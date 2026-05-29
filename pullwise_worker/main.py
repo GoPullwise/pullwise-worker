@@ -45,6 +45,7 @@ class WorkerConfig:
         self.log_dir = Path(log_dir) if log_dir else Path(tempfile.gettempdir()) / "pullwise-worker-logs"
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or "codex"
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
+        self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
         if not self.worker_token:
@@ -124,7 +125,12 @@ class PullwiseClient:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Pullwise pull worker.")
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "doctor", "status", "restart", "update", "uninstall", "cleanup"])
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="run",
+        choices=["run", "doctor", "start", "stop", "status", "restart", "update", "uninstall", "cleanup"],
+    )
     parser.add_argument("--server-url")
     parser.add_argument("--worker-token")
     parser.add_argument("--worker-id")
@@ -149,10 +155,8 @@ def main() -> None:
         raise SystemExit(2) from exc
     if args.command == "doctor":
         raise SystemExit(0 if run_doctor(config) else 1)
-    if args.command == "status":
-        raise SystemExit(service_action("status", dry_run=args.dry_run))
-    if args.command == "restart":
-        raise SystemExit(service_action("restart", dry_run=args.dry_run))
+    if args.command in {"start", "stop", "status", "restart"}:
+        raise SystemExit(service_action(args.command, dry_run=args.dry_run))
     if args.command == "update":
         raise SystemExit(update_worker(config, dry_run=args.dry_run))
     if args.command == "uninstall":
@@ -376,8 +380,8 @@ def run_doctor(config: WorkerConfig) -> bool:
         checks.append((label, ok, detail))
         if label == "codex":
             codex_cli_ok = ok
-    codex_login_ok, codex_login_detail = command_ok([config.codex_command, "exec", "--help"])
-    checks.append(("codex_login_hint", codex_login_ok, codex_login_detail or "run codex login as the service user if scans fail"))
+    codex_login_ok, codex_login_detail = codex_ready_check(config)
+    checks.append(("codex_ready", codex_login_ok, codex_login_detail))
     systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", "pullwise-worker"])
     checks.append(("systemd", systemd_ok, systemd_detail))
     for label, path in (("checkout_root", config.work_dir), ("log_dir", config.log_dir)):
@@ -393,7 +397,7 @@ def run_doctor(config: WorkerConfig) -> bool:
     checks.append(("disk_space", usage.free > 1024 * 1024 * 1024, f"{usage.free // (1024 * 1024)} MB free"))
     heartbeat_ok = True
     heartbeat_detail = "ok"
-    doctor_required_ok = all(ok for name, ok, _detail in checks if name not in {"codex_login_hint", "heartbeat"})
+    doctor_required_ok = all(ok for name, ok, _detail in checks if name != "heartbeat")
     codex_ready = bool(codex_cli_ok and codex_login_ok)
     try:
         PullwiseClient(config).heartbeat(
@@ -411,7 +415,7 @@ def run_doctor(config: WorkerConfig) -> bool:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
     if not codex_login_ok:
         print("Codex may require interactive login: sudo -u pullwise-worker codex login")
-    return all(ok for name, ok, _detail in checks if name != "codex_login_hint")
+    return all(ok for _name, ok, _detail in checks)
 
 
 def command_ok(command: list[str]) -> tuple[bool, str]:
@@ -425,6 +429,36 @@ def command_ok(command: list[str]) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
+    command = [
+        config.codex_command,
+        "exec",
+        "--json",
+        'Return only JSON: {"ok": true}',
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=config.codex_doctor_timeout_seconds,
+        )
+    except FileNotFoundError:
+        return False, "codex not found"
+    except subprocess.TimeoutExpired:
+        return False, "codex ready check timed out"
+    except Exception as exc:
+        return False, str(exc)
+    detail = redact_secrets((completed.stderr or completed.stdout).strip().splitlines()[0] if (completed.stderr or completed.stdout).strip() else f"exit {completed.returncode}", config)
+    if completed.returncode == 0:
+        return True, "ready"
+    lowered = detail.lower()
+    if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
+        return False, "not logged in"
+    return False, detail
+
+
 def service_action(action: str, *, dry_run: bool = False) -> int:
     command = ["systemctl", action, "pullwise-worker"]
     if dry_run:
@@ -435,8 +469,8 @@ def service_action(action: str, *, dry_run: bool = False) -> int:
 
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     package = os.environ.get("PULLWISE_WORKER_PACKAGE") or "pullwise-worker"
-    env_path = Path("/etc/pullwise-worker/worker.env")
-    backup_path = Path("/etc/pullwise-worker/worker.env.bak")
+    env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE") or "/etc/pullwise-worker/worker.env")
+    backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE") or "/etc/pullwise-worker/worker.env.bak")
     commands = [
         ["systemctl", "stop", "pullwise-worker"],
         ["python3", "-m", "pip", "install", "--upgrade", package],

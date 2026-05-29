@@ -11,14 +11,18 @@ from pullwise_worker.main import (
     WorkerConfig,
     cleanup_checkouts,
     clone_repository,
+    codex_ready_check,
     parse_findings,
     redact_secrets,
     result_checksum,
     run_codex_review,
     run_doctor,
+    safe_rmtree,
+    service_action,
     summarize,
     uninstall_worker,
     update_worker,
+    write_scan_summary,
 )
 
 
@@ -121,19 +125,46 @@ class WorkerMainTest(unittest.TestCase):
         with (
             patch(
                 "pullwise_worker.main.command_ok",
-                side_effect=[(True, "git ok"), (True, "codex ok"), (False, "login required"), (True, "active")],
+                side_effect=[(True, "git ok"), (True, "codex ok"), (True, "active")],
             ),
+            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")),
+            patch("pullwise_worker.main.PullwiseClient") as client_class,
+        ):
+            client_class.return_value.heartbeat.return_value = None
+            ok = run_doctor(cfg)
+
+        self.assertFalse(ok)
+        client_class.return_value.heartbeat.assert_called_once()
+        heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
+        self.assertEqual(heartbeat_kwargs["doctor_status"], "degraded")
+        self.assertFalse(heartbeat_kwargs["codex_ready"])
+        self.assertTrue(heartbeat_kwargs["systemd_active"])
+
+    def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
+        cfg = config()
+
+        with (
+            patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "codex ok"), (True, "active")]),
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")),
             patch("pullwise_worker.main.PullwiseClient") as client_class,
         ):
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
         self.assertTrue(ok)
-        client_class.return_value.heartbeat.assert_called_once()
         heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
-        self.assertEqual(heartbeat_kwargs["doctor_status"], "degraded")
-        self.assertFalse(heartbeat_kwargs["codex_ready"])
-        self.assertTrue(heartbeat_kwargs["systemd_active"])
+        self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
+        self.assertTrue(heartbeat_kwargs["codex_ready"])
+
+    def test_codex_ready_check_identifies_login_failure(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=1, stdout="", stderr="not authenticated; run codex login")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = codex_ready_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "not logged in")
 
     def test_cleanup_checkouts_removes_expired_failed_retention(self) -> None:
         cfg = config()
@@ -167,6 +198,60 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         run.assert_not_called()
+
+    def test_update_restores_existing_env_when_upgrade_fails(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "worker.env"
+            backup_file = Path(tmp) / "worker.env.bak"
+            env_file.write_text("PULLWISE_WORKER_TOKEN=worker-token\n", encoding="utf-8")
+            failed = Mock(returncode=1)
+            ok = Mock(returncode=0)
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "PULLWISE_WORKER_ENV_FILE": str(env_file),
+                        "PULLWISE_WORKER_ENV_BACKUP_FILE": str(backup_file),
+                    },
+                    clear=False,
+                ),
+                patch("pullwise_worker.main.subprocess.run", side_effect=[ok, failed, ok]),
+            ):
+                code = update_worker(cfg)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(env_file.read_text(encoding="utf-8"), "PULLWISE_WORKER_TOKEN=worker-token\n")
+            self.assertEqual(backup_file.read_text(encoding="utf-8"), "PULLWISE_WORKER_TOKEN=worker-token\n")
+
+    def test_service_action_supports_systemd_start_stop_status_restart(self) -> None:
+        for action in ("start", "stop", "status", "restart"):
+            with self.subTest(action=action):
+                with patch("pullwise_worker.main.subprocess.run") as run:
+                    self.assertEqual(service_action(action, dry_run=True), 0)
+                run.assert_not_called()
+
+    def test_write_scan_summary_redacts_tokens(self) -> None:
+        cfg = config()
+        write_scan_summary(cfg, "job_1", "failed", 12, "worker-token https://x-access-token:repo-token@github.com/acme/api.git")
+
+        summary_log = Path(cfg.log_dir) / "scan-summary.log"
+        content = summary_log.read_text(encoding="utf-8")
+        self.assertNotIn("worker-token", content)
+        self.assertNotIn("repo-token", content)
+        self.assertIn("[redacted]", content)
+
+    def test_safe_rmtree_refuses_non_worker_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target"
+            allowed = Path(tmp) / "allowed"
+            target.mkdir()
+            allowed.mkdir()
+
+            with self.assertRaises(ValueError):
+                safe_rmtree(target, allowed)
+            self.assertTrue(target.exists())
 
     def test_deploy_assets_cover_install_systemd_logrotate_and_lifecycle(self) -> None:
         deploy_root = Path(__file__).resolve().parents[1] / "deploy"
