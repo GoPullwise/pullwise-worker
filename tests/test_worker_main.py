@@ -6,7 +6,20 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from pullwise_worker.main import Worker, WorkerConfig, clone_repository, parse_findings, result_checksum, run_codex_review, summarize
+from pullwise_worker.main import (
+    Worker,
+    WorkerConfig,
+    cleanup_checkouts,
+    clone_repository,
+    parse_findings,
+    redact_secrets,
+    result_checksum,
+    run_codex_review,
+    run_doctor,
+    summarize,
+    uninstall_worker,
+    update_worker,
+)
 
 
 def config() -> WorkerConfig:
@@ -17,6 +30,9 @@ def config() -> WorkerConfig:
         max_concurrent_jobs=2,
         poll_seconds=1,
         work_dir=tempfile.mkdtemp(),
+        checkout_root=None,
+        log_dir=tempfile.mkdtemp(),
+        provider="codex",
         codex_command="codex",
         codex_timeout_seconds=60,
     )
@@ -87,6 +103,91 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(command[:3], ["codex", "exec", "--json"])
         self.assertEqual(findings[0]["title"], "Bug")
         self.assertEqual(summary["medium"], 1)
+
+    def test_redact_secrets_removes_worker_and_clone_tokens(self) -> None:
+        cfg = config()
+        text = "token worker-token clone https://x-access-token:short-token@github.com/acme/api.git"
+
+        redacted = redact_secrets(text, cfg)
+
+        self.assertNotIn("worker-token", redacted)
+        self.assertNotIn("short-token", redacted)
+        self.assertIn("[redacted]", redacted)
+        self.assertIn("x-access-token:[redacted]@github.com", redacted)
+
+    def test_run_doctor_checks_dependencies_capacity_paths_and_heartbeat(self) -> None:
+        cfg = config()
+
+        with (
+            patch(
+                "pullwise_worker.main.command_ok",
+                side_effect=[(True, "git ok"), (True, "codex ok"), (False, "login required"), (True, "active")],
+            ),
+            patch("pullwise_worker.main.PullwiseClient") as client_class,
+        ):
+            client_class.return_value.heartbeat.return_value = None
+            ok = run_doctor(cfg)
+
+        self.assertTrue(ok)
+        client_class.return_value.heartbeat.assert_called_once()
+        heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
+        self.assertEqual(heartbeat_kwargs["doctor_status"], "degraded")
+        self.assertFalse(heartbeat_kwargs["codex_ready"])
+        self.assertTrue(heartbeat_kwargs["systemd_active"])
+
+    def test_cleanup_checkouts_removes_expired_failed_retention(self) -> None:
+        cfg = config()
+        cfg.max_checkout_bytes = 1024 * 1024
+        retained = Path(cfg.work_dir) / "retained"
+        expired = Path(cfg.work_dir) / "expired"
+        retained.mkdir(parents=True)
+        expired.mkdir(parents=True)
+        (retained / "big.txt").write_text("xx", encoding="utf-8")
+        (expired / "file.txt").write_text("x", encoding="utf-8")
+        retained.with_suffix(".failed-retain").write_text("9999999999", encoding="utf-8")
+        expired.with_suffix(".failed-retain").write_text("1", encoding="utf-8")
+
+        cleanup_checkouts(cfg)
+
+        self.assertFalse(expired.exists())
+        self.assertFalse(expired.with_suffix(".failed-retain").exists())
+        self.assertTrue(retained.exists())
+        self.assertTrue(Path(cfg.work_dir).exists())
+
+    def test_lifecycle_uninstall_dry_run_does_not_remove_files(self) -> None:
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            code = uninstall_worker(remove_config=True, remove_logs=True, dry_run=True)
+
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+
+    def test_update_dry_run_backs_up_env_and_does_not_run_commands(self) -> None:
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            code = update_worker(config(), dry_run=True)
+
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+
+    def test_deploy_assets_cover_install_systemd_logrotate_and_lifecycle(self) -> None:
+        deploy_root = Path(__file__).resolve().parents[1] / "deploy"
+        expected = [
+            "install-worker.sh",
+            "worker.env.template",
+            "pullwise-worker.service",
+            "logrotate.conf",
+            "cleanup-checkouts.sh",
+            "update-worker.sh",
+            "restart-worker.sh",
+            "uninstall-worker.sh",
+        ]
+
+        for name in expected:
+            self.assertTrue((deploy_root / name).exists(), name)
+        install_script = (deploy_root / "install-worker.sh").read_text(encoding="utf-8")
+        service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
+        self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
+        self.assertIn("codex login", install_script)
+        self.assertIn("ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker", service)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+[Unit]
+Description=Pullwise Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pullwise-worker
+Group=pullwise-worker
+EnvironmentFile=/etc/pullwise-worker/worker.env
+ExecStart=/usr/local/bin/pullwise-worker run
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker
+
+[Install]
+WantedBy=multi-user.target
