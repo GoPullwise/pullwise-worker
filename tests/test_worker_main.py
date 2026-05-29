@@ -271,7 +271,14 @@ class WorkerMainTest(unittest.TestCase):
         install_script = (deploy_root / "install-worker.sh").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
         self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
+        self.assertIn("uname -s", install_script)
+        self.assertIn("uname -m", install_script)
+        self.assertIn("need_cmd python3", install_script)
+        self.assertIn("need_cmd git", install_script)
         self.assertIn("codex login", install_script)
+        self.assertNotIn("$(dirname \"$0\")", install_script)
+        self.assertNotIn("cp \"$(dirname", install_script)
+        self.assertNotIn("pww_", install_script)
         self.assertIn("ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker", service)
 
 
