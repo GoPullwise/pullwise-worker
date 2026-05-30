@@ -23,13 +23,18 @@ Required environment:
 
 - `PULLWISE_SERVER_URL`
 - `PULLWISE_WORKER_TOKEN`
-- `PULLWISE_WORKER_ID` optional
+- `PULLWISE_WORKER_ID` optional, defaults to `{hostname}-{pid}`
 - `PULLWISE_PROVIDER` optional, defaults to `codex`
 - `PULLWISE_MAX_CONCURRENT_JOBS` optional, defaults to `1`
+- `PULLWISE_WORKER_POLL_SECONDS` optional, defaults to `5`
 - `PULLWISE_CHECKOUT_ROOT` optional, defaults to the temp directory
+- `PULLWISE_WORKER_WORK_DIR` optional
 - `PULLWISE_LOG_DIR` optional, defaults to the temp directory
 - `PULLWISE_CODEX_COMMAND` optional, defaults to `codex`
-- `PULLWISE_WORKER_WORK_DIR` optional
+- `PULLWISE_CODEX_TIMEOUT_SECONDS` optional, defaults to `1800`
+- `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
+- `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
+- `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
 
 ## Deploy
 
@@ -45,7 +50,9 @@ Useful lifecycle commands:
 
 ```bash
 pullwise-worker doctor
+pullwise-worker start
 pullwise-worker status
+pullwise-worker stop
 pullwise-worker restart
 pullwise-worker update
 pullwise-worker cleanup
