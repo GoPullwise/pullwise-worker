@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from argparse import Namespace
@@ -9,6 +10,7 @@ from unittest.mock import Mock, patch
 from pullwise_worker.main import (
     Worker,
     WorkerConfig,
+    checkout_dir_for_job,
     cleanup_checkouts,
     clone_repository,
     codex_ready_check,
@@ -17,6 +19,7 @@ from pullwise_worker.main import (
     result_checksum,
     run_codex_review,
     run_doctor,
+    safe_job_id,
     safe_rmtree,
     service_action,
     summarize,
@@ -49,6 +52,14 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(findings, [{"title": "Bug", "severity": "high"}])
         self.assertEqual(summarize(findings)["high"], 1)
+
+    def test_parse_findings_skips_codex_json_event_stream(self) -> None:
+        findings = parse_findings(
+            '{"event":"review_progress","findings":[]}\n'
+            '{"findings":[{"title":"Bug","severity":"high"}]}'
+        )
+
+        self.assertEqual(findings, [{"title": "Bug", "severity": "high"}])
 
     def test_run_job_uploads_progress_result_and_cleans_checkout(self) -> None:
         worker = Worker(config())
@@ -94,19 +105,46 @@ class WorkerMainTest(unittest.TestCase):
             )
 
         clone_command = run.call_args_list[0].args[0]
+        clone_env = run.call_args_list[0].kwargs["env"]
         self.assertEqual(clone_command[:4], ["git", "clone", "--depth", "1"])
-        self.assertIn("x-access-token:short-token@github.com", clone_command[-2])
+        self.assertEqual(clone_command[-2], "https://github.com/acme/api.git")
+        self.assertNotIn("short-token", " ".join(clone_command))
+        self.assertNotIn("short-token", " ".join(str(value) for value in clone_env.values()))
+        self.assertEqual(clone_env["GIT_CONFIG_KEY_0"], "http.extraHeader")
 
     def test_run_codex_review_invokes_codex_exec_and_parses_findings(self) -> None:
-        completed = Mock(returncode=0, stdout='{"findings":[{"title":"Bug","severity":"medium"}]}', stderr="")
+        def fake_run(command: list[str], **_kwargs: object) -> Mock:
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            self.assertEqual(schema["properties"]["findings"]["maxItems"], 25)
+            output_path.write_text('{"findings":[{"title":"Bug","severity":"medium"}]}', encoding="utf-8")
+            return Mock(returncode=0, stdout='{"findings":[]}', stderr="")
 
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
+        with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run) as run:
             findings, summary, _logs = run_codex_review(config(), {"repo": "acme/api"}, Path("checkout"))
 
         command = run.call_args.args[0]
-        self.assertEqual(command[:3], ["codex", "exec", "--json"])
+        self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertIn("--ignore-user-config", command)
+        self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="xhigh"')
+        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertIn("--output-schema", command)
+        self.assertIn("--output-last-message", command)
         self.assertEqual(findings[0]["title"], "Bug")
         self.assertEqual(summary["medium"], 1)
+
+    def test_job_checkout_dir_refuses_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp) / "work"
+
+            self.assertEqual(checkout_dir_for_job(work_dir, "job_1"), (work_dir / "job_1").resolve())
+            for job_id in ("../outside", "nested/job", "nested\\job", ".", "..", ""):
+                with self.subTest(job_id=job_id):
+                    with self.assertRaises(ValueError):
+                        safe_job_id(job_id)
+                    with self.assertRaises(ValueError):
+                        checkout_dir_for_job(work_dir, job_id)
 
     def test_redact_secrets_removes_worker_and_clone_tokens(self) -> None:
         cfg = config()
@@ -276,6 +314,9 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("need_cmd python3", install_script)
         self.assertIn("need_cmd git", install_script)
         self.assertIn("codex login", install_script)
+        self.assertIn("PULLWISE_WORKER_TOKEN", install_script)
+        self.assertIn("--worker-token-file", install_script)
+        self.assertNotIn("--worker-token) WORKER_TOKEN", install_script)
         self.assertNotIn("$(dirname \"$0\")", install_script)
         self.assertNotIn("cp \"$(dirname", install_script)
         self.assertNotIn("pww_", install_script)

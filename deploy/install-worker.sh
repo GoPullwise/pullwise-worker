@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --server) SERVER_URL="${2:-}"; shift 2 ;;
     --worker-id) WORKER_ID="${2:-}"; shift 2 ;;
-    --worker-token) WORKER_TOKEN="${2:-}"; shift 2 ;;
+    --worker-token-file) WORKER_TOKEN="$(cat "${2:-}")"; shift 2 ;;
     --worker-name) WORKER_NAME="${2:-}"; shift 2 ;;
     --max-concurrent-jobs) MAX_CONCURRENT_JOBS="${2:-8}"; shift 2 ;;
     --provider) PROVIDER="${2:-codex}"; shift 2 ;;
@@ -29,8 +29,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$WORKER_TOKEN" ] && [ -n "${PULLWISE_WORKER_TOKEN:-}" ]; then
+  WORKER_TOKEN="$PULLWISE_WORKER_TOKEN"
+fi
+
 if [ -z "$SERVER_URL" ] || [ -z "$WORKER_ID" ] || [ -z "$WORKER_TOKEN" ]; then
-  echo "missing --server, --worker-id, or --worker-token" >&2
+  echo "missing --server, --worker-id, or worker token env/file" >&2
   exit 2
 fi
 

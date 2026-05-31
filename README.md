@@ -41,7 +41,9 @@ Required environment:
 Admin worker creation returns a one-time token plus an install command:
 
 ```bash
-curl -fsSL https://pullwise.example.com/install-worker.sh | bash -s -- --server https://pullwise.example.com --worker-id wk_x --worker-token pww_x
+read -rsp 'Pullwise worker token: ' PULLWISE_WORKER_TOKEN; echo
+export PULLWISE_WORKER_TOKEN
+curl -fsSL https://pullwise.example.com/install-worker.sh | bash -s -- --server https://pullwise.example.com --worker-id wk_x
 ```
 
 The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, installs the worker package, installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.

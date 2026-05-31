@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import hashlib
 import json
@@ -13,7 +14,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -28,6 +28,7 @@ PHASE_PROGRESS = {
     "ai": 80,
     "report": 95,
 }
+_SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class WorkerConfig:
@@ -49,7 +50,7 @@ class WorkerConfig:
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
         if not self.worker_token:
-            raise ValueError("PULLWISE_WORKER_TOKEN or --worker-token is required")
+            raise ValueError("PULLWISE_WORKER_TOKEN is required")
 
 
 class PullwiseClient:
@@ -132,7 +133,6 @@ def main() -> None:
         choices=["run", "doctor", "start", "stop", "status", "restart", "update", "uninstall", "cleanup"],
     )
     parser.add_argument("--server-url")
-    parser.add_argument("--worker-token")
     parser.add_argument("--worker-id")
     parser.add_argument("--max-concurrent-jobs", type=int)
     parser.add_argument("--poll-seconds", type=int)
@@ -202,9 +202,9 @@ class Worker:
                 time.sleep(self.config.poll_seconds)
 
     def run_job(self, job: dict) -> None:
-        job_id = str(job["job_id"])
+        job_id = safe_job_id(job.get("job_id"))
         attempt_id = f"{self.config.worker_id}-{job.get('attempt') or 1}"
-        checkout_dir = self.config.work_dir / job_id
+        checkout_dir = checkout_dir_for_job(self.config.work_dir, job_id)
         started = time.monotonic()
         try:
             self.client.progress(job_id, "clone", PHASE_PROGRESS["clone"], "Cloning repository")
@@ -248,19 +248,40 @@ class Worker:
                 shutil.rmtree(checkout_dir, ignore_errors=True)
 
 
+def safe_job_id(value: object) -> str:
+    job_id = str(value or "").strip()
+    if not job_id or job_id in {".", ".."} or not _SAFE_JOB_ID_RE.match(job_id):
+        raise ValueError("job_id contains unsafe path characters")
+    return job_id
+
+
+def checkout_dir_for_job(work_dir: Path, job_id: str) -> Path:
+    root = work_dir.resolve(strict=False)
+    checkout_dir = (work_dir / safe_job_id(job_id)).resolve(strict=False)
+    try:
+        common = os.path.commonpath([str(root), str(checkout_dir)])
+    except ValueError as exc:
+        raise ValueError("job checkout directory must stay inside work_dir") from exc
+    if os.path.normcase(common) != os.path.normcase(str(root)) or checkout_dir == root:
+        raise ValueError("job checkout directory must stay inside work_dir")
+    return checkout_dir
+
+
 def clone_repository(job: dict, checkout_dir: Path) -> None:
     shutil.rmtree(checkout_dir, ignore_errors=True)
     checkout_dir.parent.mkdir(parents=True, exist_ok=True)
-    clone_url = authenticated_clone_url(str(job.get("clone_url") or ""), job.get("clone_token"))
+    clone_url = str(job.get("clone_url") or "")
     if not clone_url:
         repo = str(job.get("repo") or "")
-        clone_url = authenticated_clone_url(f"https://github.com/{repo}.git", job.get("clone_token"))
+        clone_url = f"https://github.com/{repo}.git"
+    git_env = git_auth_env(job.get("clone_token"))
     subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", str(job.get("branch") or "main"), clone_url, str(checkout_dir)],
         check=True,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=git_env,
     )
     commit = str(job.get("commit") or "pending")
     if commit and commit != "pending":
@@ -273,38 +294,97 @@ def clone_repository(job: dict, checkout_dir: Path) -> None:
         )
 
 
-def authenticated_clone_url(clone_url: str, clone_token: object) -> str:
+def clone_token_value(clone_token: object) -> str:
     token = clone_token.get("token") if isinstance(clone_token, dict) else None
+    return str(token or "")
+
+
+def git_auth_env(clone_token: object) -> dict[str, str] | None:
+    token = clone_token_value(clone_token)
     if not token:
-        return clone_url
-    parsed = urlparse(clone_url)
-    netloc = f"x-access-token:{token}@{parsed.netloc}"
-    return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+        return None
+    basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        }
+    )
+    return env
 
 
 def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[list[dict], dict, str]:
     prompt = review_prompt(job)
-    command = [config.codex_command, "exec", "--json", prompt]
-    completed = subprocess.run(
-        command,
-        cwd=str(checkout_dir),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=config.codex_timeout_seconds,
-    )
-    logs_summary = redact_secrets((completed.stderr or completed.stdout)[-1000:], config)
-    if completed.returncode != 0:
-        raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {logs_summary[:300]}")
-    findings = parse_findings(completed.stdout)
+    with tempfile.TemporaryDirectory(prefix="pullwise-codex-") as tmpdir:
+        schema_path = Path(tmpdir) / "findings.schema.json"
+        output_path = Path(tmpdir) / "findings.json"
+        schema_path.write_text(json.dumps(findings_schema()), encoding="utf-8")
+        command = [
+            config.codex_command,
+            "exec",
+            "--ignore-user-config",
+            "--config",
+            'model_reasoning_effort="xhigh"',
+            "--sandbox",
+            "read-only",
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(output_path),
+            prompt,
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=str(checkout_dir),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=config.codex_timeout_seconds,
+        )
+        logs_summary = redact_secrets((completed.stderr or completed.stdout)[-1000:], config)
+        if completed.returncode != 0:
+            raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {logs_summary[:300]}")
+        output = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
+    findings = parse_findings(output)
     return findings, summarize(findings), logs_summary
 
 
 def review_prompt(job: dict) -> str:
+    required_fields = ", ".join(
+        [
+            "id",
+            "severity",
+            "category",
+            "title",
+            "summary",
+            "impact",
+            "detectionReasoning",
+            "reproductionPath",
+            "file",
+            "line",
+            "confidence",
+            "confidenceRationale",
+            "autoFix",
+            "effort",
+            "fixBenefits",
+            "fixRisks",
+            "tags",
+            "steps",
+            "badCode",
+            "goodCode",
+            "references",
+        ]
+    )
     return (
         "Review this repository for production-impacting bugs, security issues, dependency risks, "
-        "and reliability problems. Return only JSON with a top-level findings array. Each finding "
-        "must include title, severity, category, summary, impact, file, line, confidence, and recommendation. "
+        "and reliability problems. Return only JSON with a top-level findings array. Each finding must "
+        f"include these schema-required fields: {required_fields}. Use empty arrays for badCode, "
+        "goodCode, and references when not applicable. "
         f"Repository: {job.get('repo')} branch: {job.get('branch')} commit: {job.get('commit')}."
     )
 
@@ -317,16 +397,84 @@ def parse_findings(output: str) -> list[dict]:
     last = text.rfind("}")
     if first >= 0 and last > first:
         candidates.append(text[first : last + 1])
+    candidates.extend(line.strip() for line in text.splitlines() if line.strip().startswith(("{", "[")))
+    matched: list[dict] | None = None
     for candidate in candidates:
         try:
             parsed = decoder.decode(candidate)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list):
-            return [item for item in parsed["findings"] if isinstance(item, dict)]
-        if isinstance(parsed, list):
-            return [item for item in parsed if isinstance(item, dict)]
+        findings = findings_from_payload(parsed)
+        if findings is not None:
+            matched = findings
+    if matched is not None:
+        return matched
     raise RuntimeError("codex exec did not return a JSON findings payload")
+
+
+def findings_from_payload(parsed: object) -> list[dict] | None:
+    if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list) and "event" not in parsed:
+        return [item for item in parsed["findings"] if isinstance(item, dict)]
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    return None
+
+
+def findings_schema() -> dict:
+    code_line = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "ln": {"type": "integer"},
+            "code": {"type": "string"},
+            "t": {"type": ["string", "null"], "enum": ["del", "add", None]},
+        },
+        "required": ["ln", "code", "t"],
+    }
+    reference = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "label": {"type": "string"},
+            "url": {"type": "string"},
+        },
+        "required": ["label", "url"],
+    }
+    finding_properties = {
+        "id": {"type": "string"},
+        "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+        "category": {"type": "string"},
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "impact": {"type": "string"},
+        "detectionReasoning": {"type": "string"},
+        "reproductionPath": {"type": "string"},
+        "file": {"type": "string"},
+        "line": {"type": "integer"},
+        "confidence": {"type": "number"},
+        "confidenceRationale": {"type": "string"},
+        "autoFix": {"type": "boolean"},
+        "effort": {"type": "string"},
+        "fixBenefits": {"type": "string"},
+        "fixRisks": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": {"type": "string"}},
+        "badCode": {"type": "array", "items": code_line},
+        "goodCode": {"type": "array", "items": code_line},
+        "references": {"type": "array", "items": reference},
+    }
+    finding = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": finding_properties,
+        "required": list(finding_properties),
+    }
+    return {
+        "type": "object",
+        "required": ["findings"],
+        "additionalProperties": False,
+        "properties": {"findings": {"type": "array", "items": finding, "maxItems": 25}},
+    }
 
 
 def summarize(findings: list[dict]) -> dict:
