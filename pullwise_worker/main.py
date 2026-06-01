@@ -6,6 +6,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -39,6 +40,8 @@ class WorkerConfig:
         self.provider = getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "codex"
         self.max_concurrent_jobs = max(1, int(getattr(args, "max_concurrent_jobs", None) or os.environ.get("PULLWISE_MAX_CONCURRENT_JOBS") or 1))
         self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))
+        self.poll_jitter_seconds = max(0.0, float(os.environ.get("PULLWISE_WORKER_POLL_JITTER_SECONDS") or 2))
+        self.max_backoff_seconds = max(self.poll_seconds, int(os.environ.get("PULLWISE_WORKER_MAX_BACKOFF_SECONDS") or 60))
         checkout_root = getattr(args, "checkout_root", None) or os.environ.get("PULLWISE_CHECKOUT_ROOT")
         work_dir = getattr(args, "work_dir", None) or os.environ.get("PULLWISE_WORKER_WORK_DIR")
         self.work_dir = Path(checkout_root) if checkout_root else Path(work_dir or tempfile.gettempdir()) / "pullwise-worker"
@@ -47,6 +50,8 @@ class WorkerConfig:
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or "codex"
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
+        self.readiness_check_seconds = max(10, int(os.environ.get("PULLWISE_READINESS_CHECK_SECONDS") or 60))
+        self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
         if not self.worker_token:
@@ -173,6 +178,11 @@ class Worker:
         self.config = config
         self.client = PullwiseClient(config)
         self.last_error: str | None = None
+        self._readiness_checked_at = 0.0
+        self._doctor_status = "not_ready"
+        self._codex_ready = False
+        self._empty_poll_count = 0
+        self._error_poll_count = 0
 
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
@@ -187,25 +197,94 @@ class Worker:
                     except Exception as exc:
                         self.last_error = f"job {job.get('job_id')} failed unexpectedly: {exc}"[:500]
                 free_slots = max(0, self.config.max_concurrent_jobs - len(running))
-                self.client.heartbeat(running_jobs=len(running), last_error=self.last_error)
-                if free_slots:
-                    jobs = self.client.claim_many(free_slots)
+                ready = self.refresh_readiness_if_due()
+                loop_error = False
+                claimed_jobs = 0
+                try:
+                    self.client.heartbeat(
+                        running_jobs=len(running),
+                        last_error=self.last_error,
+                        doctor_status=self._doctor_status,
+                        codex_ready=self._codex_ready,
+                        doctor_checked_at=int(self._readiness_checked_at) if self._readiness_checked_at else None,
+                    )
+                except requests.RequestException as exc:
+                    self.last_error = f"heartbeat failed: {redact_secrets(str(exc), self.config)}"[:500]
+                    loop_error = True
+                if ready and free_slots:
+                    jobs = []
+                    if not loop_error:
+                        try:
+                            jobs = self.client.claim_many(free_slots)
+                        except requests.RequestException as exc:
+                            self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
+                            loop_error = True
                     for job in jobs:
                         future = executor.submit(self.run_job, job)
                         running[future] = job
+                    claimed_jobs = len(jobs)
                     if once:
                         concurrent.futures.wait(running)
                         return
                 elif once:
                     concurrent.futures.wait(running)
                     return
-                time.sleep(self.config.poll_seconds)
+                time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error))
+
+    def next_poll_sleep(self, *, claimed_jobs: int, loop_error: bool) -> float:
+        if loop_error:
+            self._error_poll_count += 1
+            self._empty_poll_count = 0
+            base = self.config.poll_seconds * (2 ** min(self._error_poll_count - 1, 6))
+        elif claimed_jobs:
+            self._error_poll_count = 0
+            self._empty_poll_count = 0
+            base = self.config.poll_seconds
+        else:
+            self._error_poll_count = 0
+            self._empty_poll_count += 1
+            base = self.config.poll_seconds * (2 ** min(self._empty_poll_count - 1, 6))
+        jitter = random.uniform(0, self.config.poll_jitter_seconds) if self.config.poll_jitter_seconds else 0
+        return min(self.config.max_backoff_seconds, base) + jitter
+
+    def refresh_readiness_if_due(self) -> bool:
+        current = time.time()
+        if current - self._readiness_checked_at < self.config.readiness_check_seconds:
+            return self._doctor_status == "ok" and self._codex_ready
+        codex_cli_ok, _codex_cli_detail = command_ok([self.config.codex_command, "--version"])
+        codex_login_ok, detail = codex_ready_check(self.config)
+        self._codex_ready = bool(codex_cli_ok and codex_login_ok)
+        self._doctor_status = "ok" if self._codex_ready else "degraded"
+        self._readiness_checked_at = current
+        self.last_error = None if self._codex_ready else f"worker not ready: {detail}"[:500]
+        return self._codex_ready
+
+    def upload_result_with_retry(self, job_id: str, payload: dict) -> None:
+        last_error: Exception | None = None
+        for attempt in range(1, self.config.result_upload_attempts + 1):
+            try:
+                self.client.result(job_id, payload)
+                return
+            except requests.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else 0
+                if status_code < 500 or attempt >= self.config.result_upload_attempts:
+                    raise
+                last_error = exc
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if attempt >= self.config.result_upload_attempts:
+                    raise
+            if attempt < self.config.result_upload_attempts:
+                time.sleep(min(30, 2 ** (attempt - 1)))
+        if last_error:
+            raise last_error
 
     def run_job(self, job: dict) -> None:
         job_id = safe_job_id(job.get("job_id"))
         attempt_id = f"{self.config.worker_id}-{job.get('attempt') or 1}"
         checkout_dir = checkout_dir_for_job(self.config.work_dir, job_id)
         started = time.monotonic()
+        duration_ms = 0
         try:
             self.client.progress(job_id, "clone", PHASE_PROGRESS["clone"], "Cloning repository")
             clone_repository(job, checkout_dir)
@@ -222,7 +301,12 @@ class Worker:
             }
             payload["result_checksum"] = result_checksum(payload)
             self.client.progress(job_id, "report", 100, "Uploading result", logs_summary)
-            self.client.result(job_id, payload)
+            try:
+                self.upload_result_with_retry(job_id, payload)
+            except Exception as exc:
+                self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                write_scan_summary(self.config, job_id, "upload_failed", duration_ms, self.last_error)
+                return
             write_scan_summary(self.config, job_id, "done", duration_ms, "")
             self.last_error = None
         except Exception as exc:
@@ -237,7 +321,12 @@ class Worker:
                 "attempt_id": attempt_id,
             }
             error_payload["result_checksum"] = result_checksum(error_payload)
-            self.client.result(job_id, error_payload)
+            try:
+                self.upload_result_with_retry(job_id, error_payload)
+            except Exception as upload_exc:
+                self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), self.config)}"[:500]
+                write_scan_summary(self.config, job_id, "upload_failed", duration_ms, self.last_error)
+                return
             write_scan_summary(self.config, job_id, "failed", duration_ms, error)
             self.last_error = error
         finally:
@@ -633,7 +722,7 @@ def service_action(action: str, *, dry_run: bool = False) -> int:
 
 
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
-    package = os.environ.get("PULLWISE_WORKER_PACKAGE") or "pullwise-worker"
+    package = os.environ.get("PULLWISE_WORKER_PACKAGE") or "pullwise-worker==0.1.0"
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE") or "/etc/pullwise-worker/worker.env")
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE") or "/etc/pullwise-worker/worker.env.bak")
     commands = [

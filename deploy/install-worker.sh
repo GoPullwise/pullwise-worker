@@ -12,9 +12,9 @@ SERVER_URL=""
 WORKER_ID=""
 WORKER_TOKEN=""
 WORKER_NAME="pullwise-worker"
-MAX_CONCURRENT_JOBS="8"
+MAX_CONCURRENT_JOBS="1"
 PROVIDER="codex"
-WORKER_PACKAGE="${PULLWISE_WORKER_PACKAGE:-pullwise-worker}"
+WORKER_PACKAGE="${PULLWISE_WORKER_PACKAGE:-pullwise-worker==0.1.0}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -22,9 +22,9 @@ while [ "$#" -gt 0 ]; do
     --worker-id) WORKER_ID="${2:-}"; shift 2 ;;
     --worker-token-file) WORKER_TOKEN="$(cat "${2:-}")"; shift 2 ;;
     --worker-name) WORKER_NAME="${2:-}"; shift 2 ;;
-    --max-concurrent-jobs) MAX_CONCURRENT_JOBS="${2:-8}"; shift 2 ;;
+    --max-concurrent-jobs) MAX_CONCURRENT_JOBS="${2:-1}"; shift 2 ;;
     --provider) PROVIDER="${2:-codex}"; shift 2 ;;
-    --package) WORKER_PACKAGE="${2:-pullwise-worker}"; shift 2 ;;
+    --package) WORKER_PACKAGE="${2:-pullwise-worker==0.1.0}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -76,6 +76,8 @@ PULLWISE_MAX_CONCURRENT_JOBS=$MAX_CONCURRENT_JOBS
 PULLWISE_CHECKOUT_ROOT=$CHECKOUT_ROOT
 PULLWISE_LOG_DIR=$LOG_DIR
 PULLWISE_WORKER_PACKAGE=$WORKER_PACKAGE
+PULLWISE_WORKER_POLL_JITTER_SECONDS=2
+PULLWISE_WORKER_MAX_BACKOFF_SECONDS=60
 EOF
 chown root:"$SERVICE_USER" "$ENV_FILE"
 chmod 0640 "$ENV_FILE"

@@ -8,6 +8,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import requests
+
 from pullwise_worker.main import (
     Worker,
     WorkerConfig,
@@ -91,6 +93,80 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(result_payload["result_checksum"], result_checksum({k: v for k, v in result_payload.items() if k != "result_checksum"}))
         self.assertGreaterEqual(worker.client.progress.call_count, 3)
         rmtree.assert_called_with(checkout_dir, ignore_errors=True)
+
+    def test_done_result_upload_timeout_retries_same_payload_without_failed_result(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.client.result.side_effect = [requests.Timeout("timed out"), None]
+
+        with (
+            patch("pullwise_worker.main.clone_repository"),
+            patch(
+                "pullwise_worker.main.run_codex_review",
+                return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+            ),
+            patch("pullwise_worker.main.time.sleep"),
+            patch("pullwise_worker.main.shutil.rmtree"),
+        ):
+            worker.run_job({"job_id": "job_retry", "attempt": 1, "repo": "acme/api"})
+
+        self.assertEqual(worker.client.result.call_count, 2)
+        first_payload = worker.client.result.call_args_list[0].args[1]
+        second_payload = worker.client.result.call_args_list[1].args[1]
+        self.assertEqual(first_payload, second_payload)
+        self.assertEqual(second_payload["status"], "done")
+        self.assertIsNone(worker.last_error)
+
+    def test_done_result_upload_exhaustion_does_not_submit_failed_result(self) -> None:
+        worker = Worker(config())
+        worker.config.result_upload_attempts = 2
+        worker.client = Mock()
+        worker.client.result.side_effect = requests.Timeout("timed out")
+
+        with (
+            patch("pullwise_worker.main.clone_repository"),
+            patch(
+                "pullwise_worker.main.run_codex_review",
+                return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+            ),
+            patch("pullwise_worker.main.time.sleep"),
+            patch("pullwise_worker.main.shutil.rmtree"),
+        ):
+            worker.run_job({"job_id": "job_timeout", "attempt": 1, "repo": "acme/api"})
+
+        self.assertEqual(worker.client.result.call_count, 2)
+        statuses = [call.args[1]["status"] for call in worker.client.result.call_args_list]
+        self.assertEqual(statuses, ["done", "done"])
+        self.assertIn("result upload failed", worker.last_error)
+
+    def test_poll_sleep_backs_off_empty_and_failed_polls_with_jitter(self) -> None:
+        worker = Worker(config())
+        worker.config.poll_seconds = 5
+        worker.config.poll_jitter_seconds = 0
+        worker.config.max_backoff_seconds = 20
+
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False), 5)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False), 10)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False), 20)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=1, loop_error=False), 5)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=True), 5)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=True), 10)
+
+    def test_once_loop_reports_heartbeat_error_without_crashing(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.client.heartbeat.side_effect = requests.ConnectionError("server down")
+
+        with (
+            patch.object(worker, "refresh_readiness_if_due", return_value=True),
+            patch("pullwise_worker.main.time.sleep") as sleep,
+        ):
+            worker.run(once=True)
+
+        worker.client.heartbeat.assert_called_once()
+        worker.client.claim_many.assert_not_called()
+        sleep.assert_not_called()
+        self.assertIn("heartbeat failed", worker.last_error)
 
     def test_clone_repository_uses_short_lived_token(self) -> None:
         with patch("pullwise_worker.main.subprocess.run") as run:
@@ -329,6 +405,7 @@ class WorkerMainTest(unittest.TestCase):
         install_script = (deploy_root / "install-worker.sh").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
         self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
+        self.assertIn("pullwise-worker==0.1.0", install_script)
         self.assertIn("uname -s", install_script)
         self.assertIn("uname -m", install_script)
         self.assertIn("need_cmd python3", install_script)
