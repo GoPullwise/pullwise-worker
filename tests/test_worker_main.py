@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
@@ -111,6 +112,25 @@ class WorkerMainTest(unittest.TestCase):
         self.assertNotIn("short-token", " ".join(clone_command))
         self.assertNotIn("short-token", " ".join(str(value) for value in clone_env.values()))
         self.assertEqual(clone_env["GIT_CONFIG_KEY_0"], "http.extraHeader")
+
+    def test_clone_repository_reports_git_stderr_on_failure(self) -> None:
+        error = subprocess.CalledProcessError(
+            128,
+            ["git", "clone"],
+            output="",
+            stderr="remote: Repository not found.\nfatal: Authentication failed for 'https://github.com/acme/api.git/'",
+        )
+        with patch("pullwise_worker.main.subprocess.run", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "git clone failed: remote: Repository not found"):
+                clone_repository(
+                    {
+                        "repo": "acme/api",
+                        "branch": "main",
+                        "commit": "pending",
+                        "clone_url": "https://github.com/acme/api.git",
+                    },
+                    Path("checkout"),
+                )
 
     def test_run_codex_review_invokes_codex_exec_and_parses_findings(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:

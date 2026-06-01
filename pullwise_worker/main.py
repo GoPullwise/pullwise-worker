@@ -275,23 +275,40 @@ def clone_repository(job: dict, checkout_dir: Path) -> None:
         repo = str(job.get("repo") or "")
         clone_url = f"https://github.com/{repo}.git"
     git_env = git_auth_env(job.get("clone_token"))
-    subprocess.run(
+    run_git_command(
         ["git", "clone", "--depth", "1", "--branch", str(job.get("branch") or "main"), clone_url, str(checkout_dir)],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        phase="clone",
         env=git_env,
     )
     commit = str(job.get("commit") or "pending")
     if commit and commit != "pending":
-        subprocess.run(
+        run_git_command(
             ["git", "-C", str(checkout_dir), "checkout", commit],
+            phase="checkout",
+        )
+
+
+def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | None = None) -> None:
+    try:
+        subprocess.run(
+            command,
             check=True,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(git_error_message(phase, exc)) from exc
+
+
+def git_error_message(phase: str, exc: subprocess.CalledProcessError) -> str:
+    output = "\n".join(part for part in (exc.stderr, exc.stdout) if part)
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    summary = " ".join(lines[:3])[:400]
+    if not summary:
+        summary = f"git exited with status {exc.returncode}"
+    return f"git {phase} failed: {summary}"
 
 
 def clone_token_value(clone_token: object) -> str:
