@@ -15,6 +15,7 @@ WORKER_NAME="pullwise-worker"
 MAX_CONCURRENT_JOBS="1"
 PROVIDER="codex"
 WORKER_PACKAGE="${PULLWISE_WORKER_PACKAGE:-pullwise-worker==0.1.0}"
+CODEX_PACKAGE="${PULLWISE_CODEX_PACKAGE:-@openai/codex@0.135.0}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -25,6 +26,7 @@ while [ "$#" -gt 0 ]; do
     --max-concurrent-jobs) MAX_CONCURRENT_JOBS="${2:-1}"; shift 2 ;;
     --provider) PROVIDER="${2:-codex}"; shift 2 ;;
     --package) WORKER_PACKAGE="${2:-pullwise-worker==0.1.0}"; shift 2 ;;
+    --codex-package) CODEX_PACKAGE="${2:-@openai/codex@0.135.0}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -55,7 +57,7 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 if ! command -v codex >/dev/null 2>&1; then
   if command -v npm >/dev/null 2>&1; then
-    npm install -g @openai/codex
+    npm install -g "$CODEX_PACKAGE"
   else
     echo "npm is required to install Codex CLI. Install codex manually and rerun." >&2
     exit 1
@@ -76,6 +78,7 @@ PULLWISE_MAX_CONCURRENT_JOBS=$MAX_CONCURRENT_JOBS
 PULLWISE_CHECKOUT_ROOT=$CHECKOUT_ROOT
 PULLWISE_LOG_DIR=$LOG_DIR
 PULLWISE_WORKER_PACKAGE=$WORKER_PACKAGE
+PULLWISE_CODEX_PACKAGE=$CODEX_PACKAGE
 PULLWISE_WORKER_POLL_JITTER_SECONDS=2
 PULLWISE_WORKER_MAX_BACKOFF_SECONDS=60
 EOF

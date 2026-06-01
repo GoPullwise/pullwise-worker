@@ -48,7 +48,7 @@ export PULLWISE_WORKER_TOKEN
 curl -fsSL https://pullwise.example.com/install-worker.sh | bash -s -- --server https://pullwise.example.com --worker-id wk_x
 ```
 
-The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, installs the pinned worker package from `PULLWISE_WORKER_PACKAGE` (default `pullwise-worker==0.1.0`), installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.
+The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, installs the pinned worker package from `PULLWISE_WORKER_PACKAGE` (default `pullwise-worker==0.1.0`), installs the pinned Codex CLI package from `PULLWISE_CODEX_PACKAGE` when `codex` is missing (default `@openai/codex@0.135.0`), installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.
 
 Useful lifecycle commands:
 
