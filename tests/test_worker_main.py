@@ -28,6 +28,7 @@ from pullwise_worker.main import (
     summarize,
     uninstall_worker,
     update_worker,
+    worker_readiness_checks,
     write_scan_summary,
 )
 
@@ -167,6 +168,48 @@ class WorkerMainTest(unittest.TestCase):
         worker.client.claim_many.assert_not_called()
         sleep.assert_not_called()
         self.assertIn("heartbeat failed", worker.last_error)
+
+    def test_once_loop_does_not_claim_when_readiness_checks_fail(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        checks = [
+            ("git", False, "not found"),
+            ("codex", True, "codex ok"),
+            ("codex_ready", True, "ready"),
+        ]
+
+        with (
+            patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, True)),
+            patch("pullwise_worker.main.time.sleep") as sleep,
+        ):
+            worker.run(once=True)
+
+        worker.client.heartbeat.assert_called_once()
+        heartbeat_kwargs = worker.client.heartbeat.call_args.kwargs
+        self.assertEqual(heartbeat_kwargs["doctor_status"], "degraded")
+        self.assertTrue(heartbeat_kwargs["codex_ready"])
+        worker.client.claim_many.assert_not_called()
+        sleep.assert_not_called()
+        self.assertIn("worker not ready: git: not found", worker.last_error)
+
+    def test_worker_readiness_checks_cover_dependencies_paths_and_disk(self) -> None:
+        cfg = config()
+
+        with (
+            patch("pullwise_worker.main.command_ok", side_effect=[(False, "git missing"), (True, "codex ok")]),
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")),
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)),
+        ):
+            checks, codex_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["git"][0])
+        self.assertTrue(by_name["codex"][0])
+        self.assertTrue(by_name["codex_ready"][0])
+        self.assertTrue(by_name["checkout_root"][0])
+        self.assertTrue(by_name["log_dir"][0])
+        self.assertTrue(by_name["disk_space"][0])
+        self.assertTrue(codex_ready)
 
     def test_clone_repository_uses_short_lived_token(self) -> None:
         with patch("pullwise_worker.main.subprocess.run") as run:

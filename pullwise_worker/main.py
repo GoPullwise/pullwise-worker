@@ -30,6 +30,7 @@ PHASE_PROGRESS = {
     "report": 95,
 }
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 
 
 class WorkerConfig:
@@ -251,13 +252,13 @@ class Worker:
         current = time.time()
         if current - self._readiness_checked_at < self.config.readiness_check_seconds:
             return self._doctor_status == "ok" and self._codex_ready
-        codex_cli_ok, _codex_cli_detail = command_ok([self.config.codex_command, "--version"])
-        codex_login_ok, detail = codex_ready_check(self.config)
-        self._codex_ready = bool(codex_cli_ok and codex_login_ok)
-        self._doctor_status = "ok" if self._codex_ready else "degraded"
+        checks, codex_ready = worker_readiness_checks(self.config)
+        failed_check = first_failed_check(checks)
+        self._codex_ready = codex_ready
+        self._doctor_status = "degraded" if failed_check else "ok"
         self._readiness_checked_at = current
-        self.last_error = None if self._codex_ready else f"worker not ready: {detail}"[:500]
-        return self._codex_ready
+        self.last_error = None if failed_check is None else readiness_error_message(failed_check, self.config)
+        return failed_check is None
 
     def upload_result_with_retry(self, job_id: str, payload: dict) -> None:
         last_error: Exception | None = None
@@ -623,40 +624,68 @@ def write_scan_summary(config: WorkerConfig, job_id: str, status: str, duration_
         log_file.write(line + "\n")
 
 
-def run_doctor(config: WorkerConfig) -> bool:
+def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool]:
     checks: list[tuple[str, bool, str]] = []
     checks.append(("server_url", bool(config.server_url.startswith(("http://", "https://"))), config.server_url))
     checks.append(("worker_token", bool(config.worker_token), "configured" if config.worker_token else "missing"))
     checks.append(("max_concurrent_jobs", config.max_concurrent_jobs > 0, str(config.max_concurrent_jobs)))
-    codex_cli_ok = False
-    for label, command in (("git", ["git", "--version"]), ("codex", [config.codex_command, "--version"])):
-        ok, detail = command_ok(command)
-        checks.append((label, ok, detail))
-        if label == "codex":
-            codex_cli_ok = ok
+
+    git_ok, git_detail = command_ok(["git", "--version"])
+    checks.append(("git", git_ok, git_detail))
+    codex_cli_ok, codex_cli_detail = command_ok([config.codex_command, "--version"])
+    checks.append(("codex", codex_cli_ok, codex_cli_detail))
     codex_login_ok, codex_login_detail = codex_ready_check(config)
     checks.append(("codex_ready", codex_login_ok, codex_login_detail))
+
+    for label, path in (("checkout_root", config.work_dir), ("log_dir", config.log_dir)):
+        ok, detail = writable_path_check(path)
+        checks.append((label, ok, detail))
+    checks.append(("disk_space", *disk_space_check(config.work_dir)))
+    return checks, bool(codex_cli_ok and codex_login_ok)
+
+
+def first_failed_check(checks: list[tuple[str, bool, str]]) -> tuple[str, bool, str] | None:
+    return next((check for check in checks if not check[1]), None)
+
+
+def readiness_error_message(check: tuple[str, bool, str], config: WorkerConfig) -> str:
+    name, _ok, detail = check
+    return f"worker not ready: {name}: {redact_secrets(detail, config)}"[:500]
+
+
+def writable_path_check(path: Path) -> tuple[bool, str]:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test_file = path / f".pullwise-write-test-{os.getpid()}"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink(missing_ok=True)
+        return True, str(path)
+    except Exception as exc:
+        return False, str(exc)
+
+
+def disk_space_check(path: Path) -> tuple[bool, str]:
+    target = path
+    while not target.exists() and target.parent != target:
+        target = target.parent
+    try:
+        usage = shutil.disk_usage(target)
+    except Exception as exc:
+        return False, str(exc)
+    return usage.free > _MIN_READY_DISK_BYTES, f"{usage.free // (1024 * 1024)} MB free"
+
+
+def run_doctor(config: WorkerConfig) -> bool:
+    checks, codex_ready = worker_readiness_checks(config)
     systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", "pullwise-worker"])
     checks.append(("systemd", systemd_ok, systemd_detail))
-    for label, path in (("checkout_root", config.work_dir), ("log_dir", config.log_dir)):
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            test_file = path / ".pullwise-write-test"
-            test_file.write_text("ok", encoding="utf-8")
-            test_file.unlink(missing_ok=True)
-            checks.append((label, True, str(path)))
-        except Exception as exc:
-            checks.append((label, False, str(exc)))
-    usage = shutil.disk_usage(config.work_dir if config.work_dir.exists() else config.work_dir.parent)
-    checks.append(("disk_space", usage.free > 1024 * 1024 * 1024, f"{usage.free // (1024 * 1024)} MB free"))
     heartbeat_ok = True
     heartbeat_detail = "ok"
     doctor_required_ok = all(ok for name, ok, _detail in checks if name != "heartbeat")
-    codex_ready = bool(codex_cli_ok and codex_login_ok)
     try:
         PullwiseClient(config).heartbeat(
             last_error=None,
-            doctor_status="ok" if doctor_required_ok and codex_ready else "degraded",
+            doctor_status="ok" if doctor_required_ok else "degraded",
             codex_ready=codex_ready,
             systemd_active=systemd_ok,
             doctor_checked_at=int(time.time()),
@@ -667,7 +696,8 @@ def run_doctor(config: WorkerConfig) -> bool:
     checks.append(("heartbeat", heartbeat_ok, heartbeat_detail))
     for name, ok, detail in checks:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
-    if not codex_login_ok:
+    codex_login_check = next((check for check in checks if check[0] == "codex_ready"), None)
+    if codex_login_check and not codex_login_check[1]:
         print("Codex may require interactive login: sudo -u pullwise-worker codex login")
     return all(ok for _name, ok, _detail in checks)
 
