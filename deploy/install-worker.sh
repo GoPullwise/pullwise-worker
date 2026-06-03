@@ -152,7 +152,7 @@ WorkingDirectory=$DATA_DIR
 EnvironmentFile=$ENV_FILE
 Environment=PATH=$SERVICE_PATH
 ExecStart=$BIN_PATH run
-Restart=always
+Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true

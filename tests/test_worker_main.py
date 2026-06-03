@@ -495,11 +495,11 @@ class WorkerMainTest(unittest.TestCase):
                     self.assertEqual(service_action(action, dry_run=True), 0)
                 run.assert_not_called()
 
-    def test_lifecycle_stop_uses_non_blocking_systemd_stop(self) -> None:
+    def test_lifecycle_stop_exits_without_systemd_authorization(self) -> None:
         with patch("pullwise_worker.main.service_action", return_value=0) as service:
             self.assertEqual(execute_lifecycle_command("stop"), 0)
 
-        service.assert_called_once_with("stop", no_block=True)
+        service.assert_not_called()
 
     def test_write_scan_summary_redacts_tokens(self) -> None:
         cfg = config()
@@ -578,6 +578,9 @@ class WorkerMainTest(unittest.TestCase):
         self.assertNotIn("$(dirname \"$0\")", install_script)
         self.assertNotIn("cp \"$(dirname", install_script)
         self.assertNotIn("pww_", install_script)
+        self.assertIn("Restart=on-failure", install_script)
+        self.assertIn("Restart=on-failure", service)
+        self.assertNotIn("Restart=always", service)
         self.assertIn("ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker", service)
 
 

@@ -74,6 +74,11 @@ pullwise-worker cleanup
 pullwise-worker uninstall
 ```
 
+`pullwise-worker stop` is a local host operation and normally needs root or
+systemd authorization. Admin-queued stop commands are handled by the running
+worker exiting cleanly; the installed unit uses `Restart=on-failure` so the
+service stays stopped.
+
 Codex must be authenticated for the service user before scans can run:
 
 ```bash

@@ -863,7 +863,9 @@ def service_action(action: str, *, dry_run: bool = False, no_block: bool = False
 
 def execute_lifecycle_command(action: str) -> int:
     if action == "stop":
-        return service_action("stop", no_block=True)
+        # Admin-queued stop runs inside the unprivileged service process. Exit
+        # cleanly and let the systemd unit's Restart=on-failure keep it stopped.
+        return 0
     if action == "uninstall":
         return uninstall_worker(remove_config=True, remove_logs=False, defer_stop=True)
     return 2
