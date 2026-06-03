@@ -15,7 +15,8 @@ WORKER_NAME="pullwise-worker"
 MAX_CONCURRENT_JOBS="1"
 PROVIDER="codex"
 WORKER_PACKAGE=""
-DEFAULT_WORKER_PACKAGE="https://github.com/GoPullwise/pullwise-worker/releases/download/v0.1.0/pullwise_worker-0.1.0-py3-none-any.whl"
+DEFAULT_WORKER_VERSION="0.1.1"
+DEFAULT_WORKER_PACKAGE="https://github.com/GoPullwise/pullwise-worker/releases/download/v${DEFAULT_WORKER_VERSION}/pullwise_worker-${DEFAULT_WORKER_VERSION}-py3-none-any.whl"
 CODEX_PACKAGE="${PULLWISE_CODEX_PACKAGE:-@openai/codex@0.135.0}"
 
 while [ "$#" -gt 0 ]; do
@@ -65,6 +66,11 @@ if sys.version_info < (3, 9):
 PY
 if ! command -v node >/dev/null 2>&1; then
   echo "node is required for Codex CLI; install Node.js 20+ then rerun." >&2
+  exit 1
+fi
+NODE_MAJOR="$(node -e 'process.stdout.write(String(process.versions.node.split(".")[0]))')"
+if [ "${NODE_MAJOR:-0}" -lt 20 ]; then
+  echo "Node.js 20+ is required for Codex CLI. Found $(node --version)." >&2
   exit 1
 fi
 if ! command -v codex >/dev/null 2>&1; then

@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from pullwise_worker import __version__
 from pullwise_worker.main import (
     Worker,
     WorkerConfig,
@@ -17,6 +18,7 @@ from pullwise_worker.main import (
     cleanup_checkouts,
     clone_repository,
     codex_ready_check,
+    default_worker_package,
     parse_findings,
     redact_secrets,
     result_checksum,
@@ -362,6 +364,7 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_update_restores_existing_env_when_upgrade_fails(self) -> None:
         cfg = config()
+        expected_package = default_worker_package()
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "worker.env"
             backup_file = Path(tmp) / "worker.env.bak"
@@ -389,7 +392,7 @@ class WorkerMainTest(unittest.TestCase):
                     "pip",
                     "install",
                     "--upgrade",
-                    "https://github.com/GoPullwise/pullwise-worker/releases/download/v0.1.0/pullwise_worker-0.1.0-py3-none-any.whl",
+                    expected_package,
                 ],
             )
             self.assertEqual(env_file.read_text(encoding="utf-8"), "PULLWISE_WORKER_TOKEN=worker-token\n")
@@ -441,7 +444,8 @@ class WorkerMainTest(unittest.TestCase):
         install_script = (deploy_root / "install-worker.sh").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
         self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
-        self.assertIn("https://github.com/GoPullwise/pullwise-worker/releases/download/v0.1.0/pullwise_worker-0.1.0-py3-none-any.whl", install_script)
+        self.assertIn(f'DEFAULT_WORKER_VERSION="{__version__}"', install_script)
+        self.assertIn("https://github.com/GoPullwise/pullwise-worker/releases/download/v${DEFAULT_WORKER_VERSION}/pullwise_worker-${DEFAULT_WORKER_VERSION}-py3-none-any.whl", install_script)
         self.assertNotIn("pullwise-worker==0.1.0", install_script)
         self.assertIn("PULLWISE_CODEX_PACKAGE", install_script)
         self.assertIn("@openai/codex@0.135.0", install_script)
@@ -451,6 +455,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("need_cmd python3", install_script)
         self.assertIn("Python 3.9 or newer", install_script)
         self.assertIn("need_cmd git", install_script)
+        self.assertIn("Node.js 20+ is required", install_script)
         self.assertIn("codex login", install_script)
         self.assertIn("PULLWISE_WORKER_TOKEN", install_script)
         self.assertIn("--worker-token-file", install_script)
