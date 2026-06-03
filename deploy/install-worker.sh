@@ -14,7 +14,8 @@ WORKER_TOKEN=""
 WORKER_NAME="pullwise-worker"
 MAX_CONCURRENT_JOBS="1"
 PROVIDER="codex"
-WORKER_PACKAGE="${PULLWISE_WORKER_PACKAGE:-pullwise-worker==0.1.0}"
+WORKER_PACKAGE=""
+DEFAULT_WORKER_PACKAGE="https://github.com/GoPullwise/pullwise-worker/releases/download/v0.1.0/pullwise_worker-0.1.0-py3-none-any.whl"
 CODEX_PACKAGE="${PULLWISE_CODEX_PACKAGE:-@openai/codex@0.135.0}"
 
 while [ "$#" -gt 0 ]; do
@@ -25,7 +26,7 @@ while [ "$#" -gt 0 ]; do
     --worker-name) WORKER_NAME="${2:-}"; shift 2 ;;
     --max-concurrent-jobs) MAX_CONCURRENT_JOBS="${2:-1}"; shift 2 ;;
     --provider) PROVIDER="${2:-codex}"; shift 2 ;;
-    --package) WORKER_PACKAGE="${2:-pullwise-worker==0.1.0}"; shift 2 ;;
+    --package) WORKER_PACKAGE="${2:-}"; shift 2 ;;
     --codex-package) CODEX_PACKAGE="${2:-@openai/codex@0.135.0}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -38,6 +39,12 @@ fi
 if [ -z "$SERVER_URL" ] || [ -z "$WORKER_ID" ] || [ -z "$WORKER_TOKEN" ]; then
   echo "missing --server, --worker-id, or worker token env/file" >&2
   exit 2
+fi
+if [ -z "$WORKER_PACKAGE" ]; then
+  WORKER_PACKAGE="${PULLWISE_WORKER_PACKAGE:-}"
+fi
+if [ -z "$WORKER_PACKAGE" ]; then
+  WORKER_PACKAGE="$DEFAULT_WORKER_PACKAGE"
 fi
 
 case "$(uname -s)" in Linux) ;; *) echo "Pullwise worker installer requires Linux" >&2; exit 1 ;; esac

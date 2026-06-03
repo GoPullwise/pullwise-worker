@@ -394,11 +394,22 @@ class WorkerMainTest(unittest.TestCase):
                     },
                     clear=False,
                 ),
-                patch("pullwise_worker.main.subprocess.run", side_effect=[ok, failed, ok]),
+                patch("pullwise_worker.main.subprocess.run", side_effect=[ok, failed, ok]) as run,
             ):
                 code = update_worker(cfg)
 
             self.assertEqual(code, 1)
+            self.assertEqual(
+                run.call_args_list[1].args[0],
+                [
+                    "python3",
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "https://github.com/GoPullwise/pullwise-worker/releases/download/v0.1.0/pullwise_worker-0.1.0-py3-none-any.whl",
+                ],
+            )
             self.assertEqual(env_file.read_text(encoding="utf-8"), "PULLWISE_WORKER_TOKEN=worker-token\n")
             self.assertEqual(backup_file.read_text(encoding="utf-8"), "PULLWISE_WORKER_TOKEN=worker-token\n")
 
@@ -448,7 +459,8 @@ class WorkerMainTest(unittest.TestCase):
         install_script = (deploy_root / "install-worker.sh").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
         self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
-        self.assertIn("pullwise-worker==0.1.0", install_script)
+        self.assertIn("https://github.com/GoPullwise/pullwise-worker/releases/download/v0.1.0/pullwise_worker-0.1.0-py3-none-any.whl", install_script)
+        self.assertNotIn("pullwise-worker==0.1.0", install_script)
         self.assertIn("PULLWISE_CODEX_PACKAGE", install_script)
         self.assertIn("@openai/codex@0.135.0", install_script)
         self.assertIn("--codex-package", install_script)

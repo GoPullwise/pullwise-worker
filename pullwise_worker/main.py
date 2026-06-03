@@ -31,6 +31,7 @@ PHASE_PROGRESS = {
 }
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
+DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 
 
 class WorkerConfig:
@@ -751,8 +752,15 @@ def service_action(action: str, *, dry_run: bool = False) -> int:
     return subprocess.run(command).returncode
 
 
+def default_worker_package() -> str:
+    package = os.environ.get("PULLWISE_WORKER_PACKAGE")
+    if package:
+        return package
+    return f"{DEFAULT_WORKER_PACKAGE_BASE_URL}/v{__version__}/pullwise_worker-{__version__}-py3-none-any.whl"
+
+
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
-    package = os.environ.get("PULLWISE_WORKER_PACKAGE") or "pullwise-worker==0.1.0"
+    package = default_worker_package()
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE") or "/etc/pullwise-worker/worker.env")
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE") or "/etc/pullwise-worker/worker.env.bak")
     commands = [

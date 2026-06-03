@@ -48,7 +48,16 @@ export PULLWISE_WORKER_TOKEN
 curl -fsSL https://pullwise.example.com/install-worker.sh | bash -s -- --server https://pullwise.example.com --worker-id wk_x
 ```
 
-The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, installs the pinned worker package from `PULLWISE_WORKER_PACKAGE` (default `pullwise-worker==0.1.0`), installs the pinned Codex CLI package from `PULLWISE_CODEX_PACKAGE` when `codex` is missing (default `@openai/codex@0.135.0`), installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.
+The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, installs the worker package from `PULLWISE_WORKER_PACKAGE` or, by default, from the `v0.1.0` GitHub Release wheel, installs the pinned Codex CLI package from `PULLWISE_CODEX_PACKAGE` when `codex` is missing (default `@openai/codex@0.135.0`), installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.
+
+## Release
+
+To publish a worker package:
+
+1. In GitHub, open Actions -> Release -> Run workflow.
+2. Enter the version, for example `0.1.0`.
+
+The workflow updates `pyproject.toml` and `pullwise_worker/__init__.py`, commits the version bump, creates `v<version>`, builds the wheel and source archive, and uploads both to the GitHub Release. Pullwise server install commands can then use that version directly.
 
 Useful lifecycle commands:
 
