@@ -8,10 +8,11 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import requests
-
 from pullwise_worker import __version__
 from pullwise_worker.main import (
+    PullwiseClient,
+    PullwiseHTTPError,
+    PullwiseRequestError,
     Worker,
     WorkerConfig,
     checkout_dir_for_job,
@@ -99,7 +100,7 @@ class WorkerMainTest(unittest.TestCase):
     def test_done_result_upload_timeout_retries_same_payload_without_failed_result(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
-        worker.client.result.side_effect = [requests.Timeout("timed out"), None]
+        worker.client.result.side_effect = [PullwiseRequestError("timed out"), None]
 
         with patch("pullwise_worker.main.clone_repository"), \
             patch(
@@ -121,7 +122,7 @@ class WorkerMainTest(unittest.TestCase):
         worker = Worker(config())
         worker.config.result_upload_attempts = 2
         worker.client = Mock()
-        worker.client.result.side_effect = requests.Timeout("timed out")
+        worker.client.result.side_effect = PullwiseRequestError("timed out")
 
         with patch("pullwise_worker.main.clone_repository"), \
             patch(
@@ -136,6 +137,24 @@ class WorkerMainTest(unittest.TestCase):
         statuses = [call.args[1]["status"] for call in worker.client.result.call_args_list]
         self.assertEqual(statuses, ["done", "done"])
         self.assertIn("result upload failed", worker.last_error)
+
+    def test_done_result_upload_retries_server_http_errors(self) -> None:
+        worker = Worker(config())
+        worker.config.result_upload_attempts = 2
+        worker.client = Mock()
+        worker.client.result.side_effect = [PullwiseHTTPError("HTTP 500", 500), None]
+
+        with patch("pullwise_worker.main.clone_repository"), \
+            patch(
+                "pullwise_worker.main.run_codex_review",
+                return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+            ), \
+            patch("pullwise_worker.main.time.sleep"), \
+            patch("pullwise_worker.main.shutil.rmtree"):
+            worker.run_job({"job_id": "job_http_retry", "attempt": 1, "repo": "acme/api"})
+
+        self.assertEqual(worker.client.result.call_count, 2)
+        self.assertIsNone(worker.last_error)
 
     def test_poll_sleep_backs_off_empty_and_failed_polls_with_jitter(self) -> None:
         worker = Worker(config())
@@ -153,7 +172,7 @@ class WorkerMainTest(unittest.TestCase):
     def test_once_loop_reports_heartbeat_error_without_crashing(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
-        worker.client.heartbeat.side_effect = requests.ConnectionError("server down")
+        worker.client.heartbeat.side_effect = PullwiseRequestError("server down")
 
         with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
             patch("pullwise_worker.main.time.sleep") as sleep:
@@ -184,6 +203,29 @@ class WorkerMainTest(unittest.TestCase):
         worker.client.claim_many.assert_not_called()
         sleep.assert_not_called()
         self.assertIn("worker not ready: git: not found", worker.last_error)
+
+    def test_pullwise_client_posts_json_with_authorization(self) -> None:
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"ok": true}'
+
+        cfg = config()
+        client = PullwiseClient(cfg)
+
+        with patch("pullwise_worker.main.urllib.request.urlopen", return_value=FakeResponse()) as urlopen:
+            response = client.post("/worker/heartbeat", {"worker_id": "wk_1"})
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://server.test/worker/heartbeat")
+        self.assertEqual(request.get_header("Authorization"), "Bearer worker-token")
+        self.assertEqual(json.loads(request.data.decode("utf-8")), {"worker_id": "wk_1"})
+        self.assertEqual(response.json(), {"ok": True})
 
     def test_once_loop_executes_lifecycle_command_from_heartbeat(self) -> None:
         worker = Worker(config())
@@ -462,11 +504,11 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn('"pip-audit>=2.9,<2.10"', workflow)
         self.assertIn('"filelock>=3.19.1,<3.20"', workflow)
         self.assertIn('python -m unittest discover -s tests -p "test_*.py"', workflow)
-        self.assertIn('"requests>=2.32.5,<2.33"', pyproject)
-        self.assertEqual(audit_requirements.strip(), "requests>=2.32.5,<2.33")
+        self.assertIn("dependencies = []", pyproject)
+        self.assertIn("no third-party runtime dependencies", audit_requirements)
         self.assertNotIn("pip>=26.1", workflow)
         self.assertNotIn("filelock>=3.20.3", workflow)
-        self.assertNotIn("requests>=2.33", pyproject)
+        self.assertNotIn("requests", pyproject)
 
     def test_deploy_assets_cover_install_systemd_logrotate_and_lifecycle(self) -> None:
         deploy_root = Path(__file__).resolve().parents[1] / "deploy"

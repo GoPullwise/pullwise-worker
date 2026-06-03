@@ -14,9 +14,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
-
-import requests
 
 from . import __version__
 
@@ -60,16 +60,53 @@ class WorkerConfig:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 
 
+class PullwiseRequestError(Exception):
+    pass
+
+
+class PullwiseHTTPError(PullwiseRequestError):
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PullwiseResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def json(self) -> dict:
+        if not self.body:
+            return {}
+        parsed = json.loads(self.body.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+
+
 class PullwiseClient:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
-        self.session = requests.Session()
-        self.session.headers.update({"Authorization": f"Bearer {config.worker_token}"})
+        self.headers = {
+            "Authorization": f"Bearer {config.worker_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
 
-    def post(self, path: str, payload: dict) -> requests.Response:
-        response = self.session.post(f"{self.config.server_url}{path}", json=payload, timeout=30)
-        response.raise_for_status()
-        return response
+    def post(self, path: str, payload: dict) -> PullwiseResponse:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.config.server_url}{path}",
+            data=body,
+            headers=self.headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return PullwiseResponse(response.read())
+        except urllib.error.HTTPError as exc:
+            reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
+            raise PullwiseHTTPError(f"HTTP {exc.code}: {reason}", exc.code) from exc
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            raise PullwiseRequestError(str(exc)) from exc
+
 
     def heartbeat(
         self,
@@ -220,7 +257,7 @@ class Worker:
                     )
                     if isinstance(heartbeat_response, dict):
                         heartbeat_payload = heartbeat_response
-                except requests.RequestException as exc:
+                except PullwiseRequestError as exc:
                     self.last_error = f"heartbeat failed: {redact_secrets(str(exc), self.config)}"[:500]
                     loop_error = True
                 worker_state = heartbeat_payload.get("worker") if isinstance(heartbeat_payload.get("worker"), dict) else {}
@@ -236,7 +273,7 @@ class Worker:
                     if not loop_error:
                         try:
                             jobs = self.client.claim_many(free_slots)
-                        except requests.RequestException as exc:
+                        except PullwiseRequestError as exc:
                             self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
                             loop_error = True
                     for job in jobs:
@@ -258,14 +295,14 @@ class Worker:
             return False
         try:
             self.client.command_status(command_id, "running")
-        except requests.RequestException as exc:
+        except PullwiseRequestError as exc:
             self.last_error = f"command ack failed: {redact_secrets(str(exc), self.config)}"[:500]
             return False
         code = execute_lifecycle_command(action)
         if code == 0:
             try:
                 self.client.command_status(command_id, "succeeded")
-            except requests.RequestException as exc:
+            except PullwiseRequestError as exc:
                 self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
             if action == "uninstall":
                 service_action("stop", no_block=True)
@@ -273,7 +310,7 @@ class Worker:
         error = f"{action} command exited {code}"
         try:
             self.client.command_status(command_id, "failed", error=error)
-        except requests.RequestException as exc:
+        except PullwiseRequestError as exc:
             self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
         return False
 
@@ -311,12 +348,11 @@ class Worker:
             try:
                 self.client.result(job_id, payload)
                 return
-            except requests.HTTPError as exc:
-                status_code = exc.response.status_code if exc.response is not None else 0
-                if status_code < 500 or attempt >= self.config.result_upload_attempts:
+            except PullwiseHTTPError as exc:
+                if exc.status_code < 500 or attempt >= self.config.result_upload_attempts:
                     raise
                 last_error = exc
-            except (requests.Timeout, requests.ConnectionError) as exc:
+            except PullwiseRequestError as exc:
                 last_error = exc
                 if attempt >= self.config.result_upload_attempts:
                     raise
