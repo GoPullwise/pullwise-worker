@@ -31,6 +31,7 @@ PHASE_PROGRESS = {
 }
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
+_MIN_NODE_MAJOR = 20
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 
 
@@ -713,16 +714,18 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
 
     git_ok, git_detail = command_ok(["git", "--version"])
     checks.append(("git", git_ok, git_detail))
+    node_ok, node_detail = node_version_check()
+    checks.append(("node", node_ok, node_detail))
     codex_cli_ok, codex_cli_detail = command_ok([config.codex_command, "--version"])
     checks.append(("codex", codex_cli_ok, codex_cli_detail))
-    codex_login_ok, codex_login_detail = codex_ready_check(config)
+    codex_login_ok, codex_login_detail = codex_ready_check(config) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
     checks.append(("codex_ready", codex_login_ok, codex_login_detail))
 
     for label, path in (("checkout_root", config.work_dir), ("log_dir", config.log_dir)):
         ok, detail = writable_path_check(path)
         checks.append((label, ok, detail))
     checks.append(("disk_space", *disk_space_check(config.work_dir)))
-    return checks, bool(codex_cli_ok and codex_login_ok)
+    return checks, bool(node_ok and codex_cli_ok and codex_login_ok)
 
 
 def first_failed_check(checks: list[tuple[str, bool, str]]) -> tuple[str, bool, str] | None:
@@ -778,7 +781,7 @@ def run_doctor(config: WorkerConfig) -> bool:
     for name, ok, detail in checks:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
     codex_login_check = next((check for check in checks if check[0] == "codex_ready"), None)
-    if codex_login_check and not codex_login_check[1]:
+    if codex_login_check and not codex_login_check[1] and codex_login_check[2] == "not logged in":
         print("Codex may require interactive login: sudo -u pullwise-worker codex login")
     return all(ok for _name, ok, _detail in checks)
 
@@ -792,6 +795,23 @@ def command_ok(command: list[str]) -> tuple[bool, str]:
         return False, "not found"
     except Exception as exc:
         return False, str(exc)
+
+
+def node_version_check() -> tuple[bool, str]:
+    ok, detail = command_ok(["node", "--version"])
+    if not ok:
+        return False, detail
+    match = re.search(r"v?(\d+)", detail.strip())
+    if not match:
+        return False, f"unable to parse Node.js version: {detail}"
+    if int(match.group(1)) < _MIN_NODE_MAJOR:
+        return False, f"Node.js {_MIN_NODE_MAJOR}+ required, found {detail}"
+    return True, detail
+
+
+def codex_node_runtime_error(output: str) -> bool:
+    lowered = output.lower()
+    return "@openai/codex" in lowered and "syntaxerror: unexpected reserved word" in lowered
 
 
 def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
@@ -815,12 +835,18 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         return False, "codex ready check timed out"
     except Exception as exc:
         return False, str(exc)
-    detail = redact_secrets((completed.stderr or completed.stdout).strip().splitlines()[0] if (completed.stderr or completed.stdout).strip() else f"exit {completed.returncode}", config)
+    output = redact_secrets((completed.stderr or completed.stdout).strip(), config)
+    detail = output.splitlines()[0] if output else f"exit {completed.returncode}"
     if completed.returncode == 0:
         return True, "ready"
-    lowered = detail.lower()
+    lowered = output.lower()
     if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
         return False, "not logged in"
+    if codex_node_runtime_error(output):
+        node_ok, node_detail = node_version_check()
+        if not node_ok:
+            return False, node_detail
+        return False, "Codex CLI failed to start; reinstall Codex CLI or verify Node.js 20+"
     return False, detail
 
 

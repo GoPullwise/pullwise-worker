@@ -21,6 +21,7 @@ from pullwise_worker.main import (
     codex_ready_check,
     default_worker_package,
     execute_lifecycle_command,
+    node_version_check,
     parse_findings,
     redact_secrets,
     result_checksum,
@@ -249,13 +250,14 @@ class WorkerMainTest(unittest.TestCase):
     def test_worker_readiness_checks_cover_dependencies_paths_and_disk(self) -> None:
         cfg = config()
 
-        with patch("pullwise_worker.main.command_ok", side_effect=[(False, "git missing"), (True, "codex ok")]), \
+        with patch("pullwise_worker.main.command_ok", side_effect=[(False, "git missing"), (True, "v22.21.0"), (True, "codex ok")]), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
             checks, codex_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
         self.assertFalse(by_name["git"][0])
+        self.assertTrue(by_name["node"][0])
         self.assertTrue(by_name["codex"][0])
         self.assertTrue(by_name["codex_ready"][0])
         self.assertTrue(by_name["checkout_root"][0])
@@ -353,7 +355,7 @@ class WorkerMainTest(unittest.TestCase):
 
         with patch(
                 "pullwise_worker.main.command_ok",
-                side_effect=[(True, "git ok"), (True, "codex ok"), (True, "active")],
+                side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")],
             ), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class:
@@ -370,7 +372,7 @@ class WorkerMainTest(unittest.TestCase):
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
 
-        with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "codex ok"), (True, "active")]), \
+        with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")]), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class:
             client_class.return_value.heartbeat.return_value = None
@@ -383,13 +385,39 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_codex_ready_check_identifies_login_failure(self) -> None:
         cfg = config()
-        completed = Mock(returncode=1, stdout="", stderr="not authenticated; run codex login")
+        completed = Mock(returncode=1, stdout="", stderr="Reading additional input from stdin...\nnot authenticated; run codex login")
 
         with patch("pullwise_worker.main.subprocess.run", return_value=completed):
             ok, detail = codex_ready_check(cfg)
 
         self.assertFalse(ok)
         self.assertEqual(detail, "not logged in")
+
+    def test_node_version_check_requires_node_20(self) -> None:
+        with patch("pullwise_worker.main.command_ok", return_value=(True, "v12.22.9")):
+            ok, detail = node_version_check()
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "Node.js 20+ required, found v12.22.9")
+
+    def test_codex_ready_check_reports_codex_node_runtime_failure(self) -> None:
+        cfg = config()
+        completed = Mock(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:213\n"
+                "const childResult = await new Promise((resolve) => {\n"
+                "SyntaxError: Unexpected reserved word"
+            ),
+        )
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed), \
+            patch("pullwise_worker.main.node_version_check", return_value=(False, "Node.js 20+ required, found v12.22.9")):
+            ok, detail = codex_ready_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "Node.js 20+ required, found v12.22.9")
 
     def test_cleanup_checkouts_removes_expired_failed_retention(self) -> None:
         cfg = config()
@@ -540,6 +568,9 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("Python 3.9 or newer", install_script)
         self.assertIn("need_cmd git", install_script)
         self.assertIn("Node.js 20+ is required", install_script)
+        self.assertIn("Node.js 20+ must be available to $SERVICE_USER", install_script)
+        self.assertIn("PULLWISE_PYTHON_BIN", install_script)
+        self.assertIn("run_as_service_user \"$BIN_PATH\" doctor || true", install_script)
         self.assertIn("codex login", install_script)
         self.assertIn("PULLWISE_WORKER_TOKEN", install_script)
         self.assertIn("--worker-token-file", install_script)
