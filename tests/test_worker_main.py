@@ -19,6 +19,7 @@ from pullwise_worker.main import (
     clone_repository,
     codex_ready_check,
     default_worker_package,
+    execute_lifecycle_command,
     parse_findings,
     redact_secrets,
     result_checksum,
@@ -183,6 +184,25 @@ class WorkerMainTest(unittest.TestCase):
         worker.client.claim_many.assert_not_called()
         sleep.assert_not_called()
         self.assertIn("worker not ready: git: not found", worker.last_error)
+
+    def test_once_loop_executes_lifecycle_command_from_heartbeat(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {
+            "worker": {"worker_id": "wk_1", "status": "disabled"},
+            "command": {"id": "cmd_stop", "command": "stop", "status": "pending"},
+        }
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch("pullwise_worker.main.execute_lifecycle_command", return_value=0) as execute, \
+            patch("pullwise_worker.main.time.sleep") as sleep:
+            worker.run(once=True)
+
+        execute.assert_called_once_with("stop")
+        worker.client.command_status.assert_any_call("cmd_stop", "running")
+        worker.client.command_status.assert_any_call("cmd_stop", "succeeded")
+        worker.client.claim_many.assert_not_called()
+        sleep.assert_not_called()
 
     def test_worker_readiness_checks_cover_dependencies_paths_and_disk(self) -> None:
         cfg = config()
@@ -404,6 +424,12 @@ class WorkerMainTest(unittest.TestCase):
                 with patch("pullwise_worker.main.subprocess.run") as run:
                     self.assertEqual(service_action(action, dry_run=True), 0)
                 run.assert_not_called()
+
+    def test_lifecycle_stop_uses_non_blocking_systemd_stop(self) -> None:
+        with patch("pullwise_worker.main.service_action", return_value=0) as service:
+            self.assertEqual(execute_lifecycle_command("stop"), 0)
+
+        service.assert_called_once_with("stop", no_block=True)
 
     def test_write_scan_summary_redacts_tokens(self) -> None:
         cfg = config()

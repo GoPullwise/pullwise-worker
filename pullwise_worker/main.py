@@ -80,8 +80,8 @@ class PullwiseClient:
         codex_ready: bool | None = None,
         systemd_active: bool | None = None,
         doctor_checked_at: int | None = None,
-    ) -> None:
-        self.post(
+    ) -> dict:
+        response = self.post(
             "/worker/heartbeat",
             {
                 "worker_id": self.config.worker_id,
@@ -98,6 +98,13 @@ class PullwiseClient:
                 "doctor_checked_at": doctor_checked_at,
             },
         )
+        return response.json()
+
+    def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:
+        payload = {"worker_id": self.config.worker_id, "status": status}
+        if error:
+            payload["error"] = error
+        self.post(f"/worker/commands/{command_id}/status", payload)
 
     def claim(self) -> dict | None:
         response = self.post(
@@ -202,17 +209,28 @@ class Worker:
                 ready = self.refresh_readiness_if_due()
                 loop_error = False
                 claimed_jobs = 0
+                heartbeat_payload: dict = {}
                 try:
-                    self.client.heartbeat(
+                    heartbeat_response = self.client.heartbeat(
                         running_jobs=len(running),
                         last_error=self.last_error,
                         doctor_status=self._doctor_status,
                         codex_ready=self._codex_ready,
                         doctor_checked_at=int(self._readiness_checked_at) if self._readiness_checked_at else None,
                     )
+                    if isinstance(heartbeat_response, dict):
+                        heartbeat_payload = heartbeat_response
                 except requests.RequestException as exc:
                     self.last_error = f"heartbeat failed: {redact_secrets(str(exc), self.config)}"[:500]
                     loop_error = True
+                worker_state = heartbeat_payload.get("worker") if isinstance(heartbeat_payload.get("worker"), dict) else {}
+                command = heartbeat_payload.get("command") if isinstance(heartbeat_payload.get("command"), dict) else None
+                if worker_state.get("status") == "disabled":
+                    ready = False
+                if command:
+                    ready = False
+                    if not running and not loop_error and self.handle_lifecycle_command(command):
+                        return
                 if ready and free_slots:
                     jobs = []
                     if not loop_error:
@@ -232,6 +250,32 @@ class Worker:
                     concurrent.futures.wait(running)
                     return
                 time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error))
+
+    def handle_lifecycle_command(self, command: dict) -> bool:
+        command_id = str(command.get("id") or "").strip()
+        action = str(command.get("command") or "").strip().lower()
+        if not command_id or action not in {"stop", "uninstall"}:
+            return False
+        try:
+            self.client.command_status(command_id, "running")
+        except requests.RequestException as exc:
+            self.last_error = f"command ack failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return False
+        code = execute_lifecycle_command(action)
+        if code == 0:
+            try:
+                self.client.command_status(command_id, "succeeded")
+            except requests.RequestException as exc:
+                self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
+            if action == "uninstall":
+                service_action("stop", no_block=True)
+            return True
+        error = f"{action} command exited {code}"
+        try:
+            self.client.command_status(command_id, "failed", error=error)
+        except requests.RequestException as exc:
+            self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
+        return False
 
     def next_poll_sleep(self, *, claimed_jobs: int, loop_error: bool) -> float:
         if loop_error:
@@ -744,12 +788,23 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     return False, detail
 
 
-def service_action(action: str, *, dry_run: bool = False) -> int:
-    command = ["systemctl", action, "pullwise-worker"]
+def service_action(action: str, *, dry_run: bool = False, no_block: bool = False) -> int:
+    command = ["systemctl"]
+    if no_block:
+        command.append("--no-block")
+    command.extend([action, "pullwise-worker"])
     if dry_run:
         print(" ".join(command))
         return 0
     return subprocess.run(command).returncode
+
+
+def execute_lifecycle_command(action: str) -> int:
+    if action == "stop":
+        return service_action("stop", no_block=True)
+    if action == "uninstall":
+        return uninstall_worker(remove_config=True, remove_logs=False, defer_stop=True)
+    return 2
 
 
 def default_worker_package() -> str:
@@ -791,8 +846,14 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     return 0
 
 
-def uninstall_worker(*, remove_config: bool = False, remove_logs: bool = False, dry_run: bool = False) -> int:
-    commands = [
+def uninstall_worker(
+    *,
+    remove_config: bool = False,
+    remove_logs: bool = False,
+    dry_run: bool = False,
+    defer_stop: bool = False,
+) -> int:
+    commands = [["systemctl", "disable", "pullwise-worker"]] if defer_stop else [
         ["systemctl", "stop", "pullwise-worker"],
         ["systemctl", "disable", "pullwise-worker"],
     ]
@@ -810,6 +871,8 @@ def uninstall_worker(*, remove_config: bool = False, remove_logs: bool = False, 
         if remove_logs:
             print("remove /var/log/pullwise-worker")
         print("systemctl daemon-reload")
+        if defer_stop:
+            print("systemctl --no-block stop pullwise-worker")
     else:
         safe_unlink(Path("/etc/systemd/system/pullwise-worker.service"))
         if remove_config:
