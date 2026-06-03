@@ -70,11 +70,9 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         checkout_dir = Path(worker.config.work_dir) / "job_1"
 
-        with (
-            patch("pullwise_worker.main.clone_repository") as clone_repository,
-            patch("pullwise_worker.main.run_codex_review") as run_codex_review,
-            patch("pullwise_worker.main.shutil.rmtree") as rmtree,
-        ):
+        with patch("pullwise_worker.main.clone_repository") as clone_repository, \
+            patch("pullwise_worker.main.run_codex_review") as run_codex_review, \
+            patch("pullwise_worker.main.shutil.rmtree") as rmtree:
             run_codex_review.return_value = (
                 [{"title": "Bug", "severity": "high"}],
                 {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
@@ -100,15 +98,13 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         worker.client.result.side_effect = [requests.Timeout("timed out"), None]
 
-        with (
-            patch("pullwise_worker.main.clone_repository"),
+        with patch("pullwise_worker.main.clone_repository"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
-            ),
-            patch("pullwise_worker.main.time.sleep"),
-            patch("pullwise_worker.main.shutil.rmtree"),
-        ):
+            ), \
+            patch("pullwise_worker.main.time.sleep"), \
+            patch("pullwise_worker.main.shutil.rmtree"):
             worker.run_job({"job_id": "job_retry", "attempt": 1, "repo": "acme/api"})
 
         self.assertEqual(worker.client.result.call_count, 2)
@@ -124,15 +120,13 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         worker.client.result.side_effect = requests.Timeout("timed out")
 
-        with (
-            patch("pullwise_worker.main.clone_repository"),
+        with patch("pullwise_worker.main.clone_repository"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
-            ),
-            patch("pullwise_worker.main.time.sleep"),
-            patch("pullwise_worker.main.shutil.rmtree"),
-        ):
+            ), \
+            patch("pullwise_worker.main.time.sleep"), \
+            patch("pullwise_worker.main.shutil.rmtree"):
             worker.run_job({"job_id": "job_timeout", "attempt": 1, "repo": "acme/api"})
 
         self.assertEqual(worker.client.result.call_count, 2)
@@ -158,10 +152,8 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         worker.client.heartbeat.side_effect = requests.ConnectionError("server down")
 
-        with (
-            patch.object(worker, "refresh_readiness_if_due", return_value=True),
-            patch("pullwise_worker.main.time.sleep") as sleep,
-        ):
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch("pullwise_worker.main.time.sleep") as sleep:
             worker.run(once=True)
 
         worker.client.heartbeat.assert_called_once()
@@ -178,10 +170,8 @@ class WorkerMainTest(unittest.TestCase):
             ("codex_ready", True, "ready"),
         ]
 
-        with (
-            patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, True)),
-            patch("pullwise_worker.main.time.sleep") as sleep,
-        ):
+        with patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, True)), \
+            patch("pullwise_worker.main.time.sleep") as sleep:
             worker.run(once=True)
 
         worker.client.heartbeat.assert_called_once()
@@ -195,11 +185,9 @@ class WorkerMainTest(unittest.TestCase):
     def test_worker_readiness_checks_cover_dependencies_paths_and_disk(self) -> None:
         cfg = config()
 
-        with (
-            patch("pullwise_worker.main.command_ok", side_effect=[(False, "git missing"), (True, "codex ok")]),
-            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")),
-            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)),
-        ):
+        with patch("pullwise_worker.main.command_ok", side_effect=[(False, "git missing"), (True, "codex ok")]), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
             checks, codex_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
@@ -299,14 +287,12 @@ class WorkerMainTest(unittest.TestCase):
     def test_run_doctor_checks_dependencies_capacity_paths_and_heartbeat(self) -> None:
         cfg = config()
 
-        with (
-            patch(
+        with patch(
                 "pullwise_worker.main.command_ok",
                 side_effect=[(True, "git ok"), (True, "codex ok"), (True, "active")],
-            ),
-            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")),
-            patch("pullwise_worker.main.PullwiseClient") as client_class,
-        ):
+            ), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class:
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
@@ -320,11 +306,9 @@ class WorkerMainTest(unittest.TestCase):
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
 
-        with (
-            patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "codex ok"), (True, "active")]),
-            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")),
-            patch("pullwise_worker.main.PullwiseClient") as client_class,
-        ):
+        with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "codex ok"), (True, "active")]), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class:
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
@@ -385,17 +369,15 @@ class WorkerMainTest(unittest.TestCase):
             failed = Mock(returncode=1)
             ok = Mock(returncode=0)
 
-            with (
-                patch.dict(
+            with patch.dict(
                     "os.environ",
                     {
                         "PULLWISE_WORKER_ENV_FILE": str(env_file),
                         "PULLWISE_WORKER_ENV_BACKUP_FILE": str(backup_file),
                     },
                     clear=False,
-                ),
-                patch("pullwise_worker.main.subprocess.run", side_effect=[ok, failed, ok]) as run,
-            ):
+                ), \
+                patch("pullwise_worker.main.subprocess.run", side_effect=[ok, failed, ok]) as run:
                 code = update_worker(cfg)
 
             self.assertEqual(code, 1)
@@ -467,6 +449,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("uname -s", install_script)
         self.assertIn("uname -m", install_script)
         self.assertIn("need_cmd python3", install_script)
+        self.assertIn("Python 3.9 or newer", install_script)
         self.assertIn("need_cmd git", install_script)
         self.assertIn("codex login", install_script)
         self.assertIn("PULLWISE_WORKER_TOKEN", install_script)

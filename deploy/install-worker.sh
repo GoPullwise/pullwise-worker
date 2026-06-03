@@ -58,6 +58,11 @@ fi
 need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
 need_cmd python3
 need_cmd git
+python3 - <<'PY'
+import sys
+if sys.version_info < (3, 9):
+    raise SystemExit("Pullwise worker requires Python 3.9 or newer.")
+PY
 if ! command -v node >/dev/null 2>&1; then
   echo "node is required for Codex CLI; install Node.js 20+ then rerun." >&2
   exit 1

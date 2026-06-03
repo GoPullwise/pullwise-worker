@@ -40,6 +40,8 @@ Required environment:
 
 ## Deploy
 
+The worker supports Python 3.9 or newer.
+
 Admin worker creation returns a one-time token plus an install command:
 
 ```bash
