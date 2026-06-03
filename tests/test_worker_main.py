@@ -265,6 +265,30 @@ class WorkerMainTest(unittest.TestCase):
         self.assertTrue(by_name["disk_space"][0])
         self.assertTrue(codex_ready)
 
+    def test_worker_readiness_allows_opencode_fallback_when_codex_login_fails(self) -> None:
+        cfg = config()
+        cfg.provider_chain = ["codex", "opencode"]
+        cfg.opencode_command = "opencode"
+
+        with patch(
+                "pullwise_worker.main.command_ok",
+                side_effect=[
+                    (True, "git ok"),
+                    (True, "v22.21.0"),
+                    (True, "codex ok"),
+                    (True, "opencode 1.0.0"),
+                ],
+            ), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            checks, provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["codex_ready"][0])
+        self.assertTrue(by_name["opencode"][0])
+        self.assertTrue(by_name["provider_ready"][0])
+        self.assertTrue(provider_ready)
+
     def test_clone_repository_uses_short_lived_token(self) -> None:
         with patch("pullwise_worker.main.subprocess.run") as run:
             clone_repository(
@@ -327,6 +351,91 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("--output-last-message", command)
         self.assertEqual(findings[0]["title"], "Bug")
         self.assertEqual(summary["medium"], 1)
+
+    def test_worker_config_defaults_to_codex_only_provider_chain(self) -> None:
+        cfg = config()
+
+        self.assertEqual(cfg.provider_chain, ["codex"])
+        self.assertEqual(cfg.codex_model, "")
+        self.assertEqual(cfg.codex_reasoning_effort, "xhigh")
+        self.assertEqual(cfg.opencode_command, "opencode")
+        self.assertEqual(cfg.opencode_model, "")
+        self.assertEqual(cfg.opencode_variant, "")
+
+    def test_worker_config_reads_provider_chain_and_model_settings(self) -> None:
+        namespace = Namespace(
+            server_url="http://server.test",
+            worker_token="worker-token",
+            worker_id="wk_1",
+            max_concurrent_jobs=2,
+            poll_seconds=1,
+            work_dir=tempfile.mkdtemp(),
+            checkout_root=None,
+            log_dir=tempfile.mkdtemp(),
+            provider=None,
+            codex_command=None,
+            codex_timeout_seconds=60,
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "PULLWISE_PROVIDER_CHAIN": "codex, opencode",
+                "PULLWISE_CODEX_MODEL": "gpt-5.5",
+                "PULLWISE_CODEX_REASONING_EFFORT": "high",
+                "PULLWISE_OPENCODE_COMMAND": "opencode-cli",
+                "PULLWISE_OPENCODE_MODEL": "openai/gpt-5",
+                "PULLWISE_OPENCODE_VARIANT": "xhigh",
+            },
+            clear=False,
+        ):
+            cfg = WorkerConfig(namespace)
+
+        self.assertEqual(cfg.provider_chain, ["codex", "opencode"])
+        self.assertEqual(cfg.codex_model, "gpt-5.5")
+        self.assertEqual(cfg.codex_reasoning_effort, "high")
+        self.assertEqual(cfg.opencode_command, "opencode-cli")
+        self.assertEqual(cfg.opencode_model, "openai/gpt-5")
+        self.assertEqual(cfg.opencode_variant, "xhigh")
+
+    def test_run_codex_review_uses_configured_codex_model_and_effort(self) -> None:
+        cfg = config()
+        cfg.codex_model = "gpt-5.5"
+        cfg.codex_reasoning_effort = "high"
+
+        def fake_run(command: list[str], **_kwargs: object) -> Mock:
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text('{"findings":[]}', encoding="utf-8")
+            return Mock(returncode=0, stdout="", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run) as run:
+            run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
+        self.assertIn('model_reasoning_effort="high"', command)
+
+    def test_run_codex_review_falls_back_to_opencode_after_codex_failure(self) -> None:
+        cfg = config()
+        cfg.provider_chain = ["codex", "opencode"]
+        cfg.opencode_command = "opencode"
+        cfg.opencode_model = "openai/gpt-5"
+        cfg.opencode_variant = "xhigh"
+
+        def fake_run(command: list[str], **_kwargs: object) -> Mock:
+            if command[:2] == ["codex", "exec"]:
+                return Mock(returncode=1, stdout="", stderr="codex failed")
+            self.assertEqual(command[:2], ["opencode", "run"])
+            self.assertEqual(command[command.index("--model") + 1], "openai/gpt-5")
+            self.assertEqual(command[command.index("--variant") + 1], "xhigh")
+            return Mock(returncode=0, stdout='{"findings":[{"title":"Fallback","severity":"low"}]}', stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run):
+            findings, summary, logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
+
+        self.assertEqual(findings[0]["title"], "Fallback")
+        self.assertEqual(summary["low"], 1)
+        self.assertIn("codex failed", logs)
 
     def test_job_checkout_dir_refuses_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -577,6 +686,7 @@ class WorkerMainTest(unittest.TestCase):
         for name in expected:
             self.assertTrue((deploy_root / name).exists(), name)
         install_script = (deploy_root / "install-worker.sh").read_text(encoding="utf-8")
+        env_template = (deploy_root / "worker.env.template").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
         self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
         self.assertIn(f'DEFAULT_WORKER_VERSION="{__version__}"', install_script)
@@ -585,6 +695,17 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("PULLWISE_CODEX_PACKAGE", install_script)
         self.assertIn("@openai/codex@0.135.0", install_script)
         self.assertIn("--codex-package", install_script)
+        self.assertIn("--provider-chain", install_script)
+        for key in (
+            "PULLWISE_PROVIDER_CHAIN",
+            "PULLWISE_CODEX_MODEL",
+            "PULLWISE_CODEX_REASONING_EFFORT",
+            "PULLWISE_OPENCODE_COMMAND",
+            "PULLWISE_OPENCODE_MODEL",
+            "PULLWISE_OPENCODE_VARIANT",
+        ):
+            self.assertIn(key, install_script)
+            self.assertIn(key, env_template)
         self.assertIn("uname -s", install_script)
         self.assertIn("uname -m", install_script)
         self.assertIn("need_cmd python3", install_script)

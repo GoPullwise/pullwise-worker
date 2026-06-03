@@ -34,6 +34,17 @@ _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
+SUPPORTED_REVIEW_PROVIDERS = {"codex", "opencode"}
+
+
+def parse_provider_chain(value: str | None, fallback: str = "codex") -> list[str]:
+    raw = value if value is not None else fallback
+    providers: list[str] = []
+    for item in str(raw or "").split(","):
+        provider = item.strip().lower()
+        if provider in SUPPORTED_REVIEW_PROVIDERS and provider not in providers:
+            providers.append(provider)
+    return providers or ["codex"]
 
 
 class WorkerConfig:
@@ -42,6 +53,7 @@ class WorkerConfig:
         self.worker_token = getattr(args, "worker_token", None) or os.environ.get("PULLWISE_WORKER_TOKEN") or ""
         self.worker_id = getattr(args, "worker_id", None) or os.environ.get("PULLWISE_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
         self.provider = getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "codex"
+        self.provider_chain = parse_provider_chain(os.environ.get("PULLWISE_PROVIDER_CHAIN"), self.provider)
         self.max_concurrent_jobs = max(1, int(getattr(args, "max_concurrent_jobs", None) or os.environ.get("PULLWISE_MAX_CONCURRENT_JOBS") or 1))
         self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))
         self.poll_jitter_seconds = max(0.0, float(os.environ.get("PULLWISE_WORKER_POLL_JITTER_SECONDS") or 2))
@@ -52,6 +64,11 @@ class WorkerConfig:
         log_dir = getattr(args, "log_dir", None) or os.environ.get("PULLWISE_LOG_DIR")
         self.log_dir = Path(log_dir) if log_dir else Path(tempfile.gettempdir()) / "pullwise-worker-logs"
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or "codex"
+        self.codex_model = os.environ.get("PULLWISE_CODEX_MODEL", "").strip()
+        self.codex_reasoning_effort = os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", "xhigh").strip() or "xhigh"
+        self.opencode_command = os.environ.get("PULLWISE_OPENCODE_COMMAND", "opencode").strip() or "opencode"
+        self.opencode_model = os.environ.get("PULLWISE_OPENCODE_MODEL", "").strip()
+        self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", "").strip()
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
         self.readiness_check_seconds = max(10, int(os.environ.get("PULLWISE_READINESS_CHECK_SECONDS") or 60))
@@ -507,26 +524,30 @@ def git_auth_env(clone_token: object) -> dict[str, str] | None:
 
 
 def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[list[dict], dict, str]:
+    errors: list[str] = []
+    for provider in config.provider_chain:
+        try:
+            if provider == "codex":
+                findings, summary, logs_summary = run_codex_provider_review(config, job, checkout_dir)
+            elif provider == "opencode":
+                findings, summary, logs_summary = run_opencode_provider_review(config, job, checkout_dir)
+            else:
+                raise RuntimeError(f"unsupported review provider: {provider}")
+            if errors:
+                logs_summary = "\n".join([*errors, logs_summary])[-1000:]
+            return findings, summary, logs_summary
+        except Exception as exc:
+            errors.append(f"{provider}: {redact_secrets(str(exc), config)}"[:500])
+    raise RuntimeError(f"all review providers failed: {'; '.join(errors)}")
+
+
+def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[list[dict], dict, str]:
     prompt = review_prompt(job)
     with tempfile.TemporaryDirectory(prefix="pullwise-codex-") as tmpdir:
         schema_path = Path(tmpdir) / "findings.schema.json"
         output_path = Path(tmpdir) / "findings.json"
         schema_path.write_text(json.dumps(findings_schema()), encoding="utf-8")
-        command = [
-            config.codex_command,
-            "exec",
-            _CODEX_SKIP_GIT_REPO_CHECK_ARG,
-            "--ignore-user-config",
-            "--config",
-            'model_reasoning_effort="xhigh"',
-            "--sandbox",
-            "read-only",
-            "--output-schema",
-            str(schema_path),
-            "--output-last-message",
-            str(output_path),
-            prompt,
-        ]
+        command = codex_review_command(config, str(schema_path), str(output_path), prompt)
         completed = subprocess.run(
             command,
             cwd=str(checkout_dir),
@@ -541,6 +562,55 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
         output = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
     findings = parse_findings(output)
     return findings, summarize(findings), logs_summary
+
+
+def codex_review_command(config: WorkerConfig, schema_path: str, output_path: str, prompt: str) -> list[str]:
+    command = [
+        config.codex_command,
+        "exec",
+        _CODEX_SKIP_GIT_REPO_CHECK_ARG,
+        "--ignore-user-config",
+        "--config",
+        f'model_reasoning_effort="{config.codex_reasoning_effort}"',
+        "--sandbox",
+        "read-only",
+        "--output-schema",
+        schema_path,
+        "--output-last-message",
+        output_path,
+    ]
+    if config.codex_model:
+        command.extend(["--model", config.codex_model])
+    command.append(prompt)
+    return command
+
+
+def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[list[dict], dict, str]:
+    prompt = review_prompt(job)
+    command = opencode_review_command(config, prompt)
+    completed = subprocess.run(
+        command,
+        cwd=str(checkout_dir),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=config.codex_timeout_seconds,
+    )
+    logs_summary = redact_secrets((completed.stderr or completed.stdout)[-1000:], config)
+    if completed.returncode != 0:
+        raise RuntimeError(f"opencode run failed with exit code {completed.returncode}: {logs_summary[:300]}")
+    findings = parse_findings(completed.stdout)
+    return findings, summarize(findings), logs_summary
+
+
+def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
+    command = [config.opencode_command, "run"]
+    if config.opencode_model:
+        command.extend(["--model", config.opencode_model])
+    if config.opencode_variant:
+        command.extend(["--variant", config.opencode_variant])
+    command.append(prompt)
+    return command
 
 
 def review_prompt(job: dict) -> str:
@@ -714,22 +784,42 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
 
     git_ok, git_detail = command_ok(["git", "--version"])
     checks.append(("git", git_ok, git_detail))
-    node_ok, node_detail = node_version_check()
-    checks.append(("node", node_ok, node_detail))
-    codex_cli_ok, codex_cli_detail = command_ok([config.codex_command, "--version"])
-    checks.append(("codex", codex_cli_ok, codex_cli_detail))
-    codex_login_ok, codex_login_detail = codex_ready_check(config) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
-    checks.append(("codex_ready", codex_login_ok, codex_login_detail))
+    ready_providers: list[str] = []
+    if "codex" in config.provider_chain:
+        node_ok, node_detail = node_version_check()
+        checks.append(("node", node_ok, node_detail))
+        codex_cli_ok, codex_cli_detail = command_ok([config.codex_command, "--version"])
+        checks.append(("codex", codex_cli_ok, codex_cli_detail))
+        codex_login_ok, codex_login_detail = codex_ready_check(config) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
+        checks.append(("codex_ready", codex_login_ok, codex_login_detail))
+        if node_ok and codex_cli_ok and codex_login_ok:
+            ready_providers.append("codex")
+    if "opencode" in config.provider_chain:
+        opencode_ok, opencode_detail = command_ok([config.opencode_command, "--version"])
+        checks.append(("opencode", opencode_ok, opencode_detail))
+        if opencode_ok:
+            ready_providers.append("opencode")
+    provider_ready = bool(ready_providers)
+    checks.append(("provider_ready", provider_ready, ", ".join(ready_providers) if provider_ready else "no configured provider is ready"))
 
     for label, path in (("checkout_root", config.work_dir), ("log_dir", config.log_dir)):
         ok, detail = writable_path_check(path)
         checks.append((label, ok, detail))
     checks.append(("disk_space", *disk_space_check(config.work_dir)))
-    return checks, bool(node_ok and codex_cli_ok and codex_login_ok)
+    return checks, provider_ready
 
 
 def first_failed_check(checks: list[tuple[str, bool, str]]) -> tuple[str, bool, str] | None:
-    return next((check for check in checks if not check[1]), None)
+    provider_ready = any(name == "provider_ready" and ok for name, ok, _detail in checks)
+    optional_provider_checks = {"node", "codex", "codex_ready", "opencode"}
+    for check in checks:
+        name, ok, _detail = check
+        if ok:
+            continue
+        if provider_ready and name in optional_provider_checks:
+            continue
+        return check
+    return None
 
 
 def readiness_error_message(check: tuple[str, bool, str], config: WorkerConfig) -> str:
@@ -760,17 +850,17 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 
 def run_doctor(config: WorkerConfig) -> bool:
-    checks, codex_ready = worker_readiness_checks(config)
+    checks, provider_ready = worker_readiness_checks(config)
     systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", "pullwise-worker"])
     checks.append(("systemd", systemd_ok, systemd_detail))
     heartbeat_ok = True
     heartbeat_detail = "ok"
-    doctor_required_ok = all(ok for name, ok, _detail in checks if name != "heartbeat")
+    doctor_required_ok = first_failed_check(checks) is None
     try:
         PullwiseClient(config).heartbeat(
             last_error=None,
             doctor_status="ok" if doctor_required_ok else "degraded",
-            codex_ready=codex_ready,
+            codex_ready=provider_ready,
             systemd_active=systemd_ok,
             doctor_checked_at=int(time.time()),
         )
@@ -781,9 +871,9 @@ def run_doctor(config: WorkerConfig) -> bool:
     for name, ok, detail in checks:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
     codex_login_check = next((check for check in checks if check[0] == "codex_ready"), None)
-    if codex_login_check and not codex_login_check[1] and codex_login_check[2] == "not logged in":
+    if not provider_ready and codex_login_check and not codex_login_check[1] and codex_login_check[2] == "not logged in":
         print("Codex may require interactive login: sudo -u pullwise-worker codex login")
-    return all(ok for _name, ok, _detail in checks)
+    return first_failed_check(checks) is None
 
 
 def command_ok(command: list[str]) -> tuple[bool, str]:

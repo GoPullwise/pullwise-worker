@@ -15,7 +15,7 @@ The worker loop:
 1. sends `POST /worker/heartbeat`
 2. claims queued jobs up to `free_slots` with `POST /worker/jobs/claim`
 3. clones the repository using the short-lived clone token returned by the server
-4. runs `codex exec`
+4. runs the configured review provider chain
 5. uploads progress and final result
 6. removes the checkout directory
 
@@ -25,6 +25,7 @@ Required environment:
 - `PULLWISE_WORKER_TOKEN`
 - `PULLWISE_WORKER_ID` optional, defaults to `{hostname}-{pid}`
 - `PULLWISE_PROVIDER` optional, defaults to `codex`
+- `PULLWISE_PROVIDER_CHAIN` optional, defaults to `codex`; use `codex,opencode` for Codex-first fallback
 - `PULLWISE_MAX_CONCURRENT_JOBS` optional, defaults to `1`
 - `PULLWISE_WORKER_POLL_SECONDS` optional, defaults to `5`
 - `PULLWISE_WORKER_POLL_JITTER_SECONDS` optional, defaults to `2`
@@ -33,10 +34,27 @@ Required environment:
 - `PULLWISE_WORKER_WORK_DIR` optional
 - `PULLWISE_LOG_DIR` optional, defaults to the temp directory
 - `PULLWISE_CODEX_COMMAND` optional, defaults to `codex`
+- `PULLWISE_CODEX_MODEL` optional, defaults to empty; when empty, the Codex CLI chooses its default model
+- `PULLWISE_CODEX_REASONING_EFFORT` optional, defaults to `xhigh`
+- `PULLWISE_OPENCODE_COMMAND` optional, defaults to `opencode`
+- `PULLWISE_OPENCODE_MODEL` optional, defaults to empty; when empty, OpenCode uses its own model loading order
+- `PULLWISE_OPENCODE_VARIANT` optional, defaults to empty; use this for OpenCode provider-specific reasoning effort
 - `PULLWISE_CODEX_TIMEOUT_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
 - `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
+
+Provider model defaults are intentionally conservative. Codex keeps the old worker behavior by default: no explicit model is passed, and `model_reasoning_effort` is set to `xhigh`. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker passes `--model` and `--variant` only if their environment variables are set.
+
+Production Codex-first fallback example:
+
+```bash
+PULLWISE_PROVIDER_CHAIN=codex,opencode
+PULLWISE_CODEX_MODEL=gpt-5.5
+PULLWISE_CODEX_REASONING_EFFORT=xhigh
+PULLWISE_OPENCODE_MODEL=openai/gpt-5
+PULLWISE_OPENCODE_VARIANT=xhigh
+```
 
 ## Deploy
 
@@ -79,8 +97,10 @@ systemd authorization. Admin-queued stop commands are handled by the running
 worker exiting cleanly; the installed unit uses `Restart=on-failure` so the
 service stays stopped.
 
-Codex must be authenticated for the service user before scans can run:
+Codex must be authenticated for the service user before Codex scans can run:
 
 ```bash
 sudo -u pullwise-worker codex login
 ```
+
+When `PULLWISE_PROVIDER_CHAIN` includes `opencode`, install and authenticate OpenCode for the same service user before relying on fallback.
