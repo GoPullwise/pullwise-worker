@@ -452,6 +452,22 @@ class WorkerMainTest(unittest.TestCase):
                 safe_rmtree(target, allowed)
             self.assertTrue(target.exists())
 
+    def test_ci_dependency_bounds_keep_python_39_support(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+        audit_requirements = (root / "requirements-audit.txt").read_text(encoding="utf-8")
+
+        self.assertIn('"pip>=25.3,<26.1"', workflow)
+        self.assertIn('"pip-audit>=2.9,<2.10"', workflow)
+        self.assertIn('"filelock>=3.19.1,<3.20"', workflow)
+        self.assertIn('python -m unittest discover -s tests -p "test_*.py"', workflow)
+        self.assertIn('"requests>=2.32.5,<2.33"', pyproject)
+        self.assertEqual(audit_requirements.strip(), "requests>=2.32.5,<2.33")
+        self.assertNotIn("pip>=26.1", workflow)
+        self.assertNotIn("filelock>=3.20.3", workflow)
+        self.assertNotIn("requests>=2.33", pyproject)
+
     def test_deploy_assets_cover_install_systemd_logrotate_and_lifecycle(self) -> None:
         deploy_root = Path(__file__).resolve().parents[1] / "deploy"
         expected = [
