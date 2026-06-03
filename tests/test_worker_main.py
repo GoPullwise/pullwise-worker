@@ -501,6 +501,14 @@ class WorkerMainTest(unittest.TestCase):
 
         service.assert_not_called()
 
+    def test_lifecycle_uninstall_exits_without_systemd_authorization(self) -> None:
+        with patch("pullwise_worker.main.uninstall_worker", return_value=1) as uninstall, \
+            patch("pullwise_worker.main.service_action", return_value=1) as service:
+            self.assertEqual(execute_lifecycle_command("uninstall"), 0)
+
+        uninstall.assert_not_called()
+        service.assert_not_called()
+
     def test_write_scan_summary_redacts_tokens(self) -> None:
         cfg = config()
         write_scan_summary(cfg, "job_1", "failed", 12, "worker-token https://x-access-token:repo-token@github.com/acme/api.git")

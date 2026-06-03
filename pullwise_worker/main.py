@@ -305,8 +305,6 @@ class Worker:
                 self.client.command_status(command_id, "succeeded")
             except PullwiseRequestError as exc:
                 self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
-            if action == "uninstall":
-                service_action("stop", no_block=True)
             return True
         error = f"{action} command exited {code}"
         try:
@@ -862,12 +860,11 @@ def service_action(action: str, *, dry_run: bool = False, no_block: bool = False
 
 
 def execute_lifecycle_command(action: str) -> int:
-    if action == "stop":
-        # Admin-queued stop runs inside the unprivileged service process. Exit
-        # cleanly and let the systemd unit's Restart=on-failure keep it stopped.
+    if action in {"stop", "uninstall"}:
+        # Admin-queued lifecycle commands run inside the unprivileged service
+        # process. Exit cleanly and let Restart=on-failure keep it stopped.
+        # Full local uninstall still requires root via `pullwise-worker uninstall`.
         return 0
-    if action == "uninstall":
-        return uninstall_worker(remove_config=True, remove_logs=False, defer_stop=True)
     return 2
 
 
@@ -915,9 +912,8 @@ def uninstall_worker(
     remove_config: bool = False,
     remove_logs: bool = False,
     dry_run: bool = False,
-    defer_stop: bool = False,
 ) -> int:
-    commands = [["systemctl", "disable", "pullwise-worker"]] if defer_stop else [
+    commands = [
         ["systemctl", "stop", "pullwise-worker"],
         ["systemctl", "disable", "pullwise-worker"],
     ]
@@ -935,8 +931,6 @@ def uninstall_worker(
         if remove_logs:
             print("remove /var/log/pullwise-worker")
         print("systemctl daemon-reload")
-        if defer_stop:
-            print("systemctl --no-block stop pullwise-worker")
     else:
         safe_unlink(Path("/etc/systemd/system/pullwise-worker.service"))
         if remove_config:
