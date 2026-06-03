@@ -319,6 +319,7 @@ class WorkerMainTest(unittest.TestCase):
 
         command = run.call_args.args[0]
         self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--ignore-user-config", command)
         self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="xhigh"')
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
@@ -392,6 +393,20 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(detail, "not logged in")
+
+    def test_codex_ready_check_skips_git_repo_trust_check(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout='{"ok": true}', stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
+            ok, detail = codex_ready_check(cfg)
+
+        command = run.call_args.args[0]
+        self.assertTrue(ok)
+        self.assertEqual(detail, "ready")
+        self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertIn("--skip-git-repo-check", command)
+        self.assertIn("--json", command)
 
     def test_node_version_check_requires_node_20(self) -> None:
         with patch("pullwise_worker.main.command_ok", return_value=(True, "v12.22.9")):

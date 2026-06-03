@@ -32,6 +32,7 @@ PHASE_PROGRESS = {
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
+_CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 
 
@@ -514,6 +515,7 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
         command = [
             config.codex_command,
             "exec",
+            _CODEX_SKIP_GIT_REPO_CHECK_ARG,
             "--ignore-user-config",
             "--config",
             'model_reasoning_effort="xhigh"',
@@ -816,6 +818,7 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     command = [
         config.codex_command,
         "exec",
+        _CODEX_SKIP_GIT_REPO_CHECK_ARG,
         "--json",
         'Return only JSON: {"ok": true}',
     ]
