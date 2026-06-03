@@ -15,7 +15,7 @@ WORKER_NAME="pullwise-worker"
 MAX_CONCURRENT_JOBS="1"
 PROVIDER="codex"
 WORKER_PACKAGE=""
-DEFAULT_WORKER_VERSION="0.1.2"
+DEFAULT_WORKER_VERSION="0.1.3"
 DEFAULT_WORKER_PACKAGE="https://github.com/GoPullwise/pullwise-worker/releases/download/v${DEFAULT_WORKER_VERSION}/pullwise_worker-${DEFAULT_WORKER_VERSION}-py3-none-any.whl"
 CODEX_PACKAGE="${PULLWISE_CODEX_PACKAGE:-@openai/codex@0.135.0}"
 
