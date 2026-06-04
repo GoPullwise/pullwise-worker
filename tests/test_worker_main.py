@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from pullwise_worker import __version__
 from pullwise_worker.main import (
+    CODEX_LOGIN_COMMAND,
     PullwiseClient,
     PullwiseHTTPError,
     PullwiseRequestError,
@@ -345,7 +346,8 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(command[:2], ["codex", "exec"])
         self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--ignore-user-config", command)
-        self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="xhigh"')
+        self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="medium"')
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.4")
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn("--output-schema", command)
         self.assertIn("--output-last-message", command)
@@ -356,11 +358,11 @@ class WorkerMainTest(unittest.TestCase):
         cfg = config()
 
         self.assertEqual(cfg.provider_chain, ["codex"])
-        self.assertEqual(cfg.codex_model, "")
-        self.assertEqual(cfg.codex_reasoning_effort, "xhigh")
+        self.assertEqual(cfg.codex_model, "gpt-5.4")
+        self.assertEqual(cfg.codex_reasoning_effort, "medium")
         self.assertEqual(cfg.opencode_command, "opencode")
-        self.assertEqual(cfg.opencode_model, "")
-        self.assertEqual(cfg.opencode_variant, "")
+        self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
+        self.assertEqual(cfg.opencode_variant, "medium")
 
     def test_worker_config_reads_provider_chain_and_model_settings(self) -> None:
         namespace = Namespace(
@@ -479,6 +481,23 @@ class WorkerMainTest(unittest.TestCase):
         self.assertFalse(heartbeat_kwargs["codex_ready"])
         self.assertTrue(heartbeat_kwargs["systemd_active"])
 
+    def test_run_doctor_prints_device_auth_login_command_when_codex_is_not_ready(self) -> None:
+        cfg = config()
+
+        with patch(
+                "pullwise_worker.main.command_ok",
+                side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")],
+            ), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("builtins.print") as print_mock:
+            client_class.return_value.heartbeat.return_value = None
+            run_doctor(cfg)
+
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertIn(CODEX_LOGIN_COMMAND, printed)
+        self.assertIn("--device-auth", printed)
+
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
 
@@ -515,7 +534,10 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(detail, "ready")
         self.assertEqual(command[:2], ["codex", "exec"])
         self.assertIn("--skip-git-repo-check", command)
+        self.assertIn("--ignore-user-config", command)
         self.assertIn("--json", command)
+        self.assertIn('model_reasoning_effort="medium"', command)
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.4")
 
     def test_node_version_check_requires_node_20(self) -> None:
         with patch("pullwise_worker.main.command_ok", return_value=(True, "v12.22.9")):
@@ -696,6 +718,14 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("@openai/codex@0.135.0", install_script)
         self.assertIn("--codex-package", install_script)
         self.assertIn("--provider-chain", install_script)
+        self.assertIn("PULLWISE_CODEX_MODEL=${PULLWISE_CODEX_MODEL:-gpt-5.4}", install_script)
+        self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=${PULLWISE_CODEX_REASONING_EFFORT:-medium}", install_script)
+        self.assertIn("PULLWISE_OPENCODE_MODEL=${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}", install_script)
+        self.assertIn("PULLWISE_OPENCODE_VARIANT=${PULLWISE_OPENCODE_VARIANT:-medium}", install_script)
+        self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.4", env_template)
+        self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
+        self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
+        self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
         for key in (
             "PULLWISE_PROVIDER_CHAIN",
             "PULLWISE_CODEX_MODEL",
@@ -715,7 +745,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("Node.js 20+ must be available to $SERVICE_USER", install_script)
         self.assertIn("PULLWISE_PYTHON_BIN", install_script)
         self.assertIn("run_as_service_user \"$BIN_PATH\" doctor || true", install_script)
-        self.assertIn("codex login", install_script)
+        self.assertIn("codex login --device-auth", install_script)
         self.assertIn("PULLWISE_WORKER_TOKEN", install_script)
         self.assertIn("--worker-token-file", install_script)
         self.assertNotIn("--worker-token) WORKER_TOKEN", install_script)

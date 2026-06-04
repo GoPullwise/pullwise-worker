@@ -35,6 +35,15 @@ _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex", "opencode"}
+DEFAULT_CODEX_MODEL = "gpt-5.4"
+DEFAULT_CODEX_REASONING_EFFORT = "medium"
+DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
+DEFAULT_OPENCODE_VARIANT = "medium"
+CODEX_LOGIN_COMMAND = (
+    "sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker "
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+    "codex login --device-auth"
+)
 
 
 def parse_provider_chain(value: str | None, fallback: str = "codex") -> list[str]:
@@ -64,11 +73,14 @@ class WorkerConfig:
         log_dir = getattr(args, "log_dir", None) or os.environ.get("PULLWISE_LOG_DIR")
         self.log_dir = Path(log_dir) if log_dir else Path(tempfile.gettempdir()) / "pullwise-worker-logs"
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or "codex"
-        self.codex_model = os.environ.get("PULLWISE_CODEX_MODEL", "").strip()
-        self.codex_reasoning_effort = os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", "xhigh").strip() or "xhigh"
+        self.codex_model = os.environ.get("PULLWISE_CODEX_MODEL", DEFAULT_CODEX_MODEL).strip() or DEFAULT_CODEX_MODEL
+        self.codex_reasoning_effort = (
+            os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", DEFAULT_CODEX_REASONING_EFFORT).strip()
+            or DEFAULT_CODEX_REASONING_EFFORT
+        )
         self.opencode_command = os.environ.get("PULLWISE_OPENCODE_COMMAND", "opencode").strip() or "opencode"
-        self.opencode_model = os.environ.get("PULLWISE_OPENCODE_MODEL", "").strip()
-        self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", "").strip()
+        self.opencode_model = os.environ.get("PULLWISE_OPENCODE_MODEL", DEFAULT_OPENCODE_MODEL).strip() or DEFAULT_OPENCODE_MODEL
+        self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", DEFAULT_OPENCODE_VARIANT).strip() or DEFAULT_OPENCODE_VARIANT
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
         self.readiness_check_seconds = max(10, int(os.environ.get("PULLWISE_READINESS_CHECK_SECONDS") or 60))
@@ -871,8 +883,8 @@ def run_doctor(config: WorkerConfig) -> bool:
     for name, ok, detail in checks:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
     codex_login_check = next((check for check in checks if check[0] == "codex_ready"), None)
-    if not provider_ready and codex_login_check and not codex_login_check[1] and codex_login_check[2] == "not logged in":
-        print("Codex may require interactive login: sudo -u pullwise-worker codex login")
+    if not provider_ready and "codex" in config.provider_chain and codex_login_check and not codex_login_check[1]:
+        print(f"Codex may require device authorization. Run: {CODEX_LOGIN_COMMAND}")
     return first_failed_check(checks) is None
 
 
@@ -909,9 +921,14 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         config.codex_command,
         "exec",
         _CODEX_SKIP_GIT_REPO_CHECK_ARG,
+        "--ignore-user-config",
         "--json",
-        'Return only JSON: {"ok": true}',
+        "--config",
+        f'model_reasoning_effort="{config.codex_reasoning_effort}"',
     ]
+    if config.codex_model:
+        command.extend(["--model", config.codex_model])
+    command.append('Return only JSON: {"ok": true}')
     try:
         completed = subprocess.run(
             command,

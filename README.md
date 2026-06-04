@@ -34,26 +34,26 @@ Required environment:
 - `PULLWISE_WORKER_WORK_DIR` optional
 - `PULLWISE_LOG_DIR` optional, defaults to the temp directory
 - `PULLWISE_CODEX_COMMAND` optional, defaults to `codex`
-- `PULLWISE_CODEX_MODEL` optional, defaults to empty; when empty, the Codex CLI chooses its default model
-- `PULLWISE_CODEX_REASONING_EFFORT` optional, defaults to `xhigh`
+- `PULLWISE_CODEX_MODEL` optional, defaults to `gpt-5.4`
+- `PULLWISE_CODEX_REASONING_EFFORT` optional, defaults to `medium`
 - `PULLWISE_OPENCODE_COMMAND` optional, defaults to `opencode`
-- `PULLWISE_OPENCODE_MODEL` optional, defaults to empty; when empty, OpenCode uses its own model loading order
-- `PULLWISE_OPENCODE_VARIANT` optional, defaults to empty; use this for OpenCode provider-specific reasoning effort
+- `PULLWISE_OPENCODE_MODEL` optional, defaults to `opencode/big-pickle`
+- `PULLWISE_OPENCODE_VARIANT` optional, defaults to `medium`; use this for OpenCode provider-specific reasoning effort
 - `PULLWISE_CODEX_TIMEOUT_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
 - `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
 
-Provider model defaults are intentionally conservative. Codex keeps the old worker behavior by default: no explicit model is passed, and `model_reasoning_effort` is set to `xhigh`. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker passes `--model` and `--variant` only if their environment variables are set.
+Provider model defaults are intentionally conservative. Codex passes `gpt-5.4` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker defaults to `opencode/big-pickle` with variant `medium`.
 
 Production Codex-first fallback example:
 
 ```bash
 PULLWISE_PROVIDER_CHAIN=codex,opencode
-PULLWISE_CODEX_MODEL=gpt-5.5
-PULLWISE_CODEX_REASONING_EFFORT=xhigh
-PULLWISE_OPENCODE_MODEL=openai/gpt-5
-PULLWISE_OPENCODE_VARIANT=xhigh
+PULLWISE_CODEX_MODEL=gpt-5.4
+PULLWISE_CODEX_REASONING_EFFORT=medium
+PULLWISE_OPENCODE_MODEL=opencode/big-pickle
+PULLWISE_OPENCODE_VARIANT=medium
 ```
 
 ## Deploy
@@ -100,7 +100,7 @@ service stays stopped.
 Codex must be authenticated for the service user before Codex scans can run:
 
 ```bash
-sudo -u pullwise-worker codex login
+sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin codex login --device-auth
 ```
 
 When `PULLWISE_PROVIDER_CHAIN` includes `opencode`, install and authenticate OpenCode for the same service user before relying on fallback.
