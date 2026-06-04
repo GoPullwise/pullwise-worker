@@ -71,6 +71,31 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(findings, [{"title": "Bug", "severity": "high"}])
 
+    def test_run_codex_review_normalizes_checkout_absolute_file_paths(self) -> None:
+        worker_config = config()
+        checkout_dir = Path(worker_config.work_dir) / "job_1"
+        checkout_file = checkout_dir / "src" / "app.py"
+
+        with patch(
+            "pullwise_worker.main.run_codex_provider_review",
+            return_value=(
+                [
+                    {"title": "Inside checkout", "severity": "high", "file": str(checkout_file)},
+                    {"title": "Outside checkout", "severity": "medium", "file": "/var/log/pullwise/server.log"},
+                ],
+                {"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0},
+                "review ok",
+            ),
+        ):
+            findings, _summary, _logs = run_codex_review(
+                worker_config,
+                {"job_id": "job_1", "repo": "acme/api"},
+                checkout_dir,
+            )
+
+        self.assertEqual(findings[0]["file"], "src/app.py")
+        self.assertEqual(findings[1]["file"], "")
+
     def test_run_job_uploads_progress_result_and_cleans_checkout(self) -> None:
         worker = Worker(config())
         worker.client = Mock()

@@ -30,6 +30,7 @@ PHASE_PROGRESS = {
     "report": 95,
 }
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
@@ -545,6 +546,8 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
                 findings, summary, logs_summary = run_opencode_provider_review(config, job, checkout_dir)
             else:
                 raise RuntimeError(f"unsupported review provider: {provider}")
+            findings = normalize_finding_files_for_checkout(findings, checkout_dir)
+            summary = summarize(findings)
             if errors:
                 logs_summary = "\n".join([*errors, logs_summary])[-1000:]
             return findings, summary, logs_summary
@@ -655,7 +658,8 @@ def review_prompt(job: dict) -> str:
         "Review this repository for production-impacting bugs, security issues, dependency risks, "
         "and reliability problems. Return only JSON with a top-level findings array. Each finding must "
         f"include these schema-required fields: {required_fields}. Use empty arrays for badCode, "
-        "goodCode, and references when not applicable. "
+        "goodCode, and references when not applicable. The file field must be a repository-relative "
+        "path; never include the worker checkout directory or any absolute server filesystem path. "
         f"Repository: {job.get('repo')} branch: {job.get('branch')} commit: {job.get('commit')}."
     )
 
@@ -689,6 +693,61 @@ def findings_from_payload(parsed: object) -> list[dict] | None:
     if isinstance(parsed, list):
         return [item for item in parsed if isinstance(item, dict)]
     return None
+
+
+def normalize_finding_files_for_checkout(findings: list[dict], checkout_dir: Path) -> list[dict]:
+    normalized: list[dict] = []
+    for finding in findings:
+        item = dict(finding)
+        item["file"] = normalize_finding_file_for_checkout(item.get("file"), checkout_dir)
+        normalized.append(item)
+    return normalized
+
+
+def normalize_finding_file_for_checkout(value: object, checkout_dir: Path) -> str:
+    relative_path = relative_file_inside_checkout(value, checkout_dir)
+    return safe_repo_relative_file(relative_path if relative_path is not None else value)
+
+
+def relative_file_inside_checkout(value: object, checkout_dir: Path) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw or any(char in raw for char in "\r\n\x00"):
+        return None
+    normalized = raw.replace("\\", "/")
+    if not (normalized.startswith("/") or _WINDOWS_DRIVE_RE.match(raw)):
+        return None
+
+    root = str(checkout_dir.resolve(strict=False)).replace("\\", "/").rstrip("/")
+    root_prefix = f"{root}/"
+    if normalized.casefold() == root.casefold():
+        return ""
+    if normalized.casefold().startswith(root_prefix.casefold()):
+        return normalized[len(root_prefix) :]
+    return None
+
+
+def safe_repo_relative_file(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    raw = value.strip()
+    normalized = raw.replace("\\", "/")
+    if (
+        not raw
+        or any(char in raw for char in "\r\n\x00")
+        or _WINDOWS_DRIVE_RE.match(raw)
+        or normalized.startswith("/")
+        or normalized.startswith("//")
+        or raw.startswith("\\")
+    ):
+        return ""
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return ""
+    if any(part.casefold() == ".git" for part in parts):
+        return ""
+    return "/".join(parts)
 
 
 def findings_schema() -> dict:
