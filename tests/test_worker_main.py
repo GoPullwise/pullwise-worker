@@ -19,6 +19,7 @@ from pullwise_worker.main import (
     Worker,
     WorkerConfig,
     audit_swarm_findings_from_payload,
+    audit_swarm_scan_artifacts,
     checkout_dir_for_job,
     cleanup_checkouts,
     cleanup_worker_resources,
@@ -42,6 +43,7 @@ from pullwise_worker.main import (
     service_action,
     summarize,
     verification_audit_payload,
+    verifier_command_env,
     uninstall_worker,
     update_worker,
     worker_readiness_checks,
@@ -115,6 +117,57 @@ class WorkerMainTest(unittest.TestCase):
 
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Bug")
+
+    def test_audit_swarm_scan_artifacts_emit_stable_evidence_blocks(self) -> None:
+        card = {
+            **issue_card("Refresh token rotation may not be atomic", issue_id="issue-refresh", severity="P1"),
+            "claim": "Token invalidation and issuance are not in one transaction.",
+            "evidence": [{"summary": "createRefreshToken runs before old-token invalidation is confirmed."}],
+            "suggested_test": "Mock a failure between issuance and invalidation.",
+            "violated_invariants": ["Refresh tokens must be single-use."],
+        }
+        result = {
+            "issue_id": "issue-refresh",
+            "verifier_role": "prover",
+            "verdict": "confirmed",
+            "confidence": 0.91,
+            "proof_type": "failing_test",
+            "proof_strength": 3,
+            "result_summary": "A mocked failure leaves both tokens valid.",
+            "commands_run": ["pnpm test auth -- refresh-token-rotation"],
+            "evidence": ["Focused test reproduced the token rotation gap."],
+        }
+
+        audit = audit_swarm_scan_artifacts(
+            "report",
+            config=config(),
+            audit_payload=audit_payload([card], [result]),
+            verification_audit=verification_audit_payload(
+                candidate_count=2,
+                reported_findings=[
+                    {
+                        "id": "issue-refresh",
+                        "title": card["title"],
+                        "file": "src/app.py",
+                        "line": 12,
+                        "verificationStatus": "verified",
+                    }
+                ],
+                rejected_reasons={"missing_evidence": 1},
+            ),
+            summary="2 candidates evaluated; 1 reported.",
+        )
+
+        blocks = audit["evidenceBlocks"]
+        by_kind = {block["kind"]: block for block in blocks}
+        self.assertEqual(audit["protocol"], "audit-swarm/0.1")
+        self.assertEqual(by_kind["claim"]["summary"], "Token invalidation and issuance are not in one transaction.")
+        self.assertEqual(by_kind["code_location"]["file"], "src/app.py")
+        self.assertEqual(by_kind["false_positive_check"]["summary"], "Check for upstream guard.")
+        self.assertEqual(by_kind["invariant"]["summary"], "Refresh tokens must be single-use.")
+        self.assertEqual(by_kind["verifier_verdict"]["verdict"], "confirmed")
+        command_blocks = [block for block in blocks if block["kind"] == "command" and block.get("command")]
+        self.assertEqual(command_blocks[0]["command"], "pnpm test auth -- refresh-token-rotation")
 
     def test_run_codex_review_normalizes_checkout_absolute_file_paths(self) -> None:
         worker_config = config()
@@ -432,14 +485,44 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(finding["affectedLocations"], [{"file": "package.json", "startLine": 3, "endLine": 3}])
         self.assertEqual(finding["evidence"][0]["type"], "runtime_log")
         self.assertEqual(finding["evidence"][0]["command"], "npm run test")
-        self.assertIn("--- attempt 1 (failed exit 1) ---", finding["evidence"][0]["output"])
-        self.assertIn("AssertionError again", finding["evidence"][0]["output"])
-        self.assertEqual(finding["reproduction"]["actual"], "Command exited 1.")
+        self.assertTrue(finding["evidence"][0]["outputRedacted"])
+        self.assertNotIn("output", finding["evidence"][0])
+        self.assertIn("withheld", finding["evidence"][0]["summary"])
+        self.assertEqual(
+            finding["reproduction"]["actual"],
+            "Command exited 1; stdout/stderr is withheld from shared payloads.",
+        )
         self.assertIn("two consecutive attempts", finding["whyNotFalsePositive"][0])
         log_path = Path(worker_config.log_dir) / verifier["runs"][1]["logPath"]
         self.assertIn("--- attempt 1 (failed exit 1) ---", log_path.read_text(encoding="utf-8"))
         self.assertIn("--- attempt 2 (failed exit 1) ---", log_path.read_text(encoding="utf-8"))
         self.assertIn("AssertionError", log_path.read_text(encoding="utf-8"))
+        self.assertTrue(verifier["runs"][1]["outputRedacted"])
+        self.assertNotIn("output", verifier["runs"][1])
+        self.assertTrue(verifier["runs"][1]["attempts"][0]["outputRedacted"])
+        self.assertNotIn("output", verifier["runs"][1]["attempts"][0])
+
+    def test_verifier_command_env_does_not_inherit_host_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp) / "checkout"
+            checkout_dir.mkdir()
+            with patch.dict(
+                os.environ,
+                {
+                    "PATH": "/bin",
+                    "AWS_SECRET_ACCESS_KEY": "secret",
+                    "GITHUB_TOKEN": "token",
+                    "OPENAI_API_KEY": "key",
+                },
+                clear=False,
+            ):
+                env = verifier_command_env(checkout_dir)
+
+        self.assertEqual(env["PATH"], "/bin")
+        self.assertEqual(env["CI"], "true")
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
 
     def test_verifier_dependency_install_failure_blocks_project_scripts(self) -> None:
         worker_config = config()
@@ -488,7 +571,10 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("dependency installation", finding["title"])
         self.assertIn("build/test reproduction is blocked", finding["impact"])
         self.assertEqual(finding["reproduction"]["commands"], ["npm ci --ignore-scripts"])
-        self.assertEqual(finding["reproduction"]["actual"], "Command exited 1.")
+        self.assertEqual(
+            finding["reproduction"]["actual"],
+            "Command exited 1; stdout/stderr is withheld from shared payloads.",
+        )
         self.assertIn("install scripts disabled", " ".join(finding["limitations"]))
         log_path = Path(worker_config.log_dir) / verifier["runs"][0]["logPath"]
         self.assertIn("registry auth failed", log_path.read_text(encoding="utf-8"))
@@ -694,7 +780,8 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         checkout_dir = Path(worker.config.work_dir) / "job_1"
 
-        with patch("pullwise_worker.main.clone_repository") as clone_repository, \
+        resolved_commit = "0123456789abcdef0123456789abcdef01234567"
+        with patch("pullwise_worker.main.clone_repository", return_value=resolved_commit) as clone_repository, \
             patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}) as collect_preflight, \
             patch(
                 "pullwise_worker.main.run_verifier_commands",
@@ -708,7 +795,7 @@ class WorkerMainTest(unittest.TestCase):
                 "review ok",
             )
 
-            worker.run_job({"job_id": "job_1", "attempt": 2, "repo": "acme/api"})
+            worker.run_job({"job_id": "job_1", "attempt": 2, "repo": "acme/api", "commit": "pending"})
 
         clone_repository.assert_called_once()
         self.assertEqual(clone_repository.call_args.args[1], checkout_dir)
@@ -719,6 +806,8 @@ class WorkerMainTest(unittest.TestCase):
         result_payload = worker.client.result.call_args.args[1]
         self.assertEqual(result_payload["status"], "done")
         self.assertEqual(result_payload["attempt_id"], "wk_1-2")
+        self.assertEqual(result_payload["commit"], resolved_commit)
+        self.assertEqual(result_payload["resolved_commit"], resolved_commit)
         self.assertEqual(result_payload["preflight"], {"mode": "static", "verifier": {"enabled": False, "runs": []}})
         self.assertEqual(result_payload["audit_protocol"], "audit-swarm/0.1")
         self.assertEqual(result_payload["issue_cards"][0]["title"], "Bug")
@@ -734,7 +823,7 @@ class WorkerMainTest(unittest.TestCase):
         worker = Worker(config())
         worker.client = Mock()
 
-        with patch("pullwise_worker.main.clone_repository"), \
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
             patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}), \
             patch("pullwise_worker.main.run_verifier_commands", side_effect=RuntimeError("verifier boom")), \
             patch(
@@ -769,7 +858,7 @@ class WorkerMainTest(unittest.TestCase):
             "reproduction": {"commands": ["npm run test"]},
         }
 
-        with patch("pullwise_worker.main.clone_repository"), \
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
             patch(
                 "pullwise_worker.main.collect_preflight_metadata",
                 return_value={"mode": "static", "execution": "no_project_scripts", "summary": "Static only."},
@@ -822,7 +911,7 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         worker.client.result.side_effect = [PullwiseRequestError("timed out"), None]
 
-        with patch("pullwise_worker.main.clone_repository"), \
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
@@ -845,9 +934,10 @@ class WorkerMainTest(unittest.TestCase):
         worker.config.failed_checkout_retention_seconds = 3600
         checkout_dir = Path(worker.config.work_dir) / "job_success_after_failure"
 
-        def clone(_job: dict, path: Path) -> None:
+        def clone(_job: dict, path: Path) -> str:
             path.mkdir(parents=True)
             (path / "file.txt").write_text("ok", encoding="utf-8")
+            return "0123456789abcdef0123456789abcdef01234567"
 
         with patch("pullwise_worker.main.clone_repository", side_effect=clone), \
             patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}), \
@@ -871,7 +961,7 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         worker.client.result.side_effect = PullwiseRequestError("timed out")
 
-        with patch("pullwise_worker.main.clone_repository"), \
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
@@ -891,7 +981,7 @@ class WorkerMainTest(unittest.TestCase):
         worker.client = Mock()
         worker.client.result.side_effect = [PullwiseHTTPError("HTTP 500", 500), None]
 
-        with patch("pullwise_worker.main.clone_repository"), \
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
@@ -1036,8 +1126,10 @@ class WorkerMainTest(unittest.TestCase):
         self.assertTrue(provider_ready)
 
     def test_clone_repository_uses_short_lived_token(self) -> None:
+        head = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
         with patch("pullwise_worker.main.subprocess.run") as run:
-            clone_repository(
+            run.return_value = Mock(stdout=f"{head}\n", stderr="", returncode=0)
+            resolved = clone_repository(
                 {
                     "repo": "acme/api",
                     "branch": "main",
@@ -1050,6 +1142,8 @@ class WorkerMainTest(unittest.TestCase):
 
         clone_command = run.call_args_list[0].args[0]
         clone_env = run.call_args_list[0].kwargs["env"]
+        self.assertEqual(resolved, head)
+        self.assertEqual(run.call_args_list[-1].args[0], ["git", "-C", "checkout", "rev-parse", "HEAD"])
         self.assertEqual(clone_command[:4], ["git", "clone", "--depth", "1"])
         self.assertEqual(clone_command[-2], "https://github.com/acme/api.git")
         self.assertNotIn("short-token", " ".join(clone_command))

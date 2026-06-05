@@ -44,6 +44,17 @@ DEFAULT_CODEX_REASONING_EFFORT = "medium"
 DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
 DEFAULT_OPENCODE_VARIANT = "medium"
 AUDIT_SWARM_PROTOCOL_VERSION = "audit-swarm/0.1"
+AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
+    "summary",
+    "claim",
+    "code_location",
+    "evidence",
+    "command",
+    "verifier_verdict",
+    "false_positive_check",
+    "invariant",
+    "risk",
+}
 CODEX_LOGIN_COMMAND = (
     "sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker "
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
@@ -464,7 +475,9 @@ class Worker:
                 "Cloning repository",
                 audit_swarm=audit_swarm_scan_artifacts("clone", config=self.config, summary="Cloning repository."),
             )
-            clone_repository(job, checkout_dir)
+            resolved_commit = clone_repository(job, checkout_dir)
+            job["resolved_commit"] = resolved_commit
+            job["commit"] = resolved_commit
             self.client.progress(
                 job_id,
                 "index",
@@ -534,6 +547,8 @@ class Worker:
             )
             payload = {
                 "status": "done",
+                "commit": resolved_commit,
+                "resolved_commit": resolved_commit,
                 "audit_protocol": audit_payload.get("audit_protocol") or AUDIT_SWARM_PROTOCOL_VERSION,
                 "issue_cards": audit_payload.get("issue_cards") if isinstance(audit_payload.get("issue_cards"), list) else [],
                 "verification_results": (
@@ -573,6 +588,9 @@ class Worker:
                 "attempt_id": attempt_id,
                 "audit_swarm": audit_swarm_scan_artifacts("failed", config=self.config, summary=error),
             }
+            if job.get("resolved_commit"):
+                error_payload["commit"] = job["resolved_commit"]
+                error_payload["resolved_commit"] = job["resolved_commit"]
             error_payload["result_checksum"] = result_checksum(error_payload)
             try:
                 self.upload_result_with_retry(job_id, error_payload)
@@ -622,7 +640,7 @@ def checkout_dir_from_failed_marker(marker: Path) -> Path:
     return marker.parent / name[: -len(_FAILED_CHECKOUT_MARKER_SUFFIX)]
 
 
-def clone_repository(job: dict, checkout_dir: Path) -> None:
+def clone_repository(job: dict, checkout_dir: Path) -> str:
     shutil.rmtree(checkout_dir, ignore_errors=True)
     checkout_dir.parent.mkdir(parents=True, exist_ok=True)
     clone_url = str(job.get("clone_url") or "")
@@ -641,6 +659,24 @@ def clone_repository(job: dict, checkout_dir: Path) -> None:
             ["git", "-C", str(checkout_dir), "checkout", commit],
             phase="checkout",
         )
+    return resolve_git_head(checkout_dir)
+
+
+def resolve_git_head(checkout_dir: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(checkout_dir), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(git_error_message("rev-parse", exc)) from exc
+    commit = (completed.stdout or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise RuntimeError("git rev-parse HEAD did not return a commit SHA")
+    return commit.lower()
 
 
 def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | None = None) -> None:
@@ -696,6 +732,19 @@ _PACKAGE_SCRIPT_NAMES = ["dev", "start", "build", "test", "lint", "typecheck", "
 _VERIFIER_DEFAULT_SCRIPTS = ["build", "test", "lint", "typecheck", "check"]
 _VERIFIER_DISABLED_VALUES = {"", "0", "false", "no", "off"}
 _VERIFIER_MAX_OUTPUT_CHARS = 4000
+_VERIFIER_OUTPUT_WITHHELD = "Verifier stdout/stderr is withheld from API responses and audit bundles."
+_VERIFIER_ENV_PASSTHROUGH_KEYS = (
+    "PATH",
+    "Path",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "ComSpec",
+    "PATHEXT",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+)
 _VERIFICATION_STATUSES = {"verified", "static_proof", "potential_risk", "unverified"}
 _LOCKFILE_PACKAGE_MANAGERS = {
     "bun.lock": "bun",
@@ -1112,8 +1161,7 @@ def execute_verifier_command(
     started = time.monotonic()
     log_path, public_log_path = verifier_log_path(config, job, label)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env.update({"CI": "true", "PULLWISE_VERIFY": "1"})
+    env = verifier_command_env(checkout_dir)
     attempts = [execute_verifier_attempt(config, checkout_dir, command, env, 1)]
     if attempts[0].get("status") == "failed" and config.verifier_confirm_failures:
         attempts.append(execute_verifier_attempt(config, checkout_dir, command, env, 2))
@@ -1134,6 +1182,7 @@ def execute_verifier_command(
 
     output = verifier_attempts_output(attempts)
     log_path.write_text(output, encoding="utf-8")
+    public_attempts = [verifier_public_attempt(attempt) for attempt in attempts]
     return {
         "script": label,
         "command": " ".join(command),
@@ -1141,10 +1190,49 @@ def execute_verifier_command(
         "exitCode": int(result_attempt.get("exitCode") or 0),
         "durationMs": int((time.monotonic() - started) * 1000),
         "logPath": public_log_path,
-        "output": output[-_VERIFIER_MAX_OUTPUT_CHARS:],
-        "attempts": attempts,
+        "outputRedacted": bool(output),
+        "outputSummary": _VERIFIER_OUTPUT_WITHHELD if output else "",
+        "attempts": public_attempts,
         "confirmedFailure": bool(confirmed_failure),
     }
+
+
+def verifier_command_env(checkout_dir: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for key in _VERIFIER_ENV_PASSTHROUGH_KEYS:
+        if key in os.environ and os.environ[key]:
+            env[key] = os.environ[key]
+    sandbox_root = checkout_dir.parent
+    home_dir = sandbox_root / ".verifier-home"
+    tmp_dir = sandbox_root / ".verifier-tmp"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    env.update(
+        {
+            "CI": "true",
+            "PULLWISE_VERIFY": "1",
+            "NO_COLOR": "1",
+            "HOME": str(home_dir),
+            "USERPROFILE": str(home_dir),
+            "TMPDIR": str(tmp_dir),
+            "TMP": str(tmp_dir),
+            "TEMP": str(tmp_dir),
+        }
+    )
+    return env
+
+
+def verifier_public_attempt(attempt: dict) -> dict:
+    public = {
+        "attempt": attempt.get("attempt"),
+        "status": attempt.get("status"),
+        "exitCode": attempt.get("exitCode"),
+        "durationMs": attempt.get("durationMs"),
+    }
+    if attempt.get("output"):
+        public["outputRedacted"] = True
+        public["outputSummary"] = _VERIFIER_OUTPUT_WITHHELD
+    return public
 
 
 def execute_verifier_attempt(
@@ -1274,14 +1362,13 @@ def verifier_command_failure_finding(job: dict, checkout_dir: Path, run: dict) -
     command = str(run.get("command") or "")
     exit_code = int(run.get("exitCode") or 1)
     log_path = str(run.get("logPath") or "")
-    output = str(run.get("output") or "")
     is_install = script == "install-deps"
     location_file = install_evidence_file(checkout_dir) if is_install else "package.json"
     line = 1 if is_install else package_script_line(checkout_dir, script)
     title = f"`{command}` fails during dependency installation" if is_install else f"`{command}` fails in verifier"
     severity = "high" if script in {"build", "test", "typecheck", "check", "install-deps"} else "medium"
     category = "Dependencies" if is_install else ("Tests" if script == "test" else "Quality")
-    digest_input = f"{job.get('repo')}:{job.get('commit')}:{script}:{exit_code}:{output[-200:]}".encode("utf-8")
+    digest_input = f"{job.get('repo')}:{job.get('commit')}:{script}:{exit_code}:{log_path}".encode("utf-8")
     finding_id = f"verified_command_failure_{hashlib.sha1(digest_input).hexdigest()[:10]}"
     code_label = "dependency manifest" if is_install else "package.json script"
     code_summary = (
@@ -1317,7 +1404,7 @@ def verifier_command_failure_finding(job: dict, checkout_dir: Path, run: dict) -
         "impact": impact,
         "detectionReasoning": (
             "This finding comes from an executed allowlisted verifier command, not from model inference. "
-            f"The command returned exit code {exit_code}{confirmed_text}; the captured output is attached as runtime evidence."
+            f"The command returned exit code {exit_code}{confirmed_text}; stdout/stderr is retained only in the worker-local log."
         ),
         "reproductionPath": f"At commit `{job.get('commit') or 'pending'}`, run `{command}` from the repository root.",
         "verificationStatus": "verified",
@@ -1329,14 +1416,14 @@ def verifier_command_failure_finding(job: dict, checkout_dir: Path, run: dict) -
             {
                 "type": "runtime_log",
                 "label": "Verifier command output",
-                "summary": (output.splitlines()[-1] if output.splitlines() else f"`{command}` exited {exit_code}.")[:500],
+                "summary": f"`{command}` exited {exit_code}. Raw stdout/stderr is withheld from API and audit bundle payloads.",
                 "file": "",
                 "startLine": 0,
                 "endLine": 0,
                 "command": command,
                 "exitCode": exit_code,
                 "logPath": log_path,
-                "output": output[-_VERIFIER_MAX_OUTPUT_CHARS:],
+                "outputRedacted": True,
                 "url": "",
             },
             {
@@ -1356,7 +1443,7 @@ def verifier_command_failure_finding(job: dict, checkout_dir: Path, run: dict) -
             "commands": [command],
             "input": f"Run `{command}` at repository root.",
             "expected": "Command exits 0.",
-            "actual": f"Command exited {exit_code}.",
+            "actual": f"Command exited {exit_code}; stdout/stderr is withheld from shared payloads.",
             "testFile": "",
             "logPath": log_path,
         },
@@ -2982,6 +3069,20 @@ def protocol_text_list(value: object) -> list[str]:
     return [text for text in (protocol_multiline_text(item) for item in value) if text]
 
 
+def protocol_text_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for item in value:
+        if isinstance(item, dict):
+            text = protocol_multiline_text(item.get("summary") or item.get("text") or item.get("claim") or item.get("label"))
+        else:
+            text = protocol_multiline_text(item)
+        if text:
+            items.append(text)
+    return items
+
+
 def clean_protocol_text(value: object) -> str:
     if isinstance(value, bool) or value is None:
         return ""
@@ -3386,8 +3487,269 @@ def audit_swarm_scan_artifacts(
             audit_swarm_verification_result_summary(result)
             for result in results[:20]
         ],
+        "evidenceBlocks": audit_swarm_evidence_blocks(
+            stage,
+            cards=cards,
+            results=results,
+            preflight=preflight,
+            verification_audit=verification_audit,
+            summary=summary,
+        ),
     }
     return {key: value for key, value in payload.items() if value not in ("", [], {})}
+
+
+def audit_swarm_evidence_blocks(
+    stage: str,
+    *,
+    cards: list[dict],
+    results: list[dict],
+    preflight: dict,
+    verification_audit: dict,
+    summary: str = "",
+) -> list[dict]:
+    blocks: list[dict] = []
+    stage_text = clean_protocol_text(stage)
+    summary_text = protocol_multiline_text(summary) or protocol_multiline_text(verification_audit.get("summary"))
+    if summary_text:
+        blocks.append(
+            audit_swarm_evidence_block(
+                "summary",
+                block_id=f"{stage_text or 'audit'}:summary",
+                title="Audit summary",
+                summary=summary_text,
+                stage=stage_text,
+            )
+        )
+    if verification_audit:
+        rejected_count = protocol_count(verification_audit.get("rejectedCount") or verification_audit.get("rejected_count"))
+        if rejected_count:
+            blocks.append(
+                audit_swarm_evidence_block(
+                    "risk",
+                    block_id=f"{stage_text or 'audit'}:rejected",
+                    title="Rejected before reporting",
+                    summary=f"{rejected_count} candidates were rejected before reporting because they lacked enough evidence.",
+                    stage=stage_text,
+                    status="rejected",
+                )
+            )
+    if preflight:
+        preflight_summary = protocol_multiline_text(preflight.get("summary"))
+        if preflight_summary and not cards and not results:
+            blocks.append(
+                audit_swarm_evidence_block(
+                    "summary",
+                    block_id=f"{stage_text or 'audit'}:preflight",
+                    title="Preflight evidence",
+                    summary=preflight_summary,
+                    stage=stage_text,
+                )
+            )
+    results_by_issue = audit_swarm_verifications_by_issue(results)
+    for index, card in enumerate(cards[:8]):
+        blocks.extend(audit_swarm_issue_card_evidence_blocks(card, results_by_issue.get(audit_swarm_issue_key(card), []), index))
+    for index, result in enumerate(results[:12]):
+        blocks.extend(audit_swarm_verification_evidence_blocks(result, index))
+    return audit_swarm_dedupe_blocks(blocks)[:40]
+
+
+def audit_swarm_issue_card_evidence_blocks(card: dict, results: list[dict], index: int) -> list[dict]:
+    issue_id = audit_swarm_issue_key(card) or audit_swarm_generated_id(card, index)
+    title = clean_protocol_text(card.get("title")) or f"Audit candidate {index + 1}"
+    severity = audit_swarm_severity(card.get("severity"))
+    category = audit_swarm_category(card)
+    role = clean_protocol_text(card.get("agent_role") or card.get("agentRole"))
+    shard_id = clean_protocol_text(card.get("shard_id") or card.get("shardId"))
+    confidence = audit_swarm_confidence(card.get("confidence"), audit_swarm_verdict(results))
+    common = {
+        "issueId": issue_id,
+        "severity": severity,
+        "category": category,
+        "role": role,
+        "shardId": shard_id,
+        "confidence": confidence,
+    }
+    blocks = []
+    claim = protocol_multiline_text(card.get("claim") or card.get("summary") or card.get("description"))
+    if claim:
+        blocks.append(
+            audit_swarm_evidence_block(
+                "claim",
+                block_id=f"{issue_id}:claim",
+                title=title,
+                summary=claim,
+                **common,
+            )
+        )
+    for location_index, location in enumerate(audit_swarm_locations(card)[:2]):
+        blocks.append(
+            audit_swarm_evidence_block(
+                "code_location",
+                block_id=f"{issue_id}:location:{location_index}",
+                title="Code location",
+                summary=claim or title,
+                file=clean_protocol_text(location.get("file")),
+                startLine=protocol_count(location.get("startLine")),
+                endLine=protocol_count(location.get("endLine")),
+                **common,
+            )
+        )
+    for evidence_index, evidence in enumerate(protocol_text_items(card.get("evidence"))[:3]):
+        blocks.append(
+            audit_swarm_evidence_block(
+                "evidence",
+                block_id=f"{issue_id}:evidence:{evidence_index}",
+                title="Discovery evidence",
+                summary=evidence,
+                **common,
+            )
+        )
+    for check_index, check in enumerate(protocol_text_list(card.get("false_positive_checks") or card.get("falsePositiveChecks"))[:3]):
+        blocks.append(
+            audit_swarm_evidence_block(
+                "false_positive_check",
+                block_id=f"{issue_id}:false-positive:{check_index}",
+                title="False-positive check",
+                summary=check,
+                **common,
+            )
+        )
+    for invariant_index, invariant in enumerate(protocol_text_list(card.get("violated_invariants") or card.get("violatedInvariants"))[:3]):
+        blocks.append(
+            audit_swarm_evidence_block(
+                "invariant",
+                block_id=f"{issue_id}:invariant:{invariant_index}",
+                title="Violated invariant",
+                summary=invariant,
+                **common,
+            )
+        )
+    suggested_test = protocol_multiline_text(card.get("suggested_test") or card.get("suggestedTest"))
+    if suggested_test:
+        blocks.append(
+            audit_swarm_evidence_block(
+                "command",
+                block_id=f"{issue_id}:suggested-test",
+                title="Suggested test",
+                summary=suggested_test,
+                status="suggested",
+                **common,
+            )
+        )
+    return blocks
+
+
+def audit_swarm_verification_evidence_blocks(result: dict, index: int) -> list[dict]:
+    issue_id = clean_protocol_text(result.get("issue_id") or result.get("issueId"))
+    role = clean_protocol_text(result.get("verifier_role") or result.get("verifierRole"))
+    verdict = clean_protocol_text(result.get("verdict")).lower()
+    proof_type = clean_protocol_text(result.get("proof_type") or result.get("proofType"))
+    confidence = audit_swarm_confidence(result.get("confidence"), verdict)
+    summary = protocol_multiline_text(result.get("result_summary") or result.get("resultSummary") or result.get("summary"))
+    common = {
+        "issueId": issue_id,
+        "role": role,
+        "verdict": verdict if verdict in {"confirmed", "rejected", "inconclusive"} else "",
+        "proofType": proof_type,
+        "proofStrength": protocol_count(result.get("proof_strength") or result.get("proofStrength")),
+        "confidence": confidence,
+    }
+    key = issue_id or f"verification-{index}"
+    blocks = [
+        audit_swarm_evidence_block(
+            "verifier_verdict",
+            block_id=f"{key}:verdict:{role or index}",
+            title="Verifier verdict",
+            summary=summary or f"{role or 'verifier'} returned {common['verdict'] or 'a verdict'}.",
+            **common,
+        )
+    ]
+    for command_index, command in enumerate(protocol_text_list(result.get("commands_run") or result.get("commandsRun"))[:3]):
+        blocks.append(
+            audit_swarm_evidence_block(
+                "command",
+                block_id=f"{key}:command:{command_index}",
+                title="Verifier command",
+                summary=summary,
+                command=command,
+                status="executed",
+                **common,
+            )
+        )
+    for evidence_index, evidence in enumerate(protocol_text_items(result.get("evidence"))[:3]):
+        blocks.append(
+            audit_swarm_evidence_block(
+                "evidence",
+                block_id=f"{key}:verification-evidence:{evidence_index}",
+                title="Verifier evidence",
+                summary=evidence,
+                **common,
+            )
+        )
+    return blocks
+
+
+def audit_swarm_evidence_block(kind: str, *, block_id: str = "", title: str = "", summary: str = "", **fields: object) -> dict:
+    normalized_kind = clean_protocol_text(kind).lower()
+    if normalized_kind not in AUDIT_SWARM_EVIDENCE_BLOCK_KINDS:
+        normalized_kind = "evidence"
+    payload = {
+        "id": clean_protocol_text(block_id),
+        "kind": normalized_kind,
+        "title": clean_protocol_text(title),
+        "summary": protocol_multiline_text(summary),
+    }
+    for key in (
+        "issueId",
+        "severity",
+        "category",
+        "role",
+        "shardId",
+        "stage",
+        "status",
+        "verdict",
+        "proofType",
+        "command",
+        "file",
+    ):
+        text = clean_protocol_text(fields.get(key))
+        if text:
+            payload[key] = text
+    for key in ("startLine", "endLine", "proofStrength"):
+        count = protocol_count(fields.get(key))
+        if count:
+            payload[key] = count
+    if "confidence" in fields:
+        try:
+            confidence = float(fields["confidence"])
+        except (OverflowError, TypeError, ValueError):
+            confidence = 0.0
+        if confidence:
+            payload["confidence"] = max(0.0, min(1.0, confidence))
+    return {key: value for key, value in payload.items() if value not in ("", [], {})}
+
+
+def audit_swarm_dedupe_blocks(blocks: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        key = (
+            clean_protocol_text(block.get("kind")),
+            clean_protocol_text(block.get("issueId")),
+            clean_protocol_text(block.get("title")),
+            protocol_multiline_text(block.get("summary")),
+            clean_protocol_text(block.get("command")),
+            clean_protocol_text(block.get("file")),
+            protocol_count(block.get("startLine")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(block)
+    return deduped
 
 
 def audit_swarm_issue_card_summary(card: dict, index: int) -> dict:
