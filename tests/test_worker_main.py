@@ -19,6 +19,7 @@ from pullwise_worker.main import (
     Worker,
     WorkerConfig,
     audit_swarm_findings_from_payload,
+    audit_swarm_output_schema,
     audit_swarm_scan_artifacts,
     checkout_dir_for_job,
     cleanup_checkouts,
@@ -1193,6 +1194,24 @@ class WorkerMainTest(unittest.TestCase):
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Bug")
         self.assertEqual(summary["medium"], 1)
+
+    def test_audit_swarm_output_schema_matches_codex_strict_structured_output_subset(self) -> None:
+        def assert_strict_schema(schema: dict, path: str = "$") -> None:
+            self.assertNotIn("oneOf", schema, path)
+            schema_type = schema.get("type")
+            if schema_type == "object" or (isinstance(schema_type, list) and "object" in schema_type):
+                properties = schema.get("properties", {})
+                self.assertIs(schema.get("additionalProperties"), False, path)
+                self.assertEqual(set(schema.get("required", [])), set(properties), path)
+                for name, child in properties.items():
+                    assert_strict_schema(child, f"{path}.properties.{name}")
+            elif schema_type == "array":
+                assert_strict_schema(schema.get("items", {}), f"{path}.items")
+            for keyword in ("anyOf", "allOf"):
+                for index, child in enumerate(schema.get(keyword, [])):
+                    assert_strict_schema(child, f"{path}.{keyword}[{index}]")
+
+        assert_strict_schema(audit_swarm_output_schema())
 
     def test_worker_config_defaults_to_codex_only_provider_chain(self) -> None:
         cfg = config()

@@ -3209,21 +3209,21 @@ def safe_repo_relative_file(value: object) -> str:
 def audit_swarm_output_schema() -> dict:
     location = {
         "type": "object",
-        "additionalProperties": True,
+        "additionalProperties": False,
         "properties": {
             "file": {"type": "string"},
             "lines": {"type": "string"},
             "startLine": {"type": "integer"},
             "endLine": {"type": "integer"},
         },
-        "required": ["file"],
+        "required": ["file", "lines", "startLine", "endLine"],
     }
     evidence = {
-        "oneOf": [
+        "anyOf": [
             {"type": "string"},
             {
                 "type": "object",
-                "additionalProperties": True,
+                "additionalProperties": False,
                 "properties": {
                     "type": {"type": "string"},
                     "label": {"type": "string"},
@@ -3237,12 +3237,25 @@ def audit_swarm_output_schema() -> dict:
                     "output": {"type": "string"},
                     "url": {"type": "string"},
                 },
+                "required": [
+                    "type",
+                    "label",
+                    "summary",
+                    "file",
+                    "startLine",
+                    "endLine",
+                    "command",
+                    "exitCode",
+                    "logPath",
+                    "output",
+                    "url",
+                ],
             },
         ]
     }
     issue_card = {
         "type": "object",
-        "additionalProperties": True,
+        "additionalProperties": False,
         "properties": {
             "issue_id": {"type": "string"},
             "shard_id": {"type": "string"},
@@ -3265,17 +3278,22 @@ def audit_swarm_output_schema() -> dict:
             "shard_id",
             "agent_role",
             "title",
+            "category",
             "severity",
             "confidence",
             "locations",
             "claim",
+            "violated_invariants",
             "evidence",
+            "reproduction_idea",
+            "suggested_test",
             "false_positive_checks",
+            "limitations",
         ],
     }
     verification_result = {
         "type": "object",
-        "additionalProperties": True,
+        "additionalProperties": False,
         "properties": {
             "issue_id": {"type": "string"},
             "verifier_role": {"type": "string"},
@@ -3288,7 +3306,18 @@ def audit_swarm_output_schema() -> dict:
             "result_summary": {"type": "string"},
             "notes_for_fix": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["issue_id", "verifier_role", "verdict", "confidence", "evidence", "result_summary"],
+        "required": [
+            "issue_id",
+            "verifier_role",
+            "verdict",
+            "confidence",
+            "proof_type",
+            "proof_strength",
+            "evidence",
+            "commands_run",
+            "result_summary",
+            "notes_for_fix",
+        ],
     }
     return {
         "type": "object",
