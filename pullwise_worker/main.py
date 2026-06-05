@@ -38,6 +38,9 @@ _TOKEN_NUMBER_RE = r"([0-9][0-9,]*)"
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
+_VERIFIER_HOME_DIR_NAME = ".verifier-home"
+_VERIFIER_TMP_DIR_NAME = ".verifier-tmp"
+_CHECKOUT_RUNTIME_DIR_NAMES = {_VERIFIER_HOME_DIR_NAME, _VERIFIER_TMP_DIR_NAME}
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex", "opencode"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
@@ -91,7 +94,7 @@ def parse_verifier_scripts(value: str | None) -> list[str]:
 
 
 class WorkerConfig:
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(self, args: argparse.Namespace, *, require_worker_token: bool = True) -> None:
         self.server_url = (getattr(args, "server_url", None) or os.environ.get("PULLWISE_SERVER_URL") or "http://localhost:8080").rstrip("/")
         self.worker_token = getattr(args, "worker_token", None) or os.environ.get("PULLWISE_WORKER_TOKEN") or ""
         self.worker_id = getattr(args, "worker_id", None) or os.environ.get("PULLWISE_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
@@ -131,7 +134,7 @@ class WorkerConfig:
         self.verifier_timeout_seconds = max(10, int(os.environ.get("PULLWISE_WORKER_VERIFIER_TIMEOUT_SECONDS") or 120))
         self.verifier_max_commands = max(1, int(os.environ.get("PULLWISE_WORKER_VERIFIER_MAX_COMMANDS") or 5))
         self.verifier_scripts = parse_verifier_scripts(os.environ.get("PULLWISE_WORKER_VERIFIER_SCRIPTS"))
-        if not self.worker_token:
+        if require_worker_token and not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 
 
@@ -282,19 +285,20 @@ def main() -> None:
     parser.add_argument("--remove-logs", action="store_true")
     args = parser.parse_args()
 
+    if args.command in {"start", "stop", "status", "restart"}:
+        raise SystemExit(service_action(args.command, dry_run=args.dry_run))
+    if args.command == "uninstall":
+        raise SystemExit(uninstall_worker(remove_config=args.remove_config, remove_logs=args.remove_logs, dry_run=args.dry_run))
+    require_worker_token = args.command in {"run", "doctor"}
     try:
-        config = WorkerConfig(args)
+        config = WorkerConfig(args, require_worker_token=require_worker_token)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from exc
     if args.command == "doctor":
         raise SystemExit(0 if run_doctor(config) else 1)
-    if args.command in {"start", "stop", "status", "restart"}:
-        raise SystemExit(service_action(args.command, dry_run=args.dry_run))
     if args.command == "update":
         raise SystemExit(update_worker(config, dry_run=args.dry_run))
-    if args.command == "uninstall":
-        raise SystemExit(uninstall_worker(remove_config=args.remove_config, remove_logs=args.remove_logs, dry_run=args.dry_run))
     if args.command == "cleanup":
         cleanup_worker_resources(config)
         raise SystemExit(0)
@@ -358,10 +362,13 @@ class Worker:
                     jobs = []
                     if not loop_error:
                         try:
-                            jobs = self.client.claim_many(free_slots)
+                            claim_limit = 1 if once else free_slots
+                            jobs = self.client.claim_many(claim_limit)
                         except PullwiseRequestError as exc:
                             self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
                             loop_error = True
+                    if once:
+                        jobs = jobs[:1]
                     for job in jobs:
                         future = executor.submit(self.run_job, job)
                         running[future] = job
@@ -652,12 +659,12 @@ def clone_repository(job: dict, checkout_dir: Path) -> str:
         repo = str(job.get("repo") or "")
         clone_url = f"https://github.com/{repo}.git"
     git_env = git_auth_env(job.get("clone_token"))
-    run_git_command(
-        ["git", "clone", "--depth", "1", "--branch", str(job.get("branch") or "main"), clone_url, str(checkout_dir)],
-        phase="clone",
-        env=git_env,
-    )
     commit = str(job.get("commit") or "pending")
+    clone_command = ["git", "clone"]
+    if not commit or commit == "pending":
+        clone_command.extend(["--depth", "1"])
+    clone_command.extend(["--branch", str(job.get("branch") or "main"), clone_url, str(checkout_dir)])
+    run_git_command(clone_command, phase="clone", env=git_env)
     if commit and commit != "pending":
         run_git_command(
             ["git", "-C", str(checkout_dir), "checkout", commit],
@@ -1207,8 +1214,8 @@ def verifier_command_env(checkout_dir: Path) -> dict[str, str]:
         if key in os.environ and os.environ[key]:
             env[key] = os.environ[key]
     sandbox_root = checkout_dir.parent
-    home_dir = sandbox_root / ".verifier-home"
-    tmp_dir = sandbox_root / ".verifier-tmp"
+    home_dir = sandbox_root / _VERIFIER_HOME_DIR_NAME
+    tmp_dir = sandbox_root / _VERIFIER_TMP_DIR_NAME
     home_dir.mkdir(parents=True, exist_ok=True)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     env.update(
@@ -4337,10 +4344,11 @@ def cleanup_worker_resources(config: WorkerConfig, *, active_job_ids: set[str] |
 def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:
     now_ts = int(time.time())
     active = set(active_job_ids or set())
+    protected = active | _CHECKOUT_RUNTIME_DIR_NAMES
     config.work_dir.mkdir(parents=True, exist_ok=True)
     for marker in config.work_dir.glob(f"*{_FAILED_CHECKOUT_MARKER_SUFFIX}"):
         checkout = checkout_dir_from_failed_marker(marker)
-        if checkout.name in active:
+        if checkout.name in protected:
             continue
         try:
             expires_at = int(marker.read_text(encoding="utf-8").strip() or "0")
@@ -4350,7 +4358,7 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
             shutil.rmtree(checkout, ignore_errors=True)
             marker.unlink(missing_ok=True)
     entries = sorted(
-        [path for path in config.work_dir.iterdir() if path.is_dir() and path.name not in active],
+        [path for path in config.work_dir.iterdir() if path.is_dir() and path.name not in protected],
         key=lambda path: path.stat().st_mtime,
     )
     while directory_size(config.work_dir) > config.max_checkout_bytes and entries:

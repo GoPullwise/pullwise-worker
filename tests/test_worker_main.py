@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -10,6 +12,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pullwise_worker.main as worker_main
 from pullwise_worker import __version__
 from pullwise_worker.main import (
     CODEX_LOGIN_COMMAND,
@@ -1123,6 +1126,23 @@ class WorkerMainTest(unittest.TestCase):
         sleep.assert_not_called()
         self.assertIn("worker not ready: git: not found", worker.last_error)
 
+    def test_once_loop_claims_and_submits_at_most_one_job(self) -> None:
+        worker = Worker(config())
+        worker.config.max_concurrent_jobs = 2
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.return_value = [{"job_id": "job_1"}, {"job_id": "job_2"}]
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch.object(worker, "run_job", return_value=None) as run_job, \
+            patch("pullwise_worker.main.time.sleep") as sleep:
+            worker.run(once=True)
+
+        worker.client.claim_many.assert_called_once_with(1)
+        self.assertEqual(run_job.call_count, 1)
+        self.assertEqual(run_job.call_args.args[0]["job_id"], "job_1")
+        sleep.assert_not_called()
+
     def test_refresh_readiness_reports_codex_specific_state_with_opencode_fallback(self) -> None:
         worker = Worker(config())
         checks = [
@@ -1251,6 +1271,40 @@ class WorkerMainTest(unittest.TestCase):
         self.assertNotIn("short-token", " ".join(clone_command))
         self.assertNotIn("short-token", " ".join(str(value) for value in clone_env.values()))
         self.assertEqual(clone_env["GIT_CONFIG_KEY_0"], "http.extraHeader")
+
+    @unittest.skipIf(shutil.which("git") is None, "git is required for clone integration coverage")
+    def test_clone_repository_can_checkout_pinned_non_tip_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = Path(tmp) / "origin"
+            checkout = Path(tmp) / "checkout"
+            subprocess.run(
+                ["git", "init", "--initial-branch", "main", str(origin)],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(["git", "-C", str(origin), "config", "user.email", "ci@example.com"], check=True)
+            subprocess.run(["git", "-C", str(origin), "config", "user.name", "CI"], check=True)
+            (origin / "file.txt").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(origin), "add", "file.txt"], check=True)
+            subprocess.run(["git", "-C", str(origin), "commit", "-m", "first"], check=True, stdout=subprocess.PIPE)
+            first = subprocess.run(
+                ["git", "-C", str(origin), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+            (origin / "file.txt").write_text("second\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(origin), "commit", "-am", "second"], check=True, stdout=subprocess.PIPE)
+
+            resolved = clone_repository(
+                {"clone_url": origin.as_uri(), "branch": "main", "commit": first},
+                checkout,
+            )
+
+        self.assertEqual(resolved, first.lower())
 
     def test_clone_repository_reports_git_stderr_on_failure(self) -> None:
         error = subprocess.CalledProcessError(
@@ -1514,6 +1568,48 @@ class WorkerMainTest(unittest.TestCase):
         self.assertFalse(heartbeat_kwargs["codex_ready"])
         self.assertTrue(heartbeat_kwargs["systemd_active"])
 
+    def test_main_service_commands_do_not_require_worker_token(self) -> None:
+        for action in ("start", "stop", "status", "restart"):
+            with self.subTest(action=action):
+                with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+                    patch.object(sys, "argv", ["pullwise-worker", action, "--dry-run"]), \
+                    patch("pullwise_worker.main.service_action", return_value=0) as service:
+                    with self.assertRaises(SystemExit) as raised:
+                        worker_main.main()
+
+                self.assertEqual(raised.exception.code, 0)
+                service.assert_called_once_with(action, dry_run=True)
+
+    def test_main_update_cleanup_and_uninstall_do_not_require_worker_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+                patch.object(sys, "argv", ["pullwise-worker", "update", "--dry-run"]), \
+                patch("pullwise_worker.main.update_worker", return_value=0) as update:
+                with self.assertRaises(SystemExit) as raised:
+                    worker_main.main()
+
+            self.assertEqual(raised.exception.code, 0)
+            self.assertEqual(update.call_args.args[0].worker_token, "")
+
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+                patch.object(sys, "argv", ["pullwise-worker", "cleanup", "--work-dir", tmp]), \
+                patch("pullwise_worker.main.cleanup_worker_resources") as cleanup:
+                with self.assertRaises(SystemExit) as raised:
+                    worker_main.main()
+
+            self.assertEqual(raised.exception.code, 0)
+            self.assertEqual(cleanup.call_args.args[0].worker_token, "")
+            self.assertEqual(cleanup.call_args.args[0].work_dir, Path(tmp) / "pullwise-worker")
+
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+                patch.object(sys, "argv", ["pullwise-worker", "uninstall", "--remove-config", "--dry-run"]), \
+                patch("pullwise_worker.main.uninstall_worker", return_value=0) as uninstall:
+                with self.assertRaises(SystemExit) as raised:
+                    worker_main.main()
+
+            self.assertEqual(raised.exception.code, 0)
+            uninstall.assert_called_once_with(remove_config=True, remove_logs=False, dry_run=True)
+
     def test_run_doctor_prints_device_auth_login_command_when_codex_is_not_ready(self) -> None:
         cfg = config()
 
@@ -1657,6 +1753,28 @@ class WorkerMainTest(unittest.TestCase):
         cleanup_checkouts(cfg, active_job_ids={"active_job"})
 
         self.assertTrue(active.exists())
+        self.assertFalse(old.exists())
+
+    def test_cleanup_checkouts_preserves_verifier_scratch_dirs_during_active_jobs(self) -> None:
+        cfg = config()
+        cfg.max_checkout_bytes = 1
+        active = Path(cfg.work_dir) / "active_job"
+        old = Path(cfg.work_dir) / "old_job"
+        verifier_home = Path(cfg.work_dir) / ".verifier-home"
+        verifier_tmp = Path(cfg.work_dir) / ".verifier-tmp"
+        for path in (active, old, verifier_home, verifier_tmp):
+            path.mkdir(parents=True)
+            (path / "big.txt").write_text("xxxxx", encoding="utf-8")
+        os.utime(verifier_home, (1, 1))
+        os.utime(verifier_tmp, (2, 2))
+        os.utime(old, (3, 3))
+        os.utime(active, (4, 4))
+
+        cleanup_checkouts(cfg, active_job_ids={"active_job"})
+
+        self.assertTrue(active.exists())
+        self.assertTrue(verifier_home.exists())
+        self.assertTrue(verifier_tmp.exists())
         self.assertFalse(old.exists())
 
     def test_cleanup_worker_resources_prunes_recursive_verifier_logs(self) -> None:
@@ -1843,10 +1961,10 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("@openai/codex@0.135.0", install_script)
         self.assertIn("--codex-package", install_script)
         self.assertIn("--provider-chain", install_script)
-        self.assertIn("PULLWISE_CODEX_MODEL=${PULLWISE_CODEX_MODEL:-gpt-5.5}", install_script)
-        self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=${PULLWISE_CODEX_REASONING_EFFORT:-medium}", install_script)
-        self.assertIn("PULLWISE_OPENCODE_MODEL=${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}", install_script)
-        self.assertIn("PULLWISE_OPENCODE_VARIANT=${PULLWISE_OPENCODE_VARIANT:-medium}", install_script)
+        self.assertIn('write_env_value PULLWISE_CODEX_MODEL "${PULLWISE_CODEX_MODEL:-gpt-5.5}"', install_script)
+        self.assertIn('write_env_value PULLWISE_CODEX_REASONING_EFFORT "${PULLWISE_CODEX_REASONING_EFFORT:-medium}"', install_script)
+        self.assertIn('write_env_value PULLWISE_OPENCODE_MODEL "${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}"', install_script)
+        self.assertIn('write_env_value PULLWISE_OPENCODE_VARIANT "${PULLWISE_OPENCODE_VARIANT:-medium}"', install_script)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
@@ -1873,6 +1991,13 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("codex login --device-auth", install_script)
         self.assertIn("PULLWISE_WORKER_TOKEN", install_script)
         self.assertIn("--worker-token-file", install_script)
+        self.assertIn('write_env_value PULLWISE_SERVER_URL "$SERVER_URL"', install_script)
+        self.assertIn('write_env_value PULLWISE_WORKER_TOKEN "$WORKER_TOKEN"', install_script)
+        self.assertIn('while IFS="=" read -r key value', install_script)
+        self.assertIn('export "$key=$value"', install_script)
+        self.assertNotIn("PULLWISE_SERVER_URL=$SERVER_URL", install_script)
+        self.assertNotIn("PULLWISE_WORKER_TOKEN=$WORKER_TOKEN", install_script)
+        self.assertNotIn(". /etc/pullwise-worker/worker.env", install_script)
         self.assertNotIn("--worker-token) WORKER_TOKEN", install_script)
         self.assertNotIn("$(dirname \"$0\")", install_script)
         self.assertNotIn("cp \"$(dirname", install_script)

@@ -111,44 +111,59 @@ fi
 
 python3 -m pip install --upgrade "$WORKER_PACKAGE"
 
-cat > "$ENV_FILE" <<EOF
-PULLWISE_SERVER_URL=$SERVER_URL
-PULLWISE_WORKER_ID=$WORKER_ID
-PULLWISE_WORKER_TOKEN=$WORKER_TOKEN
-PULLWISE_PROVIDER=$PROVIDER
-PULLWISE_PROVIDER_CHAIN=$PROVIDER_CHAIN
-PULLWISE_MAX_CONCURRENT_JOBS=$MAX_CONCURRENT_JOBS
-PULLWISE_CHECKOUT_ROOT=$CHECKOUT_ROOT
-PULLWISE_LOG_DIR=$LOG_DIR
-PULLWISE_WORKER_PACKAGE=$WORKER_PACKAGE
-PULLWISE_CODEX_PACKAGE=$CODEX_PACKAGE
-PULLWISE_CODEX_MODEL=${PULLWISE_CODEX_MODEL:-gpt-5.5}
-PULLWISE_CODEX_REASONING_EFFORT=${PULLWISE_CODEX_REASONING_EFFORT:-medium}
-PULLWISE_OPENCODE_COMMAND=${PULLWISE_OPENCODE_COMMAND:-opencode}
-PULLWISE_OPENCODE_MODEL=${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}
-PULLWISE_OPENCODE_VARIANT=${PULLWISE_OPENCODE_VARIANT:-medium}
-PULLWISE_PYTHON_BIN=$PYTHON_BIN
-PULLWISE_SERVICE_PATH=$SERVICE_PATH
-PULLWISE_WORKER_POLL_JITTER_SECONDS=2
-PULLWISE_WORKER_MAX_BACKOFF_SECONDS=60
-PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS=3600
-PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS=0
-PULLWISE_MAX_CHECKOUT_BYTES=21474836480
-PULLWISE_LOG_RETENTION_SECONDS=1209600
-PULLWISE_MAX_LOG_BYTES=1073741824
-PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES=10485760
-EOF
+write_env_value() {
+  local key="$1"
+  local value="$2"
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "environment value for $key must be single-line" >&2
+    exit 2
+  fi
+  printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+}
+
+: > "$ENV_FILE"
+write_env_value PULLWISE_SERVER_URL "$SERVER_URL"
+write_env_value PULLWISE_WORKER_ID "$WORKER_ID"
+write_env_value PULLWISE_WORKER_TOKEN "$WORKER_TOKEN"
+write_env_value PULLWISE_PROVIDER "$PROVIDER"
+write_env_value PULLWISE_PROVIDER_CHAIN "$PROVIDER_CHAIN"
+write_env_value PULLWISE_MAX_CONCURRENT_JOBS "$MAX_CONCURRENT_JOBS"
+write_env_value PULLWISE_CHECKOUT_ROOT "$CHECKOUT_ROOT"
+write_env_value PULLWISE_LOG_DIR "$LOG_DIR"
+write_env_value PULLWISE_WORKER_PACKAGE "$WORKER_PACKAGE"
+write_env_value PULLWISE_CODEX_PACKAGE "$CODEX_PACKAGE"
+write_env_value PULLWISE_CODEX_MODEL "${PULLWISE_CODEX_MODEL:-gpt-5.5}"
+write_env_value PULLWISE_CODEX_REASONING_EFFORT "${PULLWISE_CODEX_REASONING_EFFORT:-medium}"
+write_env_value PULLWISE_OPENCODE_COMMAND "${PULLWISE_OPENCODE_COMMAND:-opencode}"
+write_env_value PULLWISE_OPENCODE_MODEL "${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}"
+write_env_value PULLWISE_OPENCODE_VARIANT "${PULLWISE_OPENCODE_VARIANT:-medium}"
+write_env_value PULLWISE_PYTHON_BIN "$PYTHON_BIN"
+write_env_value PULLWISE_SERVICE_PATH "$SERVICE_PATH"
+write_env_value PULLWISE_WORKER_POLL_JITTER_SECONDS "2"
+write_env_value PULLWISE_WORKER_MAX_BACKOFF_SECONDS "60"
+write_env_value PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS "3600"
+write_env_value PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS "0"
+write_env_value PULLWISE_MAX_CHECKOUT_BYTES "21474836480"
+write_env_value PULLWISE_LOG_RETENTION_SECONDS "1209600"
+write_env_value PULLWISE_MAX_LOG_BYTES "1073741824"
+write_env_value PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES "10485760"
 chown root:"$SERVICE_USER" "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
 
 cat > "$BIN_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-set -a
-if [ -f /etc/pullwise-worker/worker.env ]; then
-  . /etc/pullwise-worker/worker.env
-fi
-set +a
+load_worker_env() {
+  local env_file="$1"
+  local key value
+  [ -f "$env_file" ] || return 0
+  while IFS="=" read -r key value || [ -n "$key" ]; do
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    export "$key=$value"
+  done < "$env_file"
+}
+load_worker_env /etc/pullwise-worker/worker.env
 export PATH="${PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 PYTHON_BIN="${PULLWISE_PYTHON_BIN:-python3}"
 exec "$PYTHON_BIN" -m pullwise_worker.main "$@"
