@@ -859,8 +859,15 @@ class WorkerMainTest(unittest.TestCase):
             ) as run_verifier, \
             patch("pullwise_worker.main.run_codex_review") as run_codex_review, \
             patch("pullwise_worker.main.shutil.rmtree") as rmtree:
+            audit_with_usage = audit_payload([issue_card("Bug", severity="P1", issue_id="bug")])
+            audit_with_usage["ai_usage"] = {
+                "model": "gpt-5.5",
+                "input_tokens": 123,
+                "output_tokens": 45,
+                "total_tokens": 168,
+            }
             run_codex_review.return_value = (
-                audit_payload([issue_card("Bug", severity="P1", issue_id="bug")]),
+                audit_with_usage,
                 {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
                 "review ok",
             )
@@ -882,6 +889,10 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(result_payload["audit_protocol"], "audit-swarm/0.1")
         self.assertEqual(result_payload["issue_cards"][0]["title"], "Bug")
         self.assertEqual(result_payload["summary"]["high"], 1)
+        self.assertEqual(
+            result_payload["ai_usage"],
+            {"model": "gpt-5.5", "input_tokens": 123, "output_tokens": 45, "total_tokens": 168},
+        )
         self.assertEqual(result_payload["verification_audit"]["candidateCount"], 1)
         self.assertEqual(result_payload["verification_audit"]["reportedCount"], 1)
         self.assertEqual(result_payload["verification_audit"]["rejectedCount"], 0)
