@@ -41,8 +41,14 @@ Required environment:
 - `PULLWISE_OPENCODE_VARIANT` optional, defaults to `medium`; use this for OpenCode provider-specific reasoning effort
 - `PULLWISE_CODEX_TIMEOUT_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
+- `PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS` optional, defaults to `3600`
 - `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
+- `PULLWISE_LOG_RETENTION_SECONDS` optional, defaults to `1209600` (14 days)
+- `PULLWISE_MAX_LOG_BYTES` optional, defaults to `1073741824` (1 GiB)
+- `PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES` optional, defaults to `10485760` (10 MiB)
+
+Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old verifier logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
 Provider model defaults are intentionally conservative. Codex passes `gpt-5.4` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker defaults to `opencode/big-pickle` with variant `medium`.
 

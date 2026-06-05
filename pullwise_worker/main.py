@@ -6,8 +6,10 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import platform
 import random
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -30,6 +32,7 @@ PHASE_PROGRESS = {
     "report": 95,
 }
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_FAILED_CHECKOUT_MARKER_SUFFIX = ".failed-retain"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
@@ -40,6 +43,7 @@ DEFAULT_CODEX_MODEL = "gpt-5.4"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
 DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
 DEFAULT_OPENCODE_VARIANT = "medium"
+AUDIT_SWARM_PROTOCOL_VERSION = "audit-swarm/0.1"
 CODEX_LOGIN_COMMAND = (
     "sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker "
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
@@ -55,6 +59,23 @@ def parse_provider_chain(value: str | None, fallback: str = "codex") -> list[str
         if provider in SUPPORTED_REVIEW_PROVIDERS and provider not in providers:
             providers.append(provider)
     return providers or ["codex"]
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in _VERIFIER_DISABLED_VALUES
+
+
+def parse_verifier_scripts(value: str | None) -> list[str]:
+    raw_items = value.split(",") if value else _VERIFIER_DEFAULT_SCRIPTS
+    scripts = []
+    for item in raw_items:
+        script = item.strip()
+        if script in _PACKAGE_SCRIPT_NAMES and script not in scripts:
+            scripts.append(script)
+    return scripts or list(_VERIFIER_DEFAULT_SCRIPTS)
 
 
 class WorkerConfig:
@@ -88,6 +109,16 @@ class WorkerConfig:
         self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
+        self.cleanup_interval_seconds = max(60, int(os.environ.get("PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS") or 3600))
+        self.log_retention_seconds = max(0, int(os.environ.get("PULLWISE_LOG_RETENTION_SECONDS") or 14 * 24 * 60 * 60))
+        self.max_log_bytes = max(1, int(os.environ.get("PULLWISE_MAX_LOG_BYTES") or 1024 * 1024 * 1024))
+        self.scan_summary_log_max_bytes = max(1024, int(os.environ.get("PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES") or 10 * 1024 * 1024))
+        self.verifier_enabled = env_bool("PULLWISE_WORKER_VERIFIER_ENABLED", False)
+        self.verifier_install_deps = env_bool("PULLWISE_WORKER_VERIFIER_INSTALL_DEPS", True)
+        self.verifier_confirm_failures = env_bool("PULLWISE_WORKER_VERIFIER_CONFIRM_FAILURES", True)
+        self.verifier_timeout_seconds = max(10, int(os.environ.get("PULLWISE_WORKER_VERIFIER_TIMEOUT_SECONDS") or 120))
+        self.verifier_max_commands = max(1, int(os.environ.get("PULLWISE_WORKER_VERIFIER_MAX_COMMANDS") or 5))
+        self.verifier_scripts = parse_verifier_scripts(os.environ.get("PULLWISE_WORKER_VERIFIER_SCRIPTS"))
         if not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 
@@ -191,17 +222,25 @@ class PullwiseClient:
         job = data.get("job")
         return [job] if isinstance(job, dict) else []
 
-    def progress(self, job_id: str, phase: str, progress: int, message: str = "", logs_summary: str = "") -> None:
-        self.post(
-            f"/worker/jobs/{job_id}/progress",
-            {
-                "phase": phase,
-                "progress": progress,
-                "message": message,
-                "started_at": int(time.time()),
-                "logs_summary": logs_summary,
-            },
-        )
+    def progress(
+        self,
+        job_id: str,
+        phase: str,
+        progress: int,
+        message: str = "",
+        logs_summary: str = "",
+        audit_swarm: dict | None = None,
+    ) -> None:
+        payload = {
+            "phase": phase,
+            "progress": progress,
+            "message": message,
+            "started_at": int(time.time()),
+            "logs_summary": logs_summary,
+        }
+        if audit_swarm:
+            payload["audit_swarm"] = audit_swarm
+        self.post(f"/worker/jobs/{job_id}/progress", payload)
 
     def result(self, job_id: str, payload: dict) -> None:
         self.post(f"/worker/jobs/{job_id}/result", payload)
@@ -245,7 +284,7 @@ def main() -> None:
     if args.command == "uninstall":
         raise SystemExit(uninstall_worker(remove_config=args.remove_config, remove_logs=args.remove_logs, dry_run=args.dry_run))
     if args.command == "cleanup":
-        cleanup_checkouts(config)
+        cleanup_worker_resources(config)
         raise SystemExit(0)
     worker = Worker(config)
     worker.run(once=args.once)
@@ -261,9 +300,11 @@ class Worker:
         self._codex_ready = False
         self._empty_poll_count = 0
         self._error_poll_count = 0
+        self._last_cleanup_at = 0.0
 
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
+        self.cleanup_resources_if_due([], force=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_concurrent_jobs) as executor:
             running: dict[concurrent.futures.Future[None], dict] = {}
             while True:
@@ -274,6 +315,7 @@ class Worker:
                         future.result()
                     except Exception as exc:
                         self.last_error = f"job {job.get('job_id')} failed unexpectedly: {exc}"[:500]
+                self.cleanup_resources_if_due(running.values())
                 free_slots = max(0, self.config.max_concurrent_jobs - len(running))
                 ready = self.refresh_readiness_if_due()
                 loop_error = False
@@ -319,6 +361,22 @@ class Worker:
                     concurrent.futures.wait(running)
                     return
                 time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error))
+
+    def cleanup_resources_if_due(self, active_jobs: object, *, force: bool = False) -> None:
+        current = time.monotonic()
+        if not force and current - self._last_cleanup_at < self.config.cleanup_interval_seconds:
+            return
+        self._last_cleanup_at = current
+        active_job_ids = set()
+        for job in active_jobs or []:
+            try:
+                active_job_ids.add(safe_job_id(job.get("job_id") if isinstance(job, dict) else job))
+            except ValueError:
+                continue
+        try:
+            cleanup_worker_resources(self.config, active_job_ids=active_job_ids)
+        except Exception as exc:
+            self.last_error = f"worker cleanup failed: {redact_secrets(str(exc), self.config)}"[:500]
 
     def handle_lifecycle_command(self, command: dict) -> bool:
         command_id = str(command.get("id") or "").strip()
@@ -397,26 +455,106 @@ class Worker:
         checkout_dir = checkout_dir_for_job(self.config.work_dir, job_id)
         started = time.monotonic()
         duration_ms = 0
+        job_error = ""
         try:
-            self.client.progress(job_id, "clone", PHASE_PROGRESS["clone"], "Cloning repository")
+            self.client.progress(
+                job_id,
+                "clone",
+                PHASE_PROGRESS["clone"],
+                "Cloning repository",
+                audit_swarm=audit_swarm_scan_artifacts("clone", config=self.config, summary="Cloning repository."),
+            )
             clone_repository(job, checkout_dir)
-            self.client.progress(job_id, "index", PHASE_PROGRESS["index"], "Repository ready")
-            self.client.progress(job_id, "ai", PHASE_PROGRESS["ai"], "Running Codex review")
-            findings, summary, logs_summary = run_codex_review(self.config, job, checkout_dir)
+            self.client.progress(
+                job_id,
+                "index",
+                PHASE_PROGRESS["index"],
+                "Repository ready",
+                audit_swarm=audit_swarm_scan_artifacts("preflight", config=self.config, summary="Repository checkout is ready."),
+            )
+            preflight = collect_preflight_metadata(self.config, job, checkout_dir)
+            try:
+                verifier, verifier_findings, verifier_logs = run_verifier_commands(self.config, job, checkout_dir, preflight)
+            except Exception as exc:
+                verifier = {
+                    "enabled": self.config.verifier_enabled,
+                    "summary": f"Verifier failed before completing: {redact_secrets(str(exc), self.config)}"[:500],
+                    "runs": [],
+                }
+                verifier_findings = []
+                verifier_logs = verifier["summary"]
+            preflight["verifier"] = verifier
+            if verifier.get("enabled") and verifier.get("runs"):
+                preflight["execution"] = "allowlisted_verifier_scripts"
+                preflight["summary"] = (
+                    "Static preflight captured repository metadata, then the verifier executed allowlisted "
+                    "setup and project check commands with bounded timeouts and logs."
+                )
+            self.client.progress(
+                job_id,
+                "ai",
+                PHASE_PROGRESS["ai"],
+                "Running Codex review",
+                verifier_logs,
+                audit_swarm=audit_swarm_scan_artifacts(
+                    "discovery",
+                    config=self.config,
+                    preflight=preflight,
+                    summary="Repository preflight is complete; reviewer agents are discovering issue cards.",
+                ),
+            )
+            audit_payload, summary, logs_summary = run_codex_review(self.config, job, checkout_dir)
+            if verifier_findings:
+                audit_payload = merge_audit_swarm_payloads(
+                    audit_swarm_payload_from_findings(verifier_findings, verifier_role="verifier"),
+                    audit_payload,
+                )
+            projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
+            candidate_count = len(projected_findings)
+            projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(projected_findings)
+            audit_payload = filter_audit_swarm_payload_by_findings(audit_payload, projected_findings)
+            summary = summarize(projected_findings)
+            verification_audit = verification_audit_payload(
+                candidate_count=candidate_count,
+                reported_findings=projected_findings,
+                rejected_reasons=rejected_reasons,
+                rejected_samples=rejected_samples,
+            )
+            if verifier_logs:
+                logs_summary = "\n".join([verifier_logs, logs_summary])[-1000:]
             duration_ms = int((time.monotonic() - started) * 1000)
+            audit_swarm = audit_swarm_scan_artifacts(
+                "report",
+                config=self.config,
+                audit_payload=audit_payload,
+                preflight=preflight,
+                verification_audit=verification_audit,
+                summary=verification_audit.get("summary") or "Audit Swarm result is ready.",
+                logs_summary=logs_summary,
+            )
             payload = {
                 "status": "done",
-                "findings": findings,
+                "audit_protocol": audit_payload.get("audit_protocol") or AUDIT_SWARM_PROTOCOL_VERSION,
+                "issue_cards": audit_payload.get("issue_cards") if isinstance(audit_payload.get("issue_cards"), list) else [],
+                "verification_results": (
+                    audit_payload.get("verification_results")
+                    if isinstance(audit_payload.get("verification_results"), list)
+                    else []
+                ),
                 "summary": summary,
                 "duration_ms": duration_ms,
                 "attempt_id": attempt_id,
+                "preflight": preflight,
+                "verification_audit": verification_audit,
+                "audit_swarm": audit_swarm,
             }
             payload["result_checksum"] = result_checksum(payload)
-            self.client.progress(job_id, "report", 100, "Uploading result", logs_summary)
+            self.client.progress(job_id, "report", 100, "Uploading result", logs_summary, audit_swarm=audit_swarm)
             try:
                 self.upload_result_with_retry(job_id, payload)
             except Exception as exc:
                 self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                job_error = self.last_error
                 write_scan_summary(self.config, job_id, "upload_failed", duration_ms, self.last_error)
                 return
             write_scan_summary(self.config, job_id, "done", duration_ms, "")
@@ -426,24 +564,29 @@ class Worker:
             error = redact_secrets(str(exc)[:500], self.config)
             error_payload = {
                 "status": "failed",
-                "findings": [],
+                "audit_protocol": AUDIT_SWARM_PROTOCOL_VERSION,
+                "issue_cards": [],
+                "verification_results": [],
                 "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
                 "duration_ms": duration_ms,
                 "error": error,
                 "attempt_id": attempt_id,
+                "audit_swarm": audit_swarm_scan_artifacts("failed", config=self.config, summary=error),
             }
             error_payload["result_checksum"] = result_checksum(error_payload)
             try:
                 self.upload_result_with_retry(job_id, error_payload)
             except Exception as upload_exc:
                 self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), self.config)}"[:500]
+                job_error = self.last_error
                 write_scan_summary(self.config, job_id, "upload_failed", duration_ms, self.last_error)
                 return
             write_scan_summary(self.config, job_id, "failed", duration_ms, error)
             self.last_error = error
+            job_error = error
         finally:
-            if self.last_error and self.config.failed_checkout_retention_seconds > 0:
-                marker = checkout_dir.with_suffix(".failed-retain")
+            if job_error and self.config.failed_checkout_retention_seconds > 0:
+                marker = failed_checkout_marker(checkout_dir)
                 marker.write_text(str(int(time.time()) + self.config.failed_checkout_retention_seconds), encoding="utf-8")
             else:
                 shutil.rmtree(checkout_dir, ignore_errors=True)
@@ -466,6 +609,17 @@ def checkout_dir_for_job(work_dir: Path, job_id: str) -> Path:
     if os.path.normcase(common) != os.path.normcase(str(root)) or checkout_dir == root:
         raise ValueError("job checkout directory must stay inside work_dir")
     return checkout_dir
+
+
+def failed_checkout_marker(checkout_dir: Path) -> Path:
+    return checkout_dir.parent / f"{checkout_dir.name}{_FAILED_CHECKOUT_MARKER_SUFFIX}"
+
+
+def checkout_dir_from_failed_marker(marker: Path) -> Path:
+    name = marker.name
+    if not name.endswith(_FAILED_CHECKOUT_MARKER_SUFFIX):
+        return marker.with_suffix("")
+    return marker.parent / name[: -len(_FAILED_CHECKOUT_MARKER_SUFFIX)]
 
 
 def clone_repository(job: dict, checkout_dir: Path) -> None:
@@ -536,32 +690,1535 @@ def git_auth_env(clone_token: object) -> dict[str, str] | None:
     return env
 
 
-def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[list[dict], dict, str]:
+_README_PACKAGE_SCRIPT_RE = re.compile(r"\b(npm|pnpm|yarn|bun)\s+run\s+([A-Za-z0-9:_-]+)\b")
+_HIGH_SIGNAL_PACKAGE_SCRIPTS = {"dev", "start", "build", "test"}
+_PACKAGE_SCRIPT_NAMES = ["dev", "start", "build", "test", "lint", "typecheck", "check"]
+_VERIFIER_DEFAULT_SCRIPTS = ["build", "test", "lint", "typecheck", "check"]
+_VERIFIER_DISABLED_VALUES = {"", "0", "false", "no", "off"}
+_VERIFIER_MAX_OUTPUT_CHARS = 4000
+_VERIFICATION_STATUSES = {"verified", "static_proof", "potential_risk", "unverified"}
+_LOCKFILE_PACKAGE_MANAGERS = {
+    "bun.lock": "bun",
+    "bun.lockb": "bun",
+    "package-lock.json": "npm",
+    "pnpm-lock.yaml": "pnpm",
+    "yarn.lock": "yarn",
+}
+_MANIFEST_TYPES = {
+    "Cargo.toml": "rust",
+    "Pipfile": "python",
+    "go.mod": "go",
+    "package.json": "node",
+    "poetry.lock": "python-lock",
+    "pyproject.toml": "python",
+    "requirements.txt": "python",
+}
+_CONFIG_MANIFEST_TYPES = {
+    ".devcontainer/devcontainer.json": "devcontainer",
+    "compose.yaml": "docker-compose",
+    "compose.yml": "docker-compose",
+    "docker-compose.yaml": "docker-compose",
+    "docker-compose.yml": "docker-compose",
+    "Dockerfile": "dockerfile",
+}
+_DOCKERFILE_SCAN_MAX_FILES = 50
+_DOCKERFILE_SKIP_DIRS = {
+    ".git",
+    "docs",
+    "examples",
+    "fixtures",
+    "node_modules",
+    "test",
+    "tests",
+    "vendor",
+    "__tests__",
+}
+_SECRET_SCAN_MAX_BYTES = 256 * 1024
+_SECRET_SCAN_MAX_FILES = 3000
+_SECRET_SCAN_SKIP_DIRS = {
+    ".git",
+    ".pytest_cache",
+    ".tox",
+    ".venv",
+    "build",
+    "coverage",
+    "dist",
+    "docs",
+    "examples",
+    "fixtures",
+    "node_modules",
+    "target",
+    "test",
+    "tests",
+    "vendor",
+    "venv",
+    "__pycache__",
+    "__tests__",
+}
+_SECRET_SCAN_SKIP_FILES = {
+    "bun.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "yarn.lock",
+}
+_SECRET_SCAN_TEXT_SUFFIXES = {
+    ".bash",
+    ".conf",
+    ".config",
+    ".cs",
+    ".env",
+    ".go",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".php",
+    ".properties",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".rs",
+    ".sh",
+    ".swift",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
+    ".zsh",
+}
+_SECRET_PATTERNS = [
+    {
+        "kind": "github_token",
+        "label": "GitHub token",
+        "regex": re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,255}\b"),
+    },
+    {
+        "kind": "stripe_live_secret_key",
+        "label": "Stripe live secret key",
+        "regex": re.compile(r"\bsk_live_[A-Za-z0-9]{16,}\b"),
+    },
+    {
+        "kind": "slack_token",
+        "label": "Slack token",
+        "regex": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+    },
+]
+
+
+def collect_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
+    repository = repository_preflight_metadata(checkout_dir)
+    tool_versions = worker_tool_versions(config, repository["packageManagers"])
+    return {
+        "mode": "static",
+        "execution": "no_project_scripts",
+        "summary": "Static preflight captured repository manifests, worker environment, and tool versions; no project scripts were executed.",
+        "repo": str(job.get("repo") or ""),
+        "branch": str(job.get("branch") or "main"),
+        "commit": str(job.get("commit") or "pending"),
+        "workerVersion": __version__,
+        "providerChain": list(config.provider_chain),
+        "environment": worker_environment_metadata(checkout_dir),
+        "languages": repository["languages"],
+        "packageManagers": repository["packageManagers"],
+        "manifests": repository["manifests"],
+        "availableScripts": repository["availableScripts"],
+        "toolVersions": tool_versions,
+        "limitations": [
+            "Dependency installation, build, tests, lint, and typecheck were not executed in this preflight.",
+            "Runtime verification requires a later sandboxed verifier stage with project dependencies available.",
+        ],
+    }
+
+
+def worker_environment_metadata(checkout_dir: Path) -> dict:
+    return {
+        "os": platform.system(),
+        "osRelease": platform.release(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "pythonVersion": platform.python_version(),
+        "pythonExecutable": sys.executable,
+        "checkoutRoot": str(checkout_dir),
+    }
+
+
+def repository_preflight_metadata(checkout_dir: Path) -> dict:
+    manifests = repository_manifests(checkout_dir)
+    package_json = read_package_json(checkout_dir / "package.json")
+    scripts = package_json.get("scripts") if isinstance(package_json.get("scripts"), dict) else {}
+    available_scripts = sorted(
+        script for script in _PACKAGE_SCRIPT_NAMES if isinstance(scripts, dict) and script in scripts
+    )
+    package_managers = package_managers_for_repository(checkout_dir, package_json)
+    languages = language_hints_for_repository(checkout_dir, manifests)
+    return {
+        "languages": languages,
+        "packageManagers": package_managers,
+        "manifests": manifests,
+        "availableScripts": available_scripts,
+    }
+
+
+def repository_manifests(checkout_dir: Path) -> list[dict]:
+    manifests: list[dict] = []
+    for filename, manifest_type in sorted(_MANIFEST_TYPES.items()):
+        path = checkout_dir / filename
+        if path.is_file():
+            manifests.append({"file": filename, "type": manifest_type})
+    for filename, manifest_type in sorted(_CONFIG_MANIFEST_TYPES.items()):
+        path = checkout_dir / filename
+        if path.is_file():
+            manifests.append({"file": filename, "type": manifest_type})
+    for filename, manager in sorted(_LOCKFILE_PACKAGE_MANAGERS.items()):
+        path = checkout_dir / filename
+        if path.is_file():
+            manifests.append({"file": filename, "type": f"{manager}-lock"})
+    manifests.extend(github_actions_workflow_manifests(checkout_dir))
+    manifests.extend(dockerfile_manifests(checkout_dir))
+    return dedupe_manifests(manifests)[:50]
+
+
+def github_actions_workflow_manifests(checkout_dir: Path) -> list[dict]:
+    workflows_dir = checkout_dir / ".github" / "workflows"
+    if not workflows_dir.is_dir():
+        return []
+    manifests = []
+    for path in sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")]):
+        if path.is_file():
+            manifests.append({"file": path.relative_to(checkout_dir).as_posix(), "type": "github-actions-workflow"})
+    return manifests[:20]
+
+
+def dockerfile_manifests(checkout_dir: Path) -> list[dict]:
+    manifests = []
+    for path in iter_dockerfiles(checkout_dir):
+        manifests.append({"file": path.relative_to(checkout_dir).as_posix(), "type": "dockerfile"})
+    return manifests[:20]
+
+
+def dedupe_manifests(manifests: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+    for manifest in manifests:
+        key = (manifest.get("file"), manifest.get("type"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(manifest)
+    return deduped
+
+
+def read_package_json(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def package_managers_for_repository(checkout_dir: Path, package_json: dict) -> list[str]:
+    managers = []
+    package_manager = str(package_json.get("packageManager") or "").strip()
+    if package_manager:
+        managers.append(package_manager.split("@", 1)[0])
+    for filename, manager in sorted(_LOCKFILE_PACKAGE_MANAGERS.items()):
+        if (checkout_dir / filename).is_file():
+            managers.append(manager)
+    if (checkout_dir / "package.json").is_file() and not managers:
+        managers.append("npm")
+    return sorted(dict.fromkeys(manager for manager in managers if manager))
+
+
+def language_hints_for_repository(checkout_dir: Path, manifests: list[dict]) -> list[str]:
+    hints = []
+    manifest_types = {item.get("type") for item in manifests}
+    if "node" in manifest_types:
+        hints.append("JavaScript/TypeScript")
+    if {"python", "python-lock"} & manifest_types:
+        hints.append("Python")
+    if "go" in manifest_types:
+        hints.append("Go")
+    if "rust" in manifest_types:
+        hints.append("Rust")
+    extension_hints = [
+        ("*.ts", "TypeScript"),
+        ("*.tsx", "TypeScript"),
+        ("*.js", "JavaScript"),
+        ("*.jsx", "JavaScript"),
+        ("*.py", "Python"),
+        ("*.go", "Go"),
+        ("*.rs", "Rust"),
+    ]
+    for pattern, label in extension_hints:
+        if label not in hints and any(checkout_dir.glob(pattern)):
+            hints.append(label)
+    return hints[:8]
+
+
+def worker_tool_versions(config: WorkerConfig, package_managers: list[str] | None = None) -> list[dict]:
+    checks = [
+        ("git", ["git", "--version"]),
+        ("node", ["node", "--version"]),
+        ("python", [sys.executable, "--version"]),
+    ]
+    for package_manager in package_managers or []:
+        if package_manager in {"npm", "pnpm", "yarn", "bun"}:
+            checks.append((package_manager, [package_manager, "--version"]))
+    if "codex" in config.provider_chain:
+        checks.append(("codex", [config.codex_command, "--version"]))
+    if "opencode" in config.provider_chain:
+        checks.append(("opencode", [config.opencode_command, "--version"]))
+    return [safe_tool_version(name, command) for name, command in checks]
+
+
+def safe_tool_version(name: str, command: list[str]) -> dict:
+    command_text = " ".join(command)
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "name": name,
+            "command": command_text,
+            "available": False,
+            "exitCode": 127,
+            "output": str(exc)[:200],
+        }
+    output = " ".join(part.strip() for part in (completed.stdout, completed.stderr) if part and part.strip())
+    return {
+        "name": name,
+        "command": command_text,
+        "available": completed.returncode == 0,
+        "exitCode": completed.returncode,
+        "output": output[:200],
+    }
+
+
+def run_verifier_commands(
+    config: WorkerConfig,
+    job: dict,
+    checkout_dir: Path,
+    preflight: dict,
+) -> tuple[dict, list[dict], str]:
+    if not config.verifier_enabled:
+        return (
+            {
+                "enabled": False,
+                "summary": "Verifier command execution is disabled for this worker.",
+                "runs": [],
+            },
+            [],
+            "verifier disabled",
+        )
+
+    package_managers = preflight.get("packageManagers") if isinstance(preflight.get("packageManagers"), list) else []
+    package_manager = str(package_managers[0] if package_managers else "npm")
+    available_scripts = preflight.get("availableScripts") if isinstance(preflight.get("availableScripts"), list) else []
+    scripts = [script for script in config.verifier_scripts if script in available_scripts][: config.verifier_max_commands]
+    install_command = package_install_command(package_manager, checkout_dir) if config.verifier_install_deps else []
+    if not scripts and not install_command:
+        return (
+            {
+                "enabled": True,
+                "summary": "Verifier enabled, but no dependency install command or allowlisted package scripts were present.",
+                "runs": [],
+            },
+            [],
+            "verifier no runnable scripts",
+        )
+
+    runs = []
+    if install_command:
+        install_run = execute_verifier_command(
+            config,
+            job,
+            checkout_dir,
+            "install-deps",
+            install_command,
+        )
+        runs.append(install_run)
+        if install_run.get("status") not in {"passed", "flaky"}:
+            findings = verifier_findings_from_results(job, checkout_dir, runs)
+            summary = verifier_runs_summary(runs)
+            return (
+                {
+                    "enabled": True,
+                    "summary": summary,
+                    "runs": runs,
+                },
+                findings,
+                summary,
+            )
+    runs.extend(
+        execute_verifier_script(config, job, checkout_dir, package_manager, script)
+        for script in scripts
+    )
+    findings = verifier_findings_from_results(job, checkout_dir, runs)
+    summary = verifier_runs_summary(runs)
+    return (
+        {
+            "enabled": True,
+            "summary": summary,
+            "runs": runs,
+        },
+        findings,
+        summary,
+    )
+
+
+def verifier_runs_summary(runs: list[dict]) -> str:
+    failed_count = len([run for run in runs if run.get("status") == "failed"])
+    flaky_count = len([run for run in runs if run.get("status") == "flaky"])
+    passed_count = len([run for run in runs if run.get("status") == "passed"])
+    skipped_count = len([run for run in runs if run.get("status") in {"skipped", "timeout"}])
+    return (
+        f"Verifier ran {len(runs)} allowlisted command(s): {passed_count} passed, "
+        f"{failed_count} failed, {flaky_count} flaky, {skipped_count} skipped or timed out."
+    )
+
+
+def execute_verifier_script(
+    config: WorkerConfig,
+    job: dict,
+    checkout_dir: Path,
+    package_manager: str,
+    script: str,
+) -> dict:
+    command = package_script_command(package_manager, script)
+    return execute_verifier_command(config, job, checkout_dir, script, command)
+
+
+def execute_verifier_command(
+    config: WorkerConfig,
+    job: dict,
+    checkout_dir: Path,
+    label: str,
+    command: list[str],
+) -> dict:
+    started = time.monotonic()
+    log_path, public_log_path = verifier_log_path(config, job, label)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.update({"CI": "true", "PULLWISE_VERIFY": "1"})
+    attempts = [execute_verifier_attempt(config, checkout_dir, command, env, 1)]
+    if attempts[0].get("status") == "failed" and config.verifier_confirm_failures:
+        attempts.append(execute_verifier_attempt(config, checkout_dir, command, env, 2))
+
+    confirmed_failure = attempts[0].get("status") == "failed" and (
+        not config.verifier_confirm_failures
+        or (len(attempts) > 1 and attempts[1].get("status") == "failed")
+    )
+    if confirmed_failure:
+        status = "failed"
+        result_attempt = attempts[-1]
+    elif attempts[0].get("status") == "failed":
+        status = "flaky"
+        result_attempt = attempts[0]
+    else:
+        status = str(attempts[0].get("status") or "skipped")
+        result_attempt = attempts[0]
+
+    output = verifier_attempts_output(attempts)
+    log_path.write_text(output, encoding="utf-8")
+    return {
+        "script": label,
+        "command": " ".join(command),
+        "status": status,
+        "exitCode": int(result_attempt.get("exitCode") or 0),
+        "durationMs": int((time.monotonic() - started) * 1000),
+        "logPath": public_log_path,
+        "output": output[-_VERIFIER_MAX_OUTPUT_CHARS:],
+        "attempts": attempts,
+        "confirmedFailure": bool(confirmed_failure),
+    }
+
+
+def execute_verifier_attempt(
+    config: WorkerConfig,
+    checkout_dir: Path,
+    command: list[str],
+    env: dict[str, str],
+    attempt: int,
+) -> dict:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(checkout_dir),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=config.verifier_timeout_seconds,
+            env=env,
+        )
+        output = verifier_output_text(completed.stdout, completed.stderr)
+        status = "passed" if completed.returncode == 0 else "failed"
+        return {
+            "attempt": attempt,
+            "status": status,
+            "exitCode": completed.returncode,
+            "durationMs": int((time.monotonic() - started) * 1000),
+            "output": output[-_VERIFIER_MAX_OUTPUT_CHARS:],
+        }
+    except FileNotFoundError as exc:
+        output = str(exc)
+        return {
+            "attempt": attempt,
+            "status": "skipped",
+            "exitCode": 127,
+            "durationMs": int((time.monotonic() - started) * 1000),
+            "output": output,
+        }
+    except subprocess.TimeoutExpired as exc:
+        output = verifier_output_text(exc.stdout, exc.stderr) or f"Command timed out after {config.verifier_timeout_seconds}s."
+        return {
+            "attempt": attempt,
+            "status": "timeout",
+            "exitCode": 124,
+            "durationMs": int((time.monotonic() - started) * 1000),
+            "output": output[-_VERIFIER_MAX_OUTPUT_CHARS:],
+        }
+
+
+def verifier_attempts_output(attempts: list[dict]) -> str:
+    if len(attempts) == 1:
+        return str(attempts[0].get("output") or "")[-_VERIFIER_MAX_OUTPUT_CHARS:]
+    parts = []
+    for attempt in attempts:
+        parts.append(
+            f"--- attempt {attempt.get('attempt')} "
+            f"({attempt.get('status')} exit {attempt.get('exitCode')}) ---"
+        )
+        output = str(attempt.get("output") or "").rstrip()
+        if output:
+            parts.append(output)
+    return "\n".join(parts)[-_VERIFIER_MAX_OUTPUT_CHARS:]
+
+
+def package_script_command(package_manager: str, script: str) -> list[str]:
+    manager = package_manager if package_manager in {"npm", "pnpm", "yarn", "bun"} else "npm"
+    return [manager, "run", script]
+
+
+def package_install_command(package_manager: str, checkout_dir: Path) -> list[str]:
+    if not (checkout_dir / "package.json").is_file():
+        return []
+    manager = package_manager if package_manager in {"npm", "pnpm", "yarn", "bun"} else "npm"
+    if manager == "npm":
+        command = ["npm", "ci"] if (checkout_dir / "package-lock.json").is_file() else ["npm", "install"]
+        return [*command, "--ignore-scripts"]
+    if manager == "pnpm":
+        command = ["pnpm", "install"]
+        if (checkout_dir / "pnpm-lock.yaml").is_file():
+            command.append("--frozen-lockfile")
+        return [*command, "--ignore-scripts"]
+    if manager == "yarn":
+        command = ["yarn", "install"]
+        if (checkout_dir / "yarn.lock").is_file():
+            command.append("--frozen-lockfile")
+        return [*command, "--ignore-scripts"]
+    if manager == "bun":
+        command = ["bun", "install"]
+        if (checkout_dir / "bun.lock").is_file() or (checkout_dir / "bun.lockb").is_file():
+            command.append("--frozen-lockfile")
+        return [*command, "--ignore-scripts"]
+    return []
+
+
+def verifier_log_path(config: WorkerConfig, job: dict, script: str) -> tuple[Path, str]:
+    job_id = safe_job_id(job.get("job_id") or job.get("scan_id") or "scan")
+    safe_script = re.sub(r"[^A-Za-z0-9_.-]+", "_", script).strip("._") or "script"
+    relative = Path("verification") / job_id / f"{safe_script}.log"
+    return config.log_dir / relative, relative.as_posix()
+
+
+def verifier_output_text(stdout: object, stderr: object) -> str:
+    parts = []
+    for value in (stdout, stderr):
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if isinstance(value, str) and value:
+            parts.append(value)
+    output = "\n".join(parts).replace("\x00", "")
+    return output[-_VERIFIER_MAX_OUTPUT_CHARS:]
+
+
+def verifier_findings_from_results(job: dict, checkout_dir: Path, runs: list[dict]) -> list[dict]:
+    findings = []
+    for run in runs:
+        if run.get("status") != "failed":
+            continue
+        if run.get("confirmedFailure") is False:
+            continue
+        findings.append(verifier_command_failure_finding(job, checkout_dir, run))
+    return findings
+
+
+def verifier_command_failure_finding(job: dict, checkout_dir: Path, run: dict) -> dict:
+    script = str(run.get("script") or "script")
+    command = str(run.get("command") or "")
+    exit_code = int(run.get("exitCode") or 1)
+    log_path = str(run.get("logPath") or "")
+    output = str(run.get("output") or "")
+    is_install = script == "install-deps"
+    location_file = install_evidence_file(checkout_dir) if is_install else "package.json"
+    line = 1 if is_install else package_script_line(checkout_dir, script)
+    title = f"`{command}` fails during dependency installation" if is_install else f"`{command}` fails in verifier"
+    severity = "high" if script in {"build", "test", "typecheck", "check", "install-deps"} else "medium"
+    category = "Dependencies" if is_install else ("Tests" if script == "test" else "Quality")
+    digest_input = f"{job.get('repo')}:{job.get('commit')}:{script}:{exit_code}:{output[-200:]}".encode("utf-8")
+    finding_id = f"verified_command_failure_{hashlib.sha1(digest_input).hexdigest()[:10]}"
+    code_label = "dependency manifest" if is_install else "package.json script"
+    code_summary = (
+        f"The verifier installs dependencies from `{location_file}` before running project checks."
+        if is_install
+        else f"The failing verifier command maps to the `{script}` script in package.json."
+    )
+    attempts = run.get("attempts") if isinstance(run.get("attempts"), list) else []
+    attempt_count = len(attempts) or 1
+    confirmed_text = " on two consecutive attempts" if attempt_count > 1 else ""
+    impact = (
+        "The project dependencies could not be installed in the verifier environment, so build/test reproduction is blocked before application checks run."
+        if is_install
+        else "The documented or standard project quality gate currently fails in the verifier environment."
+    )
+    limitation = (
+        "Private registries, missing package manager credentials, or network restrictions can make dependency installation fail outside production."
+        if is_install
+        else "Private services or environment variables absent from the worker can make this fail outside production."
+    )
+    confidence_rationale = (
+        "The command failure is directly observed and confirmed by a repeated verifier attempt; "
+        "production impact depends on environment parity."
+        if attempt_count > 1
+        else "The command failure is directly observed; production impact depends on environment parity."
+    )
+    return {
+        "id": finding_id,
+        "severity": severity,
+        "category": category,
+        "title": title[:120],
+        "summary": f"The verifier ran `{command}` and it exited with code {exit_code}{confirmed_text}.",
+        "impact": impact,
+        "detectionReasoning": (
+            "This finding comes from an executed allowlisted verifier command, not from model inference. "
+            f"The command returned exit code {exit_code}{confirmed_text}; the captured output is attached as runtime evidence."
+        ),
+        "reproductionPath": f"At commit `{job.get('commit') or 'pending'}`, run `{command}` from the repository root.",
+        "verificationStatus": "verified",
+        "verificationSummary": (
+            f"`{command}` was executed by the worker verifier and failed with exit code {exit_code}{confirmed_text}."
+        ),
+        "affectedLocations": [{"file": location_file, "startLine": line, "endLine": line}],
+        "evidence": [
+            {
+                "type": "runtime_log",
+                "label": "Verifier command output",
+                "summary": (output.splitlines()[-1] if output.splitlines() else f"`{command}` exited {exit_code}.")[:500],
+                "file": "",
+                "startLine": 0,
+                "endLine": 0,
+                "command": command,
+                "exitCode": exit_code,
+                "logPath": log_path,
+                "output": output[-_VERIFIER_MAX_OUTPUT_CHARS:],
+                "url": "",
+            },
+            {
+                "type": "code",
+                "label": code_label,
+                "summary": code_summary,
+                "file": location_file,
+                "startLine": line,
+                "endLine": line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            },
+        ],
+        "reproduction": {
+            "commands": [command],
+            "input": f"Run `{command}` at repository root.",
+            "expected": "Command exits 0.",
+            "actual": f"Command exited {exit_code}.",
+            "testFile": "",
+            "logPath": log_path,
+        },
+        "whyNotFalsePositive": [
+            (
+                "The command was executed by the worker verifier and returned a non-zero exit code on two consecutive attempts."
+                if attempt_count > 1
+                else "The command was executed by the worker verifier and returned a non-zero exit code."
+            ),
+            (
+                "Dependency installation is an explicit verifier setup step before running project checks."
+                if is_install
+                else "Only allowlisted project scripts are promoted to verifier findings."
+            ),
+        ],
+        "limitations": [
+            (
+                "Dependency installation uses an allowlisted package-manager command with install scripts disabled."
+                if is_install
+                else "The verifier runs only allowlisted project scripts after any configured setup step."
+            ),
+            limitation,
+        ],
+        "file": location_file,
+        "line": line,
+        "confidence": 0.95,
+        "confidenceRationale": confidence_rationale,
+        "autoFix": False,
+        "effort": "review required",
+        "fixBenefits": (
+            "Restores dependency installation so build and test reproduction can run from a clean checkout."
+            if is_install
+            else "Restores a failing quality gate and gives users a copyable command to verify the fix."
+        ),
+        "fixRisks": "The root cause may be missing verifier environment configuration rather than application code.",
+        "tags": ["verified", "verifier", "command-failure", script],
+        "steps": [
+            f"Run `{command}` locally at the pinned commit.",
+            "Inspect the captured output and fix the first failing error.",
+            "Rerun the same command and the existing test suite.",
+        ],
+        "badCode": [],
+        "goodCode": [],
+        "references": [],
+    }
+
+
+def package_script_line(checkout_dir: Path, script: str) -> int:
+    package_path = checkout_dir / "package.json"
+    if not package_path.is_file():
+        return 1
+    try:
+        package_text = package_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return 1
+    return first_matching_line(package_text, rf'"{re.escape(script)}"\s*:')
+
+
+def install_evidence_file(checkout_dir: Path) -> str:
+    for filename in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"):
+        if (checkout_dir / filename).is_file():
+            return filename
+    return "package.json"
+
+
+def run_deterministic_repository_checks(job: dict, checkout_dir: Path) -> list[dict]:
+    findings: list[dict] = []
+    findings.extend(readme_missing_package_script_findings(job, checkout_dir))
+    findings.extend(workflow_missing_package_script_findings(job, checkout_dir))
+    findings.extend(dockerfile_missing_source_findings(job, checkout_dir))
+    findings.extend(committed_secret_findings(job, checkout_dir))
+    return findings[:25]
+
+
+def readme_missing_package_script_findings(job: dict, checkout_dir: Path) -> list[dict]:
+    package_path = checkout_dir / "package.json"
+    if not package_path.is_file():
+        return []
+    readme_path = first_existing_file(checkout_dir, ["README.md", "README.markdown", "README"])
+    if readme_path is None:
+        return []
+
+    try:
+        package_text = package_path.read_text(encoding="utf-8")
+        package_data = json.loads(package_text)
+        readme_text = readme_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+    scripts = package_data.get("scripts") if isinstance(package_data, dict) else None
+    if not isinstance(scripts, dict):
+        return []
+    defined_scripts = {str(name) for name in scripts if isinstance(name, str)}
+    if not defined_scripts:
+        return []
+
+    readme_rel = readme_path.relative_to(checkout_dir).as_posix()
+    package_rel = "package.json"
+    scripts_line = first_matching_line(package_text, r'"scripts"\s*:')
+    seen: set[str] = set()
+    findings: list[dict] = []
+    for line_number, line in enumerate(readme_text.splitlines(), start=1):
+        for match in _README_PACKAGE_SCRIPT_RE.finditer(line):
+            manager = match.group(1)
+            script = match.group(2)
+            if script in defined_scripts or script in seen:
+                continue
+            seen.add(script)
+            findings.append(
+                missing_package_script_finding(
+                    job=job,
+                    manager=manager,
+                    script=script,
+                    readme_file=readme_rel,
+                    readme_line=line_number,
+                    package_file=package_rel,
+                    package_line=scripts_line,
+                )
+            )
+    return findings
+
+
+def workflow_missing_package_script_findings(job: dict, checkout_dir: Path) -> list[dict]:
+    package_path = checkout_dir / "package.json"
+    workflows_dir = checkout_dir / ".github" / "workflows"
+    if not package_path.is_file() or not workflows_dir.is_dir():
+        return []
+
+    try:
+        package_text = package_path.read_text(encoding="utf-8")
+        package_data = json.loads(package_text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+    scripts = package_data.get("scripts") if isinstance(package_data, dict) else None
+    defined_scripts = {str(name) for name in scripts if isinstance(name, str)} if isinstance(scripts, dict) else set()
+    package_rel = "package.json"
+    scripts_line = first_matching_line(package_text, r'"scripts"\s*:') if isinstance(scripts, dict) else 1
+    seen: set[tuple[str, str]] = set()
+    findings: list[dict] = []
+    for workflow_path in sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")]):
+        try:
+            workflow_text = workflow_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        workflow_rel = workflow_path.relative_to(checkout_dir).as_posix()
+        for line_number, line in enumerate(workflow_text.splitlines(), start=1):
+            for match in _README_PACKAGE_SCRIPT_RE.finditer(line):
+                manager = match.group(1)
+                script = match.group(2)
+                if script in defined_scripts:
+                    continue
+                key = (workflow_rel, script)
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append(
+                    missing_workflow_package_script_finding(
+                        job=job,
+                        manager=manager,
+                        script=script,
+                        workflow_file=workflow_rel,
+                        workflow_line=line_number,
+                        package_file=package_rel,
+                        package_line=scripts_line,
+                    )
+                )
+                if len(findings) >= 10:
+                    return findings
+    return findings
+
+
+def dockerfile_missing_source_findings(job: dict, checkout_dir: Path) -> list[dict]:
+    findings: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for dockerfile_path in iter_dockerfiles(checkout_dir):
+        try:
+            dockerfile_text = dockerfile_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        dockerfile_rel = dockerfile_path.relative_to(checkout_dir).as_posix()
+        for line_number, line in enumerate(dockerfile_text.splitlines(), start=1):
+            parsed = dockerfile_copy_add_sources(line)
+            if not parsed:
+                continue
+            instruction, sources = parsed
+            for source in sources:
+                if not docker_source_is_static_local(source):
+                    continue
+                if docker_source_exists(checkout_dir, source):
+                    continue
+                key = (dockerfile_rel, source)
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append(
+                    missing_dockerfile_source_finding(
+                        job=job,
+                        dockerfile_file=dockerfile_rel,
+                        dockerfile_line=line_number,
+                        instruction=instruction,
+                        source=source,
+                    )
+                )
+                if len(findings) >= 10:
+                    return findings
+    return findings
+
+
+def iter_dockerfiles(checkout_dir: Path):
+    candidates = []
+    root_dockerfile = checkout_dir / "Dockerfile"
+    if root_dockerfile.is_file():
+        candidates.append(root_dockerfile)
+    candidates.extend(path for path in checkout_dir.rglob("Dockerfile") if path.is_file() and path != root_dockerfile)
+    candidates.extend(path for path in checkout_dir.rglob("*.Dockerfile") if path.is_file())
+    yielded = 0
+    seen = set()
+    for path in sorted(candidates):
+        if yielded >= _DOCKERFILE_SCAN_MAX_FILES:
+            return
+        if path in seen or not dockerfile_scan_allowed(path, checkout_dir):
+            continue
+        seen.add(path)
+        yielded += 1
+        yield path
+
+
+def dockerfile_scan_allowed(path: Path, checkout_dir: Path) -> bool:
+    try:
+        relative = path.relative_to(checkout_dir)
+    except ValueError:
+        return False
+    parts = [part.lower() for part in relative.parts]
+    return not any(part in _DOCKERFILE_SKIP_DIRS for part in parts[:-1])
+
+
+def dockerfile_copy_add_sources(line: str) -> tuple[str, list[str]] | None:
+    text = line.strip()
+    if not text or text.startswith("#") or text.endswith("\\"):
+        return None
+    match = re.match(r"^(COPY|ADD)\s+(.+)$", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    instruction = match.group(1).upper()
+    body = dockerfile_strip_inline_comment(match.group(2).strip())
+    body = dockerfile_strip_instruction_flags(body)
+    if not body or "--from=" in match.group(2):
+        return None
+    if body.startswith("["):
+        try:
+            items = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(items, list) or len(items) < 2 or not all(isinstance(item, str) for item in items):
+            return None
+        return instruction, items[:-1]
+    try:
+        tokens = shlex.split(body, posix=True)
+    except ValueError:
+        return None
+    if len(tokens) < 2:
+        return None
+    return instruction, tokens[:-1]
+
+
+def dockerfile_strip_inline_comment(value: str) -> str:
+    if " #" not in value:
+        return value
+    return value.split(" #", 1)[0].strip()
+
+
+def dockerfile_strip_instruction_flags(value: str) -> str:
+    remaining = value.strip()
+    while remaining.startswith("--"):
+        parts = remaining.split(maxsplit=1)
+        if len(parts) < 2:
+            return ""
+        remaining = parts[1].strip()
+    return remaining
+
+
+def docker_source_is_static_local(source: str) -> bool:
+    source = str(source or "").strip()
+    if not source or source in {".", "./"}:
+        return False
+    lowered = source.lower()
+    if lowered.startswith(("http://", "https://", "git://")):
+        return False
+    if "$" in source or any(char in source for char in "*?[]"):
+        return False
+    if source.startswith("/") or _WINDOWS_DRIVE_RE.match(source):
+        return False
+    parts = [part for part in source.replace("\\", "/").split("/") if part]
+    return ".." not in parts
+
+
+def docker_source_exists(checkout_dir: Path, source: str) -> bool:
+    normalized = source.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    try:
+        target = (checkout_dir / normalized).resolve(strict=False)
+        root = checkout_dir.resolve(strict=False)
+    except OSError:
+        return False
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return False
+    return target.exists()
+
+
+def first_existing_file(root: Path, names: list[str]) -> Path | None:
+    for name in names:
+        candidate = root / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def first_matching_line(text: str, pattern: str) -> int:
+    compiled = re.compile(pattern)
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if compiled.search(line):
+            return line_number
+    return 1
+
+
+def committed_secret_findings(job: dict, checkout_dir: Path) -> list[dict]:
+    findings: list[dict] = []
+    seen_locations: set[tuple[str, str]] = set()
+    for path in iter_secret_scan_files(checkout_dir):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        file_path = path.relative_to(checkout_dir).as_posix()
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for pattern in _SECRET_PATTERNS:
+                match = pattern["regex"].search(line)
+                if not match:
+                    continue
+                secret_value = match.group(0)
+                if secret_match_is_placeholder(secret_value, line):
+                    continue
+                location_key = (str(pattern["kind"]), file_path)
+                if location_key in seen_locations:
+                    continue
+                seen_locations.add(location_key)
+                findings.append(
+                    committed_secret_finding(
+                        job=job,
+                        secret_kind=str(pattern["kind"]),
+                        secret_label=str(pattern["label"]),
+                        safe_prefix=secret_safe_prefix(secret_value),
+                        file_path=file_path,
+                        line=line_number,
+                    )
+                )
+                if len(findings) >= 10:
+                    return findings
+    return findings
+
+
+def iter_secret_scan_files(checkout_dir: Path):
+    scanned = 0
+    for path in checkout_dir.rglob("*"):
+        if scanned >= _SECRET_SCAN_MAX_FILES:
+            return
+        if not secret_scan_file_allowed(path, checkout_dir):
+            continue
+        scanned += 1
+        yield path
+
+
+def secret_scan_file_allowed(path: Path, checkout_dir: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        relative = path.relative_to(checkout_dir)
+        size = path.stat().st_size
+    except (OSError, ValueError):
+        return False
+    if size <= 0 or size > _SECRET_SCAN_MAX_BYTES:
+        return False
+    parts = [part.lower() for part in relative.parts]
+    if any(part in _SECRET_SCAN_SKIP_DIRS for part in parts[:-1]):
+        return False
+    name = relative.name
+    lower_name = name.lower()
+    if name in _SECRET_SCAN_SKIP_FILES or lower_name in {item.lower() for item in _SECRET_SCAN_SKIP_FILES}:
+        return False
+    if any(marker in lower_name for marker in ("example", "sample", "fixture", "mock")):
+        return False
+    if lower_name in {"dockerfile", ".env", ".npmrc", ".pypirc"}:
+        return True
+    return path.suffix.lower() in _SECRET_SCAN_TEXT_SUFFIXES
+
+
+def secret_match_is_placeholder(secret_value: str, line: str) -> bool:
+    lowered_line = line.lower()
+    if any(marker in lowered_line for marker in ("example", "sample", "dummy", "fake", "placeholder", "changeme")):
+        return True
+    body = re.sub(r"[^A-Za-z0-9]", "", secret_value)
+    return len(set(body)) < 8
+
+
+def secret_safe_prefix(secret_value: str) -> str:
+    if secret_value.startswith("sk_live_"):
+        return "sk_live_"
+    if secret_value.startswith("xox") and "-" in secret_value:
+        return secret_value.split("-", 1)[0] + "-"
+    if secret_value.startswith("gh") and len(secret_value) >= 4:
+        return secret_value[:4]
+    return secret_value[:4]
+
+
+def shell_quote(value: str) -> str:
+    return "'" + str(value or "").replace("'", "'\"'\"'") + "'"
+
+
+def committed_secret_finding(
+    *,
+    job: dict,
+    secret_kind: str,
+    secret_label: str,
+    safe_prefix: str,
+    file_path: str,
+    line: int,
+) -> dict:
+    commit = str(job.get("commit") or "the scanned commit")
+    digest_input = f"{job.get('repo')}:{commit}:{secret_kind}:{file_path}:{line}".encode("utf-8")
+    finding_id = f"static_committed_secret_{hashlib.sha1(digest_input).hexdigest()[:10]}"
+    grep_command = f'git grep -n "{safe_prefix}" -- {shell_quote(file_path)}'
+    return {
+        "id": finding_id,
+        "severity": "high",
+        "category": "Security",
+        "title": f"Committed {secret_label} detected",
+        "summary": (
+            f"`{file_path}` line {line} contains a value matching a vendor-specific {secret_label} pattern. "
+            "The raw value is redacted from this report."
+        ),
+        "impact": (
+            "A committed credential can be copied from repository history and used outside the application until it is revoked or rotated."
+        ),
+        "detectionReasoning": (
+            f"A deterministic secret rule matched the {secret_label} prefix `{safe_prefix}` at commit `{commit}`. "
+            "The scanner reports only the location and prefix so the report does not leak the full credential."
+        ),
+        "reproductionPath": (
+            f"At commit `{commit}`, inspect `{file_path}` line {line} or run `{grep_command}` from the repository root."
+        ),
+        "verificationStatus": "static_proof",
+        "verificationSummary": (
+            "A deterministic scanner matched a high-confidence credential pattern in a repository file; no provider API validation was attempted."
+        ),
+        "affectedLocations": [{"file": file_path, "startLine": line, "endLine": line}],
+        "evidence": [
+            {
+                "type": "code",
+                "label": "redacted secret location",
+                "summary": f"Line {line} contains a {secret_label}-shaped value with prefix `{safe_prefix}`; full value redacted.",
+                "file": file_path,
+                "startLine": line,
+                "endLine": line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            }
+        ],
+        "reproduction": {
+            "commands": [grep_command],
+            "input": f"Inspect `{file_path}` line {line}.",
+            "expected": "No live credential-like token is committed to the repository.",
+            "actual": f"A {secret_label}-shaped token with prefix `{safe_prefix}` is present; full value redacted.",
+            "testFile": "",
+            "logPath": "",
+        },
+        "whyNotFalsePositive": [
+            f"The value matches a vendor-specific {secret_label} token prefix and length.",
+            f"The finding points to a concrete repository file and line: `{file_path}:{line}`.",
+            "The scanner excludes common docs, examples, fixtures, tests, vendor directories, and lockfiles before reporting.",
+        ],
+        "limitations": [
+            "The scanner does not call the provider API, so it cannot prove whether the credential is still active.",
+            "If this was an intentionally revoked test credential, the immediate production impact may be lower.",
+        ],
+        "file": file_path,
+        "line": line,
+        "confidence": 0.95,
+        "confidenceRationale": (
+            "Vendor-specific live-token syntax plus an exact file and line gives high static confidence; active exploitability depends on whether the credential is still valid."
+        ),
+        "autoFix": False,
+        "effort": "review required",
+        "fixBenefits": "Removes a committed credential exposure and gives maintainers a precise location to inspect and rotate.",
+        "fixRisks": "Removing the line is not enough if the secret was already exposed; rotate or revoke it with the provider.",
+        "tags": ["deterministic", "static-proof", "secret", secret_kind],
+        "steps": [
+            f"Inspect `{file_path}` line {line} at the pinned commit.",
+            "Revoke or rotate the credential in the provider console.",
+            "Move the value to a secret manager or runtime environment variable.",
+            "Remove the committed value and consider history cleanup if the repository was shared.",
+        ],
+        "badCode": [],
+        "goodCode": [],
+        "references": [],
+    }
+
+
+def missing_package_script_finding(
+    *,
+    job: dict,
+    manager: str,
+    script: str,
+    readme_file: str,
+    readme_line: int,
+    package_file: str,
+    package_line: int,
+) -> dict:
+    command = f"{manager} run {script}"
+    severity = "medium" if script in _HIGH_SIGNAL_PACKAGE_SCRIPTS else "low"
+    digest_input = f"{readme_file}:{readme_line}:{package_file}:{script}".encode("utf-8")
+    finding_id = f"static_missing_script_{hashlib.sha1(digest_input).hexdigest()[:10]}"
+    repo = str(job.get("repo") or "repository")
+    commit = str(job.get("commit") or "the scanned commit")
+    return {
+        "id": finding_id,
+        "severity": severity,
+        "category": "Docs",
+        "title": f"README references missing package script `{script}`",
+        "summary": (
+            f"The README tells users to run `{command}`, but the root package.json scripts "
+            f"object does not define `{script}`."
+        ),
+        "impact": (
+            "Users following the documented setup or verification path can hit an immediate package-manager "
+            "failure before the application starts."
+        ),
+        "detectionReasoning": (
+            f"Static repository check compared `{readme_file}` with the root `{package_file}` scripts object "
+            f"at commit `{commit}` and found no `{script}` entry."
+        ),
+        "reproductionPath": (
+            f"At commit `{commit}`, inspect `{readme_file}` line {readme_line} and `{package_file}` line "
+            f"{package_line}; then run `{command}` from the repository root to verify the documented command."
+        ),
+        "verificationStatus": "static_proof",
+        "verificationSummary": (
+            "The README command and package.json scripts were compared statically; no project scripts were executed."
+        ),
+        "affectedLocations": [
+            {"file": readme_file, "startLine": readme_line, "endLine": readme_line},
+            {"file": package_file, "startLine": package_line, "endLine": package_line},
+        ],
+        "evidence": [
+            {
+                "type": "documentation",
+                "label": "README command",
+                "summary": f"`{readme_file}` documents `{command}`.",
+                "file": readme_file,
+                "startLine": readme_line,
+                "endLine": readme_line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            },
+            {
+                "type": "code",
+                "label": "package.json scripts",
+                "summary": f"The root scripts object does not define `{script}`.",
+                "file": package_file,
+                "startLine": package_line,
+                "endLine": package_line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            },
+        ],
+        "reproduction": {
+            "commands": [command],
+            "input": f"README command in {repo}: `{command}`",
+            "expected": f"`{package_file}` defines a `{script}` script or the README uses an existing command.",
+            "actual": f"`{package_file}` has no `{script}` script in the root scripts object.",
+            "testFile": "",
+            "logPath": "",
+        },
+        "whyNotFalsePositive": [
+            f"The command is explicitly documented in `{readme_file}`.",
+            f"The root `{package_file}` scripts object was parsed as JSON and does not contain `{script}`.",
+        ],
+        "limitations": [
+            "A monorepo package or external wrapper could provide this command outside the root package.json.",
+            "The checker does not execute the command, so this is static proof of a documentation/config mismatch.",
+        ],
+        "file": readme_file,
+        "line": readme_line,
+        "confidence": 0.9,
+        "confidenceRationale": (
+            "High-confidence static comparison of README command text and root package.json scripts; production "
+            "impact depends on whether users rely on this documented root command."
+        ),
+        "autoFix": False,
+        "effort": "5 min",
+        "fixBenefits": "Keeps documented setup and verification commands aligned with package.json.",
+        "fixRisks": "Low; either add the missing script or update the README to the command the project actually supports.",
+        "tags": ["deterministic", "static-proof", "docs", "package-json"],
+        "steps": [
+            f"Decide whether `{command}` should be supported at the repository root.",
+            f"Add a `{script}` entry to `{package_file}` or change `{readme_file}` to an existing script.",
+        ],
+        "badCode": [],
+        "goodCode": [],
+        "references": [],
+    }
+
+
+def missing_workflow_package_script_finding(
+    *,
+    job: dict,
+    manager: str,
+    script: str,
+    workflow_file: str,
+    workflow_line: int,
+    package_file: str,
+    package_line: int,
+) -> dict:
+    command = f"{manager} run {script}"
+    severity = "medium" if script in _HIGH_SIGNAL_PACKAGE_SCRIPTS else "low"
+    digest_input = f"{workflow_file}:{workflow_line}:{package_file}:{script}".encode("utf-8")
+    finding_id = f"static_ci_missing_script_{hashlib.sha1(digest_input).hexdigest()[:10]}"
+    commit = str(job.get("commit") or "the scanned commit")
+    grep_command = f'git grep -n "{command}" -- {shell_quote(workflow_file)}'
+    return {
+        "id": finding_id,
+        "severity": severity,
+        "category": "CI",
+        "title": f"GitHub Actions references missing package script `{script}`",
+        "summary": (
+            f"`{workflow_file}` runs `{command}`, but the root package.json scripts object does not define `{script}`."
+        ),
+        "impact": (
+            "The CI workflow can fail before build or test logic runs, blocking reproducible verification for this commit."
+        ),
+        "detectionReasoning": (
+            f"Static repository check compared `{workflow_file}` with `{package_file}` at commit `{commit}` and found "
+            f"no `{script}` script."
+        ),
+        "reproductionPath": (
+            f"At commit `{commit}`, inspect `{workflow_file}` line {workflow_line} and `{package_file}` line "
+            f"{package_line}; then run `{command}` from the repository root."
+        ),
+        "verificationStatus": "static_proof",
+        "verificationSummary": (
+            "The GitHub Actions command and package.json scripts were compared statically; the workflow was not executed."
+        ),
+        "affectedLocations": [
+            {"file": workflow_file, "startLine": workflow_line, "endLine": workflow_line},
+            {"file": package_file, "startLine": package_line, "endLine": package_line},
+        ],
+        "evidence": [
+            {
+                "type": "tool",
+                "label": "GitHub Actions command",
+                "summary": f"`{workflow_file}` runs `{command}`.",
+                "file": workflow_file,
+                "startLine": workflow_line,
+                "endLine": workflow_line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            },
+            {
+                "type": "code",
+                "label": "package.json scripts",
+                "summary": f"The root scripts object does not define `{script}`.",
+                "file": package_file,
+                "startLine": package_line,
+                "endLine": package_line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            },
+        ],
+        "reproduction": {
+            "commands": [command, grep_command],
+            "input": f"GitHub Actions command in {workflow_file}: `{command}`",
+            "expected": f"`{package_file}` defines a `{script}` script or the workflow uses an existing command.",
+            "actual": f"`{package_file}` has no `{script}` script in the root scripts object.",
+            "testFile": "",
+            "logPath": "",
+        },
+        "whyNotFalsePositive": [
+            f"The workflow command is explicitly present in `{workflow_file}`.",
+            f"The root `{package_file}` scripts object was parsed as JSON and does not contain `{script}`.",
+        ],
+        "limitations": [
+            "A workflow working-directory or monorepo package may intentionally run this command from another package.",
+            "The checker does not execute the workflow, so this is static proof of a CI/package.json mismatch at the repository root.",
+        ],
+        "file": workflow_file,
+        "line": workflow_line,
+        "confidence": 0.9,
+        "confidenceRationale": (
+            "High-confidence static comparison of GitHub Actions command text and root package.json scripts; impact depends on workflow working-directory configuration."
+        ),
+        "autoFix": False,
+        "effort": "5 min",
+        "fixBenefits": "Keeps CI verification commands aligned with package.json so users and automation can reproduce checks.",
+        "fixRisks": "Low; either add the missing script or update the workflow to an existing script or explicit working directory.",
+        "tags": ["deterministic", "static-proof", "ci", "package-json"],
+        "steps": [
+            f"Decide whether `{command}` should run at the repository root.",
+            f"Add a `{script}` entry to `{package_file}`, update `{workflow_file}`, or set the correct workflow working-directory.",
+        ],
+        "badCode": [],
+        "goodCode": [],
+        "references": [],
+    }
+
+
+def missing_dockerfile_source_finding(
+    *,
+    job: dict,
+    dockerfile_file: str,
+    dockerfile_line: int,
+    instruction: str,
+    source: str,
+) -> dict:
+    commit = str(job.get("commit") or "the scanned commit")
+    build_command = f"docker build -f {shell_quote(dockerfile_file)} ."
+    digest_input = f"{job.get('repo')}:{commit}:{dockerfile_file}:{dockerfile_line}:{source}".encode("utf-8")
+    finding_id = f"static_docker_missing_source_{hashlib.sha1(digest_input).hexdigest()[:10]}"
+    return {
+        "id": finding_id,
+        "severity": "medium",
+        "category": "Build",
+        "title": f"Dockerfile {instruction} source `{source}` is missing",
+        "summary": (
+            f"`{dockerfile_file}` line {dockerfile_line} uses `{instruction} {source}`, but `{source}` was not found in the repository checkout."
+        ),
+        "impact": (
+            "A clean Docker build can fail before the application starts, blocking a reproducible environment for this commit."
+        ),
+        "detectionReasoning": (
+            f"A deterministic Dockerfile check inspected `{dockerfile_file}` at commit `{commit}` and found a literal "
+            f"repository-local `{instruction}` source path that does not exist."
+        ),
+        "reproductionPath": (
+            f"At commit `{commit}`, inspect `{dockerfile_file}` line {dockerfile_line} and verify that `{source}` exists; "
+            f"then run `{build_command}` from the repository root."
+        ),
+        "verificationStatus": "static_proof",
+        "verificationSummary": (
+            "The Dockerfile source path was checked against the repository tree; docker build was not executed."
+        ),
+        "affectedLocations": [{"file": dockerfile_file, "startLine": dockerfile_line, "endLine": dockerfile_line}],
+        "evidence": [
+            {
+                "type": "code",
+                "label": "Dockerfile copy source",
+                "summary": f"`{instruction}` references missing repository path `{source}`.",
+                "file": dockerfile_file,
+                "startLine": dockerfile_line,
+                "endLine": dockerfile_line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            },
+            {
+                "type": "tool",
+                "label": "Repository path check",
+                "summary": f"The scanner looked for `{source}` in the repository root and did not find it.",
+                "file": dockerfile_file,
+                "startLine": dockerfile_line,
+                "endLine": dockerfile_line,
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "url": "",
+            },
+        ],
+        "reproduction": {
+            "commands": [build_command],
+            "input": f"Dockerfile instruction `{instruction} {source}`",
+            "expected": f"`{source}` exists in the Docker build context.",
+            "actual": f"`{source}` is absent from the repository checkout.",
+            "testFile": "",
+            "logPath": "",
+        },
+        "whyNotFalsePositive": [
+            f"The source path `{source}` is a literal local path, not a URL, glob, variable, or multi-stage `--from` source.",
+            f"The finding points to a concrete Dockerfile line: `{dockerfile_file}:{dockerfile_line}`.",
+        ],
+        "limitations": [
+            "The check assumes `docker build` uses the repository root as build context.",
+            "If the missing source is generated before docker build, this may be an environment/setup requirement rather than a committed file issue.",
+        ],
+        "file": dockerfile_file,
+        "line": dockerfile_line,
+        "confidence": 0.88,
+        "confidenceRationale": (
+            "A literal Dockerfile COPY/ADD source is missing from the repository tree; impact depends on build context and pre-build generation steps."
+        ),
+        "autoFix": False,
+        "effort": "5 min",
+        "fixBenefits": "Restores a Docker build path that users can reproduce from a clean checkout.",
+        "fixRisks": "Low; add the missing file, correct the Dockerfile path, or document the required generation step.",
+        "tags": ["deterministic", "static-proof", "dockerfile", "build"],
+        "steps": [
+            f"Confirm whether `{source}` should be committed or generated before Docker build.",
+            f"Update `{dockerfile_file}` or add the missing source, then run `{build_command}`.",
+        ],
+        "badCode": [],
+        "goodCode": [],
+        "references": [],
+    }
+
+
+def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str]:
     errors: list[str] = []
+    try:
+        deterministic_payload = audit_swarm_payload_from_findings(
+            run_deterministic_repository_checks(job, checkout_dir),
+            verifier_role="deterministic-check",
+        )
+    except Exception as exc:
+        deterministic_payload = empty_audit_swarm_payload()
+        errors.append(f"deterministic: {redact_secrets(str(exc), config)}"[:500])
     for provider in config.provider_chain:
         try:
             if provider == "codex":
-                findings, summary, logs_summary = run_codex_provider_review(config, job, checkout_dir)
+                audit_payload, _summary, logs_summary = run_codex_provider_review(config, job, checkout_dir)
             elif provider == "opencode":
-                findings, summary, logs_summary = run_opencode_provider_review(config, job, checkout_dir)
+                audit_payload, _summary, logs_summary = run_opencode_provider_review(config, job, checkout_dir)
             else:
                 raise RuntimeError(f"unsupported review provider: {provider}")
-            findings = normalize_finding_files_for_checkout(findings, checkout_dir)
-            summary = summarize(findings)
+            audit_payload = normalize_audit_swarm_files_for_checkout(audit_payload, checkout_dir)
+            audit_payload = merge_audit_swarm_payloads(deterministic_payload, audit_payload)
+            summary = summarize(audit_swarm_findings_from_payload(audit_payload) or [])
             if errors:
                 logs_summary = "\n".join([*errors, logs_summary])[-1000:]
-            return findings, summary, logs_summary
+            return audit_payload, summary, logs_summary
         except Exception as exc:
             errors.append(f"{provider}: {redact_secrets(str(exc), config)}"[:500])
     raise RuntimeError(f"all review providers failed: {'; '.join(errors)}")
 
 
-def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[list[dict], dict, str]:
+def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str]:
     prompt = review_prompt(job)
     with tempfile.TemporaryDirectory(prefix="pullwise-codex-") as tmpdir:
-        schema_path = Path(tmpdir) / "findings.schema.json"
-        output_path = Path(tmpdir) / "findings.json"
-        schema_path.write_text(json.dumps(findings_schema()), encoding="utf-8")
+        schema_path = Path(tmpdir) / "audit-swarm.schema.json"
+        output_path = Path(tmpdir) / "audit-swarm.json"
+        schema_path.write_text(json.dumps(audit_swarm_output_schema()), encoding="utf-8")
         command = codex_review_command(config, str(schema_path), str(output_path), prompt)
         completed = subprocess.run(
             command,
@@ -575,8 +2232,8 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
         if completed.returncode != 0:
             raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {logs_summary[:300]}")
         output = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
-    findings = parse_findings(output)
-    return findings, summarize(findings), logs_summary
+    audit_payload = parse_audit_swarm_payload(output)
+    return audit_payload, summarize(audit_swarm_findings_from_payload(audit_payload) or []), logs_summary
 
 
 def codex_review_command(config: WorkerConfig, schema_path: str, output_path: str, prompt: str) -> list[str]:
@@ -600,7 +2257,7 @@ def codex_review_command(config: WorkerConfig, schema_path: str, output_path: st
     return command
 
 
-def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[list[dict], dict, str]:
+def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str]:
     prompt = review_prompt(job)
     command = opencode_review_command(config, prompt)
     completed = subprocess.run(
@@ -614,8 +2271,8 @@ def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: 
     logs_summary = redact_secrets((completed.stderr or completed.stdout)[-1000:], config)
     if completed.returncode != 0:
         raise RuntimeError(f"opencode run failed with exit code {completed.returncode}: {logs_summary[:300]}")
-    findings = parse_findings(completed.stdout)
-    return findings, summarize(findings), logs_summary
+    audit_payload = parse_audit_swarm_payload(completed.stdout)
+    return audit_payload, summarize(audit_swarm_findings_from_payload(audit_payload) or []), logs_summary
 
 
 def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
@@ -629,42 +2286,21 @@ def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
 
 
 def review_prompt(job: dict) -> str:
-    required_fields = ", ".join(
-        [
-            "id",
-            "severity",
-            "category",
-            "title",
-            "summary",
-            "impact",
-            "detectionReasoning",
-            "reproductionPath",
-            "file",
-            "line",
-            "confidence",
-            "confidenceRationale",
-            "autoFix",
-            "effort",
-            "fixBenefits",
-            "fixRisks",
-            "tags",
-            "steps",
-            "badCode",
-            "goodCode",
-            "references",
-        ]
-    )
     return (
-        "Review this repository for production-impacting bugs, security issues, dependency risks, "
-        "and reliability problems. Return only JSON with a top-level findings array. Each finding must "
-        f"include these schema-required fields: {required_fields}. Use empty arrays for badCode, "
-        "goodCode, and references when not applicable. The file field must be a repository-relative "
-        "path; never include the worker checkout directory or any absolute server filesystem path. "
+        "Run the Audit Swarm protocol for this repository. Return only JSON with top-level "
+        "`audit_protocol`, `issue_cards`, and `verification_results`. Do not return Pullwise legacy "
+        "`findings`. Each issue card is a hypothesis and must include a concrete title, severity "
+        "(P0/P1/P2/P3/P4 or critical/high/medium/low/info), one or more repository-relative locations, "
+        "a claim, evidence, reproduction_idea, suggested_test, and false_positive_checks. "
+        "Each verification result must reference an issue_id and use verdict `confirmed`, `rejected`, "
+        "or `inconclusive`; include commands_run only for commands a user can copy to verify the issue. "
+        "Do not emit vague concerns. Do not include absolute worker checkout paths or server filesystem paths. "
+        "If a candidate has no file/line, no evidence, and no verifiable hypothesis, omit it. "
         f"Repository: {job.get('repo')} branch: {job.get('branch')} commit: {job.get('commit')}."
     )
 
 
-def parse_findings(output: str) -> list[dict]:
+def parse_audit_swarm_payload(output: str) -> dict:
     decoder = json.JSONDecoder()
     text = output.strip()
     candidates = [text]
@@ -673,26 +2309,709 @@ def parse_findings(output: str) -> list[dict]:
     if first >= 0 and last > first:
         candidates.append(text[first : last + 1])
     candidates.extend(line.strip() for line in text.splitlines() if line.strip().startswith(("{", "[")))
-    matched: list[dict] | None = None
+    matched: dict | None = None
     for candidate in candidates:
         try:
             parsed = decoder.decode(candidate)
         except json.JSONDecodeError:
             continue
-        findings = findings_from_payload(parsed)
-        if findings is not None:
-            matched = findings
+        payload = audit_swarm_payload_from_document(parsed)
+        if payload is not None:
+            matched = payload
     if matched is not None:
         return matched
-    raise RuntimeError("codex exec did not return a JSON findings payload")
+    raise RuntimeError("review provider did not return an Audit Swarm payload")
 
 
-def findings_from_payload(parsed: object) -> list[dict] | None:
-    if isinstance(parsed, dict) and isinstance(parsed.get("findings"), list) and "event" not in parsed:
-        return [item for item in parsed["findings"] if isinstance(item, dict)]
-    if isinstance(parsed, list):
-        return [item for item in parsed if isinstance(item, dict)]
+def audit_swarm_payload_from_document(parsed: object) -> dict | None:
+    if not isinstance(parsed, dict) or "event" in parsed:
+        return None
+    cards = first_list(parsed, "issue_cards", "issueCards")
+    if cards is None:
+        return None
+    results = first_list(parsed, "verification_results", "verificationResults") or []
+    return {
+        "audit_protocol": clean_protocol_text(
+            parsed.get("audit_protocol") or parsed.get("auditProtocol") or AUDIT_SWARM_PROTOCOL_VERSION
+        )
+        or AUDIT_SWARM_PROTOCOL_VERSION,
+        "issue_cards": [item for item in cards if isinstance(item, dict)],
+        "verification_results": [item for item in results if isinstance(item, dict)],
+    }
+
+
+def empty_audit_swarm_payload() -> dict:
+    return {
+        "audit_protocol": AUDIT_SWARM_PROTOCOL_VERSION,
+        "issue_cards": [],
+        "verification_results": [],
+    }
+
+
+def merge_audit_swarm_payloads(*payloads: dict) -> dict:
+    merged = empty_audit_swarm_payload()
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        protocol = clean_protocol_text(payload.get("audit_protocol") or payload.get("auditProtocol"))
+        if protocol:
+            merged["audit_protocol"] = protocol
+        cards = first_list(payload, "issue_cards", "issueCards") or []
+        results = first_list(payload, "verification_results", "verificationResults") or []
+        merged["issue_cards"].extend(item for item in cards if isinstance(item, dict))
+        merged["verification_results"].extend(item for item in results if isinstance(item, dict))
+    return merged
+
+
+def filter_audit_swarm_payload_by_findings(payload: dict, findings: list[dict]) -> dict:
+    reported_ids = {clean_protocol_text(finding.get("id")) for finding in findings if isinstance(finding, dict)}
+    filtered_cards = []
+    for index, card in enumerate(first_list(payload, "issue_cards", "issueCards") or []):
+        if not isinstance(card, dict):
+            continue
+        card_id = audit_swarm_issue_key(card) or audit_swarm_generated_id(card, index)
+        if card_id in reported_ids:
+            next_card = dict(card)
+            next_card.setdefault("issue_id", card_id)
+            filtered_cards.append(next_card)
+    filtered_card_ids = {audit_swarm_issue_key(card) for card in filtered_cards}
+    filtered_results = [
+        result
+        for result in (first_list(payload, "verification_results", "verificationResults") or [])
+        if isinstance(result, dict)
+        and clean_protocol_text(result.get("issue_id") or result.get("issueId")) in filtered_card_ids
+    ]
+    return {
+        "audit_protocol": clean_protocol_text(payload.get("audit_protocol") or payload.get("auditProtocol"))
+        or AUDIT_SWARM_PROTOCOL_VERSION,
+        "issue_cards": filtered_cards,
+        "verification_results": filtered_results,
+    }
+
+
+def audit_swarm_payload_from_findings(findings: list[dict], *, verifier_role: str) -> dict:
+    payload = empty_audit_swarm_payload()
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            continue
+        card = issue_card_from_finding(finding, index)
+        payload["issue_cards"].append(card)
+        payload["verification_results"].append(verification_result_from_finding(finding, card, verifier_role))
+    return payload
+
+
+def issue_card_from_finding(finding: dict, index: int) -> dict:
+    issue_id = clean_protocol_text(finding.get("id")) or audit_swarm_generated_id(finding, index)
+    locations = []
+    raw_locations = finding.get("affectedLocations") if isinstance(finding.get("affectedLocations"), list) else []
+    for item in raw_locations:
+        if not isinstance(item, dict):
+            continue
+        file_path = safe_repo_relative_file(item.get("file"))
+        if file_path:
+            start_line = positive_int(item.get("startLine") or item.get("line"))
+            end_line = positive_int(item.get("endLine") or item.get("startLine") or item.get("line"))
+            locations.append({"file": file_path, "startLine": start_line, "endLine": end_line or start_line})
+    file_path = safe_repo_relative_file(finding.get("file"))
+    line = positive_int(finding.get("line"))
+    if file_path and not locations:
+        locations.append({"file": file_path, "startLine": line, "endLine": line})
+    return {
+        "issue_id": issue_id,
+        "shard_id": clean_protocol_text(finding.get("category")).lower() or "repository",
+        "agent_role": clean_protocol_text(finding.get("agent_role") or finding.get("agentRole")) or "deterministic-reviewer",
+        "title": clean_protocol_text(finding.get("title")) or f"Audit candidate {index + 1}",
+        "category": clean_protocol_text(finding.get("category")) or "Quality",
+        "severity": clean_protocol_text(finding.get("severity")) or "medium",
+        "confidence": finding.get("confidence", 0.9),
+        "locations": locations,
+        "claim": protocol_multiline_text(finding.get("summary") or finding.get("claim") or finding.get("title")),
+        "violated_invariants": protocol_text_list(finding.get("violated_invariants") or finding.get("violatedInvariants")),
+        "evidence": [
+            item if isinstance(item, dict) else protocol_multiline_text(item)
+            for item in (finding.get("evidence") if isinstance(finding.get("evidence"), list) else [])
+        ],
+        "reproduction_idea": protocol_multiline_text(finding.get("reproductionPath")),
+        "suggested_test": audit_swarm_suggested_test_from_finding(finding),
+        "false_positive_checks": protocol_text_list(finding.get("whyNotFalsePositive")),
+        "limitations": protocol_text_list(finding.get("limitations")),
+        "impact": protocol_multiline_text(finding.get("impact")),
+        "steps": protocol_text_list(finding.get("steps")),
+        "references": finding.get("references") if isinstance(finding.get("references"), list) else [],
+    }
+
+
+def verification_result_from_finding(finding: dict, card: dict, verifier_role: str) -> dict:
+    status = clean_protocol_text(finding.get("verificationStatus")).lower()
+    commands = []
+    reproduction = finding.get("reproduction") if isinstance(finding.get("reproduction"), dict) else {}
+    raw_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+    verdict = "confirmed" if status in {"verified", "static_proof"} else "inconclusive"
+    proof_type = "failing_test" if status == "verified" else "static_proof"
+    if status == "verified":
+        commands.extend(protocol_text_list(reproduction.get("commands")))
+        commands.extend(clean_protocol_text(item.get("command")) for item in raw_evidence if isinstance(item, dict) and item.get("command"))
+    return {
+        "issue_id": card["issue_id"],
+        "verifier_role": verifier_role,
+        "verdict": verdict,
+        "confidence": finding.get("confidence", 0.9),
+        "proof_type": proof_type,
+        "proof_strength": 3 if verdict == "confirmed" else 1,
+        "evidence": audit_swarm_verification_evidence_from_finding(finding),
+        "commands_run": dedupe_text(commands)[:5],
+        "result_summary": protocol_multiline_text(finding.get("verificationSummary") or finding.get("summary")),
+        "notes_for_fix": protocol_text_list(finding.get("steps")),
+    }
+
+
+def audit_swarm_suggested_test_from_finding(finding: dict) -> str:
+    reproduction = finding.get("reproduction") if isinstance(finding.get("reproduction"), dict) else {}
+    commands = protocol_text_list(reproduction.get("commands"))
+    if commands:
+        return f"Run `{commands[0]}`."
+    return ""
+
+
+def audit_swarm_verification_evidence_from_finding(finding: dict) -> list[str]:
+    evidence = []
+    summary = protocol_multiline_text(finding.get("verificationSummary"))
+    if summary:
+        evidence.append(summary)
+    raw_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            continue
+        item_summary = protocol_multiline_text(item.get("summary"))
+        if item_summary:
+            evidence.append(item_summary)
+    return dedupe_text(evidence)[:8]
+
+
+def normalize_audit_swarm_files_for_checkout(payload: dict, checkout_dir: Path) -> dict:
+    normalized = merge_audit_swarm_payloads(payload)
+    for card in normalized["issue_cards"]:
+        raw_locations = card.get("locations") if isinstance(card.get("locations"), list) else []
+        for location in raw_locations:
+            if isinstance(location, dict):
+                location["file"] = normalize_finding_file_for_checkout(location.get("file"), checkout_dir)
+        raw_evidence = card.get("evidence") if isinstance(card.get("evidence"), list) else []
+        for item in raw_evidence:
+            if isinstance(item, dict):
+                item["file"] = normalize_finding_file_for_checkout(item.get("file"), checkout_dir)
+        if card.get("file"):
+            card["file"] = normalize_finding_file_for_checkout(card.get("file"), checkout_dir)
+    return normalized
+
+
+def audit_swarm_findings_from_payload(parsed: object) -> list[dict] | None:
+    if not isinstance(parsed, dict) or "event" in parsed:
+        return None
+    cards = first_list(parsed, "issue_cards", "issueCards")
+    if cards is None:
+        return None
+    verification_results = first_list(parsed, "verification_results", "verificationResults") or []
+    by_issue = audit_swarm_verifications_by_issue(verification_results)
+    findings = []
+    for index, card in enumerate(cards):
+        if isinstance(card, dict):
+            findings.append(audit_swarm_issue_card_to_finding(card, by_issue.get(audit_swarm_issue_key(card), []), index))
+    return findings
+
+
+def first_list(source: dict, *keys: str) -> list | None:
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, list):
+            return value
     return None
+
+
+def audit_swarm_issue_key(card: dict) -> str:
+    return clean_protocol_text(
+        card.get("issue_id")
+        or card.get("issueId")
+        or card.get("id")
+        or card.get("candidate_id")
+        or card.get("candidateId")
+    )
+
+
+def audit_swarm_verifications_by_issue(results: list) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        issue_id = clean_protocol_text(
+            result.get("issue_id")
+            or result.get("issueId")
+            or result.get("id")
+            or result.get("candidate_id")
+            or result.get("candidateId")
+        )
+        if not issue_id:
+            continue
+        grouped.setdefault(issue_id, []).append(result)
+    return grouped
+
+
+def audit_swarm_issue_card_to_finding(card: dict, verifications: list[dict], index: int) -> dict:
+    issue_id = audit_swarm_issue_key(card)
+    locations = audit_swarm_locations(card)
+    primary = locations[0] if locations else {}
+    verdict = audit_swarm_verdict(verifications)
+    severity = audit_swarm_severity(card.get("severity"))
+    category = audit_swarm_category(card)
+    evidence = audit_swarm_evidence(card, verifications, primary)
+    reproduction = audit_swarm_reproduction(card, verifications)
+    confidence = audit_swarm_confidence(card.get("confidence"), verdict)
+    finding_id = issue_id if issue_id and issue_id.lower() not in {"null", "none"} else audit_swarm_generated_id(card, index)
+    claim = protocol_multiline_text(card.get("claim") or card.get("summary") or card.get("description"))
+    title = clean_protocol_text(card.get("title")) or f"Audit candidate {index + 1}"
+    verification_summary = audit_swarm_verification_summary(verifications, verdict)
+    invariants = protocol_text_list(card.get("violated_invariants") or card.get("violatedInvariants"))
+    false_positive_checks = protocol_text_list(card.get("false_positive_checks") or card.get("falsePositiveChecks"))
+    limitations = [
+        *(f"Violated invariant: {item}" for item in invariants),
+        *(f"False-positive check: {item}" for item in false_positive_checks),
+        *protocol_text_list(card.get("limitations")),
+    ]
+    why_not_false_positive = audit_swarm_positive_checks(verifications)
+    return {
+        "id": finding_id,
+        "severity": severity,
+        "category": category,
+        "title": title,
+        "summary": claim or title,
+        "impact": protocol_multiline_text(card.get("impact")) or audit_swarm_impact_from_invariants(invariants),
+        "detectionReasoning": audit_swarm_detection_reasoning(card, verifications),
+        "reproductionPath": audit_swarm_reproduction_path(card, verifications),
+        "verificationStatus": audit_swarm_verification_status(verdict, verifications),
+        "verificationSummary": verification_summary,
+        "affectedLocations": locations,
+        "evidence": evidence,
+        "reproduction": reproduction,
+        "whyNotFalsePositive": why_not_false_positive,
+        "limitations": limitations[:8],
+        "file": str(primary.get("file") or ""),
+        "line": int(primary.get("startLine") or 0),
+        "confidence": confidence,
+        "confidenceRationale": audit_swarm_confidence_rationale(card, verifications, verdict, confidence),
+        "autoFix": False,
+        "effort": clean_protocol_text(card.get("effort")) or "review required",
+        "fixBenefits": protocol_multiline_text(card.get("fixBenefits") or card.get("fix_benefits")),
+        "fixRisks": protocol_multiline_text(card.get("fixRisks") or card.get("fix_risks")),
+        "tags": audit_swarm_tags(card, verifications),
+        "steps": audit_swarm_steps(card),
+        "badCode": [],
+        "goodCode": [],
+        "references": audit_swarm_references(card),
+        "_auditSwarmVerdict": verdict,
+        "_auditSwarmRole": clean_protocol_text(card.get("agent_role") or card.get("agentRole")),
+        "_auditSwarmShard": clean_protocol_text(card.get("shard_id") or card.get("shardId")),
+    }
+
+
+def audit_swarm_generated_id(card: dict, index: int) -> str:
+    seed = json.dumps(card, ensure_ascii=False, sort_keys=True, default=str)
+    digest = hashlib.sha1(f"{index}:{seed}".encode("utf-8")).hexdigest()[:10]
+    return f"audit_swarm_{digest}"
+
+
+def audit_swarm_verdict(verifications: list[dict]) -> str:
+    verdicts = [clean_protocol_text(item.get("verdict")).lower() for item in verifications if isinstance(item, dict)]
+    if "confirmed" in verdicts:
+        return "confirmed"
+    if verdicts and all(item == "rejected" for item in verdicts):
+        return "rejected"
+    if "inconclusive" in verdicts:
+        return "inconclusive"
+    return "candidate"
+
+
+def audit_swarm_verification_status(verdict: str, verifications: list[dict]) -> str:
+    if verdict == "confirmed":
+        proof_types = {
+            clean_protocol_text(item.get("proof_type") or item.get("proofType")).lower()
+            for item in verifications
+            if isinstance(item, dict)
+        }
+        has_command = any(protocol_text_list(item.get("commands_run") or item.get("commandsRun")) for item in verifications)
+        if proof_types & {"failing_test", "runtime_log", "test", "command"} or has_command:
+            return "verified"
+        return "static_proof"
+    if verdict == "rejected":
+        return "unverified"
+    if verdict == "inconclusive":
+        return "potential_risk"
+    return "potential_risk"
+
+
+def audit_swarm_severity(value: object) -> str:
+    severity = clean_protocol_text(value).lower()
+    mapping = {
+        "p0": "critical",
+        "p1": "high",
+        "p2": "medium",
+        "p3": "low",
+        "p4": "info",
+        "critical": "critical",
+        "high": "high",
+        "medium": "medium",
+        "low": "low",
+        "info": "info",
+    }
+    return mapping.get(severity, "medium")
+
+
+def audit_swarm_category(card: dict) -> str:
+    raw = " ".join(
+        clean_protocol_text(value).lower()
+        for value in (card.get("category"), card.get("agent_role"), card.get("agentRole"))
+        if clean_protocol_text(value)
+    )
+    if "security" in raw or "auth" in raw or "permission" in raw:
+        return "Security"
+    if "performance" in raw:
+        return "Performance"
+    if "dependency" in raw or "cve" in raw:
+        return "Dependencies"
+    if "test" in raw or "coverage" in raw:
+        return "Tests"
+    if "doc" in raw:
+        return "Docs"
+    if "architecture" in raw or "contract" in raw or "api" in raw:
+        return "Architecture"
+    return "Quality"
+
+
+def audit_swarm_confidence(value: object, verdict: str) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError, OverflowError):
+        confidence = 0.7
+    confidence = max(0.0, min(1.0, confidence))
+    if verdict == "confirmed":
+        return max(confidence, 0.85)
+    if verdict == "rejected":
+        return min(confidence, 0.2)
+    if verdict == "inconclusive":
+        return min(confidence, 0.79)
+    return confidence
+
+
+def audit_swarm_locations(card: dict) -> list[dict]:
+    raw_locations = first_list(card, "locations", "affectedLocations", "affected_locations") or []
+    locations = []
+    seen = set()
+    for item in raw_locations:
+        if not isinstance(item, dict):
+            continue
+        file_path = safe_repo_relative_file(item.get("file") or item.get("path"))
+        if not file_path:
+            continue
+        start_line, end_line = audit_swarm_line_range(item)
+        key = (file_path, start_line, end_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        locations.append({"file": file_path, "startLine": start_line, "endLine": end_line})
+    file_path = safe_repo_relative_file(card.get("file"))
+    if file_path:
+        line = positive_int(card.get("line"))
+        key = (file_path, line, line)
+        if key not in seen:
+            locations.append({"file": file_path, "startLine": line, "endLine": line})
+    return locations[:10]
+
+
+def audit_swarm_line_range(item: dict) -> tuple[int, int]:
+    start = positive_int(item.get("startLine") or item.get("start_line") or item.get("line"))
+    end = positive_int(item.get("endLine") or item.get("end_line"))
+    lines = clean_protocol_text(item.get("lines") or item.get("lineRange") or item.get("line_range"))
+    if lines and not start:
+        match = re.search(r"(\d+)(?:\s*[-:]\s*(\d+))?", lines)
+        if match:
+            start = int(match.group(1))
+            end = int(match.group(2) or match.group(1))
+    if start and (not end or end < start):
+        end = start
+    return start, end
+
+
+def audit_swarm_evidence(card: dict, verifications: list[dict], primary: dict) -> list[dict]:
+    evidence = []
+    role = clean_protocol_text(card.get("agent_role") or card.get("agentRole")) or "discovery agent"
+    for index, item in enumerate(first_list(card, "evidence") or []):
+        if isinstance(item, dict):
+            summary = protocol_multiline_text(item.get("summary") or item.get("claim") or item.get("text"))
+            file_path = safe_repo_relative_file(item.get("file") or item.get("path")) or str(primary.get("file") or "")
+            start_line, end_line = audit_swarm_line_range(item)
+            record = {
+                "type": audit_swarm_evidence_type(item.get("type"), default="code" if file_path else "path"),
+                "label": clean_protocol_text(item.get("label")) or f"{role} evidence",
+                "summary": summary,
+                "file": file_path,
+                "startLine": start_line or int(primary.get("startLine") or 0),
+                "endLine": end_line or int(primary.get("endLine") or primary.get("startLine") or 0),
+                "command": clean_protocol_text(item.get("command")),
+                "exitCode": positive_int(item.get("exitCode") or item.get("exit_code")),
+                "logPath": clean_protocol_text(item.get("logPath") or item.get("log_path")),
+                "output": protocol_multiline_text(item.get("output"))[:4000],
+                "url": clean_protocol_text(item.get("url")),
+            }
+        else:
+            summary = protocol_multiline_text(item)
+            record = {
+                "type": "code" if primary.get("file") else "path",
+                "label": f"{role} evidence" if index == 0 else "Discovery evidence",
+                "summary": summary,
+                "file": str(primary.get("file") or ""),
+                "startLine": int(primary.get("startLine") or 0),
+                "endLine": int(primary.get("endLine") or primary.get("startLine") or 0),
+                "command": "",
+                "exitCode": 0,
+                "logPath": "",
+                "output": "",
+                "url": "",
+            }
+        if any(record.get(key) for key in ("summary", "file", "command", "logPath", "output", "url")):
+            evidence.append(record)
+    for result in verifications:
+        if not isinstance(result, dict):
+            continue
+        verifier_role = clean_protocol_text(result.get("verifier_role") or result.get("verifierRole")) or "verifier"
+        proof_type = clean_protocol_text(result.get("proof_type") or result.get("proofType"))
+        evidence_type = audit_swarm_evidence_type(proof_type, default="test" if proof_type else "tool")
+        commands = protocol_text_list(result.get("commands_run") or result.get("commandsRun"))
+        for index, summary in enumerate(protocol_text_list(result.get("evidence"))):
+            evidence.append(
+                {
+                    "type": evidence_type,
+                    "label": f"{verifier_role} verification" if index == 0 else "Verification evidence",
+                    "summary": summary,
+                    "file": str(primary.get("file") or ""),
+                    "startLine": int(primary.get("startLine") or 0),
+                    "endLine": int(primary.get("endLine") or primary.get("startLine") or 0),
+                    "command": commands[0] if commands else "",
+                    "exitCode": 0,
+                    "logPath": clean_protocol_text(result.get("logPath") or result.get("log_path")),
+                    "output": protocol_multiline_text(result.get("output"))[:4000],
+                    "url": "",
+                }
+            )
+    return evidence[:20]
+
+
+def audit_swarm_evidence_type(value: object, *, default: str) -> str:
+    raw = clean_protocol_text(value).lower()
+    if raw in {"failing_test", "test"}:
+        return "test"
+    if raw in {"runtime", "runtime_log", "command"}:
+        return "runtime_log"
+    if raw in {"static", "static_proof", "code"}:
+        return "code"
+    if raw in {"path", "reachability", "data_flow", "data-flow"}:
+        return "path"
+    if raw in {"trigger", "input"}:
+        return "trigger"
+    if raw in {"documentation", "docs"}:
+        return "documentation"
+    if raw in {"fix", "fix_verification"}:
+        return "fix_verification"
+    if raw in {"tool", "environment"}:
+        return raw
+    return default
+
+
+def audit_swarm_reproduction(card: dict, verifications: list[dict]) -> dict:
+    commands = []
+    for result in verifications:
+        if isinstance(result, dict):
+            commands.extend(protocol_text_list(result.get("commands_run") or result.get("commandsRun")))
+    reproduction = card.get("reproduction") if isinstance(card.get("reproduction"), dict) else {}
+    commands.extend(protocol_text_list(reproduction.get("commands")))
+    commands = dedupe_text(commands)[:5]
+    return {
+        "commands": commands,
+        "input": protocol_multiline_text(reproduction.get("input") or card.get("trigger") or card.get("input")),
+        "expected": protocol_multiline_text(reproduction.get("expected") or card.get("expected")),
+        "actual": audit_swarm_actual_result(verifications) or protocol_multiline_text(reproduction.get("actual") or card.get("actual")),
+        "testFile": clean_protocol_text(reproduction.get("testFile") or reproduction.get("test_file") or card.get("test_file") or card.get("testFile")),
+        "logPath": clean_protocol_text(reproduction.get("logPath") or reproduction.get("log_path")),
+    }
+
+
+def audit_swarm_actual_result(verifications: list[dict]) -> str:
+    for result in verifications:
+        if not isinstance(result, dict):
+            continue
+        summary = protocol_multiline_text(result.get("result_summary") or result.get("resultSummary"))
+        if summary:
+            return summary
+    return ""
+
+
+def audit_swarm_detection_reasoning(card: dict, verifications: list[dict]) -> str:
+    parts = []
+    role = clean_protocol_text(card.get("agent_role") or card.get("agentRole"))
+    shard = clean_protocol_text(card.get("shard_id") or card.get("shardId"))
+    if role or shard:
+        parts.append(f"{role or 'reviewer'} reported this candidate" + (f" in shard `{shard}`." if shard else "."))
+    claim = protocol_multiline_text(card.get("claim"))
+    if claim:
+        parts.append(f"Claim: {claim}")
+    for invariant in protocol_text_list(card.get("violated_invariants") or card.get("violatedInvariants"))[:3]:
+        parts.append(f"Violated invariant: {invariant}")
+    for result in verifications[:3]:
+        if not isinstance(result, dict):
+            continue
+        verifier = clean_protocol_text(result.get("verifier_role") or result.get("verifierRole")) or "verifier"
+        verdict = clean_protocol_text(result.get("verdict"))
+        summary = protocol_multiline_text(result.get("result_summary") or result.get("resultSummary"))
+        if verdict or summary:
+            parts.append(f"{verifier} verdict: {verdict or 'reviewed'}" + (f" - {summary}" if summary else "."))
+    return " ".join(parts)[:1200]
+
+
+def audit_swarm_reproduction_path(card: dict, verifications: list[dict]) -> str:
+    parts = []
+    reproduction_idea = protocol_multiline_text(card.get("reproduction_idea") or card.get("reproductionIdea"))
+    suggested_test = protocol_multiline_text(card.get("suggested_test") or card.get("suggestedTest"))
+    if reproduction_idea:
+        parts.append(reproduction_idea)
+    if suggested_test:
+        parts.append(f"Suggested test: {suggested_test}")
+    for result in verifications:
+        if not isinstance(result, dict):
+            continue
+        commands = protocol_text_list(result.get("commands_run") or result.get("commandsRun"))
+        if commands:
+            parts.append(f"Verifier command: {commands[0]}")
+            break
+    return " ".join(parts)[:1000]
+
+
+def audit_swarm_verification_summary(verifications: list[dict], verdict: str) -> str:
+    for result in verifications:
+        if not isinstance(result, dict):
+            continue
+        summary = protocol_multiline_text(result.get("result_summary") or result.get("resultSummary"))
+        if summary:
+            role = clean_protocol_text(result.get("verifier_role") or result.get("verifierRole"))
+            return f"{role}: {summary}" if role else summary
+    if verdict == "confirmed":
+        return "Audit verifier confirmed this candidate."
+    if verdict == "rejected":
+        return "Audit verifier rejected this candidate before reporting."
+    if verdict == "inconclusive":
+        return "Audit verifier could not conclusively prove or disprove this candidate."
+    return "Discovery candidate has not been independently verified."
+
+
+def audit_swarm_confidence_rationale(card: dict, verifications: list[dict], verdict: str, confidence: float) -> str:
+    explicit = protocol_multiline_text(card.get("confidenceRationale") or card.get("confidence_rationale"))
+    if explicit:
+        return explicit
+    if verifications:
+        return f"Audit Swarm verdict is {verdict}; projected confidence is {confidence:.2f} after verifier evidence."
+    return f"Discovery confidence is {confidence:.2f}; no separate verifier result was supplied in the payload."
+
+
+def audit_swarm_impact_from_invariants(invariants: list[str]) -> str:
+    if invariants:
+        return f"The finding may violate this required behavior: {invariants[0]}"
+    return ""
+
+
+def audit_swarm_positive_checks(verifications: list[dict]) -> list[str]:
+    checks = []
+    for result in verifications:
+        if not isinstance(result, dict):
+            continue
+        role = clean_protocol_text(result.get("verifier_role") or result.get("verifierRole")) or "verifier"
+        for item in protocol_text_list(result.get("evidence"))[:3]:
+            checks.append(f"{role}: {item}")
+    return dedupe_text(checks)[:6]
+
+
+def audit_swarm_tags(card: dict, verifications: list[dict]) -> list[str]:
+    tags = ["audit-swarm"]
+    tags.extend(protocol_text_list(card.get("risk_tags") or card.get("riskTags")))
+    tags.extend(protocol_text_list(card.get("tags")))
+    for value in (card.get("agent_role"), card.get("agentRole"), card.get("shard_id"), card.get("shardId")):
+        text = clean_protocol_text(value)
+        if text:
+            tags.append(text)
+    for result in verifications:
+        if isinstance(result, dict):
+            role = clean_protocol_text(result.get("verifier_role") or result.get("verifierRole"))
+            if role:
+                tags.append(role)
+    return [slugify_tag(tag) for tag in dedupe_text(tags) if slugify_tag(tag)][:12]
+
+
+def audit_swarm_steps(card: dict) -> list[str]:
+    steps = protocol_text_list(card.get("steps"))
+    suggested_test = protocol_multiline_text(card.get("suggested_test") or card.get("suggestedTest"))
+    remediation = protocol_multiline_text(card.get("remediation") or card.get("fix"))
+    if suggested_test:
+        steps.append(f"Add or run the suggested test: {suggested_test}")
+    if remediation:
+        steps.append(remediation)
+    return dedupe_text(steps)[:8]
+
+
+def audit_swarm_references(card: dict) -> list[dict]:
+    references = []
+    for item in first_list(card, "references") or []:
+        if isinstance(item, dict):
+            label = clean_protocol_text(item.get("label")) or clean_protocol_text(item.get("url"))
+            url = clean_protocol_text(item.get("url"))
+        else:
+            label = clean_protocol_text(item)
+            url = clean_protocol_text(item)
+        if label and url.startswith(("http://", "https://")):
+            references.append({"label": label, "url": url})
+    return references[:10]
+
+
+def protocol_text_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [text for text in (protocol_multiline_text(item) for item in value) if text]
+
+
+def clean_protocol_text(value: object) -> str:
+    if isinstance(value, bool) or value is None:
+        return ""
+    text = str(value).replace("\x00", "")
+    lines = text.splitlines()
+    text = lines[0] if lines else text
+    text = text.strip()
+    return text[:500]
+
+
+def protocol_multiline_text(value: object) -> str:
+    if isinstance(value, bool) or value is None:
+        return ""
+    text = str(value).replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text[:4000]
+
+
+def dedupe_text(items: list[str]) -> list[str]:
+    deduped = []
+    seen = set()
+    for item in items:
+        text = protocol_multiline_text(item)
+        if text and text not in seen:
+            seen.add(text)
+            deduped.append(text)
+    return deduped
+
+
+def slugify_tag(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:40]
 
 
 def normalize_finding_files_for_checkout(findings: list[dict], checkout_dir: Path) -> list[dict]:
@@ -750,60 +3069,99 @@ def safe_repo_relative_file(value: object) -> str:
     return "/".join(parts)
 
 
-def findings_schema() -> dict:
-    code_line = {
+def audit_swarm_output_schema() -> dict:
+    location = {
         "type": "object",
-        "additionalProperties": False,
+        "additionalProperties": True,
         "properties": {
-            "ln": {"type": "integer"},
-            "code": {"type": "string"},
-            "t": {"type": ["string", "null"], "enum": ["del", "add", None]},
+            "file": {"type": "string"},
+            "lines": {"type": "string"},
+            "startLine": {"type": "integer"},
+            "endLine": {"type": "integer"},
         },
-        "required": ["ln", "code", "t"],
+        "required": ["file"],
     }
-    reference = {
+    evidence = {
+        "oneOf": [
+            {"type": "string"},
+            {
+                "type": "object",
+                "additionalProperties": True,
+                "properties": {
+                    "type": {"type": "string"},
+                    "label": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "file": {"type": "string"},
+                    "startLine": {"type": "integer"},
+                    "endLine": {"type": "integer"},
+                    "command": {"type": "string"},
+                    "exitCode": {"type": "integer"},
+                    "logPath": {"type": "string"},
+                    "output": {"type": "string"},
+                    "url": {"type": "string"},
+                },
+            },
+        ]
+    }
+    issue_card = {
         "type": "object",
-        "additionalProperties": False,
+        "additionalProperties": True,
         "properties": {
-            "label": {"type": "string"},
-            "url": {"type": "string"},
+            "issue_id": {"type": "string"},
+            "shard_id": {"type": "string"},
+            "agent_role": {"type": "string"},
+            "title": {"type": "string"},
+            "category": {"type": "string"},
+            "severity": {"type": "string"},
+            "confidence": {"type": "number"},
+            "locations": {"type": "array", "items": location},
+            "claim": {"type": "string"},
+            "violated_invariants": {"type": "array", "items": {"type": "string"}},
+            "evidence": {"type": "array", "items": evidence},
+            "reproduction_idea": {"type": "string"},
+            "suggested_test": {"type": "string"},
+            "false_positive_checks": {"type": "array", "items": {"type": "string"}},
+            "limitations": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["label", "url"],
+        "required": [
+            "issue_id",
+            "shard_id",
+            "agent_role",
+            "title",
+            "severity",
+            "confidence",
+            "locations",
+            "claim",
+            "evidence",
+            "false_positive_checks",
+        ],
     }
-    finding_properties = {
-        "id": {"type": "string"},
-        "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
-        "category": {"type": "string"},
-        "title": {"type": "string"},
-        "summary": {"type": "string"},
-        "impact": {"type": "string"},
-        "detectionReasoning": {"type": "string"},
-        "reproductionPath": {"type": "string"},
-        "file": {"type": "string"},
-        "line": {"type": "integer"},
-        "confidence": {"type": "number"},
-        "confidenceRationale": {"type": "string"},
-        "autoFix": {"type": "boolean"},
-        "effort": {"type": "string"},
-        "fixBenefits": {"type": "string"},
-        "fixRisks": {"type": "string"},
-        "tags": {"type": "array", "items": {"type": "string"}},
-        "steps": {"type": "array", "items": {"type": "string"}},
-        "badCode": {"type": "array", "items": code_line},
-        "goodCode": {"type": "array", "items": code_line},
-        "references": {"type": "array", "items": reference},
-    }
-    finding = {
+    verification_result = {
         "type": "object",
-        "additionalProperties": False,
-        "properties": finding_properties,
-        "required": list(finding_properties),
+        "additionalProperties": True,
+        "properties": {
+            "issue_id": {"type": "string"},
+            "verifier_role": {"type": "string"},
+            "verdict": {"type": "string", "enum": ["confirmed", "rejected", "inconclusive"]},
+            "confidence": {"type": "number"},
+            "proof_type": {"type": "string"},
+            "proof_strength": {"type": "integer"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "commands_run": {"type": "array", "items": {"type": "string"}},
+            "result_summary": {"type": "string"},
+            "notes_for_fix": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["issue_id", "verifier_role", "verdict", "confidence", "evidence", "result_summary"],
     }
     return {
         "type": "object",
-        "required": ["findings"],
+        "required": ["audit_protocol", "issue_cards", "verification_results"],
         "additionalProperties": False,
-        "properties": {"findings": {"type": "array", "items": finding, "maxItems": 25}},
+        "properties": {
+            "audit_protocol": {"type": "string"},
+            "issue_cards": {"type": "array", "items": issue_card, "maxItems": 25},
+            "verification_results": {"type": "array", "items": verification_result, "maxItems": 50},
+        },
     }
 
 
@@ -815,6 +3173,268 @@ def summarize(findings: list[dict]) -> dict:
             severity = "low"
         summary[severity] += 1
     return summary
+
+
+def positive_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        number = int(value or 0)
+    except (OverflowError, TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def finding_precise_location(finding: dict) -> bool:
+    if safe_repo_relative_file(finding.get("file")) and positive_int(finding.get("line")):
+        return True
+    raw_locations = finding.get("affectedLocations") if isinstance(finding.get("affectedLocations"), list) else []
+    for item in raw_locations:
+        if not isinstance(item, dict):
+            continue
+        if safe_repo_relative_file(item.get("file")) and positive_int(item.get("startLine") or item.get("line")):
+            return True
+    raw_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            continue
+        if safe_repo_relative_file(item.get("file")) and positive_int(item.get("startLine") or item.get("line")):
+            return True
+    return False
+
+
+def finding_structured_evidence(finding: dict) -> bool:
+    raw_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            continue
+        has_summary = bool(str(item.get("summary") or "").strip())
+        has_command = bool(str(item.get("command") or "").strip())
+        has_log = bool(str(item.get("logPath") or item.get("log_path") or "").strip())
+        has_file_line = safe_repo_relative_file(item.get("file")) and positive_int(item.get("startLine") or item.get("line"))
+        if has_summary and (has_command or has_log or has_file_line):
+            return True
+    return False
+
+
+def finding_reproduction_evidence(finding: dict) -> bool:
+    reproduction = finding.get("reproduction") if isinstance(finding.get("reproduction"), dict) else {}
+    commands = reproduction.get("commands") if isinstance(reproduction.get("commands"), list) else []
+    if any(str(command or "").strip() for command in commands):
+        return True
+    return bool(str(finding.get("reproductionPath") or "").strip())
+
+
+def reportability_rejection_reason(finding: object) -> str:
+    if not isinstance(finding, dict):
+        return "invalid_candidate"
+    if not str(finding.get("title") or "").strip():
+        return "missing_title"
+    if finding_precise_location(finding) or finding_structured_evidence(finding) or finding_reproduction_evidence(finding):
+        return ""
+    return "missing_evidence"
+
+
+def rejected_candidate_sample(finding: object, reason: str) -> dict:
+    sample = {"reason": reason}
+    if not isinstance(finding, dict):
+        return sample
+    title = str(finding.get("title") or "").strip()
+    if title:
+        sample["title"] = title[:160]
+    severity = str(finding.get("severity") or "").strip().lower()
+    if severity in {"critical", "high", "medium", "low", "info"}:
+        sample["severity"] = severity
+    category = str(finding.get("category") or "").strip()
+    if category:
+        sample["category"] = category[:80]
+    file_path = safe_repo_relative_file(finding.get("file"))
+    if file_path:
+        sample["file"] = file_path
+    line = positive_int(finding.get("line"))
+    if line:
+        sample["line"] = line
+    status = str(finding.get("verificationStatus") or "").strip().lower()
+    if status in _VERIFICATION_STATUSES:
+        sample["verificationStatus"] = status
+    return sample
+
+
+def filter_reportable_findings(findings: list[dict]) -> tuple[list[dict], dict[str, int], list[dict]]:
+    reportable: list[dict] = []
+    rejected_reasons: dict[str, int] = {}
+    rejected_samples: list[dict] = []
+    for finding in findings:
+        reason = reportability_rejection_reason(finding)
+        if not reason:
+            reportable.append(finding)
+            continue
+        rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+        if len(rejected_samples) < 5:
+            rejected_samples.append(rejected_candidate_sample(finding, reason))
+    return reportable, rejected_reasons, rejected_samples
+
+
+def verification_audit_payload(
+    *,
+    candidate_count: int,
+    reported_findings: list[dict],
+    rejected_reasons: dict[str, int],
+    rejected_samples: list[dict] | None = None,
+) -> dict:
+    rejected_count = sum(rejected_reasons.values())
+    status_counts = {status: 0 for status in _VERIFICATION_STATUSES}
+    for finding in reported_findings:
+        status = str(finding.get("verificationStatus") or "").strip().lower()
+        if status not in status_counts:
+            status = "potential_risk"
+        status_counts[status] += 1
+    parts = [
+        f"{candidate_count} candidates evaluated",
+        f"{len(reported_findings)} reported",
+    ]
+    if rejected_count:
+        parts.append(f"{rejected_count} rejected before reporting")
+    return {
+        "candidateCount": max(0, int(candidate_count)),
+        "reportedCount": len(reported_findings),
+        "rejectedCount": rejected_count,
+        "downgradedCount": 0,
+        "verifiedCount": status_counts["verified"],
+        "staticProofCount": status_counts["static_proof"],
+        "potentialRiskCount": status_counts["potential_risk"],
+        "unverifiedCount": status_counts["unverified"],
+        "rejectedReasons": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(rejected_reasons.items())
+            if count > 0
+        ],
+        "rejectedSamples": [sample for sample in rejected_samples or [] if isinstance(sample, dict)][:5],
+        "summary": "; ".join(parts) + ".",
+    }
+
+
+def audit_swarm_scan_artifacts(
+    stage: str,
+    *,
+    config: WorkerConfig | None = None,
+    audit_payload: dict | None = None,
+    preflight: dict | None = None,
+    verification_audit: dict | None = None,
+    summary: str = "",
+    logs_summary: str = "",
+) -> dict:
+    audit_payload = audit_payload if isinstance(audit_payload, dict) else {}
+    preflight = preflight if isinstance(preflight, dict) else {}
+    verification_audit = verification_audit if isinstance(verification_audit, dict) else {}
+    cards = [item for item in (first_list(audit_payload, "issue_cards", "issueCards") or []) if isinstance(item, dict)]
+    results = [
+        item
+        for item in (first_list(audit_payload, "verification_results", "verificationResults") or [])
+        if isinstance(item, dict)
+    ]
+    provider_chain = list(getattr(config, "provider_chain", []) or [])
+    roles = dedupe_text(
+        [
+            *[
+                clean_protocol_text(card.get("agent_role") or card.get("agentRole"))
+                for card in cards
+            ],
+            *[
+                clean_protocol_text(result.get("verifier_role") or result.get("verifierRole"))
+                for result in results
+            ],
+        ]
+    )
+    shards = dedupe_text(
+        [
+            clean_protocol_text(card.get("shard_id") or card.get("shardId"))
+            for card in cards
+        ]
+    )
+    verifier_runs = []
+    verifier = preflight.get("verifier") if isinstance(preflight.get("verifier"), dict) else {}
+    if isinstance(verifier.get("runs"), list):
+        verifier_runs = [item for item in verifier["runs"] if isinstance(item, dict)]
+    counts = {
+        "issueCards": len(cards),
+        "verificationResults": len(results),
+        "candidateCount": protocol_count(verification_audit.get("candidateCount") or verification_audit.get("candidate_count")),
+        "reportedCount": protocol_count(verification_audit.get("reportedCount") or verification_audit.get("reported_count")),
+        "rejectedCount": protocol_count(verification_audit.get("rejectedCount") or verification_audit.get("rejected_count")),
+        "verifiedCount": protocol_count(verification_audit.get("verifiedCount") or verification_audit.get("verified_count")),
+        "staticProofCount": protocol_count(verification_audit.get("staticProofCount") or verification_audit.get("static_proof_count")),
+        "potentialRiskCount": protocol_count(verification_audit.get("potentialRiskCount") or verification_audit.get("potential_risk_count")),
+        "unverifiedCount": protocol_count(verification_audit.get("unverifiedCount") or verification_audit.get("unverified_count")),
+        "manifestCount": len(preflight.get("manifests") or []) if isinstance(preflight.get("manifests"), list) else 0,
+        "toolCount": len(preflight.get("toolVersions") or []) if isinstance(preflight.get("toolVersions"), list) else 0,
+        "verifierRunCount": len(verifier_runs),
+    }
+    payload = {
+        "protocol": clean_protocol_text(audit_payload.get("audit_protocol") or audit_payload.get("auditProtocol"))
+        or AUDIT_SWARM_PROTOCOL_VERSION,
+        "stage": clean_protocol_text(stage),
+        "adapter": provider_chain[0] if provider_chain else clean_protocol_text(getattr(config, "provider", "")),
+        "providerChain": provider_chain,
+        "summary": protocol_multiline_text(summary) or protocol_multiline_text(verification_audit.get("summary")),
+        "logsSummary": protocol_multiline_text(logs_summary)[:1000],
+        "counts": {key: value for key, value in counts.items() if value},
+        "roles": roles[:12],
+        "shards": shards[:20],
+        "issueCards": [audit_swarm_issue_card_summary(card, index) for index, card in enumerate(cards[:10])],
+        "verificationResults": [
+            audit_swarm_verification_result_summary(result)
+            for result in results[:20]
+        ],
+    }
+    return {key: value for key, value in payload.items() if value not in ("", [], {})}
+
+
+def audit_swarm_issue_card_summary(card: dict, index: int) -> dict:
+    locations = audit_swarm_locations(card)
+    primary = locations[0] if locations else {}
+    payload = {
+        "issueId": audit_swarm_issue_key(card) or audit_swarm_generated_id(card, index),
+        "title": clean_protocol_text(card.get("title")) or f"Audit candidate {index + 1}",
+        "severity": audit_swarm_severity(card.get("severity")),
+        "category": audit_swarm_category(card),
+        "shardId": clean_protocol_text(card.get("shard_id") or card.get("shardId")),
+        "agentRole": clean_protocol_text(card.get("agent_role") or card.get("agentRole")),
+        "confidence": audit_swarm_confidence(card.get("confidence"), "candidate"),
+        "file": clean_protocol_text(primary.get("file")),
+        "line": protocol_count(primary.get("startLine")),
+        "evidenceCount": len(card.get("evidence") or []) if isinstance(card.get("evidence"), list) else 0,
+    }
+    return {key: value for key, value in payload.items() if value not in ("", [], {})}
+
+
+def audit_swarm_verification_result_summary(result: dict) -> dict:
+    commands = protocol_text_list(result.get("commands_run") or result.get("commandsRun"))
+    evidence = protocol_text_list(result.get("evidence"))
+    payload = {
+        "issueId": clean_protocol_text(result.get("issue_id") or result.get("issueId")),
+        "verifierRole": clean_protocol_text(result.get("verifier_role") or result.get("verifierRole")),
+        "verdict": clean_protocol_text(result.get("verdict")),
+        "proofType": clean_protocol_text(result.get("proof_type") or result.get("proofType")),
+        "proofStrength": protocol_count(result.get("proof_strength") or result.get("proofStrength")),
+        "confidence": audit_swarm_confidence(result.get("confidence"), clean_protocol_text(result.get("verdict"))),
+        "commandCount": len(commands),
+        "evidenceCount": len(evidence),
+        "summary": protocol_multiline_text(result.get("result_summary") or result.get("resultSummary")),
+    }
+    if commands:
+        payload["command"] = commands[0]
+    return {key: value for key, value in payload.items() if value not in ("", [], {})}
+
+
+def protocol_count(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        count = int(value or 0)
+    except (OverflowError, TypeError, ValueError):
+        return 0
+    return max(0, count)
 
 
 def result_checksum(payload: dict) -> str:
@@ -845,6 +3465,7 @@ def write_scan_summary(config: WorkerConfig, job_id: str, status: str, duration_
     )
     with path.open("a", encoding="utf-8") as log_file:
         log_file.write(line + "\n")
+    trim_file_to_last_bytes(path, config.scan_summary_log_max_bytes)
 
 
 def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool]:
@@ -1113,24 +3734,102 @@ def uninstall_worker(
     return 0
 
 
-def cleanup_checkouts(config: WorkerConfig) -> None:
+def cleanup_worker_resources(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:
+    cleanup_checkouts(config, active_job_ids=active_job_ids)
+    cleanup_logs(config, active_job_ids=active_job_ids)
+
+
+def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:
     now_ts = int(time.time())
+    active = set(active_job_ids or set())
     config.work_dir.mkdir(parents=True, exist_ok=True)
-    for marker in config.work_dir.glob("*.failed-retain"):
+    for marker in config.work_dir.glob(f"*{_FAILED_CHECKOUT_MARKER_SUFFIX}"):
+        checkout = checkout_dir_from_failed_marker(marker)
+        if checkout.name in active:
+            continue
         try:
             expires_at = int(marker.read_text(encoding="utf-8").strip() or "0")
         except ValueError:
             expires_at = 0
-        checkout = marker.with_suffix("")
         if expires_at <= now_ts:
             shutil.rmtree(checkout, ignore_errors=True)
             marker.unlink(missing_ok=True)
     entries = sorted(
-        [path for path in config.work_dir.iterdir() if path.is_dir()],
+        [path for path in config.work_dir.iterdir() if path.is_dir() and path.name not in active],
         key=lambda path: path.stat().st_mtime,
     )
     while directory_size(config.work_dir) > config.max_checkout_bytes and entries:
-        shutil.rmtree(entries.pop(0), ignore_errors=True)
+        checkout = entries.pop(0)
+        shutil.rmtree(checkout, ignore_errors=True)
+        failed_checkout_marker(checkout).unlink(missing_ok=True)
+
+
+def cleanup_logs(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:
+    active = set(active_job_ids or set())
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    now_ts = int(time.time())
+    files: list[tuple[float, Path]] = []
+    for path in config.log_dir.rglob("*"):
+        try:
+            if not path.is_file() or log_path_has_active_job_id(path, config.log_dir, active):
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        if config.log_retention_seconds and stat.st_mtime < now_ts - config.log_retention_seconds:
+            path.unlink(missing_ok=True)
+            continue
+        files.append((stat.st_mtime, path))
+    files.sort(key=lambda item: item[0])
+    while directory_size(config.log_dir) > config.max_log_bytes and files:
+        _mtime, path = files.pop(0)
+        try:
+            if not log_path_has_active_job_id(path, config.log_dir, active):
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+    prune_empty_directories(config.log_dir)
+
+
+def log_path_has_active_job_id(path: Path, log_dir: Path, active_job_ids: set[str]) -> bool:
+    if not active_job_ids:
+        return False
+    try:
+        parts = path.resolve(strict=False).relative_to(log_dir.resolve(strict=False)).parts
+    except ValueError:
+        return True
+    return any(part in active_job_ids for part in parts)
+
+
+def prune_empty_directories(root: Path) -> None:
+    directories = sorted(
+        [item for item in root.rglob("*") if item.is_dir()],
+        key=lambda item: len(item.parts),
+        reverse=True,
+    )
+    for path in directories:
+        try:
+            path.rmdir()
+        except OSError:
+            continue
+
+
+def trim_file_to_last_bytes(path: Path, max_bytes: int) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= max_bytes:
+        return
+    keep = max(1, max_bytes)
+    with path.open("rb") as handle:
+        handle.seek(-keep, os.SEEK_END)
+        data = handle.read()
+    newline = data.find(b"\n")
+    if newline >= 0 and newline + 1 < len(data):
+        data = data[newline + 1 :]
+    with path.open("wb") as handle:
+        handle.write(data)
 
 
 def safe_unlink(path: Path) -> None:

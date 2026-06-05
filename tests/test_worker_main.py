@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -16,27 +18,67 @@ from pullwise_worker.main import (
     PullwiseRequestError,
     Worker,
     WorkerConfig,
+    audit_swarm_findings_from_payload,
     checkout_dir_for_job,
     cleanup_checkouts,
+    cleanup_worker_resources,
     clone_repository,
+    collect_preflight_metadata,
     codex_ready_check,
     default_worker_package,
     execute_lifecycle_command,
+    filter_reportable_findings,
     node_version_check,
-    parse_findings,
+    package_install_command,
+    parse_audit_swarm_payload,
     redact_secrets,
     result_checksum,
     run_codex_review,
+    run_deterministic_repository_checks,
     run_doctor,
+    run_verifier_commands,
     safe_job_id,
     safe_rmtree,
     service_action,
     summarize,
+    verification_audit_payload,
     uninstall_worker,
     update_worker,
     worker_readiness_checks,
     write_scan_summary,
 )
+
+
+def audit_payload(issue_cards: list[dict] | None = None, verification_results: list[dict] | None = None) -> dict:
+    return {
+        "audit_protocol": "audit-swarm/0.1",
+        "issue_cards": issue_cards or [],
+        "verification_results": verification_results or [],
+    }
+
+
+def issue_card(
+    title: str,
+    *,
+    issue_id: str = "issue-1",
+    severity: str = "P2",
+    file: str = "src/app.py",
+    line: int = 12,
+    evidence: list | None = None,
+) -> dict:
+    return {
+        "issue_id": issue_id,
+        "shard_id": "app",
+        "agent_role": "correctness-reviewer",
+        "title": title,
+        "category": "correctness",
+        "severity": severity,
+        "confidence": 0.8,
+        "locations": [{"file": file, "startLine": line, "endLine": line}] if file else [],
+        "claim": f"{title} claim.",
+        "evidence": evidence if evidence is not None else ["Concrete evidence."],
+        "false_positive_checks": ["Check for upstream guard."],
+    }
 
 
 def config() -> WorkerConfig:
@@ -57,19 +99,22 @@ def config() -> WorkerConfig:
 
 
 class WorkerMainTest(unittest.TestCase):
-    def test_parse_findings_accepts_object_payload(self) -> None:
-        findings = parse_findings('{"findings":[{"title":"Bug","severity":"high"}]}')
+    def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
+        payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
 
-        self.assertEqual(findings, [{"title": "Bug", "severity": "high"}])
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(payload["audit_protocol"], "audit-swarm/0.1")
+        self.assertEqual(findings[0]["title"], "Bug")
         self.assertEqual(summarize(findings)["high"], 1)
 
-    def test_parse_findings_skips_codex_json_event_stream(self) -> None:
-        findings = parse_findings(
-            '{"event":"review_progress","findings":[]}\n'
-            '{"findings":[{"title":"Bug","severity":"high"}]}'
+    def test_parse_audit_swarm_skips_codex_json_event_stream(self) -> None:
+        payload = parse_audit_swarm_payload(
+            '{"event":"review_progress","issue_cards":[]}\n'
+            + json.dumps(audit_payload([issue_card("Bug", severity="P1")]))
         )
 
-        self.assertEqual(findings, [{"title": "Bug", "severity": "high"}])
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(findings[0]["title"], "Bug")
 
     def test_run_codex_review_normalizes_checkout_absolute_file_paths(self) -> None:
         worker_config = config()
@@ -79,22 +124,570 @@ class WorkerMainTest(unittest.TestCase):
         with patch(
             "pullwise_worker.main.run_codex_provider_review",
             return_value=(
-                [
-                    {"title": "Inside checkout", "severity": "high", "file": str(checkout_file)},
-                    {"title": "Outside checkout", "severity": "medium", "file": "/var/log/pullwise/server.log"},
-                ],
+                audit_payload(
+                    [
+                        issue_card("Inside checkout", severity="P1", file=str(checkout_file), issue_id="inside"),
+                        issue_card("Outside checkout", severity="P2", file="/var/log/pullwise/server.log", issue_id="outside"),
+                    ]
+                ),
                 {"critical": 0, "high": 1, "medium": 1, "low": 0, "info": 0},
                 "review ok",
             ),
         ):
-            findings, _summary, _logs = run_codex_review(
+            payload, _summary, _logs = run_codex_review(
                 worker_config,
                 {"job_id": "job_1", "repo": "acme/api"},
                 checkout_dir,
             )
 
+        findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["file"], "src/app.py")
         self.assertEqual(findings[1]["file"], "")
+
+    def test_deterministic_checks_report_readme_package_script_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text(
+                '{\n  "scripts": {\n    "build": "vite build"\n  }\n}\n',
+                encoding="utf-8",
+            )
+            (checkout_dir / "README.md").write_text(
+                "# App\n\nRun `npm run dev` to start local development.\n",
+                encoding="utf-8",
+            )
+
+            findings = run_deterministic_repository_checks(
+                {"repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+            )
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding["verificationStatus"], "static_proof")
+        self.assertEqual(finding["severity"], "medium")
+        self.assertEqual(finding["category"], "Docs")
+        self.assertEqual(finding["file"], "README.md")
+        self.assertEqual(finding["line"], 3)
+        self.assertEqual(finding["reproduction"]["commands"], ["npm run dev"])
+        self.assertEqual(finding["affectedLocations"][0], {"file": "README.md", "startLine": 3, "endLine": 3})
+        self.assertEqual(finding["affectedLocations"][1], {"file": "package.json", "startLine": 2, "endLine": 2})
+        self.assertEqual([item["type"] for item in finding["evidence"]], ["documentation", "code"])
+        self.assertIn("does not define `dev`", finding["evidence"][1]["summary"])
+        self.assertIn("no project scripts were executed", finding["verificationSummary"])
+
+    def test_deterministic_checks_report_ci_workflow_missing_package_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text(
+                '{\n  "scripts": {\n    "build": "vite build"\n  }\n}\n',
+                encoding="utf-8",
+            )
+            workflow_dir = checkout_dir / ".github" / "workflows"
+            workflow_dir.mkdir(parents=True)
+            (workflow_dir / "ci.yml").write_text(
+                "name: CI\n"
+                "on: [push]\n"
+                "jobs:\n"
+                "  test:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: npm run ci\n",
+                encoding="utf-8",
+            )
+
+            findings = run_deterministic_repository_checks(
+                {"repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+            )
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding["verificationStatus"], "static_proof")
+        self.assertEqual(finding["severity"], "low")
+        self.assertEqual(finding["category"], "CI")
+        self.assertEqual(finding["file"], ".github/workflows/ci.yml")
+        self.assertEqual(finding["line"], 7)
+        self.assertEqual(finding["reproduction"]["commands"][0], "npm run ci")
+        self.assertEqual(
+            finding["affectedLocations"],
+            [
+                {"file": ".github/workflows/ci.yml", "startLine": 7, "endLine": 7},
+                {"file": "package.json", "startLine": 2, "endLine": 2},
+            ],
+        )
+        self.assertEqual([item["type"] for item in finding["evidence"]], ["tool", "code"])
+        self.assertIn("does not define `ci`", finding["evidence"][1]["summary"])
+        self.assertIn("workflow was not executed", finding["verificationSummary"])
+        self.assertIn("working-directory", finding["limitations"][0])
+
+    def test_deterministic_checks_report_dockerfile_missing_copy_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text("{}", encoding="utf-8")
+            (checkout_dir / "Dockerfile").write_text(
+                "FROM node:22\n"
+                "COPY package.json ./\n"
+                "COPY missing/config.json /app/config.json\n"
+                "COPY --from=builder /app/dist ./dist\n"
+                "ADD https://example.test/archive.tar.gz /tmp/archive.tar.gz\n"
+                "COPY src/*.js /app/\n",
+                encoding="utf-8",
+            )
+
+            findings = run_deterministic_repository_checks(
+                {"repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+            )
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding["verificationStatus"], "static_proof")
+        self.assertEqual(finding["severity"], "medium")
+        self.assertEqual(finding["category"], "Build")
+        self.assertEqual(finding["file"], "Dockerfile")
+        self.assertEqual(finding["line"], 3)
+        self.assertEqual(finding["affectedLocations"], [{"file": "Dockerfile", "startLine": 3, "endLine": 3}])
+        self.assertEqual([item["type"] for item in finding["evidence"]], ["code", "tool"])
+        self.assertIn("missing/config.json", finding["evidence"][0]["summary"])
+        self.assertEqual(finding["reproduction"]["commands"], ["docker build -f 'Dockerfile' ."])
+        self.assertIn("docker build was not executed", finding["verificationSummary"])
+        self.assertIn("literal local path", finding["whyNotFalsePositive"][0])
+        self.assertIn("repository root as build context", finding["limitations"][0])
+
+    def test_deterministic_checks_report_redacted_committed_secret(self) -> None:
+        secret = "ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "config").mkdir()
+            (checkout_dir / "config" / "prod.env").write_text(
+                f"API_URL=https://api.example.test\nGITHUB_TOKEN={secret}\n",
+                encoding="utf-8",
+            )
+            (checkout_dir / ".env.example").write_text(
+                f"GITHUB_TOKEN={secret}\n",
+                encoding="utf-8",
+            )
+            (checkout_dir / "tests").mkdir()
+            (checkout_dir / "tests" / "fixture.py").write_text(
+                f"TOKEN = '{secret}'\n",
+                encoding="utf-8",
+            )
+
+            findings = run_deterministic_repository_checks(
+                {"repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+            )
+
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        serialized = json.dumps(finding)
+        self.assertNotIn(secret, serialized)
+        self.assertEqual(finding["verificationStatus"], "static_proof")
+        self.assertEqual(finding["severity"], "high")
+        self.assertEqual(finding["category"], "Security")
+        self.assertEqual(finding["file"], "config/prod.env")
+        self.assertEqual(finding["line"], 2)
+        self.assertEqual(finding["affectedLocations"], [{"file": "config/prod.env", "startLine": 2, "endLine": 2}])
+        self.assertEqual(finding["evidence"][0]["type"], "code")
+        self.assertIn("full value redacted", finding["evidence"][0]["summary"])
+        self.assertEqual(finding["reproduction"]["commands"], ['git grep -n "ghp_" -- \'config/prod.env\''])
+        self.assertIn("provider API validation", finding["verificationSummary"])
+        self.assertIn("excludes common docs", finding["whyNotFalsePositive"][2])
+        self.assertIn("rotate", finding["fixRisks"])
+
+    def test_collect_preflight_metadata_reports_static_repository_environment(self) -> None:
+        worker_config = config()
+        worker_config.provider_chain = ["codex", "opencode"]
+        worker_config.opencode_command = "opencode"
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text(
+                json.dumps(
+                    {
+                        "packageManager": "pnpm@9.1.0",
+                        "scripts": {
+                            "build": "vite build",
+                            "test": "vitest run",
+                            "lint": "eslint .",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (checkout_dir / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+            (checkout_dir / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+            (checkout_dir / "Dockerfile").write_text("FROM node:22\n", encoding="utf-8")
+            (checkout_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            workflow_dir = checkout_dir / ".github" / "workflows"
+            workflow_dir.mkdir(parents=True)
+            (workflow_dir / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+            devcontainer_dir = checkout_dir / ".devcontainer"
+            devcontainer_dir.mkdir()
+            (devcontainer_dir / "devcontainer.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+
+            with patch(
+                "pullwise_worker.main.safe_tool_version",
+                side_effect=lambda name, command: {
+                    "name": name,
+                    "command": " ".join(command),
+                    "available": True,
+                    "exitCode": 0,
+                    "output": f"{name} ok",
+                },
+            ):
+                preflight = collect_preflight_metadata(
+                    worker_config,
+                    {"repo": "acme/app", "branch": "main", "commit": "abc1234"},
+                    checkout_dir,
+                )
+
+        self.assertEqual(preflight["mode"], "static")
+        self.assertEqual(preflight["execution"], "no_project_scripts")
+        self.assertIn("pnpm", preflight["packageManagers"])
+        self.assertIn("JavaScript/TypeScript", preflight["languages"])
+        self.assertIn("Python", preflight["languages"])
+        self.assertEqual(preflight["availableScripts"], ["build", "lint", "test"])
+        self.assertIn({"file": "package.json", "type": "node"}, preflight["manifests"])
+        self.assertIn({"file": "pnpm-lock.yaml", "type": "pnpm-lock"}, preflight["manifests"])
+        self.assertIn({"file": "Dockerfile", "type": "dockerfile"}, preflight["manifests"])
+        self.assertIn({"file": "docker-compose.yml", "type": "docker-compose"}, preflight["manifests"])
+        self.assertIn({"file": ".github/workflows/ci.yml", "type": "github-actions-workflow"}, preflight["manifests"])
+        self.assertIn({"file": ".devcontainer/devcontainer.json", "type": "devcontainer"}, preflight["manifests"])
+        self.assertEqual(
+            len([item for item in preflight["manifests"] if item == {"file": "Dockerfile", "type": "dockerfile"}]),
+            1,
+        )
+        self.assertEqual(
+            [tool["name"] for tool in preflight["toolVersions"]],
+            ["git", "node", "python", "pnpm", "codex", "opencode"],
+        )
+        self.assertIn("environment", preflight)
+        self.assertIn("pythonVersion", preflight["environment"])
+        self.assertEqual(preflight["environment"]["checkoutRoot"], str(checkout_dir))
+        self.assertIn("worker environment", preflight["summary"])
+        self.assertIn("no project scripts were executed", preflight["summary"])
+
+    def test_verifier_is_disabled_by_default_and_does_not_run_scripts(self) -> None:
+        worker_config = config()
+        preflight = {"packageManagers": ["npm"], "availableScripts": ["test"]}
+
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            verifier, findings, logs = run_verifier_commands(
+                worker_config,
+                {"job_id": "job_verify", "repo": "acme/app", "commit": "abc1234"},
+                Path(worker_config.work_dir),
+                preflight,
+            )
+
+        run.assert_not_called()
+        self.assertFalse(verifier["enabled"])
+        self.assertEqual(verifier["runs"], [])
+        self.assertEqual(findings, [])
+        self.assertEqual(logs, "verifier disabled")
+
+    def test_verifier_failed_script_becomes_verified_finding(self) -> None:
+        worker_config = config()
+        worker_config.verifier_enabled = True
+        worker_config.verifier_scripts = ["test"]
+        checkout_dir = Path(worker_config.work_dir) / "job_verify"
+        checkout_dir.mkdir(parents=True)
+        (checkout_dir / "package.json").write_text(
+            '{\n  "scripts": {\n    "test": "vitest run"\n  }\n}\n',
+            encoding="utf-8",
+        )
+        (checkout_dir / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        preflight = {"packageManagers": ["npm"], "availableScripts": ["test"]}
+
+        install_completed = Mock(returncode=0, stdout="installed\n", stderr="")
+        test_failed_first = Mock(returncode=1, stdout="FAIL tests/example.test.js\n", stderr="AssertionError\n")
+        test_failed_second = Mock(returncode=1, stdout="FAIL tests/example.test.js\n", stderr="AssertionError again\n")
+        with patch(
+            "pullwise_worker.main.subprocess.run",
+            side_effect=[install_completed, test_failed_first, test_failed_second],
+        ) as run:
+            verifier, findings, logs = run_verifier_commands(
+                worker_config,
+                {"job_id": "job_verify", "repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+                preflight,
+            )
+
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci", "--ignore-scripts"])
+        self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "test"])
+        self.assertEqual(run.call_args_list[2].args[0], ["npm", "run", "test"])
+        self.assertTrue(verifier["enabled"])
+        self.assertEqual(verifier["runs"][0]["script"], "install-deps")
+        self.assertEqual(verifier["runs"][0]["status"], "passed")
+        self.assertEqual(verifier["runs"][1]["status"], "failed")
+        self.assertEqual(verifier["runs"][1]["exitCode"], 1)
+        self.assertTrue(verifier["runs"][1]["confirmedFailure"])
+        self.assertEqual([attempt["status"] for attempt in verifier["runs"][1]["attempts"]], ["failed", "failed"])
+        self.assertIn("2 allowlisted command(s): 1 passed, 1 failed", logs)
+        self.assertIn("1 failed", logs)
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding["verificationStatus"], "verified")
+        self.assertEqual(finding["category"], "Tests")
+        self.assertEqual(finding["affectedLocations"], [{"file": "package.json", "startLine": 3, "endLine": 3}])
+        self.assertEqual(finding["evidence"][0]["type"], "runtime_log")
+        self.assertEqual(finding["evidence"][0]["command"], "npm run test")
+        self.assertIn("--- attempt 1 (failed exit 1) ---", finding["evidence"][0]["output"])
+        self.assertIn("AssertionError again", finding["evidence"][0]["output"])
+        self.assertEqual(finding["reproduction"]["actual"], "Command exited 1.")
+        self.assertIn("two consecutive attempts", finding["whyNotFalsePositive"][0])
+        log_path = Path(worker_config.log_dir) / verifier["runs"][1]["logPath"]
+        self.assertIn("--- attempt 1 (failed exit 1) ---", log_path.read_text(encoding="utf-8"))
+        self.assertIn("--- attempt 2 (failed exit 1) ---", log_path.read_text(encoding="utf-8"))
+        self.assertIn("AssertionError", log_path.read_text(encoding="utf-8"))
+
+    def test_verifier_dependency_install_failure_blocks_project_scripts(self) -> None:
+        worker_config = config()
+        worker_config.verifier_enabled = True
+        worker_config.verifier_scripts = ["test"]
+        checkout_dir = Path(worker_config.work_dir) / "job_verify_install"
+        checkout_dir.mkdir(parents=True)
+        (checkout_dir / "package.json").write_text(
+            '{\n  "scripts": {\n    "test": "vitest run"\n  }\n}\n',
+            encoding="utf-8",
+        )
+        (checkout_dir / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        preflight = {"packageManagers": ["npm"], "availableScripts": ["test"]}
+
+        install_failed_first = Mock(returncode=1, stdout="", stderr="registry auth failed\n")
+        install_failed_second = Mock(returncode=1, stdout="", stderr="registry auth still failed\n")
+        with patch(
+            "pullwise_worker.main.subprocess.run",
+            side_effect=[install_failed_first, install_failed_second],
+        ) as run:
+            verifier, findings, logs = run_verifier_commands(
+                worker_config,
+                {"job_id": "job_verify_install", "repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+                preflight,
+            )
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci", "--ignore-scripts"])
+        self.assertEqual(run.call_args_list[1].args[0], ["npm", "ci", "--ignore-scripts"])
+        self.assertTrue(verifier["enabled"])
+        self.assertEqual(verifier["runs"][0]["script"], "install-deps")
+        self.assertEqual(verifier["runs"][0]["status"], "failed")
+        self.assertEqual(verifier["runs"][0]["exitCode"], 1)
+        self.assertTrue(verifier["runs"][0]["confirmedFailure"])
+        self.assertEqual([attempt["status"] for attempt in verifier["runs"][0]["attempts"]], ["failed", "failed"])
+        self.assertIn("1 allowlisted command(s): 0 passed, 1 failed", logs)
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding["verificationStatus"], "verified")
+        self.assertEqual(finding["category"], "Dependencies")
+        self.assertEqual(finding["file"], "package-lock.json")
+        self.assertEqual(finding["affectedLocations"], [{"file": "package-lock.json", "startLine": 1, "endLine": 1}])
+        self.assertEqual(finding["evidence"][0]["type"], "runtime_log")
+        self.assertEqual(finding["evidence"][0]["command"], "npm ci --ignore-scripts")
+        self.assertIn("dependency installation", finding["title"])
+        self.assertIn("build/test reproduction is blocked", finding["impact"])
+        self.assertEqual(finding["reproduction"]["commands"], ["npm ci --ignore-scripts"])
+        self.assertEqual(finding["reproduction"]["actual"], "Command exited 1.")
+        self.assertIn("install scripts disabled", " ".join(finding["limitations"]))
+        log_path = Path(worker_config.log_dir) / verifier["runs"][0]["logPath"]
+        self.assertIn("registry auth failed", log_path.read_text(encoding="utf-8"))
+        self.assertIn("registry auth still failed", log_path.read_text(encoding="utf-8"))
+
+    def test_verifier_flaky_dependency_install_continues_to_project_scripts(self) -> None:
+        worker_config = config()
+        worker_config.verifier_enabled = True
+        worker_config.verifier_scripts = ["test"]
+        checkout_dir = Path(worker_config.work_dir) / "job_verify_install_flaky"
+        checkout_dir.mkdir(parents=True)
+        (checkout_dir / "package.json").write_text(
+            '{\n  "scripts": {\n    "test": "vitest run"\n  }\n}\n',
+            encoding="utf-8",
+        )
+        (checkout_dir / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        preflight = {"packageManagers": ["npm"], "availableScripts": ["test"]}
+
+        install_failed = Mock(returncode=1, stdout="", stderr="registry timeout\n")
+        install_passed = Mock(returncode=0, stdout="installed\n", stderr="")
+        test_passed = Mock(returncode=0, stdout="PASS tests/example.test.js\n", stderr="")
+        with patch(
+            "pullwise_worker.main.subprocess.run",
+            side_effect=[install_failed, install_passed, test_passed],
+        ) as run:
+            verifier, findings, logs = run_verifier_commands(
+                worker_config,
+                {"job_id": "job_verify_install_flaky", "repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+                preflight,
+            )
+
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci", "--ignore-scripts"])
+        self.assertEqual(run.call_args_list[1].args[0], ["npm", "ci", "--ignore-scripts"])
+        self.assertEqual(run.call_args_list[2].args[0], ["npm", "run", "test"])
+        self.assertTrue(verifier["enabled"])
+        self.assertEqual(verifier["runs"][0]["script"], "install-deps")
+        self.assertEqual(verifier["runs"][0]["status"], "flaky")
+        self.assertFalse(verifier["runs"][0]["confirmedFailure"])
+        self.assertEqual([attempt["status"] for attempt in verifier["runs"][0]["attempts"]], ["failed", "passed"])
+        self.assertEqual(verifier["runs"][1]["script"], "test")
+        self.assertEqual(verifier["runs"][1]["status"], "passed")
+        self.assertIn("2 allowlisted command(s): 1 passed, 0 failed, 1 flaky", logs)
+        self.assertEqual(findings, [])
+
+    def test_verifier_flaky_failure_is_not_promoted_to_verified_finding(self) -> None:
+        worker_config = config()
+        worker_config.verifier_enabled = True
+        worker_config.verifier_install_deps = False
+        worker_config.verifier_scripts = ["test"]
+        checkout_dir = Path(worker_config.work_dir) / "job_verify_flaky"
+        checkout_dir.mkdir(parents=True)
+        (checkout_dir / "package.json").write_text(
+            '{\n  "scripts": {\n    "test": "vitest run"\n  }\n}\n',
+            encoding="utf-8",
+        )
+        preflight = {"packageManagers": ["npm"], "availableScripts": ["test"]}
+
+        test_failed = Mock(returncode=1, stdout="FAIL flaky.test.js\n", stderr="AssertionError\n")
+        test_passed = Mock(returncode=0, stdout="PASS flaky.test.js\n", stderr="")
+        with patch("pullwise_worker.main.subprocess.run", side_effect=[test_failed, test_passed]) as run:
+            verifier, findings, logs = run_verifier_commands(
+                worker_config,
+                {"job_id": "job_verify_flaky", "repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+                preflight,
+            )
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(verifier["runs"][0]["status"], "flaky")
+        self.assertFalse(verifier["runs"][0]["confirmedFailure"])
+        self.assertEqual([attempt["status"] for attempt in verifier["runs"][0]["attempts"]], ["failed", "passed"])
+        self.assertIn("1 allowlisted command(s): 0 passed, 0 failed, 1 flaky", logs)
+        self.assertEqual(findings, [])
+        log_path = Path(worker_config.log_dir) / verifier["runs"][0]["logPath"]
+        output = log_path.read_text(encoding="utf-8")
+        self.assertIn("FAIL flaky.test.js", output)
+        self.assertIn("PASS flaky.test.js", output)
+
+    def test_package_install_command_uses_lockfile_aware_package_manager_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            self.assertEqual(package_install_command("npm", checkout_dir), [])
+
+            (checkout_dir / "package.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(package_install_command("npm", checkout_dir), ["npm", "install", "--ignore-scripts"])
+
+            (checkout_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(package_install_command("npm", checkout_dir), ["npm", "ci", "--ignore-scripts"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text("{}", encoding="utf-8")
+            (checkout_dir / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n", encoding="utf-8")
+            self.assertEqual(package_install_command("pnpm", checkout_dir), ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text("{}", encoding="utf-8")
+            (checkout_dir / "yarn.lock").write_text("", encoding="utf-8")
+            self.assertEqual(package_install_command("yarn", checkout_dir), ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text("{}", encoding="utf-8")
+            (checkout_dir / "bun.lockb").write_text("", encoding="utf-8")
+            self.assertEqual(package_install_command("bun", checkout_dir), ["bun", "install", "--frozen-lockfile", "--ignore-scripts"])
+
+    def test_run_codex_review_prepends_deterministic_findings(self) -> None:
+        worker_config = config()
+        checkout_dir = Path(worker_config.work_dir) / "job_static"
+        checkout_dir.mkdir(parents=True)
+        (checkout_dir / "package.json").write_text(
+            '{"scripts":{"build":"vite build"}}',
+            encoding="utf-8",
+        )
+        (checkout_dir / "README.md").write_text("Run `npm run start`.\n", encoding="utf-8")
+
+        with patch(
+            "pullwise_worker.main.run_codex_provider_review",
+            return_value=(
+                audit_payload([issue_card("Provider finding", severity="low", issue_id="provider")]),
+                {"critical": 0, "high": 0, "medium": 0, "low": 1, "info": 0},
+                "review ok",
+            ),
+        ):
+            payload, summary, _logs = run_codex_review(
+                worker_config,
+                {"job_id": "job_static", "repo": "acme/api", "commit": "abc1234"},
+                checkout_dir,
+            )
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(findings[0]["verificationStatus"], "static_proof")
+        self.assertEqual(findings[0]["title"], "README references missing package script `start`")
+        self.assertEqual(findings[1]["title"], "Provider finding")
+        self.assertEqual(summary["medium"], 1)
+        self.assertEqual(summary["low"], 1)
+
+    def test_run_codex_review_continues_when_deterministic_checks_fail(self) -> None:
+        with patch("pullwise_worker.main.run_deterministic_repository_checks", side_effect=RuntimeError("bad read")), \
+            patch(
+                "pullwise_worker.main.run_codex_provider_review",
+                return_value=(
+                    audit_payload([issue_card("Provider finding", severity="low", issue_id="provider")]),
+                    {"critical": 0, "high": 0, "medium": 0, "low": 1, "info": 0},
+                    "review ok",
+                ),
+            ):
+            payload, summary, logs = run_codex_review(
+                config(),
+                {"job_id": "job_static", "repo": "acme/api"},
+                Path("checkout"),
+            )
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(findings[0]["title"], "Provider finding")
+        self.assertEqual(summary["low"], 1)
+        self.assertIn("deterministic: bad read", logs)
+
+    def test_reportability_filter_rejects_candidates_without_evidence(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {"title": "Precise code finding", "file": "src/app.py", "line": 12},
+                {"title": "Repro command finding", "reproduction": {"commands": ["npm test"]}},
+                {"title": "Only a vague model guess", "severity": "medium", "verificationStatus": "unverified"},
+                {"severity": "low", "file": "src/untitled.py", "line": 1},
+                "not a finding",
+            ]
+        )
+
+        self.assertEqual([finding["title"] for finding in findings], ["Precise code finding", "Repro command finding"])
+        self.assertEqual(rejected_reasons, {"missing_evidence": 1, "missing_title": 1, "invalid_candidate": 1})
+        self.assertEqual(
+            rejected_samples,
+            [
+                {
+                    "reason": "missing_evidence",
+                    "title": "Only a vague model guess",
+                    "severity": "medium",
+                    "verificationStatus": "unverified",
+                },
+                {"reason": "missing_title", "severity": "low", "file": "src/untitled.py", "line": 1},
+                {"reason": "invalid_candidate"},
+            ],
+        )
+
+        audit = verification_audit_payload(
+            candidate_count=5,
+            reported_findings=findings,
+            rejected_reasons=rejected_reasons,
+            rejected_samples=rejected_samples,
+        )
+        self.assertEqual(audit["candidateCount"], 5)
+        self.assertEqual(audit["reportedCount"], 2)
+        self.assertEqual(audit["rejectedCount"], 3)
+        self.assertEqual(audit["potentialRiskCount"], 2)
+        self.assertEqual(audit["rejectedSamples"][0]["title"], "Only a vague model guess")
 
     def test_run_job_uploads_progress_result_and_cleans_checkout(self) -> None:
         worker = Worker(config())
@@ -102,10 +695,15 @@ class WorkerMainTest(unittest.TestCase):
         checkout_dir = Path(worker.config.work_dir) / "job_1"
 
         with patch("pullwise_worker.main.clone_repository") as clone_repository, \
+            patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}) as collect_preflight, \
+            patch(
+                "pullwise_worker.main.run_verifier_commands",
+                return_value=({"enabled": False, "runs": []}, [], "verifier disabled"),
+            ) as run_verifier, \
             patch("pullwise_worker.main.run_codex_review") as run_codex_review, \
             patch("pullwise_worker.main.shutil.rmtree") as rmtree:
             run_codex_review.return_value = (
-                [{"title": "Bug", "severity": "high"}],
+                audit_payload([issue_card("Bug", severity="P1", issue_id="bug")]),
                 {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
                 "review ok",
             )
@@ -114,15 +712,110 @@ class WorkerMainTest(unittest.TestCase):
 
         clone_repository.assert_called_once()
         self.assertEqual(clone_repository.call_args.args[1], checkout_dir)
+        collect_preflight.assert_called_once()
+        run_verifier.assert_called_once()
         run_codex_review.assert_called_once()
         worker.client.result.assert_called_once()
         result_payload = worker.client.result.call_args.args[1]
         self.assertEqual(result_payload["status"], "done")
         self.assertEqual(result_payload["attempt_id"], "wk_1-2")
+        self.assertEqual(result_payload["preflight"], {"mode": "static", "verifier": {"enabled": False, "runs": []}})
+        self.assertEqual(result_payload["audit_protocol"], "audit-swarm/0.1")
+        self.assertEqual(result_payload["issue_cards"][0]["title"], "Bug")
         self.assertEqual(result_payload["summary"]["high"], 1)
+        self.assertEqual(result_payload["verification_audit"]["candidateCount"], 1)
+        self.assertEqual(result_payload["verification_audit"]["reportedCount"], 1)
+        self.assertEqual(result_payload["verification_audit"]["rejectedCount"], 0)
         self.assertEqual(result_payload["result_checksum"], result_checksum({k: v for k, v in result_payload.items() if k != "result_checksum"}))
         self.assertGreaterEqual(worker.client.progress.call_count, 3)
         rmtree.assert_called_with(checkout_dir, ignore_errors=True)
+
+    def test_run_job_continues_when_verifier_errors(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+
+        with patch("pullwise_worker.main.clone_repository"), \
+            patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}), \
+            patch("pullwise_worker.main.run_verifier_commands", side_effect=RuntimeError("verifier boom")), \
+            patch(
+                "pullwise_worker.main.run_codex_review",
+                return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+            ), \
+            patch("pullwise_worker.main.shutil.rmtree"):
+            worker.run_job({"job_id": "job_verifier_error", "attempt": 1, "repo": "acme/api"})
+
+        result_payload = worker.client.result.call_args.args[1]
+        self.assertEqual(result_payload["status"], "done")
+        self.assertIn("Verifier failed before completing", result_payload["preflight"]["verifier"]["summary"])
+        self.assertEqual(result_payload["preflight"]["verifier"]["runs"], [])
+
+    def test_run_job_uploads_verifier_findings_and_execution_scope(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        verifier_finding = {
+            "title": "Verifier failure",
+            "severity": "high",
+            "file": "package.json",
+            "line": 3,
+            "verificationStatus": "verified",
+            "evidence": [
+                {
+                    "type": "runtime_log",
+                    "summary": "npm run test failed with exit code 1.",
+                    "command": "npm run test",
+                    "logPath": "verification/job/test.log",
+                }
+            ],
+            "reproduction": {"commands": ["npm run test"]},
+        }
+
+        with patch("pullwise_worker.main.clone_repository"), \
+            patch(
+                "pullwise_worker.main.collect_preflight_metadata",
+                return_value={"mode": "static", "execution": "no_project_scripts", "summary": "Static only."},
+            ), \
+            patch(
+                "pullwise_worker.main.run_verifier_commands",
+                return_value=(
+                    {"enabled": True, "runs": [{"script": "test", "status": "failed"}]},
+                    [verifier_finding],
+                    "verifier ran 1 command",
+                ),
+            ), \
+            patch(
+                "pullwise_worker.main.run_codex_review",
+                return_value=(
+                    audit_payload([issue_card("Provider finding", severity="low", issue_id="provider", file="", evidence=[])]),
+                    {"critical": 0, "high": 0, "medium": 0, "low": 1, "info": 0},
+                    "review ok",
+                ),
+            ), \
+            patch("pullwise_worker.main.shutil.rmtree"):
+            worker.run_job({"job_id": "job_verifier_findings", "attempt": 1, "repo": "acme/api"})
+
+        result_payload = worker.client.result.call_args.args[1]
+        self.assertEqual(result_payload["preflight"]["execution"], "allowlisted_verifier_scripts")
+        self.assertEqual(result_payload["issue_cards"][0]["title"], "Verifier failure")
+        self.assertEqual(result_payload["verification_results"][0]["verdict"], "confirmed")
+        self.assertEqual(result_payload["summary"]["high"], 1)
+        self.assertEqual(result_payload["summary"]["low"], 0)
+        self.assertEqual(result_payload["verification_audit"]["candidateCount"], 2)
+        self.assertEqual(result_payload["verification_audit"]["reportedCount"], 1)
+        self.assertEqual(result_payload["verification_audit"]["rejectedCount"], 1)
+        self.assertEqual(result_payload["verification_audit"]["verifiedCount"], 1)
+        self.assertEqual(result_payload["verification_audit"]["rejectedReasons"], [{"reason": "missing_evidence", "count": 1}])
+        self.assertEqual(
+            result_payload["verification_audit"]["rejectedSamples"],
+            [
+                {
+                    "reason": "missing_evidence",
+                    "title": "Provider finding",
+                    "severity": "low",
+                    "category": "Quality",
+                    "verificationStatus": "potential_risk",
+                }
+            ],
+        )
 
     def test_done_result_upload_timeout_retries_same_payload_without_failed_result(self) -> None:
         worker = Worker(config())
@@ -132,7 +825,7 @@ class WorkerMainTest(unittest.TestCase):
         with patch("pullwise_worker.main.clone_repository"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
-                return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+                return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
             ), \
             patch("pullwise_worker.main.time.sleep"), \
             patch("pullwise_worker.main.shutil.rmtree"):
@@ -145,6 +838,33 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(second_payload["status"], "done")
         self.assertIsNone(worker.last_error)
 
+    def test_successful_job_cleanup_does_not_use_previous_last_error(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.last_error = "previous job failed"
+        worker.config.failed_checkout_retention_seconds = 3600
+        checkout_dir = Path(worker.config.work_dir) / "job_success_after_failure"
+
+        def clone(_job: dict, path: Path) -> None:
+            path.mkdir(parents=True)
+            (path / "file.txt").write_text("ok", encoding="utf-8")
+
+        with patch("pullwise_worker.main.clone_repository", side_effect=clone), \
+            patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}), \
+            patch(
+                "pullwise_worker.main.run_verifier_commands",
+                return_value=({"enabled": False, "runs": []}, [], "verifier disabled"),
+            ), \
+            patch(
+                "pullwise_worker.main.run_codex_review",
+                return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+            ):
+            worker.run_job({"job_id": "job_success_after_failure", "attempt": 1, "repo": "acme/api"})
+
+        self.assertIsNone(worker.last_error)
+        self.assertFalse(checkout_dir.exists())
+        self.assertFalse(checkout_dir.with_suffix(".failed-retain").exists())
+
     def test_done_result_upload_exhaustion_does_not_submit_failed_result(self) -> None:
         worker = Worker(config())
         worker.config.result_upload_attempts = 2
@@ -154,7 +874,7 @@ class WorkerMainTest(unittest.TestCase):
         with patch("pullwise_worker.main.clone_repository"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
-                return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+                return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
             ), \
             patch("pullwise_worker.main.time.sleep"), \
             patch("pullwise_worker.main.shutil.rmtree"):
@@ -174,7 +894,7 @@ class WorkerMainTest(unittest.TestCase):
         with patch("pullwise_worker.main.clone_repository"), \
             patch(
                 "pullwise_worker.main.run_codex_review",
-                return_value=([], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
+                return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
             ), \
             patch("pullwise_worker.main.time.sleep"), \
             patch("pullwise_worker.main.shutil.rmtree"):
@@ -355,17 +1075,17 @@ class WorkerMainTest(unittest.TestCase):
                     Path("checkout"),
                 )
 
-    def test_run_codex_review_invokes_codex_exec_and_parses_findings(self) -> None:
+    def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             schema_path = Path(command[command.index("--output-schema") + 1])
             output_path = Path(command[command.index("--output-last-message") + 1])
             schema = json.loads(schema_path.read_text(encoding="utf-8"))
-            self.assertEqual(schema["properties"]["findings"]["maxItems"], 25)
-            output_path.write_text('{"findings":[{"title":"Bug","severity":"medium"}]}', encoding="utf-8")
-            return Mock(returncode=0, stdout='{"findings":[]}', stderr="")
+            self.assertEqual(schema["properties"]["issue_cards"]["maxItems"], 25)
+            output_path.write_text(json.dumps(audit_payload([issue_card("Bug", severity="P2")])), encoding="utf-8")
+            return Mock(returncode=0, stdout=json.dumps(audit_payload()), stderr="")
 
         with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run) as run:
-            findings, summary, _logs = run_codex_review(config(), {"repo": "acme/api"}, Path("checkout"))
+            payload, summary, _logs = run_codex_review(config(), {"repo": "acme/api"}, Path("checkout"))
 
         command = run.call_args.args[0]
         self.assertEqual(command[:2], ["codex", "exec"])
@@ -376,6 +1096,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn("--output-schema", command)
         self.assertIn("--output-last-message", command)
+        findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Bug")
         self.assertEqual(summary["medium"], 1)
 
@@ -432,7 +1153,7 @@ class WorkerMainTest(unittest.TestCase):
 
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             output_path = Path(command[command.index("--output-last-message") + 1])
-            output_path.write_text('{"findings":[]}', encoding="utf-8")
+            output_path.write_text(json.dumps(audit_payload()), encoding="utf-8")
             return Mock(returncode=0, stdout="", stderr="")
 
         with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run) as run:
@@ -455,11 +1176,12 @@ class WorkerMainTest(unittest.TestCase):
             self.assertEqual(command[:2], ["opencode", "run"])
             self.assertEqual(command[command.index("--model") + 1], "openai/gpt-5")
             self.assertEqual(command[command.index("--variant") + 1], "xhigh")
-            return Mock(returncode=0, stdout='{"findings":[{"title":"Fallback","severity":"low"}]}', stderr="")
+            return Mock(returncode=0, stdout=json.dumps(audit_payload([issue_card("Fallback", severity="low")])), stderr="")
 
         with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run):
-            findings, summary, logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
+            payload, summary, logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
 
+        findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Fallback")
         self.assertEqual(summary["low"], 1)
         self.assertIn("codex failed", logs)
@@ -608,6 +1330,42 @@ class WorkerMainTest(unittest.TestCase):
         self.assertFalse(expired.with_suffix(".failed-retain").exists())
         self.assertTrue(retained.exists())
         self.assertTrue(Path(cfg.work_dir).exists())
+
+    def test_cleanup_checkouts_skips_active_jobs_and_removes_oldest_over_budget(self) -> None:
+        cfg = config()
+        cfg.max_checkout_bytes = 5
+        active = Path(cfg.work_dir) / "active_job"
+        old = Path(cfg.work_dir) / "old_job"
+        active.mkdir(parents=True)
+        old.mkdir(parents=True)
+        (active / "big.txt").write_text("xxxxx", encoding="utf-8")
+        (old / "big.txt").write_text("xxxxx", encoding="utf-8")
+        os.utime(old, (1, 1))
+        os.utime(active, (2, 2))
+
+        cleanup_checkouts(cfg, active_job_ids={"active_job"})
+
+        self.assertTrue(active.exists())
+        self.assertFalse(old.exists())
+
+    def test_cleanup_worker_resources_prunes_recursive_verifier_logs(self) -> None:
+        cfg = config()
+        cfg.log_retention_seconds = 60
+        cfg.max_log_bytes = 8
+        expired = Path(cfg.log_dir) / "verification" / "old_job" / "test.log"
+        active = Path(cfg.log_dir) / "verification" / "active_job" / "test.log"
+        newest = Path(cfg.log_dir) / "verification" / "new_job" / "test.log"
+        for path, content in ((expired, "expired"), (active, "active-log"), (newest, "new-log")):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        old_time = int(time.time()) - 3600
+        os.utime(expired, (old_time, old_time))
+
+        cleanup_worker_resources(cfg, active_job_ids={"active_job"})
+
+        self.assertFalse(expired.exists())
+        self.assertTrue(active.exists())
+        self.assertFalse(newest.exists())
 
     def test_lifecycle_uninstall_dry_run_does_not_remove_files(self) -> None:
         with patch("pullwise_worker.main.subprocess.run") as run:
