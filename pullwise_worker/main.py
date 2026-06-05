@@ -2402,7 +2402,9 @@ def token_usage_from_json(value: object) -> dict[str, int]:
     ):
         count = token_count(value.get(source_key))
         if count is not None:
-            usage.setdefault(target_key, count)
+            existing = usage.get(target_key)
+            if not isinstance(existing, int) or count > existing:
+                usage[target_key] = count
     for nested_key in ("usage", "token_usage", "tokenUsage", "metrics"):
         merge_token_usage(usage, token_usage_from_json(value.get(nested_key)))
     return usage
@@ -2426,20 +2428,24 @@ def merge_token_usage(target: dict, source: dict[str, int]) -> None:
     for key in ("input_tokens", "output_tokens", "total_tokens"):
         value = source.get(key)
         if isinstance(value, int) and value >= 0:
-            target.setdefault(key, value)
+            existing = target.get(key)
+            if not isinstance(existing, int) or value > existing:
+                target[key] = value
 
 
 def first_token_match(text: str, *labels: str) -> int | None:
     label_pattern = "|".join(re.escape(label).replace("_", r"[_\s-]*") for label in labels)
     patterns = [
         rf"\b(?:{label_pattern})(?:[_\s-]*tokens?)?\s*[:=]\s*{_TOKEN_NUMBER_RE}",
-        rf"\b{_TOKEN_NUMBER_RE}\s+(?:{label_pattern})(?:[_\s-]*tokens?)?\b",
+        rf"\b{_TOKEN_NUMBER_RE}\s+(?:{label_pattern})(?:[_\s-]*tokens?)?\b(?!\s*[:=])",
     ]
+    best_count = None
     for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            return token_count(match.group(1))
-    return None
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            count = token_count(match.group(1))
+            if count is not None and (best_count is None or count > best_count):
+                best_count = count
+    return best_count
 
 
 def token_count(value: object) -> int | None:
