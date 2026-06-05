@@ -1,6 +1,6 @@
 [project]
 name = "pullwise-worker"
-version = "0.2.5"
+version = "0.2.6"
 description = "Pullwise pull-based scan worker"
 requires-python = ">=3.9"
 dependencies = []
