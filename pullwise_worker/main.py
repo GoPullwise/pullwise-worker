@@ -39,7 +39,7 @@ _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex", "opencode"}
-DEFAULT_CODEX_MODEL = "gpt-5.4"
+DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
 DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
 DEFAULT_OPENCODE_VARIANT = "medium"
@@ -432,10 +432,10 @@ class Worker:
     def refresh_readiness_if_due(self) -> bool:
         current = time.time()
         if current - self._readiness_checked_at < self.config.readiness_check_seconds:
-            return self._doctor_status == "ok" and self._codex_ready
-        checks, codex_ready = worker_readiness_checks(self.config)
+            return self._doctor_status == "ok"
+        checks, _provider_ready = worker_readiness_checks(self.config)
         failed_check = first_failed_check(checks)
-        self._codex_ready = codex_ready
+        self._codex_ready = readiness_check_ok(checks, "codex_ready")
         self._doctor_status = "degraded" if failed_check else "ok"
         self._readiness_checked_at = current
         self.last_error = None if failed_check is None else readiness_error_message(failed_check, self.config)
@@ -2284,7 +2284,7 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
     for provider in config.provider_chain:
         try:
             if provider == "codex":
-                audit_payload, _summary, logs_summary = run_codex_provider_review(config, job, checkout_dir)
+                audit_payload, _summary, logs_summary = run_codex_provider_review(config, job, checkout_dir)[:3]
             elif provider == "opencode":
                 audit_payload, _summary, logs_summary = run_opencode_provider_review(config, job, checkout_dir)
             else:
@@ -2300,7 +2300,7 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
     raise RuntimeError(f"all review providers failed: {'; '.join(errors)}")
 
 
-def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str]:
+def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str, dict]:
     prompt = review_prompt(job)
     with tempfile.TemporaryDirectory(prefix="pullwise-codex-") as tmpdir:
         schema_path = Path(tmpdir) / "audit-swarm.schema.json"
@@ -2315,13 +2315,30 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
             stderr=subprocess.PIPE,
             timeout=config.codex_timeout_seconds,
         )
-        logs_summary = redact_secrets((completed.stderr or completed.stdout)[-1000:], config)
+        raw_logs = completed.stderr or completed.stdout
+        logs_summary = redact_secrets(raw_logs[-1000:], config)
         if completed.returncode != 0:
             detail = codex_failure_detail(completed.stderr or completed.stdout, config)
             raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {detail[:700]}")
         output = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
     audit_payload = parse_audit_swarm_payload(output)
-    return audit_payload, summarize(audit_swarm_findings_from_payload(audit_payload) or []), logs_summary
+    return audit_payload, summarize(audit_swarm_findings_from_payload(audit_payload) or []), logs_summary, codex_ai_usage(raw_logs, config)
+
+
+def codex_ai_usage(raw_output: str, config: WorkerConfig) -> dict:
+    usage: dict[str, object] = {}
+    if config.codex_model:
+        usage["model"] = config.codex_model
+    match = re.search(r"Token usage:\s*input=(\d+)\s+output=(\d+)\s+total=(\d+)", raw_output or "", re.IGNORECASE)
+    if match:
+        usage.update(
+            {
+                "input_tokens": int(match.group(1)),
+                "output_tokens": int(match.group(2)),
+                "total_tokens": int(match.group(3)),
+            }
+        )
+    return usage
 
 
 def codex_failure_detail(raw_output: str, config: WorkerConfig) -> str:
@@ -2492,10 +2509,10 @@ def filter_audit_swarm_payload_by_findings(payload: dict, findings: list[dict]) 
     for index, card in enumerate(first_list(payload, "issue_cards", "issueCards") or []):
         if not isinstance(card, dict):
             continue
-        card_id = audit_swarm_issue_key(card) or audit_swarm_generated_id(card, index)
+        card_id = audit_swarm_resolved_issue_id(card, index)
         if card_id in reported_ids:
             next_card = dict(card)
-            next_card.setdefault("issue_id", card_id)
+            next_card["issue_id"] = card_id
             filtered_cards.append(next_card)
     filtered_card_ids = {audit_swarm_issue_key(card) for card in filtered_cards}
     filtered_results = [
@@ -2621,10 +2638,20 @@ def normalize_audit_swarm_files_for_checkout(payload: dict, checkout_dir: Path) 
         raw_evidence = card.get("evidence") if isinstance(card.get("evidence"), list) else []
         for item in raw_evidence:
             if isinstance(item, dict):
-                item["file"] = normalize_finding_file_for_checkout(item.get("file"), checkout_dir)
-        if card.get("file"):
-            card["file"] = normalize_finding_file_for_checkout(card.get("file"), checkout_dir)
+                normalize_audit_swarm_path_fields(item, checkout_dir, "file", "logPath", "log_path")
+        normalize_audit_swarm_path_fields(card, checkout_dir, "file", "testFile", "test_file")
+        reproduction = card.get("reproduction") if isinstance(card.get("reproduction"), dict) else {}
+        normalize_audit_swarm_path_fields(reproduction, checkout_dir, "testFile", "test_file", "logPath", "log_path")
+    for result in normalized["verification_results"]:
+        if isinstance(result, dict):
+            normalize_audit_swarm_path_fields(result, checkout_dir, "logPath", "log_path")
     return normalized
+
+
+def normalize_audit_swarm_path_fields(item: dict, checkout_dir: Path, *keys: str) -> None:
+    for key in keys:
+        if key in item:
+            item[key] = normalize_finding_file_for_checkout(item.get(key), checkout_dir)
 
 
 def audit_swarm_findings_from_payload(parsed: object) -> list[dict] | None:
@@ -2638,7 +2665,8 @@ def audit_swarm_findings_from_payload(parsed: object) -> list[dict] | None:
     findings = []
     for index, card in enumerate(cards):
         if isinstance(card, dict):
-            findings.append(audit_swarm_issue_card_to_finding(card, by_issue.get(audit_swarm_issue_key(card), []), index))
+            issue_id = audit_swarm_resolved_issue_id(card, index)
+            findings.append(audit_swarm_issue_card_to_finding(card, by_issue.get(issue_id, []), index))
     return findings
 
 
@@ -2660,6 +2688,15 @@ def audit_swarm_issue_key(card: dict) -> str:
     )
 
 
+def audit_swarm_placeholder_issue_id(issue_id: str) -> bool:
+    return not issue_id or issue_id.lower() in {"null", "none"}
+
+
+def audit_swarm_resolved_issue_id(card: dict, index: int) -> str:
+    issue_id = audit_swarm_issue_key(card)
+    return audit_swarm_generated_id(card, index) if audit_swarm_placeholder_issue_id(issue_id) else issue_id
+
+
 def audit_swarm_verifications_by_issue(results: list) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = {}
     for result in results:
@@ -2679,7 +2716,7 @@ def audit_swarm_verifications_by_issue(results: list) -> dict[str, list[dict]]:
 
 
 def audit_swarm_issue_card_to_finding(card: dict, verifications: list[dict], index: int) -> dict:
-    issue_id = audit_swarm_issue_key(card)
+    issue_id = audit_swarm_resolved_issue_id(card, index)
     locations = audit_swarm_locations(card)
     primary = locations[0] if locations else {}
     verdict = audit_swarm_verdict(verifications)
@@ -2688,7 +2725,7 @@ def audit_swarm_issue_card_to_finding(card: dict, verifications: list[dict], ind
     evidence = audit_swarm_evidence(card, verifications, primary)
     reproduction = audit_swarm_reproduction(card, verifications)
     confidence = audit_swarm_confidence(card.get("confidence"), verdict)
-    finding_id = issue_id if issue_id and issue_id.lower() not in {"null", "none"} else audit_swarm_generated_id(card, index)
+    finding_id = issue_id
     claim = protocol_multiline_text(card.get("claim") or card.get("summary") or card.get("description"))
     title = clean_protocol_text(card.get("title")) or f"Audit candidate {index + 1}"
     verification_summary = audit_swarm_verification_summary(verifications, verdict)
@@ -3929,7 +3966,7 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
 
 
 def first_failed_check(checks: list[tuple[str, bool, str]]) -> tuple[str, bool, str] | None:
-    provider_ready = any(name == "provider_ready" and ok for name, ok, _detail in checks)
+    provider_ready = readiness_check_ok(checks, "provider_ready")
     optional_provider_checks = {"node", "codex", "codex_ready", "opencode"}
     for check in checks:
         name, ok, _detail = check
@@ -3939,6 +3976,10 @@ def first_failed_check(checks: list[tuple[str, bool, str]]) -> tuple[str, bool, 
             continue
         return check
     return None
+
+
+def readiness_check_ok(checks: list[tuple[str, bool, str]], name: str) -> bool:
+    return any(check_name == name and ok for check_name, ok, _detail in checks)
 
 
 def readiness_error_message(check: tuple[str, bool, str], config: WorkerConfig) -> str:
@@ -3970,6 +4011,7 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 def run_doctor(config: WorkerConfig) -> bool:
     checks, provider_ready = worker_readiness_checks(config)
+    codex_ready = readiness_check_ok(checks, "codex_ready")
     systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", "pullwise-worker"])
     checks.append(("systemd", systemd_ok, systemd_detail))
     heartbeat_ok = True
@@ -3979,7 +4021,7 @@ def run_doctor(config: WorkerConfig) -> bool:
         PullwiseClient(config).heartbeat(
             last_error=None,
             doctor_status="ok" if doctor_required_ok else "degraded",
-            codex_ready=provider_ready,
+            codex_ready=codex_ready,
             systemd_active=systemd_ok,
             doctor_checked_at=int(time.time()),
         )
@@ -4096,11 +4138,12 @@ def default_worker_package() -> str:
 
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     package = default_worker_package()
+    python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3"
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE") or "/etc/pullwise-worker/worker.env")
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE") or "/etc/pullwise-worker/worker.env.bak")
     commands = [
         ["systemctl", "stop", "pullwise-worker"],
-        ["python3", "-m", "pip", "install", "--upgrade", package],
+        [python_bin, "-m", "pip", "install", "--upgrade", package],
         ["pullwise-worker", "doctor"],
         ["systemctl", "restart", "pullwise-worker"],
     ]

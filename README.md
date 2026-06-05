@@ -34,7 +34,7 @@ Required environment:
 - `PULLWISE_WORKER_WORK_DIR` optional
 - `PULLWISE_LOG_DIR` optional, defaults to the temp directory
 - `PULLWISE_CODEX_COMMAND` optional, defaults to `codex`
-- `PULLWISE_CODEX_MODEL` optional, defaults to `gpt-5.4`
+- `PULLWISE_CODEX_MODEL` optional, defaults to `gpt-5.5`
 - `PULLWISE_CODEX_REASONING_EFFORT` optional, defaults to `medium`
 - `PULLWISE_OPENCODE_COMMAND` optional, defaults to `opencode`
 - `PULLWISE_OPENCODE_MODEL` optional, defaults to `opencode/big-pickle`
@@ -50,13 +50,13 @@ Required environment:
 
 Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old verifier logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
-Provider model defaults are intentionally conservative. Codex passes `gpt-5.4` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker defaults to `opencode/big-pickle` with variant `medium`.
+Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker defaults to `opencode/big-pickle` with variant `medium`.
 
 Production Codex-first fallback example:
 
 ```bash
 PULLWISE_PROVIDER_CHAIN=codex,opencode
-PULLWISE_CODEX_MODEL=gpt-5.4
+PULLWISE_CODEX_MODEL=gpt-5.5
 PULLWISE_CODEX_REASONING_EFFORT=medium
 PULLWISE_OPENCODE_MODEL=opencode/big-pickle
 PULLWISE_OPENCODE_VARIANT=medium

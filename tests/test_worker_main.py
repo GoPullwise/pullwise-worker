@@ -29,12 +29,15 @@ from pullwise_worker.main import (
     codex_ready_check,
     default_worker_package,
     execute_lifecycle_command,
+    filter_audit_swarm_payload_by_findings,
     filter_reportable_findings,
+    normalize_audit_swarm_files_for_checkout,
     node_version_check,
     package_install_command,
     parse_audit_swarm_payload,
     redact_secrets,
     result_checksum,
+    run_codex_provider_review,
     run_codex_review,
     run_deterministic_repository_checks,
     run_doctor,
@@ -197,6 +200,72 @@ class WorkerMainTest(unittest.TestCase):
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["file"], "src/app.py")
         self.assertEqual(findings[1]["file"], "")
+
+    def test_audit_swarm_blank_issue_id_keeps_confirmed_verification(self) -> None:
+        card = issue_card("Blank id keeps verifier", issue_id="")
+        fallback_id = (audit_swarm_findings_from_payload(audit_payload([card])) or [])[0]["id"]
+        payload = audit_payload(
+            [card],
+            [
+                {
+                    "issue_id": fallback_id,
+                    "verifier_role": "prover",
+                    "verdict": "confirmed",
+                    "proof_type": "static_proof",
+                    "proof_strength": 3,
+                    "result_summary": "Verifier confirmed the fallback issue.",
+                    "evidence": ["Static proof matched the fallback issue id."],
+                }
+            ],
+        )
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        filtered = filter_audit_swarm_payload_by_findings(payload, findings)
+
+        self.assertEqual(findings[0]["id"], fallback_id)
+        self.assertEqual(findings[0]["verificationStatus"], "static_proof")
+        self.assertEqual(filtered["issue_cards"][0]["issue_id"], fallback_id)
+        self.assertEqual(len(filtered["verification_results"]), 1)
+
+    def test_audit_swarm_normalizes_nested_reproduction_and_verifier_log_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            absolute_source = checkout_dir / "src" / "app.py"
+            absolute_test = checkout_dir / "tests" / "test_app.py"
+            absolute_card_log = checkout_dir / ".pullwise" / "card.log"
+            absolute_result_log = checkout_dir / ".pullwise" / "result.log"
+            card = issue_card(
+                "Nested paths are relative",
+                issue_id="nested-paths",
+                file=str(absolute_source),
+                evidence=[{"summary": "Source proof.", "file": str(absolute_source), "logPath": str(absolute_card_log)}],
+            )
+            card["reproduction"] = {
+                "commands": ["pytest tests/test_app.py"],
+                "testFile": str(absolute_test),
+                "logPath": str(absolute_card_log),
+            }
+            result = {
+                "issue_id": "nested-paths",
+                "verifier_role": "prover",
+                "verdict": "confirmed",
+                "proof_type": "failing_test",
+                "commands_run": ["pytest tests/test_app.py"],
+                "result_summary": "Test failed before the fix.",
+                "evidence": ["Verifier log confirmed the failure."],
+                "logPath": str(absolute_result_log),
+            }
+
+            normalized = normalize_audit_swarm_files_for_checkout(audit_payload([card], [result]), checkout_dir)
+
+        findings = audit_swarm_findings_from_payload(normalized) or []
+        reproduction = findings[0]["reproduction"]
+        log_paths = [item["logPath"] for item in findings[0]["evidence"] if item.get("logPath")]
+        self.assertEqual(findings[0]["file"], "src/app.py")
+        self.assertEqual(reproduction["testFile"], "tests/test_app.py")
+        self.assertEqual(reproduction["logPath"], ".pullwise/card.log")
+        self.assertIn(".pullwise/card.log", log_paths)
+        self.assertIn(".pullwise/result.log", log_paths)
 
     def test_deterministic_checks_report_readme_package_script_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1042,6 +1111,26 @@ class WorkerMainTest(unittest.TestCase):
         sleep.assert_not_called()
         self.assertIn("worker not ready: git: not found", worker.last_error)
 
+    def test_refresh_readiness_reports_codex_specific_state_with_opencode_fallback(self) -> None:
+        worker = Worker(config())
+        checks = [
+            ("git", True, "git ok"),
+            ("codex_ready", False, "not logged in"),
+            ("opencode", True, "opencode 1.0.0"),
+            ("provider_ready", True, "opencode"),
+            ("checkout_root", True, "ok"),
+            ("log_dir", True, "ok"),
+            ("disk_space", True, "2048 MB free"),
+        ]
+
+        with patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, True)):
+            ready = worker.refresh_readiness_if_due()
+
+        self.assertTrue(ready)
+        self.assertEqual(worker._doctor_status, "ok")
+        self.assertFalse(worker._codex_ready)
+        self.assertTrue(worker.refresh_readiness_if_due())
+
     def test_pullwise_client_posts_json_with_authorization(self) -> None:
         class FakeResponse:
             def __enter__(self) -> "FakeResponse":
@@ -1170,6 +1259,36 @@ class WorkerMainTest(unittest.TestCase):
                     Path("checkout"),
                 )
 
+    def test_codex_provider_review_reports_model_and_token_usage(self) -> None:
+        cfg = config()
+        cfg.codex_model = "gpt-5.5"
+
+        def fake_run(command: list[str], **_kwargs: object) -> Mock:
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text(json.dumps(audit_payload([])), encoding="utf-8")
+            return Mock(
+                returncode=0,
+                stdout="",
+                stderr="Review complete. Token usage: input=123 output=45 total=168",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", side_effect=fake_run):
+            _payload, _summary, _logs, ai_usage = run_codex_provider_review(
+                cfg,
+                {"repo": "acme/api", "branch": "main", "commit": "pending"},
+                Path(tmp),
+            )
+
+        self.assertEqual(
+            ai_usage,
+            {
+                "model": "gpt-5.5",
+                "input_tokens": 123,
+                "output_tokens": 45,
+                "total_tokens": 168,
+            },
+        )
+
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             schema_path = Path(command[command.index("--output-schema") + 1])
@@ -1187,7 +1306,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--ignore-user-config", command)
         self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="medium"')
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.4")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn("--output-schema", command)
         self.assertIn("--output-last-message", command)
@@ -1217,7 +1336,7 @@ class WorkerMainTest(unittest.TestCase):
         cfg = config()
 
         self.assertEqual(cfg.provider_chain, ["codex"])
-        self.assertEqual(cfg.codex_model, "gpt-5.4")
+        self.assertEqual(cfg.codex_model, "gpt-5.5")
         self.assertEqual(cfg.codex_reasoning_effort, "medium")
         self.assertEqual(cfg.opencode_command, "opencode")
         self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
@@ -1388,6 +1507,30 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
         self.assertTrue(heartbeat_kwargs["codex_ready"])
 
+    def test_run_doctor_sends_codex_not_ready_when_opencode_fallback_is_ready(self) -> None:
+        cfg = config()
+        cfg.provider_chain = ["codex", "opencode"]
+
+        with patch(
+                "pullwise_worker.main.command_ok",
+                side_effect=[
+                    (True, "git ok"),
+                    (True, "v22.21.0"),
+                    (True, "codex ok"),
+                    (True, "opencode 1.0.0"),
+                    (True, "active"),
+                ],
+            ), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class:
+            client_class.return_value.heartbeat.return_value = None
+            ok = run_doctor(cfg)
+
+        self.assertTrue(ok)
+        heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
+        self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
+        self.assertFalse(heartbeat_kwargs["codex_ready"])
+
     def test_codex_ready_check_identifies_login_failure(self) -> None:
         cfg = config()
         completed = Mock(returncode=1, stdout="", stderr="Reading additional input from stdin...\nnot authenticated; run codex login")
@@ -1414,7 +1557,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("--json", command)
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn('model_reasoning_effort="medium"', command)
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.4")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
 
     def test_node_version_check_requires_node_20(self) -> None:
         with patch("pullwise_worker.main.command_ok", return_value=(True, "v12.22.9")):
@@ -1509,6 +1652,37 @@ class WorkerMainTest(unittest.TestCase):
             code = update_worker(config(), dry_run=True)
 
         self.assertEqual(code, 0)
+        run.assert_not_called()
+
+    def test_update_uses_installed_service_interpreter(self) -> None:
+        cfg = config()
+        expected_package = default_worker_package()
+        with patch.dict("os.environ", {"PULLWISE_PYTHON_BIN": "/custom/python"}, clear=False), \
+            patch("pullwise_worker.main.subprocess.run") as run, \
+            patch("builtins.print") as print_mock:
+            code = update_worker(cfg, dry_run=True)
+
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertEqual(code, 0)
+        self.assertIn(f"/custom/python -m pip install --upgrade {expected_package}", printed)
+        run.assert_not_called()
+
+    def test_update_falls_back_to_python3_when_service_interpreter_is_missing(self) -> None:
+        cfg = config()
+        expected_package = default_worker_package()
+
+        with patch.dict(
+                "os.environ",
+                {"PULLWISE_WORKER_ENV_FILE": "/tmp/worker.env", "PULLWISE_WORKER_ENV_BACKUP_FILE": "/tmp/worker.env.bak"},
+                clear=True,
+            ), \
+            patch("pullwise_worker.main.subprocess.run") as run, \
+            patch("builtins.print") as print_mock:
+            code = update_worker(cfg, dry_run=True)
+
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertEqual(code, 0)
+        self.assertIn(f"python3 -m pip install --upgrade {expected_package}", printed)
         run.assert_not_called()
 
     def test_update_restores_existing_env_when_upgrade_fails(self) -> None:
@@ -1631,11 +1805,11 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("@openai/codex@0.135.0", install_script)
         self.assertIn("--codex-package", install_script)
         self.assertIn("--provider-chain", install_script)
-        self.assertIn("PULLWISE_CODEX_MODEL=${PULLWISE_CODEX_MODEL:-gpt-5.4}", install_script)
+        self.assertIn("PULLWISE_CODEX_MODEL=${PULLWISE_CODEX_MODEL:-gpt-5.5}", install_script)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=${PULLWISE_CODEX_REASONING_EFFORT:-medium}", install_script)
         self.assertIn("PULLWISE_OPENCODE_MODEL=${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}", install_script)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=${PULLWISE_OPENCODE_VARIANT:-medium}", install_script)
-        self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.4", env_template)
+        self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
