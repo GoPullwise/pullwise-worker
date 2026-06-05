@@ -1280,6 +1280,22 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(summary["low"], 1)
         self.assertIn("codex failed", logs)
 
+    def test_run_codex_review_surfaces_codex_json_error_detail(self) -> None:
+        cfg = config()
+        codex_stderr = "\n".join(
+            [
+                "warning: Codex could not find bubblewrap on PATH.",
+                'ERROR: {"type": "error", "message": "Sandbox helper failed to create the namespace", "code": "sandbox_unavailable"}',
+            ]
+        )
+
+        with patch(
+            "pullwise_worker.main.subprocess.run",
+            return_value=Mock(returncode=1, stdout="", stderr=codex_stderr),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "sandbox_unavailable.*Sandbox helper failed"):
+                run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
+
     def test_job_checkout_dir_refuses_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp) / "work"
@@ -1377,6 +1393,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--json", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.4")
 

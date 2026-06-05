@@ -2317,10 +2317,46 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
         )
         logs_summary = redact_secrets((completed.stderr or completed.stdout)[-1000:], config)
         if completed.returncode != 0:
-            raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {logs_summary[:300]}")
+            detail = codex_failure_detail(completed.stderr or completed.stdout, config)
+            raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {detail[:700]}")
         output = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
     audit_payload = parse_audit_swarm_payload(output)
     return audit_payload, summarize(audit_swarm_findings_from_payload(audit_payload) or []), logs_summary
+
+
+def codex_failure_detail(raw_output: str, config: WorkerConfig) -> str:
+    structured = extract_codex_error_detail(raw_output)
+    raw_detail = structured or (raw_output or "").strip()[-1000:] or "no stderr/stdout"
+    return redact_secrets(raw_detail, config)
+
+
+def extract_codex_error_detail(raw_output: str) -> str | None:
+    text = raw_output or ""
+    marker = "ERROR:"
+    index = text.find(marker)
+    decoder = json.JSONDecoder()
+    while index >= 0:
+        candidate = text[index + len(marker):].lstrip()
+        try:
+            payload, _end = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            index = text.find(marker, index + len(marker))
+            continue
+        if isinstance(payload, dict):
+            code = payload.get("code")
+            message = payload.get("message")
+            error = payload.get("error")
+            if not isinstance(message, str) and isinstance(error, dict):
+                message = error.get("message")
+                code = code or error.get("code")
+            parts = [part for part in (code, message) if isinstance(part, str) and part.strip()]
+            if parts:
+                return ": ".join(parts)
+            error_type = payload.get("type")
+            if isinstance(error_type, str) and error_type.strip():
+                return f"type={error_type}"
+        index = text.find(marker, index + len(marker))
+    return None
 
 
 def codex_review_command(config: WorkerConfig, schema_path: str, output_path: str, prompt: str) -> list[str]:
@@ -3967,6 +4003,8 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         "--json",
         "--config",
         f'model_reasoning_effort="{config.codex_reasoning_effort}"',
+        "--sandbox",
+        "read-only",
     ]
     if config.codex_model:
         command.extend(["--model", config.codex_model])
