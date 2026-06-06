@@ -32,7 +32,6 @@ from pullwise_worker.main import (
     codex_ready_check,
     default_worker_package,
     execute_lifecycle_command,
-    extract_token_usage,
     filter_audit_swarm_payload_by_findings,
     filter_reportable_findings,
     normalize_audit_swarm_files_for_checkout,
@@ -895,7 +894,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(result_payload["summary"]["high"], 1)
         self.assertEqual(
             result_payload["ai_usage"],
-            {"model": "gpt-5.5", "input_tokens": 123, "output_tokens": 45, "total_tokens": 168},
+            {"model": "gpt-5.5"},
         )
         self.assertEqual(result_payload["verification_audit"]["candidateCount"], 1)
         self.assertEqual(result_payload["verification_audit"]["reportedCount"], 1)
@@ -1325,7 +1324,7 @@ class WorkerMainTest(unittest.TestCase):
                     Path("checkout"),
                 )
 
-    def test_codex_provider_review_reports_model_and_token_usage(self) -> None:
+    def test_codex_provider_review_reports_model_without_token_usage(self) -> None:
         cfg = config()
         cfg.codex_model = "gpt-5.5"
 
@@ -1347,38 +1346,7 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(
             ai_usage,
-            {
-                "model": "gpt-5.5",
-                "input_tokens": 123,
-                "output_tokens": 45,
-                "total_tokens": 168,
-            },
-        )
-
-    def test_extract_token_usage_uses_largest_repeated_json_usage(self) -> None:
-        raw_output = "\n".join(
-            [
-                json.dumps({"usage": {"input_tokens": 123, "output_tokens": 45, "total_tokens": 168}}),
-                json.dumps({"usage": {"input_tokens": 53210, "output_tokens": 4123, "total_tokens": 57333}}),
-            ]
-        )
-
-        self.assertEqual(
-            extract_token_usage(raw_output),
-            {"input_tokens": 53210, "output_tokens": 4123, "total_tokens": 57333},
-        )
-
-    def test_extract_token_usage_uses_largest_repeated_text_usage(self) -> None:
-        raw_output = "\n".join(
-            [
-                "Review complete. Token usage: input=123 output=45 total=168",
-                "Review complete. Token usage: input=53210 output=4123 total=57333",
-            ]
-        )
-
-        self.assertEqual(
-            extract_token_usage(raw_output),
-            {"input_tokens": 53210, "output_tokens": 4123, "total_tokens": 57333},
+            {"model": "gpt-5.5"},
         )
 
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:

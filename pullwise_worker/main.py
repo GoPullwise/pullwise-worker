@@ -34,7 +34,6 @@ PHASE_PROGRESS = {
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FAILED_CHECKOUT_MARKER_SUFFIX = ".failed-retain"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
-_TOKEN_NUMBER_RE = r"([0-9][0-9,]*)"
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
@@ -525,7 +524,7 @@ class Worker:
                 ),
             )
             audit_payload, summary, logs_summary = run_codex_review(self.config, job, checkout_dir)
-            ai_usage = audit_payload.get("ai_usage") if isinstance(audit_payload.get("ai_usage"), dict) else {}
+            ai_usage = normalize_ai_usage(audit_payload.get("ai_usage"))
             if verifier_findings:
                 audit_payload = merge_audit_swarm_payloads(
                     audit_swarm_payload_from_findings(verifier_findings, verifier_role="verifier"),
@@ -2301,7 +2300,7 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
             else:
                 raise RuntimeError(f"unsupported review provider: {provider}")
             audit_payload, _summary, logs_summary = provider_result[:3]
-            ai_usage = provider_result[3] if len(provider_result) > 3 and isinstance(provider_result[3], dict) else {}
+            ai_usage = normalize_ai_usage(provider_result[3] if len(provider_result) > 3 else {})
             audit_payload = normalize_audit_swarm_files_for_checkout(audit_payload, checkout_dir)
             audit_payload = merge_audit_swarm_payloads(deterministic_payload, audit_payload)
             if ai_usage:
@@ -2340,129 +2339,23 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
     return audit_payload, summarize(audit_swarm_findings_from_payload(audit_payload) or []), logs_summary, codex_ai_usage(raw_logs, config)
 
 
-def codex_ai_usage(raw_output: str, config: WorkerConfig) -> dict:
-    return ai_usage_payload(config.codex_model, raw_output)
+def codex_ai_usage(_raw_output: str, config: WorkerConfig) -> dict:
+    return ai_usage_payload(config.codex_model)
 
 
-def opencode_ai_usage(raw_output: str, config: WorkerConfig) -> dict:
-    return ai_usage_payload(config.opencode_model, raw_output)
+def opencode_ai_usage(_raw_output: str, config: WorkerConfig) -> dict:
+    return ai_usage_payload(config.opencode_model)
 
 
-def ai_usage_payload(model: str, raw_output: str) -> dict:
-    usage: dict[str, object] = {}
+def ai_usage_payload(model: object) -> dict:
     clean_model = clean_protocol_text(model)
-    if clean_model:
-        usage["model"] = clean_model
-    merge_token_usage(usage, extract_token_usage(raw_output))
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
-    if usage.get("total_tokens") is None and isinstance(input_tokens, int) and isinstance(output_tokens, int):
-        usage["total_tokens"] = input_tokens + output_tokens
-    return {key: value for key, value in usage.items() if value not in ("", None)}
+    return {"model": clean_model} if clean_model else {}
 
 
-def extract_token_usage(raw_output: str) -> dict[str, int]:
-    usage: dict[str, int] = {}
-    for payload in json_objects_from_lines(raw_output):
-        merge_token_usage(usage, token_usage_from_json(payload))
-    merge_token_usage(usage, token_usage_from_text(raw_output))
-    return usage
-
-
-def json_objects_from_lines(raw_output: str) -> list[object]:
-    payloads = []
-    decoder = json.JSONDecoder()
-    for line in (raw_output or "").splitlines():
-        text = line.strip()
-        start = text.find("{")
-        while start >= 0:
-            try:
-                payload, _end = decoder.raw_decode(text[start:])
-            except json.JSONDecodeError:
-                start = text.find("{", start + 1)
-                continue
-            payloads.append(payload)
-            break
-    return payloads
-
-
-def token_usage_from_json(value: object) -> dict[str, int]:
-    if isinstance(value, list):
-        usage: dict[str, int] = {}
-        for item in value:
-            merge_token_usage(usage, token_usage_from_json(item))
-        return usage
+def normalize_ai_usage(value: object) -> dict:
     if not isinstance(value, dict):
         return {}
-    usage: dict[str, int] = {}
-    for source_key, target_key in (
-        ("input_tokens", "input_tokens"),
-        ("inputTokens", "input_tokens"),
-        ("prompt_tokens", "input_tokens"),
-        ("promptTokens", "input_tokens"),
-        ("output_tokens", "output_tokens"),
-        ("outputTokens", "output_tokens"),
-        ("completion_tokens", "output_tokens"),
-        ("completionTokens", "output_tokens"),
-        ("total_tokens", "total_tokens"),
-        ("totalTokens", "total_tokens"),
-    ):
-        count = token_count(value.get(source_key))
-        if count is not None:
-            existing = usage.get(target_key)
-            if not isinstance(existing, int) or count > existing:
-                usage[target_key] = count
-    for nested_key in ("usage", "token_usage", "tokenUsage", "metrics"):
-        merge_token_usage(usage, token_usage_from_json(value.get(nested_key)))
-    return usage
-
-
-def token_usage_from_text(raw_output: str) -> dict[str, int]:
-    text = raw_output or ""
-    usage = {}
-    for key, labels in (
-        ("input_tokens", ("input", "prompt")),
-        ("output_tokens", ("output", "completion", "cached_output")),
-        ("total_tokens", ("total",)),
-    ):
-        count = first_token_match(text, *labels)
-        if count is not None:
-            usage[key] = count
-    return usage
-
-
-def merge_token_usage(target: dict, source: dict[str, int]) -> None:
-    for key in ("input_tokens", "output_tokens", "total_tokens"):
-        value = source.get(key)
-        if isinstance(value, int) and value >= 0:
-            existing = target.get(key)
-            if not isinstance(existing, int) or value > existing:
-                target[key] = value
-
-
-def first_token_match(text: str, *labels: str) -> int | None:
-    label_pattern = "|".join(re.escape(label).replace("_", r"[_\s-]*") for label in labels)
-    patterns = [
-        rf"\b(?:{label_pattern})(?:[_\s-]*tokens?)?\s*[:=]\s*{_TOKEN_NUMBER_RE}",
-        rf"\b{_TOKEN_NUMBER_RE}\s+(?:{label_pattern})(?:[_\s-]*tokens?)?\b(?!\s*[:=])",
-    ]
-    best_count = None
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            count = token_count(match.group(1))
-            if count is not None and (best_count is None or count > best_count):
-                best_count = count
-    return best_count
-
-
-def token_count(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        count = int(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return None
-    return count if count >= 0 else None
+    return ai_usage_payload(value.get("model") or value.get("modelName") or value.get("model_name"))
 
 
 def codex_failure_detail(raw_output: str, config: WorkerConfig) -> str:
