@@ -3635,7 +3635,17 @@ def finding_reproduction_evidence(finding: dict) -> bool:
     commands = reproduction.get("commands") if isinstance(reproduction.get("commands"), list) else []
     if any(reproduction_command_looks_executable(command) for command in commands):
         return True
-    return bool(str(finding.get("reproductionPath") or "").strip())
+    return reproduction_path_has_executable_command(finding.get("reproductionPath"))
+
+
+def reproduction_path_has_executable_command(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    verifier_match = re.search(r"Verifier command:\s*([^`.;\n\r]+)", text, flags=re.IGNORECASE)
+    if verifier_match and reproduction_command_looks_executable(verifier_match.group(1)):
+        return True
+    return any(reproduction_command_looks_executable(match) for match in re.findall(r"`([^`]+)`", text))
 
 
 def reproduction_command_looks_executable(command: object) -> bool:
