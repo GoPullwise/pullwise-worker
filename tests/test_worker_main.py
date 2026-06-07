@@ -1112,6 +1112,27 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"missing_evidence": 1})
         self.assertEqual(rejected_samples[0]["title"], "Natural language reproduction path")
 
+    def test_reportability_filter_rejects_natural_language_evidence_command(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Natural language evidence command",
+                    "evidence": [
+                        {
+                            "summary": "The checkout flow was inspected manually.",
+                            "command": "Open the app and click through the checkout flow.",
+                        }
+                    ],
+                    "whyNotFalsePositive": ["The flow was manually inspected."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_evidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Natural language evidence command")
+
     def test_convergence_gate_marks_missing_previous_finding_resolved(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
         previous_finding = {

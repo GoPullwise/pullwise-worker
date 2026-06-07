@@ -3622,7 +3622,7 @@ def finding_structured_evidence(finding: dict) -> bool:
         if not isinstance(item, dict):
             continue
         has_summary = bool(str(item.get("summary") or "").strip())
-        has_command = bool(str(item.get("command") or "").strip())
+        has_command = reproduction_command_looks_executable(item.get("command"))
         has_log = bool(str(item.get("logPath") or item.get("log_path") or "").strip())
         has_file_line = safe_repo_relative_file(item.get("file")) and positive_int(item.get("startLine") or item.get("line"))
         if has_summary and (has_command or has_log or has_file_line):
