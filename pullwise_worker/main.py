@@ -3688,10 +3688,39 @@ def finding_has_false_positive_check(finding: dict) -> bool:
         return True
     for key in ("whyNotFalsePositive", "false_positive_checks", "falsePositiveChecks"):
         values = finding.get(key) if isinstance(finding.get(key), list) else []
-        if any(str(item or "").strip() for item in values):
+        if any(false_positive_check_is_substantive(item) for item in values):
             return True
     limitations = finding.get("limitations") if isinstance(finding.get("limitations"), list) else []
-    return any("false-positive check:" in str(item or "").strip().lower() for item in limitations)
+    return any(
+        false_positive_check_is_substantive(
+            re.sub(r"^.*?false-positive check:\s*", "", str(item or ""), flags=re.IGNORECASE)
+        )
+        for item in limitations
+        if "false-positive check:" in str(item or "").strip().lower()
+    )
+
+
+def false_positive_check_is_substantive(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = normalized_fingerprint_text(text)
+    return normalized not in {
+        "n/a",
+        "na",
+        "none",
+        "not applicable",
+        "unknown",
+        "unchecked",
+        "not checked",
+        "not verified",
+        "no check",
+        "no false positive check",
+        "could not verify",
+        "cannot verify",
+        "todo",
+        "tbd",
+    }
 
 
 def reportability_rejection_reason(finding: object) -> str:
