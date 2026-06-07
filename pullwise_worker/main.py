@@ -4050,7 +4050,9 @@ def statistically_calibrated_confidence(finding: dict, source_stats: dict) -> fl
         reliability = wilson_lower_bound(1, resolved + 2)
         return base_confidence * reliability
     positive_feedback = confirmed
-    if rejected <= positive_feedback:
+    if not positive_feedback and not rejected:
+        return base_confidence
+    if rejected < positive_feedback:
         total = positive_feedback + rejected
         if total < 8 or rejected <= 1:
             return base_confidence

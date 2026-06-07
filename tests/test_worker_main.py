@@ -1686,6 +1686,40 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_samples[0]["title"], "Unverified default guess")
         self.assertEqual(state["open_findings"], [])
 
+    def test_convergence_gate_penalizes_small_sample_source_with_equal_rejections(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 20)), encoding="utf-8")
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Early mixed source bug")])) or [])[0]
+        finding["_auditSwarmRole"] = "correctness-reviewer"
+        finding["confidence"] = 0.9
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "source_stats": {
+                    "correctness-reviewer": {"reported": 2, "confirmed": 1, "resolved": 0, "rejected": 1}
+                },
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}), \
+            patch("pullwise_worker.main.changed_line_ranges_between_heads", return_value={"src/app.py": [(1, 20)]}):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"low_statistical_confidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Early mixed source bug")
+        self.assertEqual(state["open_findings"], [])
+
     def test_convergence_gate_suppresses_same_run_duplicate_fingerprints(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
         first = (audit_swarm_findings_from_payload(audit_payload([issue_card("Duplicate bug", issue_id="dup-1")])) or [])[0]
