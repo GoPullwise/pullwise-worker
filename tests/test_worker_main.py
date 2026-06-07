@@ -1167,6 +1167,8 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_convergence_gate_allows_new_finding_when_delta_touches_file(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 20)), encoding="utf-8")
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Fix introduced bug")])) or [])[0]
         finding["confidence"] = 0.9
         job = {
@@ -1192,6 +1194,39 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {})
         self.assertEqual(rejected_samples, [])
         self.assertEqual(state["open_findings"][0]["title"], "Fix introduced bug")
+
+    def test_convergence_gate_rejects_new_finding_when_location_is_stale(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("line 1\nline 2\nline 3\n", encoding="utf-8")
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("New stale line bug", line=12)])) or [])[0]
+        finding["confidence"] = 0.95
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [],
+                "source_stats": {
+                    "correctness-reviewer": {"reported": 4, "confirmed": 4, "resolved": 0, "rejected": 0}
+                },
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"invalid_candidate_location": 1})
+        self.assertEqual(rejected_samples[0]["title"], "New stale line bug")
+        self.assertEqual(state["open_findings"], [])
 
     def test_convergence_gate_resolves_previous_finding_when_location_deleted(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())

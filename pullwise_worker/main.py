@@ -4024,6 +4024,9 @@ def apply_convergence_gate(
             if changed_files is None or not finding_files or not (finding_files & changed_files):
                 reject(finding, "not_introduced_by_current_delta")
                 continue
+            if not finding_location_exists_in_checkout(checkout_dir, finding):
+                reject(finding, "invalid_candidate_location")
+                continue
         reportable.append(finding)
         open_fingerprints.add(matched_fingerprint)
         seen_current_fingerprints.add(matched_fingerprint)
