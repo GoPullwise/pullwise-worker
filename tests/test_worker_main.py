@@ -1387,7 +1387,8 @@ class WorkerMainTest(unittest.TestCase):
             },
         }
 
-        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}):
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}), \
+            patch("pullwise_worker.main.changed_line_ranges_between_heads", return_value={"src/app.py": [(10, 14)]}):
             reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
                 job,
                 checkout_dir,
@@ -1420,7 +1421,8 @@ class WorkerMainTest(unittest.TestCase):
             },
         }
 
-        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}):
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}), \
+            patch("pullwise_worker.main.changed_line_ranges_between_heads", return_value={"src/app.py": [(10, 14)]}):
             reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
                 job,
                 checkout_dir,
@@ -1464,6 +1466,40 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(reported, [])
         self.assertEqual(rejected_reasons, {"not_introduced_by_current_delta": 1})
         self.assertEqual(rejected_samples[0]["title"], "Same file latent bug")
+        self.assertEqual(state["open_findings"], [])
+
+    def test_convergence_gate_rejects_line_finding_when_changed_hunks_are_unknown(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 20)), encoding="utf-8")
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Unknown hunk latent bug", line=12)])) or [])[0]
+        finding["confidence"] = 0.95
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [],
+                "source_stats": {
+                    "correctness-reviewer": {"reported": 4, "confirmed": 4, "resolved": 0, "rejected": 0}
+                },
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}), \
+            patch("pullwise_worker.main.changed_line_ranges_between_heads", return_value=None):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"not_introduced_by_current_delta": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Unknown hunk latent bug")
         self.assertEqual(state["open_findings"], [])
 
     def test_convergence_gate_rejects_line_finding_when_changed_file_has_no_hunk(self) -> None:
