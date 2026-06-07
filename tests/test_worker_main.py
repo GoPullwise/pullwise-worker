@@ -1096,6 +1096,29 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"missing_evidence": 1})
         self.assertEqual(rejected_samples[0]["title"], "Self verified location-only candidate")
 
+    def test_reportability_filter_rejects_self_verified_candidate_without_false_positive_check(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Self verified unchecked candidate",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "evidence": [
+                        {
+                            "summary": "The checkout handler calls charge() before validating idempotency_key.",
+                            "file": "src/app.py",
+                            "startLine": 12,
+                        }
+                    ],
+                    "verificationStatus": "verified",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Self verified unchecked candidate")
+
     def test_reportability_filter_rejects_natural_language_reproduction_command(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [

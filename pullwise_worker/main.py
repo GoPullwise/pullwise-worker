@@ -3717,8 +3717,6 @@ def reproduction_command_looks_executable(command: object) -> bool:
 
 
 def finding_has_false_positive_check(finding: dict) -> bool:
-    if finding_has_verification_proof(finding):
-        return True
     for key in ("whyNotFalsePositive", "false_positive_checks", "falsePositiveChecks"):
         values = finding.get(key) if isinstance(finding.get(key), list) else []
         if any(false_positive_check_is_substantive(item) for item in values):
@@ -3761,13 +3759,27 @@ def reportability_rejection_reason(finding: object) -> str:
         return "invalid_candidate"
     if not str(finding.get("title") or "").strip():
         return "missing_title"
-    if finding_has_verification_proof(finding) and (finding_structured_evidence(finding) or finding_reproduction_evidence(finding)):
+    structured_evidence = finding_structured_evidence(finding)
+    reproduction_evidence = finding_reproduction_evidence(finding)
+    if finding_has_verification_proof(finding) and (reproduction_evidence or finding_has_independent_verification_support(finding)):
         return ""
-    if finding_structured_evidence(finding) or finding_reproduction_evidence(finding):
+    if structured_evidence or reproduction_evidence:
         if not finding_has_false_positive_check(finding):
             return "missing_false_positive_check"
         return ""
     return "missing_evidence"
+
+
+def finding_has_independent_verification_support(finding: dict) -> bool:
+    raw_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            continue
+        if reproduction_command_looks_executable(item.get("command")):
+            return True
+        if evidence_log_path_is_structured(item.get("logPath") or item.get("log_path")):
+            return True
+    return False
 
 
 def rejected_candidate_sample(finding: object, reason: str) -> dict:
