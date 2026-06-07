@@ -2996,7 +2996,7 @@ def audit_swarm_confirmed_verification_has_support(result: dict) -> bool:
         return True
     if clean_protocol_text(result.get("logPath") or result.get("log_path")):
         return True
-    return bool(positive_int(result.get("proof_strength") or result.get("proofStrength")))
+    return False
 
 
 def audit_swarm_verification_status(verdict: str, verifications: list[dict]) -> str:
