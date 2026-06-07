@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from threading import Lock
 
 from . import __version__
 
@@ -64,6 +65,17 @@ CODEX_LOGIN_COMMAND = (
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
     "codex login --device-auth"
 )
+_CODEX_AUTH_FAILURE_MARKERS = (
+    "401 Unauthorized",
+    "Failed to refresh token",
+    "Please log out and sign in again",
+    "access token could not be refreshed",
+    "refresh token was already used",
+)
+_CODEX_EXEC_LOCK = Lock()
+_CODEX_AUTH_FAILURE_LOCK = Lock()
+_codex_auth_failure_until = 0.0
+_codex_auth_failure_detail = ""
 
 
 def parse_provider_chain(value: str | None, fallback: str = "codex") -> list[str]:
@@ -127,6 +139,7 @@ class WorkerConfig:
         self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", DEFAULT_OPENCODE_VARIANT).strip() or DEFAULT_OPENCODE_VARIANT
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
+        self.codex_auth_failure_cooldown_seconds = max(0, int(os.environ.get("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS") or 3600))
         self.readiness_check_seconds = max(10, int(os.environ.get("PULLWISE_READINESS_CHECK_SECONDS") or 60))
         self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
@@ -2359,6 +2372,35 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
     raise RuntimeError(f"all review providers failed: {'; '.join(errors)}")
 
 
+def codex_auth_failure_error(config: WorkerConfig) -> str | None:
+    with _CODEX_AUTH_FAILURE_LOCK:
+        remaining = _codex_auth_failure_until - time.monotonic()
+        detail = _codex_auth_failure_detail
+    if remaining <= 0:
+        return None
+    clean_detail = redact_secrets(detail, config)
+    return f"codex exec temporarily disabled after auth failure; retrying in {remaining:.0f}s: {clean_detail}"
+
+
+def mark_codex_auth_failure(config: WorkerConfig, detail: str) -> None:
+    global _codex_auth_failure_until, _codex_auth_failure_detail
+
+    cooldown = max(0, int(config.codex_auth_failure_cooldown_seconds))
+    if cooldown <= 0:
+        return
+    clipped = redact_secrets(str(detail or "").strip(), config)
+    if len(clipped) > 500:
+        clipped = clipped[-500:]
+    with _CODEX_AUTH_FAILURE_LOCK:
+        _codex_auth_failure_until = time.monotonic() + cooldown
+        _codex_auth_failure_detail = clipped
+
+
+def looks_like_codex_auth_failure(detail: str) -> bool:
+    lowered = str(detail or "").lower()
+    return any(marker.lower() in lowered for marker in _CODEX_AUTH_FAILURE_MARKERS)
+
+
 def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str, dict]:
     prompt = review_prompt(job)
     with tempfile.TemporaryDirectory(prefix="pullwise-codex-") as tmpdir:
@@ -2366,18 +2408,27 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
         output_path = Path(tmpdir) / "audit-swarm.json"
         schema_path.write_text(json.dumps(audit_swarm_output_schema()), encoding="utf-8")
         command = codex_review_command(config, str(schema_path), str(output_path), prompt)
-        completed = subprocess.run(
-            command,
-            cwd=str(checkout_dir),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=config.codex_timeout_seconds,
-        )
+        auth_failure = codex_auth_failure_error(config)
+        if auth_failure:
+            raise RuntimeError(auth_failure)
+        with _CODEX_EXEC_LOCK:
+            auth_failure = codex_auth_failure_error(config)
+            if auth_failure:
+                raise RuntimeError(auth_failure)
+            completed = subprocess.run(
+                command,
+                cwd=str(checkout_dir),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=config.codex_timeout_seconds,
+            )
         raw_logs = "\n".join([completed.stdout or "", completed.stderr or ""])
         logs_summary = redact_secrets(raw_logs[-1000:], config)
         if completed.returncode != 0:
             detail = codex_failure_detail(completed.stderr or completed.stdout, config)
+            if looks_like_codex_auth_failure(detail):
+                mark_codex_auth_failure(config, detail)
             raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {detail[:700]}")
         output = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
     audit_payload = parse_audit_swarm_payload(output)
@@ -4148,7 +4199,15 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     if config.codex_model:
         command.extend(["--model", config.codex_model])
     command.append('Return only JSON: {"ok": true}')
+    auth_failure = codex_auth_failure_error(config)
+    if auth_failure:
+        return False, auth_failure
+    if not _CODEX_EXEC_LOCK.acquire(blocking=False):
+        return True, "ready check deferred while codex is running"
     try:
+        auth_failure = codex_auth_failure_error(config)
+        if auth_failure:
+            return False, auth_failure
         completed = subprocess.run(
             command,
             text=True,
@@ -4162,10 +4221,14 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         return False, "codex ready check timed out"
     except Exception as exc:
         return False, str(exc)
+    finally:
+        _CODEX_EXEC_LOCK.release()
     output = redact_secrets((completed.stderr or completed.stdout).strip(), config)
     detail = output.splitlines()[0] if output else f"exit {completed.returncode}"
     if completed.returncode == 0:
         return True, "ready"
+    if looks_like_codex_auth_failure(output):
+        mark_codex_auth_failure(config, output)
     lowered = output.lower()
     if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
         return False, "not logged in"

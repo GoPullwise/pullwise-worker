@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from argparse import Namespace
@@ -118,6 +120,11 @@ def mark_checkout_root_owned(cfg: WorkerConfig) -> None:
 
 
 class WorkerMainTest(unittest.TestCase):
+    def setUp(self) -> None:
+        with worker_main._CODEX_AUTH_FAILURE_LOCK:
+            worker_main._codex_auth_failure_until = 0.0
+            worker_main._codex_auth_failure_detail = ""
+
     def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
         payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
 
@@ -1386,6 +1393,76 @@ class WorkerMainTest(unittest.TestCase):
             {"model": "gpt-5.5"},
         )
 
+    def test_codex_provider_review_invocations_are_serialized(self) -> None:
+        cfg = config()
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        concurrent_entries = []
+        in_run = 0
+        run_lock = threading.Lock()
+
+        def fake_run(command: list[str], **_kwargs: object) -> Mock:
+            nonlocal in_run
+            with run_lock:
+                in_run += 1
+                concurrent_entries.append(in_run)
+            calls.append(command)
+            try:
+                entered.set()
+                release.wait(timeout=5)
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(json.dumps(audit_payload()), encoding="utf-8")
+                return Mock(returncode=0, stdout="", stderr="")
+            finally:
+                with run_lock:
+                    in_run -= 1
+
+        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", side_effect=fake_run):
+            checkout_dir = Path(tmp)
+
+            def run_call() -> tuple[dict, dict, str, dict]:
+                return run_codex_provider_review(cfg, {"repo": "acme/api"}, checkout_dir)
+
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(run_call)
+                    self.assertTrue(entered.wait(timeout=5))
+                    second = pool.submit(run_call)
+                    time.sleep(0.05)
+                    self.assertEqual(len(calls), 1)
+                    release.set()
+                    first.result(timeout=5)
+                    second.result(timeout=5)
+            finally:
+                release.set()
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(concurrent_entries)
+        self.assertLessEqual(max(concurrent_entries), 1)
+
+    def test_codex_auth_failure_cooldown_skips_next_process_launch(self) -> None:
+        cfg = config()
+        cfg.codex_auth_failure_cooldown_seconds = 3600
+        auth_error = (
+            "ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: "
+            "HTTP error: 401 Unauthorized\n"
+            "ERROR codex_login::auth::manager: Failed to refresh token: Your access token "
+            "could not be refreshed because your refresh token was already used. "
+            "Please log out and sign in again."
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "pullwise_worker.main.subprocess.run",
+            return_value=Mock(returncode=1, stdout="", stderr=auth_error),
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, "401 Unauthorized"):
+                run_codex_provider_review(cfg, {"repo": "acme/api"}, Path(tmp))
+            with self.assertRaisesRegex(RuntimeError, "temporarily disabled after auth failure"):
+                run_codex_provider_review(cfg, {"repo": "acme/api"}, Path(tmp))
+
+        self.assertEqual(run.call_count, 1)
+
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             schema_path = Path(command[command.index("--output-schema") + 1])
@@ -1435,6 +1512,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(cfg.provider_chain, ["codex"])
         self.assertEqual(cfg.codex_model, "gpt-5.5")
         self.assertEqual(cfg.codex_reasoning_effort, "medium")
+        self.assertEqual(cfg.codex_auth_failure_cooldown_seconds, 3600)
         self.assertEqual(cfg.opencode_command, "opencode")
         self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
         self.assertEqual(cfg.opencode_variant, "medium")
@@ -1460,6 +1538,7 @@ class WorkerMainTest(unittest.TestCase):
                 "PULLWISE_PROVIDER_CHAIN": "codex, opencode",
                 "PULLWISE_CODEX_MODEL": "gpt-5.5",
                 "PULLWISE_CODEX_REASONING_EFFORT": "high",
+                "PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS": "120",
                 "PULLWISE_OPENCODE_COMMAND": "opencode-cli",
                 "PULLWISE_OPENCODE_MODEL": "openai/gpt-5",
                 "PULLWISE_OPENCODE_VARIANT": "xhigh",
@@ -1471,6 +1550,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(cfg.provider_chain, ["codex", "opencode"])
         self.assertEqual(cfg.codex_model, "gpt-5.5")
         self.assertEqual(cfg.codex_reasoning_effort, "high")
+        self.assertEqual(cfg.codex_auth_failure_cooldown_seconds, 120)
         self.assertEqual(cfg.opencode_command, "opencode-cli")
         self.assertEqual(cfg.opencode_model, "openai/gpt-5")
         self.assertEqual(cfg.opencode_variant, "xhigh")
@@ -1686,6 +1766,19 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(detail, "not logged in")
+
+    def test_codex_ready_check_defers_when_codex_invocation_is_running(self) -> None:
+        cfg = config()
+        self.assertTrue(worker_main._CODEX_EXEC_LOCK.acquire(blocking=False))
+        try:
+            with patch("pullwise_worker.main.subprocess.run") as run:
+                ok, detail = codex_ready_check(cfg)
+        finally:
+            worker_main._CODEX_EXEC_LOCK.release()
+
+        self.assertTrue(ok)
+        self.assertIn("deferred", detail)
+        run.assert_not_called()
 
     def test_codex_ready_check_skips_git_repo_trust_check(self) -> None:
         cfg = config()
