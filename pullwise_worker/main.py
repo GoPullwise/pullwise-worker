@@ -49,6 +49,9 @@ DEFAULT_CODEX_REASONING_EFFORT = "medium"
 DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
 DEFAULT_OPENCODE_VARIANT = "medium"
 AUDIT_SWARM_PROTOCOL_VERSION = "audit-swarm/0.1"
+CONVERGENCE_PROTOCOL_VERSION = "pullwise-convergence/0.1"
+CONVERGENCE_MIN_VERIFIED_CONFIDENCE = 0.75
+CONVERGENCE_MIN_UNVERIFIED_CONFIDENCE = 0.85
 AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
     "summary",
     "claim",
@@ -558,6 +561,12 @@ class Worker:
             projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
             candidate_count = len(projected_findings)
             projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(projected_findings)
+            projected_findings, convergence_rejected_reasons, convergence_rejected_samples, convergence_state = (
+                apply_convergence_gate(job, checkout_dir, projected_findings)
+            )
+            for reason, count in convergence_rejected_reasons.items():
+                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
+            rejected_samples = [*rejected_samples, *convergence_rejected_samples][:5]
             audit_payload = filter_audit_swarm_payload_by_findings(audit_payload, projected_findings)
             summary = summarize(projected_findings)
             verification_audit = verification_audit_payload(
@@ -594,6 +603,7 @@ class Worker:
                 "attempt_id": attempt_id,
                 "preflight": preflight,
                 "verification_audit": verification_audit,
+                "convergence_state": convergence_state,
                 "audit_swarm": audit_swarm,
             }
             if ai_usage:
@@ -2548,6 +2558,24 @@ def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
 
 
 def review_prompt(job: dict) -> str:
+    convergence_context = job.get("convergence_context") if isinstance(job.get("convergence_context"), dict) else {}
+    previous_head_sha = normalized_head_sha(convergence_context.get("previous_head_sha"))
+    open_findings = convergence_context.get("open_findings") if isinstance(convergence_context.get("open_findings"), list) else []
+    convergence_instruction = ""
+    if previous_head_sha or open_findings:
+        prior_titles = [
+            str(item.get("title") or item.get("fingerprint") or "").strip()[:120]
+            for item in open_findings
+            if isinstance(item, dict) and str(item.get("title") or item.get("fingerprint") or "").strip()
+        ][:8]
+        convergence_instruction = (
+            " This is an incremental convergent review. First verify whether prior open findings still exist; "
+            f"previous_head_sha: {previous_head_sha or 'unknown'}. "
+            "Only report new issues that are directly introduced after that previous head. "
+            "Do not report latent pre-existing issues, style preferences, or speculative risks."
+        )
+        if prior_titles:
+            convergence_instruction += f" Prior open findings to verify: {', '.join(prior_titles)}."
     return (
         "Run the Audit Swarm protocol for this repository. Return only JSON with top-level "
         "`audit_protocol`, `issue_cards`, and `verification_results`. Do not return Pullwise legacy "
@@ -2558,6 +2586,7 @@ def review_prompt(job: dict) -> str:
         "or `inconclusive`; include commands_run only for commands a user can copy to verify the issue. "
         "Do not emit vague concerns. Do not include absolute worker checkout paths or server filesystem paths. "
         "If a candidate has no file/line, no evidence, and no verifiable hypothesis, omit it. "
+        f"{convergence_instruction} "
         f"Repository: {job.get('repo')} branch: {job.get('branch')} commit: {job.get('commit')}."
     )
 
@@ -3627,6 +3656,318 @@ def filter_reportable_findings(findings: list[dict]) -> tuple[list[dict], dict[s
         if len(rejected_samples) < 5:
             rejected_samples.append(rejected_candidate_sample(finding, reason))
     return reportable, rejected_reasons, rejected_samples
+
+
+def normalized_fingerprint_text(value: object) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    return re.sub(r"[^a-z0-9_./:-]+", " ", text).strip()
+
+
+def finding_primary_file(finding: dict) -> str:
+    file_path = safe_repo_relative_file(finding.get("file"))
+    if file_path:
+        return file_path
+    for key in ("affectedLocations", "evidence"):
+        items = finding.get(key) if isinstance(finding.get(key), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            file_path = safe_repo_relative_file(item.get("file"))
+            if file_path:
+                return file_path
+    return ""
+
+
+def finding_source(finding: dict) -> str:
+    source = str(finding.get("_auditSwarmRole") or finding.get("source") or finding.get("category") or "reviewer")
+    return normalized_source_key(source) or "reviewer"
+
+
+def normalized_source_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()[:80]
+
+
+def finding_fingerprint(finding: dict) -> str:
+    parts = [
+        normalized_fingerprint_text(finding.get("category")),
+        normalized_fingerprint_text(finding_primary_file(finding)),
+        normalized_fingerprint_text(finding.get("title") or finding.get("summary")),
+        normalized_fingerprint_text(finding.get("summary") or finding.get("impact")),
+    ]
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+    return digest
+
+
+def finding_delta_files(finding: dict) -> set[str]:
+    files = set()
+    primary = finding_primary_file(finding)
+    if primary:
+        files.add(primary)
+    for key in ("affectedLocations", "evidence"):
+        items = finding.get(key) if isinstance(finding.get(key), list) else []
+        for item in items:
+            if isinstance(item, dict):
+                file_path = safe_repo_relative_file(item.get("file"))
+                if file_path:
+                    files.add(file_path)
+    return files
+
+
+def normalized_head_sha(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text and text != "pending" and re.fullmatch(r"[0-9a-f]{7,64}", text):
+        return text
+    return ""
+
+
+def git_diff_name_only(checkout_dir: Path, previous: str, current: str) -> set[str] | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(checkout_dir), "diff", "--name-only", f"{previous}..{current}"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return {safe_repo_relative_file(line.strip()) for line in completed.stdout.splitlines() if safe_repo_relative_file(line.strip())}
+
+
+def fetch_git_head(checkout_dir: Path, head_sha: str, job: dict | None = None) -> bool:
+    head = normalized_head_sha(head_sha)
+    if not head:
+        return False
+    try:
+        subprocess.run(
+            ["git", "-C", str(checkout_dir), "fetch", "--depth", "1", "origin", head],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600),
+            env=git_auth_env(job.get("clone_token")) if isinstance(job, dict) else None,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def changed_files_between_heads(
+    checkout_dir: Path,
+    previous_head_sha: str,
+    current_head_sha: str,
+    *,
+    job: dict | None = None,
+) -> set[str] | None:
+    previous = normalized_head_sha(previous_head_sha)
+    current = normalized_head_sha(current_head_sha)
+    if not previous or not current:
+        return None
+    if previous == current:
+        return set()
+    changed_files = git_diff_name_only(checkout_dir, previous, current)
+    if changed_files is not None:
+        return changed_files
+    if fetch_git_head(checkout_dir, previous, job):
+        return git_diff_name_only(checkout_dir, previous, current)
+    return None
+
+
+def source_stat_count(stats: dict, key: str) -> int:
+    return positive_int(stats.get(key)) if isinstance(stats, dict) else 0
+
+
+def wilson_lower_bound(successes: int, total: int, *, z: float = 1.0) -> float:
+    if total <= 0:
+        return 1.0
+    p = successes / total
+    denominator = 1 + (z * z / total)
+    centre = p + (z * z / (2 * total))
+    margin = z * ((p * (1 - p) + (z * z / (4 * total))) / total) ** 0.5
+    return max(0.0, min(1.0, (centre - margin) / denominator))
+
+
+def statistically_calibrated_confidence(finding: dict, source_stats: dict) -> float:
+    try:
+        base_confidence = float(finding.get("confidence") or 0.0)
+    except (OverflowError, TypeError, ValueError):
+        base_confidence = 0.0
+    base_confidence = max(0.0, min(1.0, base_confidence))
+    confirmed = source_stat_count(source_stats, "confirmed")
+    resolved = source_stat_count(source_stats, "resolved")
+    rejected = source_stat_count(source_stats, "rejected")
+    positive_feedback = confirmed + resolved
+    if rejected <= positive_feedback:
+        total = positive_feedback + rejected
+        if total < 8 or rejected <= 1:
+            return base_confidence
+    reliability = wilson_lower_bound(positive_feedback + 1, positive_feedback + rejected + 2)
+    return base_confidence * reliability
+
+
+def convergence_min_confidence(finding: dict) -> float:
+    status = str(finding.get("verificationStatus") or "").strip().lower()
+    if status in {"verified", "static_proof"}:
+        return CONVERGENCE_MIN_VERIFIED_CONFIDENCE
+    return CONVERGENCE_MIN_UNVERIFIED_CONFIDENCE
+
+
+def merge_source_stats(context: dict) -> dict[str, dict[str, int]]:
+    raw_stats = context.get("source_stats") if isinstance(context.get("source_stats"), dict) else {}
+    stats: dict[str, dict[str, int]] = {}
+    for raw_source, raw_counts in raw_stats.items():
+        source = normalized_source_key(raw_source)
+        if not source or not isinstance(raw_counts, dict):
+            continue
+        stats[source] = {
+            "reported": source_stat_count(raw_counts, "reported"),
+            "confirmed": source_stat_count(raw_counts, "confirmed"),
+            "resolved": source_stat_count(raw_counts, "resolved"),
+            "rejected": source_stat_count(raw_counts, "rejected"),
+        }
+    return stats
+
+
+def bump_source_stat(stats: dict[str, dict[str, int]], source: str, key: str) -> None:
+    bucket = stats.setdefault(source or "reviewer", {"reported": 0, "confirmed": 0, "resolved": 0, "rejected": 0})
+    bucket[key] = positive_int(bucket.get(key)) + 1
+
+
+def convergence_record_for_finding(finding: dict, fingerprint: str) -> dict:
+    record = {
+        "fingerprint": fingerprint,
+        "issue_id": str(finding.get("id") or "").strip()[:120],
+        "title": str(finding.get("title") or "").strip()[:180],
+        "file": finding_primary_file(finding),
+        "line": positive_int(finding.get("line")),
+        "confidence": max(0.0, min(1.0, float(finding.get("confidence") or 0.0))),
+        "source": finding_source(finding),
+        "status": "open",
+    }
+    return {key: value for key, value in record.items() if value not in ("", 0, [], {})}
+
+
+def finding_issue_id(finding: dict) -> str:
+    return str(finding.get("id") or finding.get("issue_id") or finding.get("issueId") or "").strip()
+
+
+def convergence_scope_key(job: dict) -> str:
+    repo = normalized_fingerprint_text(job.get("repo"))
+    branch = normalized_fingerprint_text(job.get("branch") or "main")
+    return f"repo:{repo}|branch:{branch}"
+
+
+def convergence_context_for_job(job: dict) -> dict:
+    context = job.get("convergence_context") if isinstance(job.get("convergence_context"), dict) else {}
+    if not context:
+        return {}
+    scope_key = normalized_fingerprint_text(context.get("scope_key") or context.get("scopeKey"))
+    expected_scope_key = normalized_fingerprint_text(convergence_scope_key(job))
+    if scope_key and scope_key != expected_scope_key:
+        return {}
+    protocol = str(context.get("protocol") or "").strip()
+    if protocol and protocol != CONVERGENCE_PROTOCOL_VERSION:
+        return {}
+    return context
+
+
+def apply_convergence_gate(
+    job: dict,
+    checkout_dir: Path,
+    findings: list[dict],
+) -> tuple[list[dict], dict[str, int], list[dict], dict]:
+    context = convergence_context_for_job(job)
+    previous_open = [
+        item
+        for item in (context.get("open_findings") if isinstance(context.get("open_findings"), list) else [])
+        if isinstance(item, dict) and str(item.get("fingerprint") or "").strip()
+    ]
+    previous_by_fingerprint = {str(item.get("fingerprint")).strip(): item for item in previous_open}
+    previous_fingerprint_by_issue_id = {
+        str(item.get("issue_id") or item.get("issueId")).strip(): str(item.get("fingerprint")).strip()
+        for item in previous_open
+        if str(item.get("issue_id") or item.get("issueId")).strip()
+    }
+    previous_head_sha = normalized_head_sha(context.get("previous_head_sha"))
+    current_head_sha = normalized_head_sha(job.get("resolved_commit") or job.get("commit"))
+    has_prior_run = bool(previous_head_sha or previous_open or context.get("source_stats"))
+    source_stats = merge_source_stats(context)
+    changed_files: set[str] | None = None
+    changed_files_loaded = False
+    reportable: list[dict] = []
+    open_fingerprints = set()
+    seen_current_fingerprints = set()
+    rejected_reasons: dict[str, int] = {}
+    rejected_samples: list[dict] = []
+
+    def reject(finding: dict, reason: str) -> None:
+        rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+        bump_source_stat(source_stats, finding_source(finding), "rejected")
+        if len(rejected_samples) < 5:
+            rejected_samples.append(rejected_candidate_sample(finding, reason))
+
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        fingerprint = finding_fingerprint(finding)
+        matched_fingerprint = previous_fingerprint_by_issue_id.get(finding_issue_id(finding)) or fingerprint
+        source = finding_source(finding)
+        source_counts = source_stats.get(source, {})
+        if matched_fingerprint in seen_current_fingerprints:
+            reject(finding, "duplicate_finding")
+            continue
+        if matched_fingerprint in previous_by_fingerprint:
+            reportable.append(finding)
+            open_fingerprints.add(matched_fingerprint)
+            seen_current_fingerprints.add(matched_fingerprint)
+            bump_source_stat(source_stats, source, "reported")
+            if str(finding.get("verificationStatus") or "").lower() in {"verified", "static_proof"}:
+                bump_source_stat(source_stats, source, "confirmed")
+            continue
+        if statistically_calibrated_confidence(finding, source_counts) < convergence_min_confidence(finding):
+            reject(finding, "low_statistical_confidence")
+            continue
+        if has_prior_run:
+            if not changed_files_loaded:
+                changed_files = changed_files_between_heads(checkout_dir, previous_head_sha, current_head_sha, job=job)
+                changed_files_loaded = True
+            finding_files = finding_delta_files(finding)
+            if changed_files is None or not finding_files or not (finding_files & changed_files):
+                reject(finding, "not_introduced_by_current_delta")
+                continue
+        reportable.append(finding)
+        open_fingerprints.add(matched_fingerprint)
+        seen_current_fingerprints.add(matched_fingerprint)
+        bump_source_stat(source_stats, source, "reported")
+        if str(finding.get("verificationStatus") or "").lower() in {"verified", "static_proof"}:
+            bump_source_stat(source_stats, source, "confirmed")
+
+    resolved_fingerprints = []
+    for fingerprint, record in previous_by_fingerprint.items():
+        if fingerprint not in open_fingerprints:
+            resolved_fingerprints.append(fingerprint)
+            source = normalized_source_key(record.get("source")) or "reviewer"
+            bump_source_stat(source_stats, source, "resolved")
+
+    state = {
+        "protocol": CONVERGENCE_PROTOCOL_VERSION,
+        "scope_key": convergence_scope_key(job),
+        "head_sha": current_head_sha,
+        "open_findings": [
+            convergence_record_for_finding(
+                finding,
+                previous_fingerprint_by_issue_id.get(finding_issue_id(finding)) or finding_fingerprint(finding),
+            )
+            for finding in reportable
+        ],
+        "resolved_fingerprints": sorted(resolved_fingerprints),
+        "source_stats": source_stats,
+    }
+    return reportable, rejected_reasons, rejected_samples, state
 
 
 def verification_audit_payload(

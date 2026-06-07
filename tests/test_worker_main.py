@@ -991,6 +991,362 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(audit["potentialRiskCount"], 2)
         self.assertEqual(audit["rejectedSamples"][0]["title"], "Only a vague model guess")
 
+    def test_convergence_gate_marks_missing_previous_finding_resolved(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        previous_finding = {
+            "fingerprint": "fp-old",
+            "issue_id": "issue-old",
+            "title": "Old bug",
+            "file": "src/app.py",
+            "line": 12,
+            "confidence": 0.92,
+            "source": "correctness-reviewer",
+            "status": "open",
+        }
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [previous_finding],
+                "source_stats": {},
+            },
+        }
+
+        reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(job, checkout_dir, [])
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {})
+        self.assertEqual(rejected_samples, [])
+        self.assertEqual(state["resolved_fingerprints"], ["fp-old"])
+        self.assertEqual(state["open_findings"], [])
+        self.assertEqual(state["head_sha"], "b" * 40)
+
+    def test_convergence_gate_accepts_context_for_matching_scope(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": "fp-matching-scope",
+                        "title": "Matching scope bug",
+                        "file": "src/app.py",
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {},
+            },
+        }
+
+        _reported, _rejected_reasons, _samples, state = worker_main.apply_convergence_gate(job, checkout_dir, [])
+
+        self.assertEqual(state["resolved_fingerprints"], ["fp-matching-scope"])
+
+    def test_convergence_gate_ignores_context_for_different_scope(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/other|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": "fp-other-repo",
+                        "title": "Other repo bug",
+                        "file": "src/app.py",
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {"correctness-reviewer": {"reported": 0, "confirmed": 0, "resolved": 0, "rejected": 50}},
+            },
+        }
+
+        reported, rejected_reasons, _samples, state = worker_main.apply_convergence_gate(job, checkout_dir, [])
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {})
+        self.assertEqual(state["resolved_fingerprints"], [])
+        self.assertEqual(state["source_stats"], {})
+
+    def test_convergence_gate_rejects_unproven_new_finding_after_prior_run(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Latent old issue")])) or [])[0]
+        finding["confidence"] = 0.9
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [],
+                "source_stats": {},
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value=None):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"not_introduced_by_current_delta": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Latent old issue")
+        self.assertEqual(state["open_findings"], [])
+
+    def test_changed_files_fetches_previous_head_when_shallow_checkout_lacks_it(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        previous = "a" * 40
+        current = "b" * 40
+        missing_previous = subprocess.CalledProcessError(128, ["git", "diff"], stderr="unknown revision")
+        fetch_ok = Mock(returncode=0, stdout="", stderr="")
+        diff_ok = Mock(returncode=0, stdout="src/app.py\nREADME.md\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", side_effect=[missing_previous, fetch_ok, diff_ok]) as run:
+            changed = worker_main.changed_files_between_heads(
+                checkout_dir,
+                previous,
+                current,
+                job={"clone_token": {"token": "repo-token"}},
+            )
+
+        self.assertEqual(changed, {"src/app.py", "README.md"})
+        self.assertEqual(run.call_args_list[0].args[0], ["git", "-C", str(checkout_dir), "diff", "--name-only", f"{previous}..{current}"])
+        self.assertEqual(run.call_args_list[1].args[0], ["git", "-C", str(checkout_dir), "fetch", "--depth", "1", "origin", previous])
+        self.assertNotIn("repo-token", run.call_args_list[1].args[0])
+        self.assertIn("Authorization: Basic", run.call_args_list[1].kwargs["env"]["GIT_CONFIG_VALUE_0"])
+        self.assertEqual(run.call_args_list[2].args[0], ["git", "-C", str(checkout_dir), "diff", "--name-only", f"{previous}..{current}"])
+
+    def test_convergence_gate_allows_new_finding_when_delta_touches_file(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Fix introduced bug")])) or [])[0]
+        finding["confidence"] = 0.9
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [],
+                "source_stats": {},
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual([item["title"] for item in reported], ["Fix introduced bug"])
+        self.assertEqual(rejected_reasons, {})
+        self.assertEqual(rejected_samples, [])
+        self.assertEqual(state["open_findings"][0]["title"], "Fix introduced bug")
+
+    def test_convergence_gate_keeps_same_finding_when_line_shifts(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        old_finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Line shifted bug", line=12)])) or [])[0]
+        old_fingerprint = worker_main.finding_fingerprint(old_finding)
+        shifted_finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Line shifted bug", line=20)])) or [])[0]
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": old_fingerprint,
+                        "title": "Line shifted bug",
+                        "file": "src/app.py",
+                        "line": 12,
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {},
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value=None):
+            reported, rejected_reasons, _samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [shifted_finding],
+            )
+
+        self.assertEqual([item["line"] for item in reported], [20])
+        self.assertEqual(rejected_reasons, {})
+        self.assertEqual(state["resolved_fingerprints"], [])
+
+    def test_convergence_gate_matches_same_issue_id_when_fingerprint_drifts(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        old_finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Original title", issue_id="issue-stable")])) or [])[0]
+        old_fingerprint = worker_main.finding_fingerprint(old_finding)
+        rewritten_finding = (
+            audit_swarm_findings_from_payload(audit_payload([issue_card("Rewritten title", issue_id="issue-stable")]))
+            or []
+        )[0]
+        rewritten_finding["confidence"] = 0.9
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": old_fingerprint,
+                        "issue_id": "issue-stable",
+                        "title": "Original title",
+                        "file": "src/app.py",
+                        "line": 12,
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {},
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value=None):
+            reported, rejected_reasons, _samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [rewritten_finding],
+            )
+
+        self.assertEqual([item["title"] for item in reported], ["Rewritten title"])
+        self.assertEqual(rejected_reasons, {})
+        self.assertEqual(state["resolved_fingerprints"], [])
+        self.assertEqual(state["open_findings"][0]["fingerprint"], old_fingerprint)
+
+    def test_convergence_gate_rejects_low_confidence_unverified_candidate(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Default confidence guess")])) or [])[0]
+        finding["confidence"] = 0.7
+
+        reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+            {"repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            checkout_dir,
+            [finding],
+        )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"low_statistical_confidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Default confidence guess")
+        self.assertEqual(state["open_findings"], [])
+
+    def test_convergence_gate_rejects_default_confidence_unverified_candidate(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Unverified default guess")])) or [])[0]
+
+        reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+            {"repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            checkout_dir,
+            [finding],
+        )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"low_statistical_confidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Unverified default guess")
+        self.assertEqual(state["open_findings"], [])
+
+    def test_convergence_gate_suppresses_same_run_duplicate_fingerprints(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        first = (audit_swarm_findings_from_payload(audit_payload([issue_card("Duplicate bug", issue_id="dup-1")])) or [])[0]
+        second = (audit_swarm_findings_from_payload(audit_payload([issue_card("Duplicate bug", issue_id="dup-2")])) or [])[0]
+        first["confidence"] = 0.9
+        second["confidence"] = 0.9
+
+        reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+            {"repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            checkout_dir,
+            [first, second],
+        )
+
+        self.assertEqual([item["id"] for item in reported], ["dup-1"])
+        self.assertEqual(rejected_reasons, {"duplicate_finding": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Duplicate bug")
+        self.assertEqual(len(state["open_findings"]), 1)
+
+    def test_statistical_confidence_penalizes_repeatedly_rejected_source(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Noisy source bug")])) or [])[0]
+        finding["_auditSwarmRole"] = "noisy-reviewer"
+
+        confidence = worker_main.statistically_calibrated_confidence(
+            finding,
+            {"reported": 0, "confirmed": 0, "resolved": 0, "rejected": 50},
+        )
+
+        self.assertLess(confidence, 0.7)
+
+    def test_statistical_confidence_does_not_penalize_confirmed_source(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Trusted source bug")])) or [])[0]
+
+        confidence = worker_main.statistically_calibrated_confidence(
+            finding,
+            {"reported": 1, "confirmed": 1, "resolved": 0, "rejected": 0},
+        )
+
+        self.assertGreaterEqual(confidence, 0.75)
+
+    def test_statistical_confidence_uses_conservative_source_reliability_bound(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Source reliability bug")])) or [])[0]
+        finding["confidence"] = 0.9
+
+        strong_source = worker_main.statistically_calibrated_confidence(
+            finding,
+            {"reported": 10, "confirmed": 9, "resolved": 0, "rejected": 1},
+        )
+        mixed_source = worker_main.statistically_calibrated_confidence(
+            finding,
+            {"reported": 10, "confirmed": 5, "resolved": 0, "rejected": 5},
+        )
+
+        self.assertGreater(strong_source, 0.75)
+        self.assertLess(mixed_source, 0.65)
+        self.assertGreater(strong_source, mixed_source)
+
+    def test_convergence_gate_applies_source_stats_across_separator_variants(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Separator alias bug")])) or [])[0]
+        finding["_auditSwarmRole"] = "correctness-reviewer"
+        finding["confidence"] = 0.9
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "source_stats": {
+                    "correctness_reviewer": {"reported": 0, "confirmed": 0, "resolved": 0, "rejected": 50}
+                },
+            },
+        }
+
+        reported, rejected_reasons, _samples, _state = worker_main.apply_convergence_gate(job, checkout_dir, [finding])
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"low_statistical_confidence": 1})
+
     def test_run_job_uploads_progress_result_and_cleans_checkout(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
@@ -1005,7 +1361,22 @@ class WorkerMainTest(unittest.TestCase):
             ) as run_verifier, \
             patch("pullwise_worker.main.run_codex_review") as run_codex_review, \
             patch("pullwise_worker.main.shutil.rmtree") as rmtree:
-            audit_with_usage = audit_payload([issue_card("Bug", severity="P1", issue_id="bug")])
+            audit_with_usage = audit_payload(
+                [issue_card("Bug", severity="P1", issue_id="bug")],
+                [
+                    {
+                        "issue_id": "bug",
+                        "verifier_role": "prover",
+                        "verdict": "confirmed",
+                        "confidence": 0.86,
+                        "proof_type": "static_proof",
+                        "proof_strength": 2,
+                        "evidence": ["Static proof confirms the candidate."],
+                        "commands_run": [],
+                        "result_summary": "Static proof confirms the candidate.",
+                    }
+                ],
+            )
             audit_with_usage["ai_usage"] = {
                 "model": "gpt-5.5",
                 "input_tokens": 123,
@@ -1035,6 +1406,9 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(result_payload["audit_protocol"], "audit-swarm/0.1")
         self.assertEqual(result_payload["issue_cards"][0]["title"], "Bug")
         self.assertEqual(result_payload["summary"]["high"], 1)
+        self.assertNotIn("findings", result_payload)
+        self.assertEqual(result_payload["convergence_state"]["protocol"], "pullwise-convergence/0.1")
+        self.assertEqual(result_payload["convergence_state"]["open_findings"][0]["title"], "Bug")
         self.assertEqual(
             result_payload["ai_usage"],
             {"model": "gpt-5.5"},
