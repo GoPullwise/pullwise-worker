@@ -1502,6 +1502,53 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_samples[0]["title"], "Unknown hunk latent bug")
         self.assertEqual(state["open_findings"], [])
 
+    def test_convergence_gate_rejects_incremental_file_finding_without_line(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 20)), encoding="utf-8")
+        finding = {
+            "id": "file-only",
+            "title": "File-only latent bug",
+            "file": "src/app.py",
+            "confidence": 0.95,
+            "_auditSwarmRole": "correctness-reviewer",
+            "evidence": [
+                {
+                    "summary": "The checkout regression is reproduced by the focused test.",
+                    "file": "src/app.py",
+                    "command": "pytest tests/test_checkout.py",
+                }
+            ],
+            "verificationStatus": "potential_risk",
+        }
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [],
+                "source_stats": {
+                    "correctness-reviewer": {"reported": 4, "confirmed": 4, "resolved": 0, "rejected": 0}
+                },
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}), \
+            patch("pullwise_worker.main.changed_line_ranges_between_heads", return_value={"src/app.py": [(1, 3)]}):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"not_introduced_by_current_delta": 1})
+        self.assertEqual(rejected_samples[0]["title"], "File-only latent bug")
+        self.assertEqual(state["open_findings"], [])
+
     def test_convergence_gate_rejects_line_finding_when_changed_file_has_no_hunk(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
         (checkout_dir / "src").mkdir(parents=True)

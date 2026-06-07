@@ -4047,8 +4047,10 @@ def finding_line_within_changed_ranges(finding: dict, changed_line_ranges: dict[
     line = finding_primary_line(finding)
     if changed_line_ranges is None:
         return not (file_path and line)
-    if not file_path or not line:
+    if not file_path:
         return True
+    if not line:
+        return False
     ranges = changed_line_ranges.get(file_path)
     if not ranges:
         return False
