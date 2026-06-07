@@ -1190,6 +1190,22 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"missing_evidence": 1})
         self.assertEqual(rejected_samples[0]["title"], "Natural language reproduction")
 
+    def test_reportability_filter_rejects_bare_reproduction_command(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Bare reproduction command",
+                    "reproduction": {"commands": ["pytest"]},
+                    "whyNotFalsePositive": ["The focused command reproduces the failure."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_evidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Bare reproduction command")
+
     def test_reportability_filter_rejects_natural_language_reproduction_path(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [

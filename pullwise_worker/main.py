@@ -3704,9 +3704,12 @@ def reproduction_command_looks_executable(command: object) -> bool:
     text = str(command or "").strip()
     if not text or "\n" in text or "\r" in text:
         return False
-    first = text.split(maxsplit=1)[0].strip("\"'")
+    parts = text.split(maxsplit=1)
+    first = parts[0].strip("\"'")
     if first.startswith(("./", ".\\", "scripts/", "bin/")):
         return True
+    if len(parts) < 2 or not parts[1].strip():
+        return False
     executable = first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
     executable = executable[:-4] if executable.endswith(".exe") else executable
     return executable in {
