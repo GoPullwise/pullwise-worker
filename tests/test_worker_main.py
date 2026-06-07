@@ -1322,6 +1322,27 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
         self.assertEqual(rejected_samples[0]["title"], "Vacuous false positive check")
 
+    def test_reportability_filter_rejects_punctuated_vacuous_false_positive_check(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Punctuated vacuous false positive check",
+                    "evidence": [
+                        {
+                            "summary": "The checkout regression is covered by the payment test.",
+                            "command": "pytest tests/test_checkout.py",
+                        }
+                    ],
+                    "whyNotFalsePositive": ["N/A."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Punctuated vacuous false positive check")
+
     def test_convergence_gate_marks_missing_previous_finding_resolved(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
         previous_finding = {

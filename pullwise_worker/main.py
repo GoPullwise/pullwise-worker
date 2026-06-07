@@ -3757,7 +3757,7 @@ def false_positive_check_is_substantive(value: object) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    normalized = normalized_fingerprint_text(text)
+    normalized = normalized_fingerprint_text(text).strip(" .:-")
     return normalized not in {
         "n/a",
         "na",
