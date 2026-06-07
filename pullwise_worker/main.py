@@ -3737,9 +3737,7 @@ def reportability_rejection_reason(finding: object) -> str:
         return "invalid_candidate"
     if not str(finding.get("title") or "").strip():
         return "missing_title"
-    if finding_has_verification_proof(finding) and (
-        finding_precise_location(finding) or finding_structured_evidence(finding) or finding_reproduction_evidence(finding)
-    ):
+    if finding_has_verification_proof(finding) and (finding_structured_evidence(finding) or finding_reproduction_evidence(finding)):
         return ""
     if finding_structured_evidence(finding) or finding_reproduction_evidence(finding):
         if not finding_has_false_positive_check(finding):
