@@ -144,6 +144,16 @@ class WorkerMainTest(unittest.TestCase):
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Bug")
 
+    def test_audit_swarm_confirmed_verdict_without_evidence_is_not_static_proof(self) -> None:
+        payload = audit_payload(
+            [issue_card("Unsupported verifier confirmation", issue_id="issue-unsupported")],
+            [{"issue_id": "issue-unsupported", "verdict": "confirmed"}],
+        )
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+
+        self.assertEqual(findings[0]["verificationStatus"], "potential_risk")
+
     def test_audit_swarm_scan_artifacts_emit_stable_evidence_blocks(self) -> None:
         card = {
             **issue_card("Refresh token rotation may not be atomic", issue_id="issue-refresh", severity="P1"),

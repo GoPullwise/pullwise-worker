@@ -2971,13 +2971,32 @@ def audit_swarm_generated_id(card: dict, index: int) -> str:
 
 def audit_swarm_verdict(verifications: list[dict]) -> str:
     verdicts = [clean_protocol_text(item.get("verdict")).lower() for item in verifications if isinstance(item, dict)]
-    if "confirmed" in verdicts:
+    if any(
+        clean_protocol_text(item.get("verdict")).lower() == "confirmed"
+        and audit_swarm_confirmed_verification_has_support(item)
+        for item in verifications
+        if isinstance(item, dict)
+    ):
         return "confirmed"
     if verdicts and all(item == "rejected" for item in verdicts):
         return "rejected"
     if "inconclusive" in verdicts:
         return "inconclusive"
     return "candidate"
+
+
+def audit_swarm_confirmed_verification_has_support(result: dict) -> bool:
+    if protocol_text_list(result.get("commands_run") or result.get("commandsRun")):
+        return True
+    if protocol_text_list(result.get("evidence")):
+        return True
+    if protocol_multiline_text(result.get("result_summary") or result.get("resultSummary") or result.get("summary")):
+        return True
+    if protocol_multiline_text(result.get("output")):
+        return True
+    if clean_protocol_text(result.get("logPath") or result.get("log_path")):
+        return True
+    return bool(positive_int(result.get("proof_strength") or result.get("proofStrength")))
 
 
 def audit_swarm_verification_status(verdict: str, verifications: list[dict]) -> str:
