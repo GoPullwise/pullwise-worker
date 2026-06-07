@@ -3662,6 +3662,25 @@ def evidence_summary_is_substantive(value: object) -> bool:
     }
 
 
+def evidence_output_is_substantive(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = normalized_fingerprint_text(text).strip(" .:-")
+    return normalized not in {
+        "ok",
+        "pass",
+        "passed",
+        "success",
+        "successful",
+        "succeeded",
+        "no output",
+        "none",
+        "n/a",
+        "na",
+    }
+
+
 def evidence_log_path_is_structured(value: object) -> bool:
     path = safe_repo_relative_file(value)
     if not path or re.search(r"\s", path):
@@ -3775,14 +3794,11 @@ def finding_has_independent_verification_support(finding: dict) -> bool:
     for item in raw_evidence:
         if not isinstance(item, dict):
             continue
-        has_supporting_detail = evidence_summary_is_substantive(item.get("summary")) or bool(
-            str(item.get("output") or "").strip()
-        )
-        if not has_supporting_detail:
-            continue
-        if reproduction_command_looks_executable(item.get("command")):
+        has_summary = evidence_summary_is_substantive(item.get("summary"))
+        has_output = evidence_output_is_substantive(item.get("output"))
+        if reproduction_command_looks_executable(item.get("command")) and has_output:
             return True
-        if evidence_log_path_is_structured(item.get("logPath") or item.get("log_path")):
+        if evidence_log_path_is_structured(item.get("logPath") or item.get("log_path")) and (has_summary or has_output):
             return True
     return False
 
