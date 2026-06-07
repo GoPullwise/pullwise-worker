@@ -3899,6 +3899,24 @@ def finding_primary_line(finding: dict) -> int:
     return 0
 
 
+def finding_line_locations(finding: dict) -> list[tuple[str, int]]:
+    locations: list[tuple[str, int]] = []
+    top_file = safe_repo_relative_file(finding.get("file"))
+    top_line = positive_int(finding.get("line") or finding.get("startLine"))
+    if top_file and top_line:
+        locations.append((top_file, top_line))
+    for key in ("affectedLocations", "evidence"):
+        items = finding.get(key) if isinstance(finding.get(key), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            file_path = safe_repo_relative_file(item.get("file"))
+            line = positive_int(item.get("startLine") or item.get("line"))
+            if file_path and line:
+                locations.append((file_path, line))
+    return locations
+
+
 def finding_location_exists_in_checkout(checkout_dir: Path, finding: dict, fallback: dict | None = None) -> bool:
     file_path = finding_primary_file(finding)
     if not file_path and isinstance(fallback, dict):
@@ -4049,17 +4067,18 @@ def changed_line_ranges_between_heads(
 
 def finding_line_within_changed_ranges(finding: dict, changed_line_ranges: dict[str, list[tuple[int, int]]] | None) -> bool:
     file_path = finding_primary_file(finding)
-    line = finding_primary_line(finding)
+    locations = finding_line_locations(finding)
     if changed_line_ranges is None:
-        return not (file_path and line)
+        return not locations
     if not file_path:
         return True
-    if not line:
+    if not locations:
         return False
-    ranges = changed_line_ranges.get(file_path)
-    if not ranges:
-        return False
-    return any(start <= line <= end for start, end in ranges)
+    for location_file, line in locations:
+        ranges = changed_line_ranges.get(location_file)
+        if not ranges or not any(start <= line <= end for start, end in ranges):
+            return False
+    return True
 
 
 def source_stat_count(stats: dict, key: str) -> int:
