@@ -21,10 +21,12 @@ from pullwise_worker.main import (
     PullwiseClient,
     PullwiseHTTPError,
     PullwiseRequestError,
+    PullwiseResponse,
     Worker,
     WorkerConfig,
     audit_swarm_findings_from_payload,
     audit_swarm_output_schema,
+    audit_swarm_payload_from_findings,
     audit_swarm_scan_artifacts,
     checkout_dir_for_job,
     cleanup_checkouts,
@@ -246,6 +248,52 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(findings[0]["verificationStatus"], "static_proof")
         self.assertEqual(filtered["issue_cards"][0]["issue_id"], fallback_id)
         self.assertEqual(len(filtered["verification_results"]), 1)
+
+    def test_audit_swarm_filter_keeps_verification_result_id_aliases(self) -> None:
+        aliases = ["issue_id", "issueId", "id", "candidate_id", "candidateId"]
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                result = {
+                    alias: "alias-issue",
+                    "verifier_role": "prover",
+                    "verdict": "confirmed",
+                    "proof_type": "static_proof",
+                    "proof_strength": 3,
+                    "result_summary": "Verifier confirmed the aliased issue.",
+                    "evidence": ["Static proof matched the aliased issue id."],
+                }
+                payload = audit_payload([issue_card("Aliased verifier", issue_id="alias-issue")], [result])
+
+                findings = audit_swarm_findings_from_payload(payload) or []
+                filtered = filter_audit_swarm_payload_by_findings(payload, findings)
+
+                self.assertEqual(findings[0]["verificationStatus"], "static_proof")
+                self.assertEqual(len(filtered["verification_results"]), 1)
+                self.assertEqual(filtered["verification_results"][0]["issue_id"], "alias-issue")
+
+    def test_audit_swarm_single_blank_issue_id_matches_blank_verification_result(self) -> None:
+        card = issue_card("Blank id verifier", issue_id="")
+        payload = audit_payload(
+            [card],
+            [
+                {
+                    "issue_id": "",
+                    "verifier_role": "prover",
+                    "verdict": "confirmed",
+                    "proof_type": "static_proof",
+                    "proof_strength": 3,
+                    "result_summary": "Verifier confirmed the only blank issue.",
+                    "evidence": ["Static proof matched the only blank issue id."],
+                }
+            ],
+        )
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        filtered = filter_audit_swarm_payload_by_findings(payload, findings)
+
+        self.assertTrue(findings[0]["id"].startswith("audit_swarm_"))
+        self.assertEqual(findings[0]["verificationStatus"], "static_proof")
+        self.assertEqual(filtered["verification_results"][0]["issue_id"], findings[0]["id"])
 
     def test_audit_swarm_normalizes_nested_reproduction_and_verifier_log_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -509,6 +557,57 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(preflight["environment"]["checkoutRoot"], str(checkout_dir))
         self.assertIn("worker environment", preflight["summary"])
         self.assertIn("no project scripts were executed", preflight["summary"])
+
+    def test_declared_package_manager_stays_first_when_lockfiles_conflict(self) -> None:
+        worker_config = config()
+        worker_config.verifier_enabled = True
+        worker_config.verifier_host_execution_allowed = True
+        worker_config.verifier_scripts = ["test"]
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "package.json").write_text(
+                json.dumps(
+                    {
+                        "packageManager": "pnpm@9.1.0",
+                        "scripts": {"test": "vitest run"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (checkout_dir / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+            (checkout_dir / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+
+            with patch(
+                "pullwise_worker.main.safe_tool_version",
+                side_effect=lambda name, command: {
+                    "name": name,
+                    "command": " ".join(command),
+                    "available": True,
+                    "exitCode": 0,
+                    "output": f"{name} ok",
+                },
+            ):
+                preflight = collect_preflight_metadata(
+                    worker_config,
+                    {"repo": "acme/app", "branch": "main", "commit": "abc1234"},
+                    checkout_dir,
+                )
+
+            self.assertEqual(preflight["packageManagers"][0], "pnpm")
+
+            with patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0, stdout="", stderr="")) as run:
+                verifier, findings, logs = run_verifier_commands(
+                    worker_config,
+                    {"job_id": "job_verify_pnpm", "repo": "acme/app", "commit": "abc1234"},
+                    checkout_dir,
+                    preflight,
+                )
+
+        self.assertEqual(run.call_args_list[0].args[0], ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"])
+        self.assertEqual(run.call_args_list[1].args[0], ["pnpm", "run", "test"])
+        self.assertEqual(findings, [])
+        self.assertIn("2 allowlisted command", logs)
+        self.assertTrue(verifier["enabled"])
 
     def test_verifier_is_disabled_by_default_and_does_not_run_scripts(self) -> None:
         worker_config = config()
@@ -1148,6 +1247,37 @@ class WorkerMainTest(unittest.TestCase):
         sleep.assert_not_called()
         self.assertIn("heartbeat failed", worker.last_error)
 
+    def test_once_loop_reports_malformed_heartbeat_json_without_crashing(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.client.heartbeat.side_effect = lambda **_kwargs: PullwiseResponse(b"{").json()
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch("pullwise_worker.main.time.sleep") as sleep:
+            worker.run(once=True)
+
+        worker.client.heartbeat.assert_called_once()
+        worker.client.claim_many.assert_not_called()
+        sleep.assert_not_called()
+        self.assertIn("heartbeat failed", worker.last_error)
+        self.assertIn("invalid JSON response", worker.last_error)
+
+    def test_once_loop_reports_malformed_claim_json_without_crashing(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.side_effect = lambda _limit: PullwiseResponse(b"{").json()
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch("pullwise_worker.main.time.sleep") as sleep:
+            worker.run(once=True)
+
+        worker.client.heartbeat.assert_called_once()
+        worker.client.claim_many.assert_called_once_with(1)
+        sleep.assert_not_called()
+        self.assertIn("job claim failed", worker.last_error)
+        self.assertIn("invalid JSON response", worker.last_error)
+
     def test_once_loop_does_not_claim_when_readiness_checks_fail(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
@@ -1505,6 +1635,28 @@ class WorkerMainTest(unittest.TestCase):
                     assert_strict_schema(child, f"{path}.{keyword}[{index}]")
 
         assert_strict_schema(audit_swarm_output_schema())
+
+    def test_worker_generated_audit_swarm_locations_match_output_schema(self) -> None:
+        payload = audit_swarm_payload_from_findings(
+            [
+                {
+                    "id": "deterministic-1",
+                    "title": "Generated card",
+                    "category": "Quality",
+                    "severity": "medium",
+                    "summary": "Generated finding.",
+                    "file": "src/app.py",
+                    "line": 7,
+                    "verificationStatus": "static_proof",
+                }
+            ],
+            verifier_role="verifier",
+        )
+        location = payload["issue_cards"][0]["locations"][0]
+        location_schema = audit_swarm_output_schema()["properties"]["issue_cards"]["items"]["properties"]["locations"]["items"]
+
+        self.assertEqual(set(location_schema["required"]) - set(location), set())
+        self.assertEqual(location["lines"], "7")
 
     def test_worker_config_defaults_to_codex_only_provider_chain(self) -> None:
         cfg = config()
@@ -1966,8 +2118,11 @@ class WorkerMainTest(unittest.TestCase):
             code = update_worker(config(), dry_run=True)
 
         printed = [str(call.args[0]) for call in print_mock.call_args_list if call.args]
+        doctor_command = next(item for item in printed if item.endswith(" doctor"))
         self.assertEqual(code, 0)
-        self.assertLess(printed.index("systemctl restart pullwise-worker"), printed.index("pullwise-worker doctor"))
+        self.assertIn("runuser -u pullwise-worker -- env HOME=/var/lib/pullwise-worker", doctor_command)
+        self.assertIn("/usr/local/bin/pullwise-worker doctor", doctor_command)
+        self.assertLess(printed.index("systemctl restart pullwise-worker"), printed.index(doctor_command))
         run.assert_not_called()
 
     def test_update_rewrites_env_loading_wrapper_after_package_upgrade(self) -> None:

@@ -176,7 +176,10 @@ class PullwiseResponse:
     def json(self) -> dict:
         if not self.body:
             return {}
-        parsed = json.loads(self.body.decode("utf-8"))
+        try:
+            parsed = json.loads(self.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PullwiseRequestError(f"invalid JSON response: {exc}") from exc
         return parsed if isinstance(parsed, dict) else {}
 
 
@@ -1036,7 +1039,7 @@ def package_managers_for_repository(checkout_dir: Path, package_json: dict) -> l
             managers.append(manager)
     if (checkout_dir / "package.json").is_file() and not managers:
         managers.append("npm")
-    return sorted(dict.fromkeys(manager for manager in managers if manager))
+    return list(dict.fromkeys(manager for manager in managers if manager))
 
 
 def language_hints_for_repository(checkout_dir: Path, manifests: list[dict]) -> list[str]:
@@ -2624,8 +2627,10 @@ def merge_audit_swarm_payloads(*payloads: dict) -> dict:
 
 def filter_audit_swarm_payload_by_findings(payload: dict, findings: list[dict]) -> dict:
     reported_ids = {clean_protocol_text(finding.get("id")) for finding in findings if isinstance(finding, dict)}
+    raw_cards = first_list(payload, "issue_cards", "issueCards") or []
     filtered_cards = []
-    for index, card in enumerate(first_list(payload, "issue_cards", "issueCards") or []):
+    filtered_placeholder_ids = []
+    for index, card in enumerate(raw_cards):
         if not isinstance(card, dict):
             continue
         card_id = audit_swarm_resolved_issue_id(card, index)
@@ -2633,13 +2638,19 @@ def filter_audit_swarm_payload_by_findings(payload: dict, findings: list[dict]) 
             next_card = dict(card)
             next_card["issue_id"] = card_id
             filtered_cards.append(next_card)
+            if audit_swarm_placeholder_issue_id(audit_swarm_issue_key(card)):
+                filtered_placeholder_ids.append(card_id)
     filtered_card_ids = {audit_swarm_issue_key(card) for card in filtered_cards}
-    filtered_results = [
-        result
-        for result in (first_list(payload, "verification_results", "verificationResults") or [])
-        if isinstance(result, dict)
-        and clean_protocol_text(result.get("issue_id") or result.get("issueId")) in filtered_card_ids
-    ]
+    single_placeholder_id = filtered_placeholder_ids[0] if len(filtered_placeholder_ids) == 1 else ""
+    filtered_results = []
+    for result in first_list(payload, "verification_results", "verificationResults") or []:
+        if not isinstance(result, dict):
+            continue
+        result_issue_id = audit_swarm_resolved_verification_issue_id(result, single_placeholder_id)
+        if result_issue_id in filtered_card_ids:
+            next_result = dict(result)
+            next_result["issue_id"] = result_issue_id
+            filtered_results.append(next_result)
     return {
         "audit_protocol": clean_protocol_text(payload.get("audit_protocol") or payload.get("auditProtocol"))
         or AUDIT_SWARM_PROTOCOL_VERSION,
@@ -2659,6 +2670,18 @@ def audit_swarm_payload_from_findings(findings: list[dict], *, verifier_role: st
     return payload
 
 
+def audit_swarm_location(file_path: str, start_line: int, end_line: int) -> dict:
+    if start_line and end_line and end_line != start_line:
+        lines = f"{start_line}-{end_line}"
+    elif start_line:
+        lines = str(start_line)
+    elif end_line:
+        lines = str(end_line)
+    else:
+        lines = ""
+    return {"file": file_path, "lines": lines, "startLine": start_line, "endLine": end_line}
+
+
 def issue_card_from_finding(finding: dict, index: int) -> dict:
     issue_id = clean_protocol_text(finding.get("id")) or audit_swarm_generated_id(finding, index)
     locations = []
@@ -2670,11 +2693,11 @@ def issue_card_from_finding(finding: dict, index: int) -> dict:
         if file_path:
             start_line = positive_int(item.get("startLine") or item.get("line"))
             end_line = positive_int(item.get("endLine") or item.get("startLine") or item.get("line"))
-            locations.append({"file": file_path, "startLine": start_line, "endLine": end_line or start_line})
+            locations.append(audit_swarm_location(file_path, start_line, end_line or start_line))
     file_path = safe_repo_relative_file(finding.get("file"))
     line = positive_int(finding.get("line"))
     if file_path and not locations:
-        locations.append({"file": file_path, "startLine": line, "endLine": line})
+        locations.append(audit_swarm_location(file_path, line, line))
     return {
         "issue_id": issue_id,
         "shard_id": clean_protocol_text(finding.get("category")).lower() or "repository",
@@ -2780,7 +2803,7 @@ def audit_swarm_findings_from_payload(parsed: object) -> list[dict] | None:
     if cards is None:
         return None
     verification_results = first_list(parsed, "verification_results", "verificationResults") or []
-    by_issue = audit_swarm_verifications_by_issue(verification_results)
+    by_issue = audit_swarm_verifications_by_issue(verification_results, cards)
     findings = []
     for index, card in enumerate(cards):
         if isinstance(card, dict):
@@ -2816,18 +2839,27 @@ def audit_swarm_resolved_issue_id(card: dict, index: int) -> str:
     return audit_swarm_generated_id(card, index) if audit_swarm_placeholder_issue_id(issue_id) else issue_id
 
 
-def audit_swarm_verifications_by_issue(results: list) -> dict[str, list[dict]]:
+def audit_swarm_single_placeholder_issue_id(cards: list) -> str:
+    placeholder_ids = [
+        audit_swarm_resolved_issue_id(card, index)
+        for index, card in enumerate(cards)
+        if isinstance(card, dict) and audit_swarm_placeholder_issue_id(audit_swarm_issue_key(card))
+    ]
+    return placeholder_ids[0] if len(placeholder_ids) == 1 else ""
+
+
+def audit_swarm_resolved_verification_issue_id(result: dict, single_placeholder_id: str = "") -> str:
+    issue_id = audit_swarm_issue_key(result)
+    return single_placeholder_id if audit_swarm_placeholder_issue_id(issue_id) else issue_id
+
+
+def audit_swarm_verifications_by_issue(results: list, cards: list | None = None) -> dict[str, list[dict]]:
     grouped: dict[str, list[dict]] = {}
+    single_placeholder_id = audit_swarm_single_placeholder_issue_id(cards or [])
     for result in results:
         if not isinstance(result, dict):
             continue
-        issue_id = clean_protocol_text(
-            result.get("issue_id")
-            or result.get("issueId")
-            or result.get("id")
-            or result.get("candidate_id")
-            or result.get("candidateId")
-        )
+        issue_id = audit_swarm_resolved_verification_issue_id(result, single_placeholder_id)
         if not issue_id:
             continue
         grouped.setdefault(issue_id, []).append(result)
@@ -4267,6 +4299,27 @@ def default_worker_package() -> str:
     return f"{DEFAULT_WORKER_PACKAGE_BASE_URL}/v{__version__}/pullwise_worker-{__version__}-py3-none-any.whl"
 
 
+def service_user_doctor_command(bin_path: Path) -> list[str]:
+    service_user = os.environ.get("PULLWISE_SERVICE_USER", "").strip() or "pullwise-worker"
+    service_home = os.environ.get("PULLWISE_SERVICE_HOME", "").strip() or "/var/lib/pullwise-worker"
+    service_path = (
+        os.environ.get("PULLWISE_SERVICE_PATH", "").strip()
+        or "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
+    service_bin = str(bin_path).replace("\\", "/")
+    return [
+        "runuser",
+        "-u",
+        service_user,
+        "--",
+        "env",
+        f"HOME={service_home}",
+        f"PATH={service_path}",
+        service_bin,
+        "doctor",
+    ]
+
+
 def worker_wrapper_script(env_path: Path) -> str:
     env_file = shlex.quote(str(env_path))
     return f"""#!/usr/bin/env bash
@@ -4305,7 +4358,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         ["systemctl", "stop", "pullwise-worker"],
         install_command,
         ["systemctl", "restart", "pullwise-worker"],
-        ["pullwise-worker", "doctor"],
+        service_user_doctor_command(bin_path),
     ]
     if dry_run:
         print(f"backup {env_path} to {backup_path}")
