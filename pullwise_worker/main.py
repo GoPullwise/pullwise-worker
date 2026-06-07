@@ -3775,6 +3775,11 @@ def finding_has_independent_verification_support(finding: dict) -> bool:
     for item in raw_evidence:
         if not isinstance(item, dict):
             continue
+        has_supporting_detail = evidence_summary_is_substantive(item.get("summary")) or bool(
+            str(item.get("output") or "").strip()
+        )
+        if not has_supporting_detail:
+            continue
         if reproduction_command_looks_executable(item.get("command")):
             return True
         if evidence_log_path_is_structured(item.get("logPath") or item.get("log_path")):
