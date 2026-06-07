@@ -1159,6 +1159,21 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
         self.assertEqual(rejected_samples[0]["title"], "Self verified vacuous output candidate")
 
+    def test_reportability_filter_rejects_verified_reproduction_command_without_false_positive_check(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Self verified reproduction-only candidate",
+                    "reproduction": {"commands": ["pytest tests/test_checkout.py"]},
+                    "verificationStatus": "verified",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Self verified reproduction-only candidate")
+
     def test_reportability_filter_rejects_natural_language_reproduction_command(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [

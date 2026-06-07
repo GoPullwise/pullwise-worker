@@ -3780,7 +3780,7 @@ def reportability_rejection_reason(finding: object) -> str:
         return "missing_title"
     structured_evidence = finding_structured_evidence(finding)
     reproduction_evidence = finding_reproduction_evidence(finding)
-    if finding_has_verification_proof(finding) and (reproduction_evidence or finding_has_independent_verification_support(finding)):
+    if finding_has_verification_proof(finding) and finding_has_independent_verification_support(finding):
         return ""
     if structured_evidence or reproduction_evidence:
         if not finding_has_false_positive_check(finding):
