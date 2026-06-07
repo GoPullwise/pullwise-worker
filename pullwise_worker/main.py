@@ -3638,12 +3638,25 @@ def finding_reproduction_evidence(finding: dict) -> bool:
     return bool(str(finding.get("reproductionPath") or "").strip())
 
 
+def finding_has_false_positive_check(finding: dict) -> bool:
+    if finding_has_verification_proof(finding):
+        return True
+    for key in ("whyNotFalsePositive", "false_positive_checks", "falsePositiveChecks"):
+        values = finding.get(key) if isinstance(finding.get(key), list) else []
+        if any(str(item or "").strip() for item in values):
+            return True
+    limitations = finding.get("limitations") if isinstance(finding.get("limitations"), list) else []
+    return any("false-positive check:" in str(item or "").strip().lower() for item in limitations)
+
+
 def reportability_rejection_reason(finding: object) -> str:
     if not isinstance(finding, dict):
         return "invalid_candidate"
     if not str(finding.get("title") or "").strip():
         return "missing_title"
     if finding_precise_location(finding) or finding_structured_evidence(finding) or finding_reproduction_evidence(finding):
+        if not finding_has_false_positive_check(finding):
+            return "missing_false_positive_check"
         return ""
     return "missing_evidence"
 

@@ -1000,8 +1000,17 @@ class WorkerMainTest(unittest.TestCase):
     def test_reportability_filter_rejects_candidates_without_evidence(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [
-                {"title": "Precise code finding", "file": "src/app.py", "line": 12},
-                {"title": "Repro command finding", "reproduction": {"commands": ["npm test"]}},
+                {
+                    "title": "Precise code finding",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "limitations": ["False-positive check: Confirm no upstream guard exists."],
+                },
+                {
+                    "title": "Repro command finding",
+                    "reproduction": {"commands": ["npm test"]},
+                    "whyNotFalsePositive": ["The focused command reproduces the failure."],
+                },
                 {"title": "Only a vague model guess", "severity": "medium", "verificationStatus": "unverified"},
                 {"severity": "low", "file": "src/untitled.py", "line": 1},
                 "not a finding",
@@ -1035,6 +1044,22 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(audit["rejectedCount"], 3)
         self.assertEqual(audit["potentialRiskCount"], 2)
         self.assertEqual(audit["rejectedSamples"][0]["title"], "Only a vague model guess")
+
+    def test_reportability_filter_rejects_unverified_candidate_without_false_positive_check(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Precise but unchecked candidate",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Precise but unchecked candidate")
 
     def test_convergence_gate_marks_missing_previous_finding_resolved(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
