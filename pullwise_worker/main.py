@@ -3918,27 +3918,35 @@ def finding_line_locations(finding: dict) -> list[tuple[str, int]]:
 
 
 def finding_location_exists_in_checkout(checkout_dir: Path, finding: dict, fallback: dict | None = None) -> bool:
+    locations = finding_line_locations(finding)
+    if not locations and isinstance(fallback, dict):
+        current_file = finding_primary_file(finding)
+        fallback_locations = finding_line_locations(fallback)
+        locations = [
+            (file_path, line)
+            for file_path, line in fallback_locations
+            if not current_file or file_path == current_file
+        ]
+    if locations:
+        for file_path, line in locations:
+            path = checkout_dir / file_path
+            if not path.is_file():
+                return False
+            try:
+                with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    line_count = sum(1 for _ in handle)
+            except OSError:
+                return False
+            if line > line_count:
+                return False
+        return True
     file_path = finding_primary_file(finding)
     if not file_path and isinstance(fallback, dict):
         file_path = finding_primary_file(fallback)
     if not file_path:
         return True
     path = checkout_dir / file_path
-    if not path.is_file():
-        return False
-    line = finding_primary_line(finding)
-    if not line and isinstance(fallback, dict):
-        fallback_file = finding_primary_file(fallback)
-        if not finding_primary_file(finding) or fallback_file == file_path:
-            line = finding_primary_line(fallback)
-    if not line:
-        return True
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            line_count = sum(1 for _ in handle)
-    except OSError:
-        return False
-    return line <= line_count
+    return path.is_file()
 
 
 def normalized_head_sha(value: object) -> str:

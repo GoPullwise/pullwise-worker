@@ -1730,6 +1730,54 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"stale_previous_location": 1})
         self.assertEqual(state["resolved_fingerprints"], [old_fingerprint])
 
+    def test_convergence_gate_resolves_previous_finding_when_secondary_location_is_stale(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("line 1\nline 2\nline 3\n", encoding="utf-8")
+        stale_finding = {
+            "id": "issue-stale-secondary",
+            "title": "Secondary location removed bug",
+            "file": "src/app.py",
+            "line": 2,
+            "confidence": 0.95,
+            "verificationStatus": "potential_risk",
+            "affectedLocations": [
+                {"file": "src/app.py", "startLine": 2, "endLine": 2},
+                {"file": "src/app.py", "startLine": 12, "endLine": 12},
+            ],
+            "_auditSwarmRole": "correctness-reviewer",
+        }
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": "fp-stale-secondary",
+                        "issue_id": "issue-stale-secondary",
+                        "title": "Secondary location removed bug",
+                        "file": "src/app.py",
+                        "line": 2,
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {},
+            },
+        }
+
+        reported, rejected_reasons, _samples, state = worker_main.apply_convergence_gate(
+            job,
+            checkout_dir,
+            [stale_finding],
+        )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"stale_previous_location": 1})
+        self.assertEqual(state["resolved_fingerprints"], ["fp-stale-secondary"])
+
     def test_convergence_gate_uses_prior_location_when_repeated_finding_omits_file(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
         repeated_without_location = {
