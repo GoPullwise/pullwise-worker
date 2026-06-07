@@ -1170,6 +1170,22 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"missing_evidence": 1})
         self.assertEqual(rejected_samples[0]["title"], "Natural language evidence log path")
 
+    def test_reportability_filter_rejects_generic_evidence_summary(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Generic evidence summary",
+                    "evidence": [{"summary": "Concrete evidence.", "file": "src/app.py", "startLine": 12}],
+                    "limitations": ["False-positive check: Confirm no upstream guard exists."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_evidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Generic evidence summary")
+
     def test_reportability_filter_rejects_vacuous_false_positive_check(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [

@@ -3621,7 +3621,7 @@ def finding_structured_evidence(finding: dict) -> bool:
     for item in raw_evidence:
         if not isinstance(item, dict):
             continue
-        has_summary = bool(str(item.get("summary") or "").strip())
+        has_summary = evidence_summary_is_substantive(item.get("summary"))
         has_command = reproduction_command_looks_executable(item.get("command"))
         has_log = evidence_log_path_is_structured(item.get("logPath") or item.get("log_path"))
         has_file_line = safe_repo_relative_file(item.get("file")) and positive_int(item.get("startLine") or item.get("line"))
@@ -3636,6 +3636,30 @@ def finding_reproduction_evidence(finding: dict) -> bool:
     if any(reproduction_command_looks_executable(command) for command in commands):
         return True
     return reproduction_path_has_executable_command(finding.get("reproductionPath"))
+
+
+def evidence_summary_is_substantive(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = normalized_fingerprint_text(text).strip(" .:-")
+    return normalized not in {
+        "concrete evidence",
+        "evidence",
+        "source proof",
+        "proof",
+        "verified",
+        "confirmed",
+        "issue confirmed",
+        "bug confirmed",
+        "see evidence",
+        "see above",
+        "see code",
+        "manual inspection",
+        "manually inspected",
+        "the issue exists",
+        "this is a bug",
+    }
 
 
 def evidence_log_path_is_structured(value: object) -> bool:
