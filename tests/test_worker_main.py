@@ -1004,6 +1004,7 @@ class WorkerMainTest(unittest.TestCase):
                     "title": "Precise code finding",
                     "file": "src/app.py",
                     "line": 12,
+                    "evidence": [{"summary": "The code path has no guard.", "file": "src/app.py", "startLine": 12}],
                     "limitations": ["False-positive check: Confirm no upstream guard exists."],
                 },
                 {
@@ -1052,6 +1053,7 @@ class WorkerMainTest(unittest.TestCase):
                     "title": "Precise but unchecked candidate",
                     "file": "src/app.py",
                     "line": 12,
+                    "evidence": [{"summary": "The code path has no guard.", "file": "src/app.py", "startLine": 12}],
                     "verificationStatus": "potential_risk",
                 }
             ]
@@ -1060,6 +1062,23 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
         self.assertEqual(rejected_samples[0]["title"], "Precise but unchecked candidate")
+
+    def test_reportability_filter_rejects_unverified_candidate_with_only_location(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Location-only candidate",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "verificationStatus": "potential_risk",
+                    "limitations": ["False-positive check: Confirm no upstream guard exists."],
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_evidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Location-only candidate")
 
     def test_convergence_gate_marks_missing_previous_finding_resolved(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
