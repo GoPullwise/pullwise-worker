@@ -2563,19 +2563,30 @@ def review_prompt(job: dict) -> str:
     open_findings = convergence_context.get("open_findings") if isinstance(convergence_context.get("open_findings"), list) else []
     convergence_instruction = ""
     if previous_head_sha or open_findings:
-        prior_titles = [
-            str(item.get("title") or item.get("fingerprint") or "").strip()[:120]
-            for item in open_findings
-            if isinstance(item, dict) and str(item.get("title") or item.get("fingerprint") or "").strip()
-        ][:8]
+        prior_refs = []
+        for item in open_findings:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()[:120]
+            issue_id = str(item.get("issue_id") or item.get("issueId") or "").strip()[:80]
+            fingerprint = str(item.get("fingerprint") or "").strip()[:80]
+            anchor = issue_id or fingerprint
+            if anchor and title:
+                prior_refs.append(f"{anchor} ({title})")
+            elif anchor or title:
+                prior_refs.append(anchor or title)
+            if len(prior_refs) >= 8:
+                break
         convergence_instruction = (
             " This is an incremental convergent review. First verify whether prior open findings still exist; "
             f"previous_head_sha: {previous_head_sha or 'unknown'}. "
             "Only report new issues that are directly introduced after that previous head. "
-            "Do not report latent pre-existing issues, style preferences, or speculative risks."
+            "Do not report latent pre-existing issues, style preferences, or speculative risks. "
+            "When a prior finding still exists, reuse its issue_id exactly. "
+            "For new findings, choose deterministic issue_id values from the bug shape and primary path."
         )
-        if prior_titles:
-            convergence_instruction += f" Prior open findings to verify: {', '.join(prior_titles)}."
+        if prior_refs:
+            convergence_instruction += f" Prior open findings to verify: {', '.join(prior_refs)}."
     return (
         "Run the Audit Swarm protocol for this repository. Return only JSON with top-level "
         "`audit_protocol`, `issue_cards`, and `verification_results`. Do not return Pullwise legacy "
@@ -3715,6 +3726,45 @@ def finding_delta_files(finding: dict) -> set[str]:
     return files
 
 
+def finding_primary_line(finding: dict) -> int:
+    line = positive_int(finding.get("line") or finding.get("startLine"))
+    if line:
+        return line
+    for key in ("affectedLocations", "evidence"):
+        items = finding.get(key) if isinstance(finding.get(key), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            line = positive_int(item.get("startLine") or item.get("line"))
+            if line:
+                return line
+    return 0
+
+
+def finding_location_exists_in_checkout(checkout_dir: Path, finding: dict, fallback: dict | None = None) -> bool:
+    file_path = finding_primary_file(finding)
+    if not file_path and isinstance(fallback, dict):
+        file_path = finding_primary_file(fallback)
+    if not file_path:
+        return True
+    path = checkout_dir / file_path
+    if not path.is_file():
+        return False
+    line = finding_primary_line(finding)
+    if not line and isinstance(fallback, dict):
+        fallback_file = finding_primary_file(fallback)
+        if not finding_primary_file(finding) or fallback_file == file_path:
+            line = finding_primary_line(fallback)
+    if not line:
+        return True
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            line_count = sum(1 for _ in handle)
+    except OSError:
+        return False
+    return line <= line_count
+
+
 def normalized_head_sha(value: object) -> str:
     text = str(value or "").strip().lower()
     if text and text != "pending" and re.fullmatch(r"[0-9a-f]{7,64}", text):
@@ -3800,7 +3850,12 @@ def statistically_calibrated_confidence(finding: dict, source_stats: dict) -> fl
     confirmed = source_stat_count(source_stats, "confirmed")
     resolved = source_stat_count(source_stats, "resolved")
     rejected = source_stat_count(source_stats, "rejected")
-    positive_feedback = confirmed + resolved
+    if finding_has_verification_proof(finding):
+        return base_confidence
+    if not confirmed and resolved and not rejected:
+        reliability = wilson_lower_bound(1, resolved + 2)
+        return base_confidence * reliability
+    positive_feedback = confirmed
     if rejected <= positive_feedback:
         total = positive_feedback + rejected
         if total < 8 or rejected <= 1:
@@ -3810,10 +3865,14 @@ def statistically_calibrated_confidence(finding: dict, source_stats: dict) -> fl
 
 
 def convergence_min_confidence(finding: dict) -> float:
-    status = str(finding.get("verificationStatus") or "").strip().lower()
-    if status in {"verified", "static_proof"}:
+    if finding_has_verification_proof(finding):
         return CONVERGENCE_MIN_VERIFIED_CONFIDENCE
     return CONVERGENCE_MIN_UNVERIFIED_CONFIDENCE
+
+
+def finding_has_verification_proof(finding: dict) -> bool:
+    status = str(finding.get("verificationStatus") or "").strip().lower()
+    return status in {"verified", "static_proof"}
 
 
 def merge_source_stats(context: dict) -> dict[str, dict[str, int]]:
@@ -3896,6 +3955,7 @@ def apply_convergence_gate(
     current_head_sha = normalized_head_sha(job.get("resolved_commit") or job.get("commit"))
     has_prior_run = bool(previous_head_sha or previous_open or context.get("source_stats"))
     source_stats = merge_source_stats(context)
+    known_sources = set(source_stats)
     changed_files: set[str] | None = None
     changed_files_loaded = False
     reportable: list[dict] = []
@@ -3921,12 +3981,18 @@ def apply_convergence_gate(
             reject(finding, "duplicate_finding")
             continue
         if matched_fingerprint in previous_by_fingerprint:
+            if not finding_location_exists_in_checkout(checkout_dir, finding, previous_by_fingerprint[matched_fingerprint]):
+                reject(finding, "stale_previous_location")
+                continue
             reportable.append(finding)
             open_fingerprints.add(matched_fingerprint)
             seen_current_fingerprints.add(matched_fingerprint)
             bump_source_stat(source_stats, source, "reported")
             if str(finding.get("verificationStatus") or "").lower() in {"verified", "static_proof"}:
                 bump_source_stat(source_stats, source, "confirmed")
+            continue
+        if has_prior_run and known_sources and source not in known_sources and not finding_has_verification_proof(finding):
+            reject(finding, "unknown_source_after_prior_run")
             continue
         if statistically_calibrated_confidence(finding, source_counts) < convergence_min_confidence(finding):
             reject(finding, "low_statistical_confidence")

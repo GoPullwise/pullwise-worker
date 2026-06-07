@@ -195,6 +195,31 @@ class WorkerMainTest(unittest.TestCase):
         command_blocks = [block for block in blocks if block["kind"] == "command" and block.get("command")]
         self.assertEqual(command_blocks[0]["command"], "pnpm test auth -- refresh-token-rotation")
 
+    def test_review_prompt_reuses_prior_issue_ids_for_convergence(self) -> None:
+        prompt = worker_main.review_prompt(
+            {
+                "repo": "acme/api",
+                "branch": "main",
+                "commit": "b" * 40,
+                "convergence_context": {
+                    "previous_head_sha": "a" * 40,
+                    "open_findings": [
+                        {
+                            "fingerprint": "fp-old",
+                            "issue_id": "issue-old",
+                            "title": "Old bug",
+                            "file": "src/app.py",
+                            "line": 12,
+                            "status": "open",
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertIn("reuse its issue_id exactly", prompt)
+        self.assertIn("issue-old", prompt)
+
     def test_run_codex_review_normalizes_checkout_absolute_file_paths(self) -> None:
         worker_config = config()
         checkout_dir = Path(worker_config.work_dir) / "job_1"
@@ -1158,8 +1183,137 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_samples, [])
         self.assertEqual(state["open_findings"][0]["title"], "Fix introduced bug")
 
+    def test_convergence_gate_resolves_previous_finding_when_location_deleted(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        stale_finding = (
+            audit_swarm_findings_from_payload(
+                audit_payload([issue_card("Deleted file bug", issue_id="issue-deleted", file="src/deleted.py")])
+            )
+            or []
+        )[0]
+        old_fingerprint = worker_main.finding_fingerprint(stale_finding)
+        stale_finding["confidence"] = 0.95
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": old_fingerprint,
+                        "issue_id": "issue-deleted",
+                        "title": "Deleted file bug",
+                        "file": "src/deleted.py",
+                        "line": 12,
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {},
+            },
+        }
+
+        reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+            job,
+            checkout_dir,
+            [stale_finding],
+        )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"stale_previous_location": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Deleted file bug")
+        self.assertEqual(state["resolved_fingerprints"], [old_fingerprint])
+        self.assertEqual(state["open_findings"], [])
+
+    def test_convergence_gate_resolves_previous_finding_when_line_is_stale(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("line 1\nline 2\nline 3\n", encoding="utf-8")
+        stale_finding = (
+            audit_swarm_findings_from_payload(
+                audit_payload([issue_card("Removed block bug", issue_id="issue-stale-line", line=12)])
+            )
+            or []
+        )[0]
+        old_fingerprint = worker_main.finding_fingerprint(stale_finding)
+        stale_finding["confidence"] = 0.95
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": old_fingerprint,
+                        "issue_id": "issue-stale-line",
+                        "title": "Removed block bug",
+                        "file": "src/app.py",
+                        "line": 12,
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {},
+            },
+        }
+
+        reported, rejected_reasons, _samples, state = worker_main.apply_convergence_gate(
+            job,
+            checkout_dir,
+            [stale_finding],
+        )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"stale_previous_location": 1})
+        self.assertEqual(state["resolved_fingerprints"], [old_fingerprint])
+
+    def test_convergence_gate_uses_prior_location_when_repeated_finding_omits_file(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        repeated_without_location = {
+            "id": "issue-omitted-location",
+            "title": "Omitted location bug",
+            "confidence": 0.95,
+            "verificationStatus": "potential_risk",
+            "reproduction": {"commands": ["pytest tests/test_app.py"]},
+            "_auditSwarmRole": "correctness-reviewer",
+        }
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [
+                    {
+                        "fingerprint": "fp-omitted-location",
+                        "issue_id": "issue-omitted-location",
+                        "title": "Omitted location bug",
+                        "file": "src/deleted.py",
+                        "line": 12,
+                        "source": "correctness-reviewer",
+                    }
+                ],
+                "source_stats": {},
+            },
+        }
+
+        reported, rejected_reasons, _samples, state = worker_main.apply_convergence_gate(
+            job,
+            checkout_dir,
+            [repeated_without_location],
+        )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"stale_previous_location": 1})
+        self.assertEqual(state["resolved_fingerprints"], ["fp-omitted-location"])
+
     def test_convergence_gate_keeps_same_finding_when_line_shifts(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 26)), encoding="utf-8")
         old_finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Line shifted bug", line=12)])) or [])[0]
         old_fingerprint = worker_main.finding_fingerprint(old_finding)
         shifted_finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Line shifted bug", line=20)])) or [])[0]
@@ -1196,6 +1350,8 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_convergence_gate_matches_same_issue_id_when_fingerprint_drifts(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 26)), encoding="utf-8")
         old_finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Original title", issue_id="issue-stable")])) or [])[0]
         old_fingerprint = worker_main.finding_fingerprint(old_finding)
         rewritten_finding = (
@@ -1307,6 +1463,17 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertGreaterEqual(confidence, 0.75)
 
+    def test_statistical_confidence_does_not_treat_resolved_only_history_as_confirmation(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Resolved-only source bug")])) or [])[0]
+        finding["confidence"] = 0.95
+
+        confidence = worker_main.statistically_calibrated_confidence(
+            finding,
+            {"reported": 20, "confirmed": 0, "resolved": 20, "rejected": 0},
+        )
+
+        self.assertLess(confidence, worker_main.CONVERGENCE_MIN_UNVERIFIED_CONFIDENCE)
+
     def test_statistical_confidence_uses_conservative_source_reliability_bound(self) -> None:
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Source reliability bug")])) or [])[0]
         finding["confidence"] = 0.9
@@ -1346,6 +1513,40 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(reported, [])
         self.assertEqual(rejected_reasons, {"low_statistical_confidence": 1})
+
+    def test_convergence_gate_rejects_unknown_unverified_source_after_prior_run(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 20)), encoding="utf-8")
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Unexpected source bug")])) or [])[0]
+        finding["_auditSwarmRole"] = "surprise-reviewer"
+        finding["confidence"] = 0.95
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [],
+                "source_stats": {
+                    "correctness-reviewer": {"reported": 3, "confirmed": 3, "resolved": 0, "rejected": 0}
+                },
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual(reported, [])
+        self.assertEqual(rejected_reasons, {"unknown_source_after_prior_run": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Unexpected source bug")
+        self.assertEqual(state["open_findings"], [])
 
     def test_run_job_uploads_progress_result_and_cleans_checkout(self) -> None:
         worker = Worker(config())
