@@ -3930,7 +3930,7 @@ def finding_line_within_changed_ranges(finding: dict, changed_line_ranges: dict[
         return True
     ranges = changed_line_ranges.get(file_path)
     if not ranges:
-        return True
+        return False
     return any(start <= line <= end for start, end in ranges)
 
 
