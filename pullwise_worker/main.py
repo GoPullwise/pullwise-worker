@@ -3685,7 +3685,7 @@ def evidence_log_path_is_structured(value: object) -> bool:
     path = safe_repo_relative_file(value)
     if not path or re.search(r"\s", path):
         return False
-    if "/" in path:
+    if path.startswith((".pullwise/", "verification/")):
         return True
     return bool(re.search(r"\.(log|txt|json|out|err|trace)\Z", path, flags=re.IGNORECASE))
 
