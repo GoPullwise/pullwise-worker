@@ -3623,7 +3623,7 @@ def finding_structured_evidence(finding: dict) -> bool:
             continue
         has_summary = bool(str(item.get("summary") or "").strip())
         has_command = reproduction_command_looks_executable(item.get("command"))
-        has_log = bool(str(item.get("logPath") or item.get("log_path") or "").strip())
+        has_log = evidence_log_path_is_structured(item.get("logPath") or item.get("log_path"))
         has_file_line = safe_repo_relative_file(item.get("file")) and positive_int(item.get("startLine") or item.get("line"))
         if has_summary and (has_command or has_log or has_file_line):
             return True
@@ -3636,6 +3636,15 @@ def finding_reproduction_evidence(finding: dict) -> bool:
     if any(reproduction_command_looks_executable(command) for command in commands):
         return True
     return reproduction_path_has_executable_command(finding.get("reproductionPath"))
+
+
+def evidence_log_path_is_structured(value: object) -> bool:
+    path = safe_repo_relative_file(value)
+    if not path or re.search(r"\s", path):
+        return False
+    if "/" in path:
+        return True
+    return bool(re.search(r"\.(log|txt|json|out|err|trace)\Z", path, flags=re.IGNORECASE))
 
 
 def reproduction_path_has_executable_command(value: object) -> bool:

@@ -1133,6 +1133,27 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_reasons, {"missing_evidence": 1})
         self.assertEqual(rejected_samples[0]["title"], "Natural language evidence command")
 
+    def test_reportability_filter_rejects_natural_language_evidence_log_path(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Natural language evidence log path",
+                    "evidence": [
+                        {
+                            "summary": "The checkout flow was inspected manually.",
+                            "logPath": "Open the worker logs and inspect the checkout flow.",
+                        }
+                    ],
+                    "whyNotFalsePositive": ["The focused checkout flow was inspected."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_evidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Natural language evidence log path")
+
     def test_reportability_filter_rejects_vacuous_false_positive_check(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [
