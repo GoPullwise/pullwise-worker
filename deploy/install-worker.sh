@@ -101,6 +101,9 @@ fi
 
 id "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --home "$DATA_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR" "$CHECKOUT_ROOT" "$LOG_DIR"
+touch "$CHECKOUT_ROOT/.pullwise-checkout-root"
+chown "$SERVICE_USER:$SERVICE_USER" "$CHECKOUT_ROOT/.pullwise-checkout-root"
+chmod 0640 "$CHECKOUT_ROOT/.pullwise-checkout-root"
 
 SERVICE_NODE_MAJOR="$(run_as_service_user node -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || true)"
 SERVICE_NODE_VERSION="$(run_as_service_user node --version 2>/dev/null || true)"

@@ -44,6 +44,7 @@ from pullwise_worker.main import (
     run_codex_review,
     run_deterministic_repository_checks,
     run_doctor,
+    run_git_command,
     run_verifier_commands,
     safe_job_id,
     safe_rmtree,
@@ -105,6 +106,15 @@ def config() -> WorkerConfig:
         codex_timeout_seconds=60,
     )
     return WorkerConfig(namespace)
+
+
+def mark_checkout_root_owned(cfg: WorkerConfig) -> None:
+    checkout_root = Path(cfg.work_dir)
+    checkout_root.mkdir(parents=True, exist_ok=True)
+    (checkout_root / ".pullwise-checkout-root").write_text(
+        "pullwise-worker checkout root\n",
+        encoding="utf-8",
+    )
 
 
 class WorkerMainTest(unittest.TestCase):
@@ -511,9 +521,33 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(logs, "verifier disabled")
 
+    def test_verifier_enabled_without_host_execution_permission_does_not_run_scripts(self) -> None:
+        worker_config = config()
+        worker_config.verifier_enabled = True
+        worker_config.verifier_scripts = ["test"]
+        checkout_dir = Path(worker_config.work_dir) / "job_verify_untrusted"
+        checkout_dir.mkdir(parents=True)
+        preflight = {"packageManagers": ["npm"], "availableScripts": ["test"]}
+
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            verifier, findings, logs = run_verifier_commands(
+                worker_config,
+                {"job_id": "job_verify_untrusted", "repo": "acme/app", "commit": "abc1234"},
+                checkout_dir,
+                preflight,
+            )
+
+        run.assert_not_called()
+        self.assertTrue(verifier["enabled"])
+        self.assertEqual(verifier["runs"], [])
+        self.assertEqual(findings, [])
+        self.assertIn("host execution is not allowed", verifier["summary"])
+        self.assertEqual(logs, "verifier host execution disabled")
+
     def test_verifier_failed_script_becomes_verified_finding(self) -> None:
         worker_config = config()
         worker_config.verifier_enabled = True
+        worker_config.verifier_host_execution_allowed = True
         worker_config.verifier_scripts = ["test"]
         checkout_dir = Path(worker_config.work_dir) / "job_verify"
         checkout_dir.mkdir(parents=True)
@@ -600,6 +634,7 @@ class WorkerMainTest(unittest.TestCase):
     def test_verifier_dependency_install_failure_blocks_project_scripts(self) -> None:
         worker_config = config()
         worker_config.verifier_enabled = True
+        worker_config.verifier_host_execution_allowed = True
         worker_config.verifier_scripts = ["test"]
         checkout_dir = Path(worker_config.work_dir) / "job_verify_install"
         checkout_dir.mkdir(parents=True)
@@ -656,6 +691,7 @@ class WorkerMainTest(unittest.TestCase):
     def test_verifier_flaky_dependency_install_continues_to_project_scripts(self) -> None:
         worker_config = config()
         worker_config.verifier_enabled = True
+        worker_config.verifier_host_execution_allowed = True
         worker_config.verifier_scripts = ["test"]
         checkout_dir = Path(worker_config.work_dir) / "job_verify_install_flaky"
         checkout_dir.mkdir(parents=True)
@@ -697,6 +733,7 @@ class WorkerMainTest(unittest.TestCase):
     def test_verifier_flaky_failure_is_not_promoted_to_verified_finding(self) -> None:
         worker_config = config()
         worker_config.verifier_enabled = True
+        worker_config.verifier_host_execution_allowed = True
         worker_config.verifier_install_deps = False
         worker_config.verifier_scripts = ["test"]
         checkout_dir = Path(worker_config.work_dir) / "job_verify_flaky"
@@ -1506,6 +1543,13 @@ class WorkerMainTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         checkout_dir_for_job(work_dir, job_id)
 
+    def test_run_git_command_passes_configured_timeout_to_subprocess(self) -> None:
+        with patch.dict(os.environ, {"PULLWISE_GIT_TIMEOUT_SECONDS": "17"}, clear=False), \
+            patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)) as run:
+            run_git_command(["git", "status"], phase="status")
+
+        self.assertEqual(run.call_args.kwargs["timeout"], 17)
+
     def test_redact_secrets_removes_worker_and_clone_tokens(self) -> None:
         cfg = config()
         text = "token worker-token clone https://x-access-token:short-token@github.com/acme/api.git"
@@ -1689,6 +1733,7 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_cleanup_checkouts_removes_expired_failed_retention(self) -> None:
         cfg = config()
+        mark_checkout_root_owned(cfg)
         cfg.max_checkout_bytes = 1024 * 1024
         retained = Path(cfg.work_dir) / "retained"
         expired = Path(cfg.work_dir) / "expired"
@@ -1708,6 +1753,7 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_cleanup_checkouts_skips_active_jobs_and_removes_oldest_over_budget(self) -> None:
         cfg = config()
+        mark_checkout_root_owned(cfg)
         cfg.max_checkout_bytes = 5
         active = Path(cfg.work_dir) / "active_job"
         old = Path(cfg.work_dir) / "old_job"
@@ -1725,6 +1771,7 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_cleanup_checkouts_preserves_verifier_scratch_dirs_during_active_jobs(self) -> None:
         cfg = config()
+        mark_checkout_root_owned(cfg)
         cfg.max_checkout_bytes = 1
         active = Path(cfg.work_dir) / "active_job"
         old = Path(cfg.work_dir) / "old_job"
@@ -1744,6 +1791,17 @@ class WorkerMainTest(unittest.TestCase):
         self.assertTrue(verifier_home.exists())
         self.assertTrue(verifier_tmp.exists())
         self.assertFalse(old.exists())
+
+    def test_cleanup_checkouts_requires_owned_checkout_root_before_deleting(self) -> None:
+        cfg = config()
+        cfg.max_checkout_bytes = 1
+        unrelated = Path(cfg.work_dir) / "unrelated"
+        unrelated.mkdir(parents=True)
+        (unrelated / "big.txt").write_text("xxxxx", encoding="utf-8")
+
+        cleanup_checkouts(cfg)
+
+        self.assertTrue(unrelated.exists())
 
     def test_cleanup_worker_resources_prunes_recursive_verifier_logs(self) -> None:
         cfg = config()
@@ -1808,6 +1866,41 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(f"python3 -m pip install --upgrade {expected_package}", printed)
         run.assert_not_called()
+
+    def test_update_dry_run_restarts_service_before_running_doctor(self) -> None:
+        with patch("pullwise_worker.main.subprocess.run") as run, \
+            patch("builtins.print") as print_mock:
+            code = update_worker(config(), dry_run=True)
+
+        printed = [str(call.args[0]) for call in print_mock.call_args_list if call.args]
+        self.assertEqual(code, 0)
+        self.assertLess(printed.index("systemctl restart pullwise-worker"), printed.index("pullwise-worker doctor"))
+        run.assert_not_called()
+
+    def test_update_rewrites_env_loading_wrapper_after_package_upgrade(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "worker.env"
+            backup_file = Path(tmp) / "worker.env.bak"
+            bin_path = Path(tmp) / "pullwise-worker"
+            env_file.write_text("PULLWISE_WORKER_TOKEN=worker-token\n", encoding="utf-8")
+
+            with patch.dict(
+                    "os.environ",
+                    {
+                        "PULLWISE_WORKER_ENV_FILE": str(env_file),
+                        "PULLWISE_WORKER_ENV_BACKUP_FILE": str(backup_file),
+                        "PULLWISE_WORKER_BIN_PATH": str(bin_path),
+                    },
+                    clear=False,
+                ), \
+                patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)):
+                code = update_worker(cfg)
+
+            self.assertEqual(code, 0)
+            wrapper = bin_path.read_text(encoding="utf-8")
+            self.assertIn("load_worker_env", wrapper)
+            self.assertIn(str(env_file), wrapper)
 
     def test_update_restores_existing_env_when_upgrade_fails(self) -> None:
         cfg = config()
@@ -1886,6 +1979,16 @@ class WorkerMainTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 safe_rmtree(target, allowed)
             self.assertTrue(target.exists())
+
+    def test_safe_rmtree_refuses_symlinked_allowed_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            allowed = Path(tmp) / "allowed"
+            allowed.mkdir()
+
+            with patch.object(Path, "is_symlink", return_value=True):
+                with self.assertRaises(ValueError):
+                    safe_rmtree(allowed, allowed)
+            self.assertTrue(allowed.exists())
 
     def test_ci_dependency_bounds_keep_python_39_support(self) -> None:
         root = Path(__file__).resolve().parents[1]

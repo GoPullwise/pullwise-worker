@@ -39,6 +39,7 @@ _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
 _VERIFIER_HOME_DIR_NAME = ".verifier-home"
 _VERIFIER_TMP_DIR_NAME = ".verifier-tmp"
+_CHECKOUT_ROOT_SENTINEL_NAME = ".pullwise-checkout-root"
 _CHECKOUT_RUNTIME_DIR_NAMES = {_VERIFIER_HOME_DIR_NAME, _VERIFIER_TMP_DIR_NAME}
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex", "opencode"}
@@ -80,6 +81,13 @@ def env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in _VERIFIER_DISABLED_VALUES
+
+
+def env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name) or default))
+    except ValueError:
+        return default
 
 
 def parse_verifier_scripts(value: str | None) -> list[str]:
@@ -130,6 +138,7 @@ class WorkerConfig:
         self.verifier_enabled = env_bool("PULLWISE_WORKER_VERIFIER_ENABLED", False)
         self.verifier_install_deps = env_bool("PULLWISE_WORKER_VERIFIER_INSTALL_DEPS", True)
         self.verifier_confirm_failures = env_bool("PULLWISE_WORKER_VERIFIER_CONFIRM_FAILURES", True)
+        self.verifier_host_execution_allowed = env_bool("PULLWISE_WORKER_VERIFIER_ALLOW_HOST_EXECUTION", False)
         self.verifier_timeout_seconds = max(10, int(os.environ.get("PULLWISE_WORKER_VERIFIER_TIMEOUT_SECONDS") or 120))
         self.verifier_max_commands = max(1, int(os.environ.get("PULLWISE_WORKER_VERIFIER_MAX_COMMANDS") or 5))
         self.verifier_scripts = parse_verifier_scripts(os.environ.get("PULLWISE_WORKER_VERIFIER_SCRIPTS"))
@@ -650,6 +659,24 @@ def checkout_dir_from_failed_marker(marker: Path) -> Path:
     return marker.parent / name[: -len(_FAILED_CHECKOUT_MARKER_SUFFIX)]
 
 
+def checkout_root_sentinel(work_dir: Path) -> Path:
+    return work_dir / _CHECKOUT_ROOT_SENTINEL_NAME
+
+
+def checkout_root_is_owned(work_dir: Path) -> bool:
+    sentinel = checkout_root_sentinel(work_dir)
+    if sentinel.is_file():
+        return True
+    entries = [path for path in work_dir.iterdir() if path.name not in _CHECKOUT_RUNTIME_DIR_NAMES]
+    if entries:
+        return False
+    try:
+        sentinel.write_text("pullwise-worker checkout root\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def clone_repository(job: dict, checkout_dir: Path) -> str:
     shutil.rmtree(checkout_dir, ignore_errors=True)
     checkout_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -697,8 +724,11 @@ def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | Non
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600),
             env=env,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git {phase} timed out after {env_int('PULLWISE_GIT_TIMEOUT_SECONDS', 600)}s") from exc
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(git_error_message(phase, exc)) from exc
 
@@ -1082,6 +1112,21 @@ def run_verifier_commands(
             },
             [],
             "verifier disabled",
+        )
+
+    if not config.verifier_host_execution_allowed:
+        return (
+            {
+                "enabled": True,
+                "summary": (
+                    "Verifier command execution is enabled, but host execution is not allowed. "
+                    "Run verifier commands only inside an external sandbox or set "
+                    "PULLWISE_WORKER_VERIFIER_ALLOW_HOST_EXECUTION=true for trusted hosts."
+                ),
+                "runs": [],
+            },
+            [],
+            "verifier host execution disabled",
         )
 
     package_managers = preflight.get("packageManagers") if isinstance(preflight.get("packageManagers"), list) else []
@@ -4159,16 +4204,45 @@ def default_worker_package() -> str:
     return f"{DEFAULT_WORKER_PACKAGE_BASE_URL}/v{__version__}/pullwise_worker-{__version__}-py3-none-any.whl"
 
 
+def worker_wrapper_script(env_path: Path) -> str:
+    env_file = shlex.quote(str(env_path))
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+load_worker_env() {{
+  local env_file="$1"
+  local key value
+  [ -f "$env_file" ] || return 0
+  while IFS="=" read -r key value || [ -n "$key" ]; do
+    [[ -z "$key" || "$key" == \\#* ]] && continue
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    export "$key=$value"
+  done < "$env_file"
+}}
+load_worker_env {env_file}
+export PATH="${{PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
+PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-python3}}"
+exec "$PYTHON_BIN" -m pullwise_worker.main "$@"
+"""
+
+
+def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
+    bin_path.parent.mkdir(parents=True, exist_ok=True)
+    bin_path.write_text(worker_wrapper_script(env_path), encoding="utf-8")
+    bin_path.chmod(0o755)
+
+
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     package = default_worker_package()
     python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3"
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE") or "/etc/pullwise-worker/worker.env")
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE") or "/etc/pullwise-worker/worker.env.bak")
+    bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH") or "/usr/local/bin/pullwise-worker")
+    install_command = [python_bin, "-m", "pip", "install", "--upgrade", package]
     commands = [
         ["systemctl", "stop", "pullwise-worker"],
-        [python_bin, "-m", "pip", "install", "--upgrade", package],
-        ["pullwise-worker", "doctor"],
+        install_command,
         ["systemctl", "restart", "pullwise-worker"],
+        ["pullwise-worker", "doctor"],
     ]
     if dry_run:
         print(f"backup {env_path} to {backup_path}")
@@ -4182,6 +4256,8 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     for command in commands:
         if dry_run:
             print(" ".join(command))
+            if command is install_command:
+                print(f"write env-loading wrapper {bin_path}")
             continue
         completed = subprocess.run(command)
         if completed.returncode != 0:
@@ -4189,6 +4265,15 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
                 shutil.copy2(backup_path, env_path)
             subprocess.run(["systemctl", "restart", "pullwise-worker"])
             return completed.returncode
+        if command is install_command:
+            try:
+                write_worker_wrapper(bin_path, env_path)
+            except OSError as exc:
+                print(f"failed to write worker wrapper: {exc}", file=sys.stderr)
+                if backup_path.exists():
+                    shutil.copy2(backup_path, env_path)
+                subprocess.run(["systemctl", "restart", "pullwise-worker"])
+                return 1
     return 0
 
 
@@ -4239,6 +4324,8 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
     active = set(active_job_ids or set())
     protected = active | _CHECKOUT_RUNTIME_DIR_NAMES
     config.work_dir.mkdir(parents=True, exist_ok=True)
+    if not checkout_root_is_owned(config.work_dir):
+        return
     for marker in config.work_dir.glob(f"*{_FAILED_CHECKOUT_MARKER_SUFFIX}"):
         checkout = checkout_dir_from_failed_marker(marker)
         if checkout.name in protected:
@@ -4335,11 +4422,13 @@ def safe_unlink(path: Path) -> None:
 
 
 def safe_rmtree(path: Path, allowed_root: Path) -> None:
+    if path.is_symlink():
+        raise ValueError(f"refusing to remove symlinked directory: {path}")
     resolved = path.resolve(strict=False)
     allowed = allowed_root.resolve(strict=False)
     if resolved != allowed:
         raise ValueError(f"refusing to remove unexpected directory: {path}")
-    shutil.rmtree(resolved, ignore_errors=True)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def directory_size(path: Path) -> int:
