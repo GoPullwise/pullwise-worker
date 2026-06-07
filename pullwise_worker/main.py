@@ -3819,6 +3819,47 @@ def git_diff_name_only(checkout_dir: Path, previous: str, current: str) -> set[s
     return {safe_repo_relative_file(line.strip()) for line in completed.stdout.splitlines() if safe_repo_relative_file(line.strip())}
 
 
+def parse_git_diff_changed_line_ranges(diff_text: str) -> dict[str, list[tuple[int, int]]]:
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    current_file = ""
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            file_path = line[4:].strip()
+            if file_path == "/dev/null":
+                current_file = ""
+                continue
+            if file_path.startswith("b/"):
+                file_path = file_path[2:]
+            current_file = safe_repo_relative_file(file_path)
+            continue
+        if not current_file or not line.startswith("@@"):
+            continue
+        match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+        if not match:
+            continue
+        start = positive_int(match.group(1))
+        count = positive_int(match.group(2) or 1)
+        if not start or not count:
+            continue
+        ranges.setdefault(current_file, []).append((start, start + count - 1))
+    return ranges
+
+
+def git_diff_changed_line_ranges(checkout_dir: Path, previous: str, current: str) -> dict[str, list[tuple[int, int]]] | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(checkout_dir), "diff", "--unified=0", f"{previous}..{current}"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return parse_git_diff_changed_line_ranges(completed.stdout)
+
+
 def fetch_git_head(checkout_dir: Path, head_sha: str, job: dict | None = None) -> bool:
     head = normalized_head_sha(head_sha)
     if not head:
@@ -3857,6 +3898,40 @@ def changed_files_between_heads(
     if fetch_git_head(checkout_dir, previous, job):
         return git_diff_name_only(checkout_dir, previous, current)
     return None
+
+
+def changed_line_ranges_between_heads(
+    checkout_dir: Path,
+    previous_head_sha: str,
+    current_head_sha: str,
+    *,
+    job: dict | None = None,
+) -> dict[str, list[tuple[int, int]]] | None:
+    previous = normalized_head_sha(previous_head_sha)
+    current = normalized_head_sha(current_head_sha)
+    if not previous or not current:
+        return None
+    if previous == current:
+        return {}
+    changed_ranges = git_diff_changed_line_ranges(checkout_dir, previous, current)
+    if changed_ranges is not None:
+        return changed_ranges
+    if fetch_git_head(checkout_dir, previous, job):
+        return git_diff_changed_line_ranges(checkout_dir, previous, current)
+    return None
+
+
+def finding_line_within_changed_ranges(finding: dict, changed_line_ranges: dict[str, list[tuple[int, int]]] | None) -> bool:
+    if changed_line_ranges is None:
+        return True
+    file_path = finding_primary_file(finding)
+    line = finding_primary_line(finding)
+    if not file_path or not line:
+        return True
+    ranges = changed_line_ranges.get(file_path)
+    if not ranges:
+        return True
+    return any(start <= line <= end for start, end in ranges)
 
 
 def source_stat_count(stats: dict, key: str) -> int:
@@ -3990,6 +4065,8 @@ def apply_convergence_gate(
     known_sources = set(source_stats)
     changed_files: set[str] | None = None
     changed_files_loaded = False
+    changed_line_ranges: dict[str, list[tuple[int, int]]] | None = None
+    changed_line_ranges_loaded = False
     reportable: list[dict] = []
     open_fingerprints = set()
     seen_current_fingerprints = set()
@@ -4035,6 +4112,12 @@ def apply_convergence_gate(
                 changed_files_loaded = True
             finding_files = finding_delta_files(finding)
             if changed_files is None or not finding_files or not (finding_files & changed_files):
+                reject(finding, "not_introduced_by_current_delta")
+                continue
+            if not changed_line_ranges_loaded:
+                changed_line_ranges = changed_line_ranges_between_heads(checkout_dir, previous_head_sha, current_head_sha, job=job)
+                changed_line_ranges_loaded = True
+            if not finding_line_within_changed_ranges(finding, changed_line_ranges):
                 reject(finding, "not_introduced_by_current_delta")
                 continue
             if not finding_location_exists_in_checkout(checkout_dir, finding):
