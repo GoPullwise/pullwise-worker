@@ -3633,9 +3633,44 @@ def finding_structured_evidence(finding: dict) -> bool:
 def finding_reproduction_evidence(finding: dict) -> bool:
     reproduction = finding.get("reproduction") if isinstance(finding.get("reproduction"), dict) else {}
     commands = reproduction.get("commands") if isinstance(reproduction.get("commands"), list) else []
-    if any(str(command or "").strip() for command in commands):
+    if any(reproduction_command_looks_executable(command) for command in commands):
         return True
     return bool(str(finding.get("reproductionPath") or "").strip())
+
+
+def reproduction_command_looks_executable(command: object) -> bool:
+    text = str(command or "").strip()
+    if not text or "\n" in text or "\r" in text:
+        return False
+    first = text.split(maxsplit=1)[0].strip("\"'")
+    if first.startswith(("./", ".\\", "scripts/", "bin/")):
+        return True
+    executable = first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    executable = executable[:-4] if executable.endswith(".exe") else executable
+    return executable in {
+        "bun",
+        "cargo",
+        "deno",
+        "docker",
+        "dotnet",
+        "go",
+        "gradle",
+        "java",
+        "make",
+        "mvn",
+        "node",
+        "npm",
+        "npx",
+        "pnpm",
+        "pytest",
+        "python",
+        "python3",
+        "ruby",
+        "ruff",
+        "tox",
+        "uv",
+        "yarn",
+    }
 
 
 def finding_has_false_positive_check(finding: dict) -> bool:
