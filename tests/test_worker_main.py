@@ -2626,6 +2626,73 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(sample["scoreKind"], "ranking_score")
         self.assertLess(sample["decisionScore"], 0.65)
 
+    def test_review_calibration_marks_borderline_candidates_for_manual_review(self) -> None:
+        findings = audit_swarm_findings_from_payload(
+            audit_payload(
+                [
+                    issue_card("Audit borderline bug", issue_id="borderline-audit"),
+                    issue_card("Rejected borderline bug", issue_id="borderline-reject"),
+                ]
+            )
+        )
+        audit_finding, rejected_finding = findings
+        audit_finding["confidence"] = 0.85
+        audit_finding["verificationStatus"] = "potential_risk"
+        audit_finding["evidence"] = [{"summary": "Verifier reproduced the boundary failure.", "logPath": "verification/failure.log"}]
+        audit_finding["whyNotFalsePositive"] = ["The guarded caller path is not used here."]
+        rejected_finding["confidence"] = 0.75
+        rejected_finding["verificationStatus"] = "potential_risk"
+        records = [
+            {
+                "stage": "convergence",
+                "decision": "reported",
+                "reason": "passed_convergence_gate",
+                "finding": finding,
+                "fingerprint": worker_main.finding_fingerprint(finding),
+                "source_stats": {},
+            }
+            for finding in findings
+        ]
+
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only",
+                "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE": "0.0",
+                "PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW": "0.03",
+            },
+            clear=False,
+        ):
+            result = worker_main.apply_review_calibration_decisions(
+                config(),
+                {"job_id": "job_borderline", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+                findings,
+                records,
+                attempt_id="wk_1-1",
+            )
+
+        self.assertEqual([item["title"] for item in result["reported_findings"]], [])
+        self.assertEqual([item["title"] for item in result["audit_only_findings"]], ["Audit borderline bug"])
+        audit_sample = result["audit_only_samples"][0]
+        self.assertTrue(audit_sample["sampledForManualReview"])
+        self.assertEqual(audit_sample["sampleReason"], "calibration_borderline_report_threshold")
+        self.assertEqual(audit_sample["sampleStrategy"], "threshold_borderline")
+        self.assertEqual(audit_sample["scoreBand"], "audit_band")
+        self.assertEqual(audit_sample["scoreKind"], "ranking_score")
+        self.assertAlmostEqual(audit_sample["decisionThreshold"], 0.82)
+        self.assertLess(audit_sample["thresholdDistance"], 0.03)
+        self.assertNotIn("sampleRate", audit_sample)
+
+        rejected_sample = result["rejected_samples"][0]
+        self.assertTrue(rejected_sample["sampledForManualReview"])
+        self.assertEqual(rejected_sample["sampleReason"], "calibration_borderline_audit_threshold")
+        self.assertEqual(rejected_sample["sampleStrategy"], "threshold_borderline")
+        self.assertEqual(rejected_sample["scoreBand"], "reject_band")
+        self.assertEqual(rejected_sample["scoreKind"], "ranking_score")
+        self.assertAlmostEqual(rejected_sample["decisionThreshold"], 0.65)
+        self.assertLess(rejected_sample["thresholdDistance"], 0.03)
+        self.assertNotIn("sampleRate", rejected_sample)
+
     def test_review_calibration_logit_beta_outputs_truth_probability(self) -> None:
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Logit beta bug")])) or [])[0]
         finding["confidence"] = 0.92
@@ -4181,6 +4248,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY "false"', install_script)
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT "false"', install_script)
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE "0.02"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW "0.03"', install_script)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
@@ -4195,6 +4263,7 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY=false", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT=false", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE=0.02", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW=0.03", env_template)
         for key in (
             "PULLWISE_PROVIDER_CHAIN",
             "PULLWISE_CODEX_MODEL",
@@ -4212,6 +4281,7 @@ class WorkerMainTest(unittest.TestCase):
             "PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY",
             "PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT",
             "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE",
+            "PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW",
         ):
             self.assertIn(key, install_script)
             self.assertIn(key, env_template)

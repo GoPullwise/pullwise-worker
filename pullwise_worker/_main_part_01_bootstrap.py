@@ -229,6 +229,12 @@ class WorkerConfig:
             minimum=0.0,
             maximum=1.0,
         )
+        self.review_calibration_borderline_sample_window = env_float(
+            "PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW",
+            0.03,
+            minimum=0.0,
+            maximum=0.10,
+        )
         if require_worker_token and not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 

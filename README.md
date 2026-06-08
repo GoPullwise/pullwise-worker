@@ -55,6 +55,7 @@ Required environment:
 - `PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY` optional, defaults to `false`
 - `PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT` optional, defaults to `false`
 - `PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE` optional, defaults to `0.02`; sampled candidates are kept in audit artifacts for manual/internal review without becoming truth labels
+- `PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW` optional, defaults to `0.03`; candidates near report/audit thresholds are marked for manual/internal review to reduce selection bias
 - `PULLWISE_LOG_RETENTION_SECONDS` optional, defaults to `1209600` (14 days)
 - `PULLWISE_MAX_LOG_BYTES` optional, defaults to `1073741824` (1 GiB)
 - `PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES` optional, defaults to `10485760` (10 MiB)

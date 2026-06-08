@@ -265,6 +265,45 @@ def review_sample_selected(config: WorkerConfig, job: dict, features: dict) -> t
     return bucket < rate, rate
 
 
+def review_borderline_sample_metadata(config: WorkerConfig, features: dict, score: dict) -> dict:
+    window = review_positive_float(getattr(config, "review_calibration_borderline_sample_window", 0.0))
+    window = max(0.0, min(0.10, window))
+    if window <= 0:
+        return {}
+    status = str(features.get("verification_status") or "potential_risk").strip().lower()
+    thresholds: list[tuple[str, float]] = []
+    if status == "potential_risk":
+        thresholds = [
+            ("report_threshold", _REVIEW_POTENTIAL_RISK_REPORT_THRESHOLD),
+            ("audit_threshold", _REVIEW_POTENTIAL_RISK_AUDIT_THRESHOLD),
+        ]
+    elif status == "unverified":
+        thresholds = [("audit_threshold", _REVIEW_UNVERIFIED_AUDIT_THRESHOLD)]
+    if not thresholds:
+        return {}
+    decision_score = review_probability(score.get("decision_score"))
+    closest: tuple[str, float, float] | None = None
+    for threshold_name, threshold in thresholds:
+        distance = abs(decision_score - threshold)
+        if distance <= window and (closest is None or distance < closest[2]):
+            closest = (threshold_name, threshold, distance)
+    if closest is None:
+        return {}
+    score_kind = "truth_probability" if score.get("truth_probability") is not None else "ranking_score"
+    threshold_name, threshold, distance = closest
+    return {
+        "sampledForManualReview": True,
+        "sampleReason": f"calibration_borderline_{threshold_name}",
+        "sampleStrategy": "threshold_borderline",
+        "scoreBand": review_score_band(score),
+        "scoreKind": score_kind,
+        "decisionScore": decision_score,
+        "decisionThreshold": threshold,
+        "thresholdDistance": round(distance, 6),
+        "cohortKey": score.get("cohort_key") or "",
+    }
+
+
 def review_score_band(score: dict) -> str:
     decision_score = review_probability(score.get("decision_score"))
     if decision_score >= _REVIEW_POTENTIAL_RISK_REPORT_THRESHOLD:
@@ -282,6 +321,9 @@ def review_manual_sample_metadata(
     score: dict,
     decision: str,
 ) -> dict:
+    borderline_metadata = review_borderline_sample_metadata(config, features, score)
+    if borderline_metadata:
+        return borderline_metadata
     selected, rate = review_sample_selected(config, job, features)
     if not selected:
         return {}
