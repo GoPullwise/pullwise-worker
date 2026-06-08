@@ -197,6 +197,40 @@ def review_source_factor(reliability: dict) -> float:
     return max(_REVIEW_SOURCE_FACTOR_MIN, min(_REVIEW_SOURCE_FACTOR_MAX, source_lb / prior_lb))
 
 
+def review_logit(value: float) -> float:
+    probability = max(0.01, min(0.99, review_probability(value)))
+    return math.log(probability / (1.0 - probability))
+
+
+def review_sigmoid(value: float) -> float:
+    if value >= 0:
+        z = math.exp(-value)
+        return 1.0 / (1.0 + z)
+    z = math.exp(value)
+    return z / (1.0 + z)
+
+
+def review_source_logit_adjustment(reliability: dict) -> float:
+    prior_lb = review_beta_lower_bound(_REVIEW_PRIOR_ALPHA, _REVIEW_PRIOR_BETA, z=1.0)
+    source_lb = review_probability(reliability.get("posterior_lb")) or prior_lb
+    raw = review_logit(source_lb) - review_logit(prior_lb)
+    return max(-0.70, min(0.40, raw))
+
+
+def review_factor_log_adjustment(value: float, *, lower: float = 0.20, upper: float = 1.20) -> float:
+    factor = max(lower, min(upper, float(value or 0.0)))
+    return math.log(factor)
+
+
+def review_verification_logit_adjustment(status: str) -> float:
+    return {
+        "verified": 0.35,
+        "static_proof": 0.30,
+        "potential_risk": 0.0,
+        "unverified": -0.35,
+    }.get(status, 0.0)
+
+
 def review_calibrated_confidence(features: dict, job: dict, config: WorkerConfig) -> float:
     raw = review_probability(features.get("raw_confidence"))
     status = str(features.get("verification_status") or "potential_risk")
@@ -282,20 +316,48 @@ def review_score_candidate(record: dict, job: dict, config: WorkerConfig) -> tup
     evidence_strength = review_evidence_strength(features)
     delta_relevance = review_delta_relevance(record)
     category_factor = review_category_factor(features)
-    decision_score = max(0.0, min(1.0, calibrated * source_factor * evidence_strength * delta_relevance * category_factor))
+    model = getattr(config, "review_calibration_model", "relative_factor")
+    if model == "logit_beta":
+        source_adjustment = review_source_logit_adjustment(reliability)
+        evidence_adjustment = review_factor_log_adjustment(evidence_strength)
+        delta_adjustment = review_factor_log_adjustment(delta_relevance)
+        category_adjustment = review_factor_log_adjustment(category_factor, lower=0.80, upper=1.20)
+        verification_adjustment = review_verification_logit_adjustment(features["verification_status"])
+        truth_probability = max(
+            0.0,
+            min(
+                1.0,
+                review_sigmoid(
+                    review_logit(calibrated)
+                    + source_adjustment
+                    + evidence_adjustment
+                    + delta_adjustment
+                    + category_adjustment
+                    + verification_adjustment
+                ),
+            ),
+        )
+        decision_score = truth_probability
+        source_adjustment_value = source_adjustment
+    else:
+        truth_probability = None
+        decision_score = max(0.0, min(1.0, calibrated * source_factor * evidence_strength * delta_relevance * category_factor))
+        source_adjustment_value = source_factor
     score = {
         "calibrated_confidence": calibrated,
         "source_reliability_mean": review_probability(reliability.get("posterior_mean")),
         "source_reliability_lb": review_probability(reliability.get("posterior_lb")),
-        "source_adjustment": source_factor,
+        "source_adjustment": source_adjustment_value,
+        "source_factor": source_factor,
         "evidence_strength": evidence_strength,
         "delta_relevance": delta_relevance,
         "category_adjustment": category_factor,
-        "truth_probability": None,
+        "truth_probability": truth_probability,
         "decision_score": decision_score,
         "scoring_protocol": REVIEW_SCORING_PROTOCOL_VERSION,
         "reliability_source": reliability.get("source") or "prior",
         "cohort_key": reliability.get("cohort_key") or "",
+        "score_model": model,
         "drift_state": review_drift_state_for_features(features, job, config),
     }
     return features, score
@@ -433,7 +495,7 @@ def review_decision_event(
         "decision_reason": actual_reason,
         "scoring_protocol": score.get("scoring_protocol"),
         "score_factors": {
-            "scoreKind": "ranking_score",
+            "scoreKind": "truth_probability" if score.get("truth_probability") is not None else "ranking_score",
             "mode": mode or getattr(config, "review_calibration_mode", "shadow"),
             "model": getattr(config, "review_calibration_model", "relative_factor"),
             "proposedDecision": proposed_decision,

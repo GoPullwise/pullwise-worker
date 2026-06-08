@@ -2392,6 +2392,70 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(active_score["reliability_source"], "review_calibration_context")
         self.assertLess(active_score["source_adjustment"], 1.0)
 
+    def test_review_calibration_logit_beta_outputs_truth_probability(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Logit beta bug")])) or [])[0]
+        finding["confidence"] = 0.92
+        finding["verificationStatus"] = "potential_risk"
+        record = {
+            "stage": "convergence",
+            "decision": "reported",
+            "reason": "passed_convergence_gate",
+            "finding": finding,
+            "fingerprint": worker_main.finding_fingerprint(finding),
+            "source_stats": {},
+        }
+        features = worker_main.review_candidate_features(finding, record)
+        cohort_key = (
+            f"source:{worker_main.normalized_source_key(features['source'])}"
+            f"|category:{worker_main.normalized_source_key(features['category'])}"
+            f"|status:{features['verification_status']}"
+        )
+        job = {
+            "job_id": "job_logit",
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "a" * 40,
+            "review_calibration_context": {
+                "protocol": "pullwise-review-calibration/0.2",
+                "scope_key": "user:usr_1|repo:repo_123|branch:main",
+                "source_reliability": {
+                    cohort_key: {
+                        "posterior_mean": 0.28,
+                        "posterior_lb": 0.18,
+                        "effective_samples": 40,
+                    }
+                },
+            },
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_REVIEW_CALIBRATION_MODEL": "logit_beta",
+                "PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only",
+            },
+            clear=False,
+        ):
+            cfg = config()
+            _features, score = worker_main.review_score_candidate(record, job, cfg)
+            result = worker_main.apply_review_calibration_decisions(
+                cfg,
+                job,
+                [finding],
+                [record],
+                attempt_id="wk_1-1",
+            )
+
+        self.assertIsNotNone(score["truth_probability"])
+        self.assertAlmostEqual(score["decision_score"], score["truth_probability"])
+        self.assertLess(score["source_adjustment"], 0)
+        self.assertLess(score["truth_probability"], score["calibrated_confidence"])
+        event = result["decision_events"][0]
+        self.assertEqual(event["truth_probability"], score["truth_probability"])
+        self.assertEqual(event["decision_score"], score["truth_probability"])
+        self.assertEqual(event["score_factors"]["scoreKind"], "truth_probability")
+        self.assertEqual(event["score_factors"]["model"], "logit_beta")
+
     def test_review_calibration_consumes_confidence_buckets_and_drift_safe_mode(self) -> None:
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Drifted source bug")])) or [])[0]
         finding["confidence"] = 0.92
