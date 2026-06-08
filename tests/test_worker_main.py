@@ -2284,6 +2284,7 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(rejected_reasons, {})
         self.assertEqual(result["reported_findings"], reported)
+        self.assertNotIn("reviewCalibration", result["reported_findings"][0])
         self.assertEqual(result["audit_only_findings"], [])
         self.assertEqual(len(result["decision_events"]), 1)
         event = result["decision_events"][0]
@@ -2404,6 +2405,15 @@ class WorkerMainTest(unittest.TestCase):
             )
 
         self.assertEqual([item["title"] for item in result["reported_findings"]], ["Static proof noisy source bug"])
+        public_calibration = result["reported_findings"][0]["reviewCalibration"]
+        self.assertEqual(public_calibration["protocol"], "pullwise-review-calibration-public/0.1")
+        self.assertEqual(public_calibration["decision"], "reported")
+        self.assertEqual(public_calibration["reason"], "verified_or_static_proof_guardrail")
+        self.assertIn(public_calibration["scoreBand"], {"report_band", "audit_band", "reject_band"})
+        self.assertEqual(public_calibration["scoreKind"], "ranking_score")
+        self.assertEqual(public_calibration["verificationStatus"], "static_proof")
+        self.assertFalse(public_calibration["auditOnly"])
+        self.assertTrue(public_calibration["guardrailApplied"])
         self.assertEqual(result["audit_only_findings"], [])
         self.assertEqual(result["decision_events"][0]["decision_reason"], "verified_or_static_proof_guardrail")
         self.assertTrue(result["decision_events"][0]["score_factors"]["guardrailApplied"])

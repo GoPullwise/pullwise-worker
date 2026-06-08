@@ -297,6 +297,33 @@ def review_manual_sample_metadata(
     }
 
 
+def review_public_calibration_payload(
+    *,
+    decision: str,
+    reason: str,
+    features: dict,
+    score: dict,
+    guardrail_applied: bool,
+) -> dict:
+    safe_decision = str(decision or "").strip().lower()
+    if safe_decision not in _REVIEW_DECISIONS:
+        return {}
+    score_kind = "truth_probability" if score.get("truth_probability") is not None else "ranking_score"
+    status = str(features.get("verification_status") or "potential_risk").strip().lower()
+    if status not in _VERIFICATION_STATUSES:
+        status = "potential_risk"
+    return {
+        "protocol": "pullwise-review-calibration-public/0.1",
+        "decision": safe_decision,
+        "reason": review_text(reason, 120),
+        "scoreBand": review_score_band(score),
+        "scoreKind": score_kind,
+        "verificationStatus": status,
+        "auditOnly": safe_decision == "audit_only",
+        "guardrailApplied": bool(guardrail_applied),
+    }
+
+
 def review_logit(value: float) -> float:
     probability = max(0.01, min(0.99, review_probability(value)))
     return math.log(probability / (1.0 - probability))
@@ -711,7 +738,19 @@ def apply_review_calibration_decisions(
                 actual_decision = "reported"
                 actual_reason = original_reason
             if actual_decision == "reported":
-                formal_reported.append(finding)
+                reported_finding = finding
+                if mode in {"audit_only", "enforce"}:
+                    reported_finding = dict(finding)
+                    public_calibration = review_public_calibration_payload(
+                        decision=actual_decision,
+                        reason=actual_reason,
+                        features=features,
+                        score=score,
+                        guardrail_applied=guardrail_applied,
+                    )
+                    if public_calibration:
+                        reported_finding["reviewCalibration"] = public_calibration
+                formal_reported.append(reported_finding)
             elif actual_decision == "audit_only":
                 audit_only.append(finding)
                 if len(audit_only_samples) < 5:

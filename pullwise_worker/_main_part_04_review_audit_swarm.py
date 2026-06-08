@@ -401,6 +401,33 @@ def audit_swarm_location(file_path: str, start_line: int, end_line: int) -> dict
     return {"file": file_path, "lines": lines, "startLine": start_line, "endLine": end_line}
 
 
+def public_calibration_card_payload(value: object) -> dict:
+    source = value if isinstance(value, dict) else {}
+    decision = clean_protocol_text(source.get("decision")).lower()
+    if decision not in {"reported", "audit_only", "rejected"}:
+        return {}
+    score_band = clean_protocol_text(source.get("scoreBand") or source.get("score_band")).lower()
+    if score_band not in {"report_band", "audit_band", "reject_band"}:
+        score_band = ""
+    score_kind = clean_protocol_text(source.get("scoreKind") or source.get("score_kind")).lower()
+    if score_kind not in {"ranking_score", "truth_probability"}:
+        score_kind = ""
+    status = clean_protocol_text(source.get("verificationStatus") or source.get("verification_status")).lower()
+    if status not in {"verified", "static_proof", "potential_risk", "unverified"}:
+        status = ""
+    payload = {
+        "protocol": "pullwise-review-calibration-public/0.1",
+        "decision": decision,
+        "reason": clean_protocol_text(source.get("reason"))[:120],
+        "scoreBand": score_band,
+        "scoreKind": score_kind,
+        "verificationStatus": status,
+        "auditOnly": source.get("auditOnly") is True or source.get("audit_only") is True,
+        "guardrailApplied": source.get("guardrailApplied") is True or source.get("guardrail_applied") is True,
+    }
+    return {key: item for key, item in payload.items() if item not in ("", [], {})}
+
+
 def issue_card_from_finding(finding: dict, index: int) -> dict:
     issue_id = clean_protocol_text(finding.get("id")) or audit_swarm_generated_id(finding, index)
     locations = []
@@ -417,7 +444,7 @@ def issue_card_from_finding(finding: dict, index: int) -> dict:
     line = positive_int(finding.get("line"))
     if file_path and not locations:
         locations.append(audit_swarm_location(file_path, line, line))
-    return {
+    card = {
         "issue_id": issue_id,
         "shard_id": clean_protocol_text(finding.get("category")).lower() or "repository",
         "agent_role": clean_protocol_text(finding.get("agent_role") or finding.get("agentRole")) or "deterministic-reviewer",
@@ -440,6 +467,12 @@ def issue_card_from_finding(finding: dict, index: int) -> dict:
         "steps": protocol_text_list(finding.get("steps")),
         "references": finding.get("references") if isinstance(finding.get("references"), list) else [],
     }
+    public_calibration = public_calibration_card_payload(
+        finding.get("reviewCalibration") or finding.get("review_calibration")
+    )
+    if public_calibration:
+        card["review_calibration"] = public_calibration
+    return card
 
 
 def verification_result_from_finding(finding: dict, card: dict, verifier_role: str) -> dict:
