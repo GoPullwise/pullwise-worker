@@ -3710,6 +3710,9 @@ def reproduction_command_looks_executable(command: object) -> bool:
         return True
     if len(parts) < 2 or not parts[1].strip():
         return False
+    args = parts[1].strip().lower().split()
+    if args and args[0] in {"--version", "-v", "version", "--help", "-h", "help"}:
+        return False
     executable = first.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
     executable = executable[:-4] if executable.endswith(".exe") else executable
     return executable in {
