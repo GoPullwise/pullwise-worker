@@ -205,6 +205,62 @@ def review_source_factor(reliability: dict) -> float:
     return max(_REVIEW_SOURCE_FACTOR_MIN, min(_REVIEW_SOURCE_FACTOR_MAX, source_lb / prior_lb))
 
 
+def review_sample_rate(config: WorkerConfig) -> float:
+    rate = review_positive_float(getattr(config, "review_calibration_sample_audit_rate", 0.0))
+    return max(0.0, min(1.0, rate))
+
+
+def review_sample_selected(config: WorkerConfig, job: dict, features: dict) -> tuple[bool, float]:
+    rate = review_sample_rate(config)
+    if rate <= 0:
+        return False, 0.0
+    if rate >= 1:
+        return True, 1.0
+    sample_key = review_hash(
+        "manual_review_sample",
+        job.get("user_id"),
+        review_scope_repo_key(job),
+        job.get("branch") or "main",
+        features.get("candidate_id"),
+        features.get("fingerprint"),
+        features.get("verification_status"),
+    )
+    bucket = int(sample_key[:12], 16) / float(0xFFFFFFFFFFFF)
+    return bucket < rate, rate
+
+
+def review_score_band(score: dict) -> str:
+    decision_score = review_probability(score.get("decision_score"))
+    if decision_score >= _REVIEW_POTENTIAL_RISK_REPORT_THRESHOLD:
+        return "report_band"
+    if decision_score >= _REVIEW_POTENTIAL_RISK_AUDIT_THRESHOLD:
+        return "audit_band"
+    return "reject_band"
+
+
+def review_manual_sample_metadata(
+    *,
+    config: WorkerConfig,
+    job: dict,
+    features: dict,
+    score: dict,
+    decision: str,
+) -> dict:
+    selected, rate = review_sample_selected(config, job, features)
+    if not selected:
+        return {}
+    score_kind = "truth_probability" if score.get("truth_probability") is not None else "ranking_score"
+    return {
+        "sampledForManualReview": True,
+        "sampleReason": f"calibration_sample_{decision}",
+        "sampleRate": rate,
+        "scoreBand": review_score_band(score),
+        "scoreKind": score_kind,
+        "decisionScore": review_probability(score.get("decision_score")),
+        "cohortKey": score.get("cohort_key") or "",
+    }
+
+
 def review_logit(value: float) -> float:
     probability = max(0.01, min(0.99, review_probability(value)))
     return math.log(probability / (1.0 - probability))
@@ -549,9 +605,11 @@ def review_decision_event(
     }
 
 
-def sample_from_finding_for_audit_only(finding: dict, reason: str) -> dict:
+def sample_from_finding_for_audit_only(finding: dict, reason: str, metadata: dict | None = None) -> dict:
     sample = rejected_candidate_sample(finding, reason)
     sample["decision"] = "audit_only"
+    if metadata:
+        sample.update(metadata)
     return sample
 
 
@@ -617,11 +675,28 @@ def apply_review_calibration_decisions(
             elif actual_decision == "audit_only":
                 audit_only.append(finding)
                 if len(audit_only_samples) < 5:
-                    audit_only_samples.append(sample_from_finding_for_audit_only(finding, actual_reason))
+                    sample_metadata = review_manual_sample_metadata(
+                        config=config,
+                        job=job,
+                        features=features,
+                        score=score,
+                        decision=actual_decision,
+                    )
+                    audit_only_samples.append(sample_from_finding_for_audit_only(finding, actual_reason, sample_metadata))
             else:
                 rejected_reasons[actual_reason] = rejected_reasons.get(actual_reason, 0) + 1
                 if len(rejected_samples) < 5:
-                    rejected_samples.append(rejected_candidate_sample(finding, actual_reason))
+                    sample = rejected_candidate_sample(finding, actual_reason)
+                    sample_metadata = review_manual_sample_metadata(
+                        config=config,
+                        job=job,
+                        features=features,
+                        score=score,
+                        decision=actual_decision,
+                    )
+                    if sample_metadata:
+                        sample.update(sample_metadata)
+                    rejected_samples.append(sample)
         elif id(finding) in reported_by_identity and mode == "shadow":
             formal_reported.append(finding)
 

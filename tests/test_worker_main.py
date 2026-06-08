@@ -2312,7 +2312,14 @@ class WorkerMainTest(unittest.TestCase):
             records,
         )
 
-        with patch.dict(os.environ, {"PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only",
+                "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE": "1.0",
+            },
+            clear=False,
+        ):
             result = worker_main.apply_review_calibration_decisions(
                 config(),
                 {"job_id": "job_audit", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
@@ -2324,6 +2331,9 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(result["reported_findings"], [])
         self.assertEqual([item["title"] for item in result["audit_only_findings"]], ["Unverified high confidence bug"])
         self.assertEqual(result["decision_events"][0]["decision"], "audit_only")
+        self.assertTrue(result["audit_only_samples"][0]["sampledForManualReview"])
+        self.assertEqual(result["audit_only_samples"][0]["sampleReason"], "calibration_sample_audit_only")
+        self.assertEqual(result["audit_only_samples"][0]["sampleRate"], 1.0)
         self.assertEqual(result["verified_suppression_count"], 0)
 
     def test_review_calibration_server_policy_caps_local_enforce_to_shadow(self) -> None:
@@ -2438,6 +2448,46 @@ class WorkerMainTest(unittest.TestCase):
         _features, active_score = worker_main.review_score_candidate(record, job, config())
         self.assertEqual(active_score["reliability_source"], "review_calibration_context")
         self.assertLess(active_score["source_adjustment"], 1.0)
+
+    def test_review_calibration_samples_rejected_candidates_for_manual_review(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Low confidence sample bug")])) or [])[0]
+        finding["confidence"] = 0.10
+        finding["verificationStatus"] = "potential_risk"
+        record = {
+            "stage": "convergence",
+            "decision": "reported",
+            "reason": "passed_convergence_gate",
+            "finding": finding,
+            "fingerprint": worker_main.finding_fingerprint(finding),
+            "source_stats": {},
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only",
+                "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE": "1.0",
+            },
+            clear=False,
+        ):
+            result = worker_main.apply_review_calibration_decisions(
+                config(),
+                {"job_id": "job_sample", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+                [finding],
+                [record],
+                attempt_id="wk_1-1",
+            )
+
+        self.assertEqual(result["reported_findings"], [])
+        self.assertEqual(result["audit_only_findings"], [])
+        self.assertEqual(result["rejected_reasons"], {"potential_risk_below_audit_threshold": 1})
+        sample = result["rejected_samples"][0]
+        self.assertEqual(sample["title"], "Low confidence sample bug")
+        self.assertTrue(sample["sampledForManualReview"])
+        self.assertEqual(sample["sampleReason"], "calibration_sample_rejected")
+        self.assertEqual(sample["scoreBand"], "reject_band")
+        self.assertEqual(sample["scoreKind"], "ranking_score")
+        self.assertLess(sample["decisionScore"], 0.65)
 
     def test_review_calibration_logit_beta_outputs_truth_probability(self) -> None:
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Logit beta bug")])) or [])[0]
