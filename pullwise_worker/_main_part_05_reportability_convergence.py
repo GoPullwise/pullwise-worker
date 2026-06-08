@@ -343,18 +343,35 @@ def finding_delta_files(finding: dict) -> set[str]:
 
 
 def finding_primary_line(finding: dict) -> int:
-    line = positive_int(finding.get("line") or finding.get("startLine"))
-    if line:
-        return line
+    _file_path, line = finding_primary_line_location(finding)
+    return line
+
+
+def finding_primary_line_location(finding: dict) -> tuple[str, int]:
+    top_file = safe_repo_relative_file(finding.get("file"))
+    top_line = positive_int(finding.get("line") or finding.get("startLine"))
+    if top_file and top_line:
+        return top_file, top_line
+    if top_file:
+        for key in ("affectedLocations", "evidence"):
+            items = finding.get(key) if isinstance(finding.get(key), list) else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                file_path = safe_repo_relative_file(item.get("file"))
+                line = positive_int(item.get("startLine") or item.get("line"))
+                if file_path == top_file and line:
+                    return top_file, line
     for key in ("affectedLocations", "evidence"):
         items = finding.get(key) if isinstance(finding.get(key), list) else []
         for item in items:
             if not isinstance(item, dict):
                 continue
+            file_path = safe_repo_relative_file(item.get("file"))
             line = positive_int(item.get("startLine") or item.get("line"))
-            if line:
-                return line
-    return 0
+            if file_path and line:
+                return file_path, line
+    return top_file, 0
 
 
 def finding_line_locations(finding: dict) -> list[tuple[str, int]]:
@@ -532,19 +549,15 @@ def changed_line_ranges_between_heads(
 
 
 def finding_line_within_changed_ranges(finding: dict, changed_line_ranges: dict[str, list[tuple[int, int]]] | None) -> bool:
-    file_path = finding_primary_file(finding)
-    locations = finding_line_locations(finding)
+    file_path, line = finding_primary_line_location(finding)
     if changed_line_ranges is None:
-        return not locations
+        return not line
     if not file_path:
         return True
-    if not locations:
+    if not line:
         return False
-    for location_file, line in locations:
-        ranges = changed_line_ranges.get(location_file)
-        if not ranges or not any(start <= line <= end for start, end in ranges):
-            return False
-    return True
+    ranges = changed_line_ranges.get(file_path)
+    return bool(ranges and any(start <= line <= end for start, end in ranges))
 
 
 def source_stat_count(stats: dict, key: str) -> int:

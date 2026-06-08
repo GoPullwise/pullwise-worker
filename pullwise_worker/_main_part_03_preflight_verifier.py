@@ -144,8 +144,8 @@ def worker_environment_metadata(checkout_dir: Path) -> dict:
         "platform": platform.platform(),
         "machine": platform.machine(),
         "pythonVersion": platform.python_version(),
-        "pythonExecutable": sys.executable,
-        "checkoutRoot": str(checkout_dir),
+        "pythonExecutable": Path(sys.executable).name or "python",
+        "checkoutRoot": "repository-root",
     }
 
 
