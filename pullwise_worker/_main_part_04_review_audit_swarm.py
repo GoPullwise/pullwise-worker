@@ -207,10 +207,38 @@ def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
     return command
 
 
+REVIEW_OUTPUT_LANGUAGE_NAMES = {
+    "en": "English",
+    "zh-CN": "Chinese",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "pt-BR": "Portuguese",
+    "pt": "Portuguese",
+    "it": "Italian",
+}
+
+
+def review_output_language_name(job: dict) -> str:
+    raw_code = str(job.get("review_output_language") or job.get("reviewOutputLanguage") or "").strip()
+    raw_label = str(job.get("review_output_language_label") or job.get("reviewOutputLanguageLabel") or "").strip()
+    if raw_label and len(raw_label) <= 80 and not any(char in raw_label for char in "\r\n"):
+        return raw_label
+    return REVIEW_OUTPUT_LANGUAGE_NAMES.get(raw_code, "English")
+
+
 def review_prompt(job: dict) -> str:
     convergence_context = job.get("convergence_context") if isinstance(job.get("convergence_context"), dict) else {}
     previous_head_sha = normalized_head_sha(convergence_context.get("previous_head_sha"))
     open_findings = convergence_context.get("open_findings") if isinstance(convergence_context.get("open_findings"), list) else []
+    language_name = review_output_language_name(job)
+    language_instruction = (
+        f"Write every human-facing review output field in {language_name}. "
+        "Keep JSON keys, enum values, file paths, commands, identifiers, and code excerpts unchanged."
+    )
     convergence_instruction = ""
     if previous_head_sha or open_findings:
         prior_refs = []
@@ -247,6 +275,7 @@ def review_prompt(job: dict) -> str:
         "or `inconclusive`; include commands_run only for commands a user can copy to verify the issue. "
         "Do not emit vague concerns. Do not include absolute worker checkout paths or server filesystem paths. "
         "If a candidate has no file/line, no evidence, and no verifiable hypothesis, omit it. "
+        f"{language_instruction} "
         f"{convergence_instruction} "
         f"Repository: {job.get('repo')} branch: {job.get('branch')} commit: {job.get('commit')}."
     )

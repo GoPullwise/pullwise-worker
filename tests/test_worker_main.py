@@ -240,6 +240,25 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("reuse its issue_id exactly", prompt)
         self.assertIn("issue-old", prompt)
 
+    def test_review_prompt_uses_requested_review_output_language(self) -> None:
+        prompt = worker_main.review_prompt(
+            {
+                "repo": "acme/api",
+                "branch": "main",
+                "commit": "b" * 40,
+                "review_output_language": "zh-CN",
+                "review_output_language_label": "Chinese",
+            }
+        )
+
+        self.assertIn("Write every human-facing review output field in Chinese.", prompt)
+        self.assertIn("Keep JSON keys, enum values, file paths, commands, identifiers, and code excerpts unchanged.", prompt)
+
+    def test_review_prompt_defaults_to_english_output_language(self) -> None:
+        prompt = worker_main.review_prompt({"repo": "acme/api", "branch": "main", "commit": "pending"})
+
+        self.assertIn("Write every human-facing review output field in English.", prompt)
+
     def test_run_codex_review_normalizes_checkout_absolute_file_paths(self) -> None:
         worker_config = config()
         checkout_dir = Path(worker_config.work_dir) / "job_1"
