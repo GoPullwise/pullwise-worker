@@ -666,6 +666,35 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("worker environment", preflight["summary"])
         self.assertIn("no project scripts were executed", preflight["summary"])
 
+    def test_collect_preflight_metadata_redacts_tool_version_executable_paths(self) -> None:
+        worker_config = config()
+        worker_config.provider_chain = []
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+
+            with patch(
+                "pullwise_worker.main.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="Python 3.12.0\n", stderr=""),
+            ) as run:
+                preflight = collect_preflight_metadata(
+                    worker_config,
+                    {"repo": "acme/app", "branch": "main", "commit": "abc1234"},
+                    checkout_dir,
+                )
+
+        python_tool = next(tool for tool in preflight["toolVersions"] if tool["name"] == "python")
+        self.assertEqual(python_tool["command"], f"{Path(sys.executable).name} --version")
+        self.assertNotIn(sys.executable, python_tool["command"])
+        self.assertNotIn(json.dumps(sys.executable)[1:-1], json.dumps(preflight))
+        run.assert_any_call(
+            [sys.executable, "--version"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+
     def test_declared_package_manager_stays_first_when_lockfiles_conflict(self) -> None:
         worker_config = config()
         worker_config.verifier_enabled = True

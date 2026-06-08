@@ -280,8 +280,25 @@ def worker_tool_versions(config: WorkerConfig, package_managers: list[str] | Non
     return [safe_tool_version(name, command) for name, command in checks]
 
 
+def public_tool_version_command(command: list[str]) -> str:
+    return " ".join(public_tool_version_command_part(part) for part in command)
+
+
+def public_tool_version_command_part(part: str) -> str:
+    text = str(part)
+    if not text:
+        return text
+    posix_path = PurePosixPath(text)
+    if posix_path.is_absolute():
+        return posix_path.name or "[path]"
+    windows_path = PureWindowsPath(text)
+    if windows_path.is_absolute() or text.startswith("\\"):
+        return windows_path.name or "[path]"
+    return text
+
+
 def safe_tool_version(name: str, command: list[str]) -> dict:
-    command_text = " ".join(command)
+    command_text = public_tool_version_command(command)
     try:
         completed = subprocess.run(
             command,
