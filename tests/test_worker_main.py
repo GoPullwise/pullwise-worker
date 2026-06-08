@@ -2408,6 +2408,48 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(result["decision_events"][0]["decision_reason"], "verified_or_static_proof_guardrail")
         self.assertTrue(result["decision_events"][0]["score_factors"]["guardrailApplied"])
 
+    def test_review_calibration_verified_guardrail_respects_hard_exceptions(self) -> None:
+        invalid = (audit_swarm_findings_from_payload(audit_payload([issue_card("Invalid static proof bug")])) or [])[0]
+        invalid["verificationStatus"] = "static_proof"
+        delta_excluded = (audit_swarm_findings_from_payload(audit_payload([issue_card("Old verified bug")])) or [])[0]
+        delta_excluded["verificationStatus"] = "verified"
+        records = [
+            {
+                "stage": "convergence",
+                "decision": "rejected",
+                "reason": "invalid_candidate_location",
+                "finding": invalid,
+                "fingerprint": worker_main.finding_fingerprint(invalid),
+                "source_stats": {},
+            },
+            {
+                "stage": "convergence",
+                "decision": "rejected",
+                "reason": "not_introduced_by_current_delta",
+                "finding": delta_excluded,
+                "fingerprint": worker_main.finding_fingerprint(delta_excluded),
+                "source_stats": {},
+            },
+        ]
+
+        result = worker_main.apply_review_calibration_decisions(
+            config(),
+            {"job_id": "job_guardrail_exceptions", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            [],
+            records,
+            attempt_id="wk_1-1",
+        )
+
+        events_by_title = {event["normalized_title"]: event for event in result["decision_events"]}
+        invalid_event = events_by_title["invalid static proof bug"]
+        self.assertEqual(invalid_event["score_factors"]["proposedDecision"], "rejected")
+        self.assertEqual(invalid_event["score_factors"]["proposedReason"], "invalid_candidate_location")
+        self.assertFalse(invalid_event["score_factors"]["guardrailApplied"])
+        delta_event = events_by_title["old verified bug"]
+        self.assertEqual(delta_event["score_factors"]["proposedDecision"], "audit_only")
+        self.assertEqual(delta_event["score_factors"]["proposedReason"], "not_delta_relevant_but_verified")
+        self.assertTrue(delta_event["score_factors"]["guardrailApplied"])
+
     def test_review_calibration_context_reliability_requires_effective_samples(self) -> None:
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Sparse context bug")])) or [])[0]
         finding["confidence"] = 0.95

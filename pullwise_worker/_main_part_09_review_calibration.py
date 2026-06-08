@@ -15,6 +15,17 @@ _REVIEW_UNVERIFIED_AUDIT_THRESHOLD = 0.60
 _REVIEW_PROMPT_VERSION = "pullwise-review-prompt/0.1"
 _REVIEW_VERIFIER_VERSION = "pullwise-worker-verifier/0.1"
 _REVIEW_STATIC_CHECKER_VERSION = "pullwise-static-checker/0.1"
+_REVIEW_HARD_REJECT_REASONS = {
+    "invalid_candidate",
+    "missing_title",
+    "missing_evidence",
+    "missing_false_positive_check",
+    "invalid_candidate_location",
+    "invalid_location",
+    "verifier_explicitly_rejected",
+    "verifier_explicit_rejection",
+}
+_REVIEW_DELTA_EXCLUSION_REASONS = {"not_introduced_by_current_delta", "stale_previous_location"}
 
 
 def review_text(value: object, limit: int = 160) -> str:
@@ -451,10 +462,15 @@ def review_score_candidate(record: dict, job: dict, config: WorkerConfig) -> tup
     return features, score
 
 
-def proposed_review_decision(features: dict, score: dict) -> tuple[str, str, bool]:
+def proposed_review_decision(record: dict, features: dict, score: dict) -> tuple[str, str, bool]:
     status = str(features.get("verification_status") or "potential_risk")
     decision_score = review_probability(score.get("decision_score"))
+    original_reason = str(record.get("reason") or "").strip()
+    if original_reason in _REVIEW_HARD_REJECT_REASONS:
+        return "rejected", original_reason, False
     if status in _REVIEW_VERIFIED_STATUSES:
+        if original_reason in _REVIEW_DELTA_EXCLUSION_REASONS:
+            return "audit_only", "not_delta_relevant_but_verified", True
         return "reported", "verified_or_static_proof_guardrail", True
     drift_state = str(score.get("drift_state") or "normal")
     if drift_state == "suspended":
@@ -684,7 +700,7 @@ def apply_review_calibration_decisions(
         features, score = review_score_candidate(record, job, config)
         original_decision = str(record.get("decision") or "rejected")
         original_reason = str(record.get("reason") or original_decision)
-        proposed_decision, proposed_reason, guardrail_applied = proposed_review_decision(features, score)
+        proposed_decision, proposed_reason, guardrail_applied = proposed_review_decision(record, features, score)
         actual_decision = original_decision if original_decision in _REVIEW_DECISIONS else "rejected"
         actual_reason = original_reason
         if original_decision == "reported":
