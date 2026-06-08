@@ -139,6 +139,13 @@ def review_calibration_context_for_job(job: dict) -> dict:
     return context
 
 
+def review_provider_model_keys(config: WorkerConfig) -> tuple[str, str]:
+    provider_chain = list(getattr(config, "provider_chain", []) or [])
+    provider = provider_chain[0] if provider_chain else getattr(config, "provider", "")
+    model = getattr(config, "codex_model", "") if provider == "codex" else getattr(config, "opencode_model", "")
+    return normalized_source_key(provider), normalized_source_key(model)
+
+
 def review_context_reliability(features: dict, job: dict, config: WorkerConfig) -> dict:
     context = review_calibration_context_for_job(job)
     buckets = context.get("source_reliability") if isinstance(context.get("source_reliability"), dict) else {}
@@ -147,13 +154,30 @@ def review_context_reliability(features: dict, job: dict, config: WorkerConfig) 
     source = normalized_source_key(features.get("source"))
     category = normalized_source_key(features.get("category"))
     status = str(features.get("verification_status") or "").lower()
-    candidates = [
-        f"source:{source}|category:{category}|status:{status}",
-        f"source:{source}|category:{category}",
-        f"source:{source}|status:{status}",
-        f"source:{source}",
-        source,
-    ]
+    provider, model = review_provider_model_keys(config)
+    candidates = []
+    if provider and model and source:
+        candidates.extend(
+            [
+                f"provider:{provider}|model:{model}|source:{source}|category:{category}|status:{status}",
+                f"provider:{provider}|model:{model}|source:{source}|category:{category}",
+                f"provider:{provider}|model:{model}|source:{source}|status:{status}",
+                f"provider:{provider}|model:{model}|source:{source}",
+            ]
+        )
+    if provider and model:
+        candidates.append(f"provider:{provider}|model:{model}")
+    if provider:
+        candidates.append(f"provider:{provider}")
+    candidates.extend(
+        [
+            f"source:{source}|category:{category}|status:{status}",
+            f"source:{source}|category:{category}",
+            f"source:{source}|status:{status}",
+            f"source:{source}",
+            source,
+        ]
+    )
     for key in candidates:
         item = buckets.get(key)
         if not isinstance(item, dict):
@@ -182,14 +206,31 @@ def review_drift_state_for_features(features: dict, job: dict, config: WorkerCon
     source = normalized_source_key(features.get("source"))
     category = normalized_source_key(features.get("category"))
     status = str(features.get("verification_status") or "").lower()
-    candidates = [
+    provider, model = review_provider_model_keys(config)
+    candidates = []
+    if provider and model and source:
+        candidates.extend(
+            [
+                f"provider:{provider}|model:{model}|source:{source}|category:{category}|status:{status}",
+                f"provider:{provider}|model:{model}|source:{source}|category:{category}",
+                f"provider:{provider}|model:{model}|source:{source}|status:{status}",
+                f"provider:{provider}|model:{model}|source:{source}",
+            ]
+        )
+    if provider and model:
+        candidates.append(f"provider:{provider}|model:{model}")
+    if provider:
+        candidates.append(f"provider:{provider}")
+    candidates.extend(
+        [
         f"source:{source}|category:{category}|status:{status}",
         f"source:{source}|category:{category}",
         f"source:{source}|status:{status}",
         f"source:{source}",
         f"status:{status}",
         "global",
-    ]
+        ]
+    )
     for key in candidates:
         state = str(drift.get(key) or "").strip().lower()
         if state in {"normal", "watch", "audit_only", "suspended"}:

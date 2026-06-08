@@ -2449,6 +2449,48 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(active_score["reliability_source"], "review_calibration_context")
         self.assertLess(active_score["source_adjustment"], 1.0)
 
+    def test_review_calibration_prefers_provider_model_reliability_context(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Provider model scoped bug")])) or [])[0]
+        finding["confidence"] = 0.95
+        finding["verificationStatus"] = "potential_risk"
+        record = {
+            "stage": "convergence",
+            "decision": "reported",
+            "reason": "passed_convergence_gate",
+            "finding": finding,
+            "fingerprint": worker_main.finding_fingerprint(finding),
+            "source_stats": {},
+        }
+        provider_key = "provider:codex|model:gpt 5 5|source:correctness reviewer|category:quality|status:potential_risk"
+        job = {
+            "job_id": "job_provider_model",
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "a" * 40,
+            "review_calibration_context": {
+                "protocol": "pullwise-review-calibration/0.2",
+                "scope_key": "user:usr_1|repo:repo_123|branch:main",
+                "source_reliability": {
+                    provider_key: {
+                        "posterior_mean": 0.30,
+                        "posterior_lb": 0.20,
+                        "effective_samples": 40,
+                    },
+                    "source:correctness reviewer|category:quality|status:potential_risk": {
+                        "posterior_mean": 0.95,
+                        "posterior_lb": 0.90,
+                        "effective_samples": 40,
+                    },
+                },
+            },
+        }
+
+        _features, score = worker_main.review_score_candidate(record, job, config())
+
+        self.assertEqual(score["reliability_source"], "review_calibration_context")
+        self.assertEqual(score["cohort_key"], provider_key)
+        self.assertLess(score["source_adjustment"], 1.0)
+
     def test_review_calibration_samples_rejected_candidates_for_manual_review(self) -> None:
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Low confidence sample bug")])) or [])[0]
         finding["confidence"] = 0.10
@@ -2580,7 +2622,7 @@ class WorkerMainTest(unittest.TestCase):
                         }
                     }
                 },
-                "drift_state": {"source:correctness reviewer": "audit_only"},
+                "drift_state": {"provider:codex|model:gpt 5 5|source:correctness reviewer": "audit_only"},
             },
         }
 
