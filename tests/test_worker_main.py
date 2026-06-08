@@ -4036,12 +4036,28 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn('write_env_value PULLWISE_OPENCODE_VARIANT "${PULLWISE_OPENCODE_VARIANT:-medium}"', install_script)
         self.assertIn('write_env_value PULLWISE_MAX_REPO_FILES "2000"', install_script)
         self.assertIn('write_env_value PULLWISE_MAX_REPO_BYTES "52428800"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODE "shadow"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODEL "relative_factor"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS "45"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES "20"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS "false"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY "false"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT "false"', install_script)
+        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE "0.02"', install_script)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
         self.assertIn("PULLWISE_MAX_REPO_FILES=2000", env_template)
         self.assertIn("PULLWISE_MAX_REPO_BYTES=52428800", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODE=shadow", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODEL=relative_factor", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS=45", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES=20", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS=false", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY=false", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT=false", env_template)
+        self.assertIn("PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE=0.02", env_template)
         for key in (
             "PULLWISE_PROVIDER_CHAIN",
             "PULLWISE_CODEX_MODEL",
@@ -4051,6 +4067,14 @@ class WorkerMainTest(unittest.TestCase):
             "PULLWISE_OPENCODE_VARIANT",
             "PULLWISE_MAX_REPO_FILES",
             "PULLWISE_MAX_REPO_BYTES",
+            "PULLWISE_REVIEW_CALIBRATION_MODE",
+            "PULLWISE_REVIEW_CALIBRATION_MODEL",
+            "PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS",
+            "PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES",
+            "PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS",
+            "PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY",
+            "PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT",
+            "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE",
         ):
             self.assertIn(key, install_script)
             self.assertIn(key, env_template)

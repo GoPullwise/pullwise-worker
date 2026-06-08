@@ -47,6 +47,14 @@ Required environment:
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
 - `PULLWISE_MAX_REPO_FILES` optional, defaults to `2000`; repositories above this file count fail before verifier or AI review
 - `PULLWISE_MAX_REPO_BYTES` optional, defaults to `52428800` (50 MiB); repositories above this checkout size fail before verifier or AI review
+- `PULLWISE_REVIEW_CALIBRATION_MODE` optional, defaults to `shadow`; use `audit_only` or `enforce` only after server-side shadow evaluation passes
+- `PULLWISE_REVIEW_CALIBRATION_MODEL` optional, defaults to `relative_factor`; set to `logit_beta` to emit `truth_probability`
+- `PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS` optional, defaults to `45`
+- `PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES` optional, defaults to `20`
+- `PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS` optional, defaults to `false`
+- `PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY` optional, defaults to `false`
+- `PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT` optional, defaults to `false`
+- `PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE` optional, defaults to `0.02`; sampled candidates are kept in audit artifacts for manual/internal review without becoming truth labels
 - `PULLWISE_LOG_RETENTION_SECONDS` optional, defaults to `1209600` (14 days)
 - `PULLWISE_MAX_LOG_BYTES` optional, defaults to `1073741824` (1 GiB)
 - `PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES` optional, defaults to `10485760` (10 MiB)
