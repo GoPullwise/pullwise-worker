@@ -45,6 +45,8 @@ Required environment:
 - `PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS` optional, defaults to `3600`
 - `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
+- `PULLWISE_MAX_REPO_FILES` optional, defaults to `2000`; repositories above this file count fail before verifier or AI review
+- `PULLWISE_MAX_REPO_BYTES` optional, defaults to `52428800` (50 MiB); repositories above this checkout size fail before verifier or AI review
 - `PULLWISE_LOG_RETENTION_SECONDS` optional, defaults to `1209600` (14 days)
 - `PULLWISE_MAX_LOG_BYTES` optional, defaults to `1073741824` (1 GiB)
 - `PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES` optional, defaults to `10485760` (10 MiB)

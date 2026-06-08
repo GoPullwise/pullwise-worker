@@ -4,6 +4,8 @@ from __future__ import annotations
 
 def collect_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
     repository = repository_preflight_metadata(checkout_dir)
+    repository_stats = repository_resource_stats(checkout_dir)
+    repository_limits = repository_limits_metadata(config)
     tool_versions = worker_tool_versions(config, repository["packageManagers"])
     return {
         "mode": "static",
@@ -19,12 +21,120 @@ def collect_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Pa
         "packageManagers": repository["packageManagers"],
         "manifests": repository["manifests"],
         "availableScripts": repository["availableScripts"],
+        "repositoryStats": repository_stats,
+        "repositoryLimits": repository_limits,
         "toolVersions": tool_versions,
         "limitations": [
             "Dependency installation, build, tests, lint, and typecheck were not executed in this preflight.",
             "Runtime verification requires a later sandboxed verifier stage with project dependencies available.",
         ],
     }
+
+
+class RepositoryTooLargeError(RuntimeError):
+    def __init__(self, message: str, preflight: dict) -> None:
+        super().__init__(message)
+        self.error_code = REPOSITORY_TOO_LARGE_ERROR_CODE
+        self.preflight = preflight
+
+
+def repository_limits_metadata(config: WorkerConfig) -> dict:
+    return {
+        "maxFiles": max(1, int(getattr(config, "max_repo_files", _DEFAULT_MAX_REPO_FILES) or _DEFAULT_MAX_REPO_FILES)),
+        "maxBytes": max(1, int(getattr(config, "max_repo_bytes", _DEFAULT_MAX_REPO_BYTES) or _DEFAULT_MAX_REPO_BYTES)),
+    }
+
+
+def repository_resource_stats(checkout_dir: Path, limits: dict | None = None) -> dict:
+    file_count = 0
+    total_bytes = 0
+    if not checkout_dir.is_dir():
+        return {"fileCount": 0, "totalBytes": 0}
+    max_files = int(limits.get("maxFiles") or 0) if isinstance(limits, dict) else 0
+    max_bytes = int(limits.get("maxBytes") or 0) if isinstance(limits, dict) else 0
+    stopped_early = False
+    stack = [checkout_dir]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name == ".git":
+                continue
+            try:
+                stat_result = entry.stat(follow_symlinks=False)
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                    continue
+            except OSError:
+                continue
+            if entry.is_file(follow_symlinks=False) or entry.is_symlink():
+                file_count += 1
+                total_bytes += max(0, int(stat_result.st_size))
+                if (max_files and file_count > max_files) or (max_bytes and total_bytes > max_bytes):
+                    stopped_early = True
+                    stack.clear()
+                    break
+    stats = {"fileCount": file_count, "totalBytes": total_bytes}
+    if stopped_early:
+        stats["scanStoppedEarly"] = True
+    return stats
+
+
+def repository_limit_exceeded(stats: dict, limits: dict) -> list[str]:
+    exceeded = []
+    if int(stats.get("fileCount") or 0) > int(limits.get("maxFiles") or 0):
+        exceeded.append("file_count")
+    if int(stats.get("totalBytes") or 0) > int(limits.get("maxBytes") or 0):
+        exceeded.append("total_bytes")
+    return exceeded
+
+
+def repository_limit_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
+    limits = repository_limits_metadata(config)
+    stats = repository_resource_stats(checkout_dir, limits=limits)
+    exceeded = repository_limit_exceeded(stats, limits)
+    summary = (
+        "Repository checkout exceeds Pullwise worker repository limits; verifier and AI review were not executed."
+        if exceeded
+        else "Repository checkout is within Pullwise worker repository limits."
+    )
+    return {
+        "mode": "static",
+        "execution": "repository_limit_check",
+        "summary": summary,
+        "repo": str(job.get("repo") or ""),
+        "branch": str(job.get("branch") or "main"),
+        "commit": str(job.get("commit") or "pending"),
+        "workerVersion": __version__,
+        "providerChain": list(config.provider_chain),
+        "repositoryStats": stats,
+        "repositoryLimits": limits,
+        "repositoryLimitExceeded": bool(exceeded),
+        "repositoryLimitReasons": exceeded,
+        "limitations": [
+            "Dependency installation, verifier commands, and AI review were not executed before this repository size check.",
+        ],
+    }
+
+
+def enforce_repository_limits(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
+    preflight = repository_limit_preflight_metadata(config, job, checkout_dir)
+    exceeded = preflight.get("repositoryLimitReasons") if isinstance(preflight.get("repositoryLimitReasons"), list) else []
+    if not exceeded:
+        return preflight
+    stats = preflight["repositoryStats"]
+    limits = preflight["repositoryLimits"]
+    raise RepositoryTooLargeError(
+        (
+            "Repository is too large for Pullwise scanning "
+            f"({stats['fileCount']} files / {stats['totalBytes']} bytes; "
+            f"limits {limits['maxFiles']} files / {limits['maxBytes']} bytes)."
+        ),
+        preflight,
+    )
 
 
 def worker_environment_metadata(checkout_dir: Path) -> dict:

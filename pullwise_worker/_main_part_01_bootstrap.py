@@ -40,6 +40,8 @@ _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FAILED_CHECKOUT_MARKER_SUFFIX = ".failed-retain"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
+_DEFAULT_MAX_REPO_FILES = 2000
+_DEFAULT_MAX_REPO_BYTES = 50 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
 _VERIFIER_HOME_DIR_NAME = ".verifier-home"
@@ -59,6 +61,7 @@ REVIEW_CALIBRATION_PROTOCOL_VERSION = "pullwise-review-calibration/0.2"
 REVIEW_SCORING_PROTOCOL_VERSION = "pullwise-review-score/0.1"
 CONVERGENCE_MIN_VERIFIED_CONFIDENCE = 0.75
 CONVERGENCE_MIN_UNVERIFIED_CONFIDENCE = 0.85
+REPOSITORY_TOO_LARGE_ERROR_CODE = "REPOSITORY_TOO_LARGE"
 AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
     "summary",
     "claim",
@@ -183,6 +186,8 @@ class WorkerConfig:
         self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
+        self.max_repo_files = env_int("PULLWISE_MAX_REPO_FILES", _DEFAULT_MAX_REPO_FILES, minimum=1)
+        self.max_repo_bytes = env_int("PULLWISE_MAX_REPO_BYTES", _DEFAULT_MAX_REPO_BYTES, minimum=1)
         self.cleanup_interval_seconds = max(60, int(os.environ.get("PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS") or 3600))
         self.log_retention_seconds = max(0, int(os.environ.get("PULLWISE_LOG_RETENTION_SECONDS") or 14 * 24 * 60 * 60))
         self.max_log_bytes = max(1, int(os.environ.get("PULLWISE_MAX_LOG_BYTES") or 1024 * 1024 * 1024))

@@ -127,6 +127,42 @@ class WorkerMainTest(unittest.TestCase):
             worker_main._codex_auth_failure_until = 0.0
             worker_main._codex_auth_failure_detail = ""
 
+    def test_worker_config_defaults_repository_limits(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            worker_config = config()
+
+        self.assertEqual(worker_config.max_repo_files, 2000)
+        self.assertEqual(worker_config.max_repo_bytes, 50 * 1024 * 1024)
+
+    def test_repository_resource_stats_excludes_git_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "src").mkdir()
+            (checkout_dir / "src" / "app.py").write_bytes(b"print(1)\n")
+            (checkout_dir / "README.md").write_bytes(b"hello\n")
+            (checkout_dir / ".git" / "objects").mkdir(parents=True)
+            (checkout_dir / ".git" / "objects" / "ignored").write_bytes(b"x" * 1000)
+
+            stats = worker_main.repository_resource_stats(checkout_dir)
+
+        self.assertEqual(stats["fileCount"], 2)
+        self.assertEqual(stats["totalBytes"], len(b"print(1)\n") + len(b"hello\n"))
+
+    def test_repository_resource_stats_stops_after_limit_exceeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            for index in range(3):
+                (checkout_dir / f"{index}.txt").write_bytes(b"x")
+
+            stats = worker_main.repository_resource_stats(
+                checkout_dir,
+                limits={"maxFiles": 1, "maxBytes": 1024},
+            )
+
+        self.assertEqual(stats["fileCount"], 2)
+        self.assertEqual(stats["totalBytes"], 2)
+        self.assertTrue(stats["scanStoppedEarly"])
+
     def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
         payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
 
@@ -619,6 +655,10 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("environment", preflight)
         self.assertIn("pythonVersion", preflight["environment"])
         self.assertEqual(preflight["environment"]["checkoutRoot"], str(checkout_dir))
+        self.assertGreaterEqual(preflight["repositoryStats"]["fileCount"], 7)
+        self.assertGreater(preflight["repositoryStats"]["totalBytes"], 0)
+        self.assertEqual(preflight["repositoryLimits"]["maxFiles"], worker_config.max_repo_files)
+        self.assertEqual(preflight["repositoryLimits"]["maxBytes"], worker_config.max_repo_bytes)
         self.assertIn("worker environment", preflight["summary"])
         self.assertIn("no project scripts were executed", preflight["summary"])
 
@@ -2586,6 +2626,47 @@ class WorkerMainTest(unittest.TestCase):
         self.assertGreaterEqual(worker.client.progress.call_count, 3)
         rmtree.assert_called_with(checkout_dir, ignore_errors=True)
 
+    def test_run_job_fails_repository_too_large_before_verifier_or_review(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_MAX_REPO_FILES": "1",
+                "PULLWISE_MAX_REPO_BYTES": str(50 * 1024 * 1024),
+            },
+            clear=False,
+        ):
+            worker = Worker(config())
+        worker.client = Mock()
+        resolved_commit = "0123456789abcdef0123456789abcdef01234567"
+
+        def clone_large_checkout(_job: dict, checkout_dir: Path) -> str:
+            checkout_dir.mkdir(parents=True, exist_ok=True)
+            (checkout_dir / "one.txt").write_text("one", encoding="utf-8")
+            (checkout_dir / "two.txt").write_text("two", encoding="utf-8")
+            return resolved_commit
+
+        with patch("pullwise_worker.main.clone_repository", side_effect=clone_large_checkout), \
+            patch("pullwise_worker.main.collect_preflight_metadata") as collect_preflight, \
+            patch("pullwise_worker.main.run_verifier_commands") as run_verifier, \
+            patch("pullwise_worker.main.run_codex_review") as run_codex_review:
+            worker.run_job({"job_id": "job_large", "attempt": 1, "repo": "acme/large", "commit": "pending"})
+
+        collect_preflight.assert_not_called()
+        run_verifier.assert_not_called()
+        run_codex_review.assert_not_called()
+        worker.client.result.assert_called_once()
+        payload = worker.client.result.call_args.args[1]
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["error_code"], "REPOSITORY_TOO_LARGE")
+        self.assertEqual(payload["errorCode"], "REPOSITORY_TOO_LARGE")
+        self.assertEqual(payload["commit"], resolved_commit)
+        self.assertEqual(payload["preflight"]["repositoryStats"]["fileCount"], 2)
+        self.assertTrue(payload["preflight"]["repositoryStats"]["scanStoppedEarly"])
+        self.assertEqual(payload["preflight"]["repositoryLimits"]["maxFiles"], 1)
+        self.assertTrue(payload["preflight"]["repositoryLimitExceeded"])
+        self.assertEqual(payload["preflight"]["repositoryLimitReasons"], ["file_count"])
+        self.assertIn("Repository is too large", payload["error"])
+
     def test_run_job_continues_when_verifier_errors(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
@@ -3896,10 +3977,14 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn('write_env_value PULLWISE_CODEX_REASONING_EFFORT "${PULLWISE_CODEX_REASONING_EFFORT:-medium}"', install_script)
         self.assertIn('write_env_value PULLWISE_OPENCODE_MODEL "${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}"', install_script)
         self.assertIn('write_env_value PULLWISE_OPENCODE_VARIANT "${PULLWISE_OPENCODE_VARIANT:-medium}"', install_script)
+        self.assertIn('write_env_value PULLWISE_MAX_REPO_FILES "2000"', install_script)
+        self.assertIn('write_env_value PULLWISE_MAX_REPO_BYTES "52428800"', install_script)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
+        self.assertIn("PULLWISE_MAX_REPO_FILES=2000", env_template)
+        self.assertIn("PULLWISE_MAX_REPO_BYTES=52428800", env_template)
         for key in (
             "PULLWISE_PROVIDER_CHAIN",
             "PULLWISE_CODEX_MODEL",
@@ -3907,6 +3992,8 @@ class WorkerMainTest(unittest.TestCase):
             "PULLWISE_OPENCODE_COMMAND",
             "PULLWISE_OPENCODE_MODEL",
             "PULLWISE_OPENCODE_VARIANT",
+            "PULLWISE_MAX_REPO_FILES",
+            "PULLWISE_MAX_REPO_BYTES",
         ):
             self.assertIn(key, install_script)
             self.assertIn(key, env_template)

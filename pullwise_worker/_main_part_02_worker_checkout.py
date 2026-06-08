@@ -182,12 +182,18 @@ class Worker:
             resolved_commit = clone_repository(job, checkout_dir)
             job["resolved_commit"] = resolved_commit
             job["commit"] = resolved_commit
+            limit_preflight = enforce_repository_limits(self.config, job, checkout_dir)
             self.client.progress(
                 job_id,
                 "index",
                 PHASE_PROGRESS["index"],
                 "Repository ready",
-                audit_swarm=audit_swarm_scan_artifacts("preflight", config=self.config, summary="Repository checkout is ready."),
+                audit_swarm=audit_swarm_scan_artifacts(
+                    "preflight",
+                    config=self.config,
+                    preflight=limit_preflight,
+                    summary="Repository checkout is ready.",
+                ),
             )
             preflight = collect_preflight_metadata(self.config, job, checkout_dir)
             try:
@@ -310,6 +316,10 @@ class Worker:
         except Exception as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             error = redact_secrets(str(exc)[:500], self.config)
+            error_code = str(getattr(exc, "error_code", "") or "").strip()
+            error_preflight = getattr(exc, "preflight", None)
+            if not isinstance(error_preflight, dict):
+                error_preflight = {}
             error_payload = {
                 "status": "failed",
                 "audit_protocol": AUDIT_SWARM_PROTOCOL_VERSION,
@@ -319,8 +329,18 @@ class Worker:
                 "duration_ms": duration_ms,
                 "error": error,
                 "attempt_id": attempt_id,
-                "audit_swarm": audit_swarm_scan_artifacts("failed", config=self.config, summary=error),
+                "audit_swarm": audit_swarm_scan_artifacts(
+                    "failed",
+                    config=self.config,
+                    preflight=error_preflight,
+                    summary=error,
+                ),
             }
+            if error_code:
+                error_payload["error_code"] = error_code
+                error_payload["errorCode"] = error_code
+            if error_preflight:
+                error_payload["preflight"] = error_preflight
             if job.get("resolved_commit"):
                 error_payload["commit"] = job["resolved_commit"]
                 error_payload["resolved_commit"] = job["resolved_commit"]
