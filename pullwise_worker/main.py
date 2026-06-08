@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from threading import Lock
@@ -115,9 +116,26 @@ def parse_verifier_scripts(value: str | None) -> list[str]:
     return scripts or list(_VERIFIER_DEFAULT_SCRIPTS)
 
 
+def server_url_allowed(server_url: str, *, allow_insecure: bool = False) -> bool:
+    parsed = urllib.parse.urlparse(server_url)
+    if parsed.scheme == "https" and parsed.netloc:
+        return True
+    if parsed.scheme != "http" or not parsed.netloc:
+        return False
+    if allow_insecure:
+        return True
+    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+
+
 class WorkerConfig:
     def __init__(self, args: argparse.Namespace, *, require_worker_token: bool = True) -> None:
         self.server_url = (getattr(args, "server_url", None) or os.environ.get("PULLWISE_SERVER_URL") or "http://localhost:8080").rstrip("/")
+        self.allow_insecure_server_url = env_bool("PULLWISE_ALLOW_INSECURE_SERVER_URL", False)
+        if not server_url_allowed(self.server_url, allow_insecure=self.allow_insecure_server_url):
+            raise ValueError(
+                "PULLWISE_SERVER_URL must use https unless it points to localhost/127.0.0.1 "
+                "or PULLWISE_ALLOW_INSECURE_SERVER_URL=true is set."
+            )
         self.worker_token = getattr(args, "worker_token", None) or os.environ.get("PULLWISE_WORKER_TOKEN") or ""
         self.worker_id = getattr(args, "worker_id", None) or os.environ.get("PULLWISE_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
         self.provider = getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "codex"
@@ -4789,7 +4807,7 @@ def write_scan_summary(config: WorkerConfig, job_id: str, status: str, duration_
 
 def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool]:
     checks: list[tuple[str, bool, str]] = []
-    checks.append(("server_url", bool(config.server_url.startswith(("http://", "https://"))), config.server_url))
+    checks.append(("server_url", server_url_allowed(config.server_url, allow_insecure=config.allow_insecure_server_url), config.server_url))
     checks.append(("worker_token", bool(config.worker_token), "configured" if config.worker_token else "missing"))
     checks.append(("max_concurrent_jobs", config.max_concurrent_jobs > 0, str(config.max_concurrent_jobs)))
 

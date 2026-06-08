@@ -97,7 +97,7 @@ def issue_card(
 
 def config() -> WorkerConfig:
     namespace = Namespace(
-        server_url="http://server.test",
+        server_url="https://server.test",
         worker_token="worker-token",
         worker_id="wk_1",
         max_concurrent_jobs=2,
@@ -2584,7 +2584,7 @@ class WorkerMainTest(unittest.TestCase):
             response = client.post("/worker/heartbeat", {"worker_id": "wk_1"})
 
         request = urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, "http://server.test/worker/heartbeat")
+        self.assertEqual(request.full_url, "https://server.test/worker/heartbeat")
         self.assertEqual(request.get_header("Authorization"), "Bearer worker-token")
         self.assertEqual(json.loads(request.data.decode("utf-8")), {"worker_id": "wk_1"})
         self.assertEqual(response.json(), {"ok": True})
@@ -2625,6 +2625,19 @@ class WorkerMainTest(unittest.TestCase):
         self.assertTrue(by_name["log_dir"][0])
         self.assertTrue(by_name["disk_space"][0])
         self.assertTrue(codex_ready)
+
+    def test_worker_readiness_rejects_remote_http_server_url_if_config_is_mutated(self) -> None:
+        cfg = config()
+        cfg.server_url = "http://server.test"
+
+        with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok")]), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            checks, _provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["server_url"][0])
+        self.assertEqual(by_name["server_url"][1], "http://server.test")
 
     def test_worker_readiness_allows_opencode_fallback_when_codex_login_fails(self) -> None:
         cfg = config()
@@ -2899,9 +2912,68 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
         self.assertEqual(cfg.opencode_variant, "medium")
 
-    def test_worker_config_reads_provider_chain_and_model_settings(self) -> None:
+    def test_worker_config_rejects_remote_http_server_url_by_default(self) -> None:
         namespace = Namespace(
             server_url="http://server.test",
+            worker_token="worker-token",
+            worker_id="wk_1",
+            max_concurrent_jobs=2,
+            poll_seconds=1,
+            work_dir=tempfile.mkdtemp(),
+            checkout_root=None,
+            log_dir=tempfile.mkdtemp(),
+            provider="codex",
+            codex_command="codex",
+            codex_timeout_seconds=60,
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "must use https"):
+                WorkerConfig(namespace)
+
+    def test_worker_config_allows_loopback_http_server_url(self) -> None:
+        namespace = Namespace(
+            server_url="http://127.0.0.1:8080",
+            worker_token="worker-token",
+            worker_id="wk_1",
+            max_concurrent_jobs=2,
+            poll_seconds=1,
+            work_dir=tempfile.mkdtemp(),
+            checkout_root=None,
+            log_dir=tempfile.mkdtemp(),
+            provider="codex",
+            codex_command="codex",
+            codex_timeout_seconds=60,
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = WorkerConfig(namespace)
+
+        self.assertEqual(cfg.server_url, "http://127.0.0.1:8080")
+
+    def test_worker_config_allows_remote_http_server_url_with_explicit_override(self) -> None:
+        namespace = Namespace(
+            server_url="http://server.test",
+            worker_token="worker-token",
+            worker_id="wk_1",
+            max_concurrent_jobs=2,
+            poll_seconds=1,
+            work_dir=tempfile.mkdtemp(),
+            checkout_root=None,
+            log_dir=tempfile.mkdtemp(),
+            provider="codex",
+            codex_command="codex",
+            codex_timeout_seconds=60,
+        )
+
+        with patch.dict(os.environ, {"PULLWISE_ALLOW_INSECURE_SERVER_URL": "true"}, clear=True):
+            cfg = WorkerConfig(namespace)
+
+        self.assertEqual(cfg.server_url, "http://server.test")
+
+    def test_worker_config_reads_provider_chain_and_model_settings(self) -> None:
+        namespace = Namespace(
+            server_url="https://server.test",
             worker_token="worker-token",
             worker_id="wk_1",
             max_concurrent_jobs=2,
@@ -3045,7 +3117,7 @@ class WorkerMainTest(unittest.TestCase):
     def test_main_service_commands_do_not_require_worker_token(self) -> None:
         for action in ("start", "stop", "status", "restart"):
             with self.subTest(action=action):
-                with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+                with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "https://server.test"}, clear=True), \
                     patch.object(sys, "argv", ["pullwise-worker", action, "--dry-run"]), \
                     patch("pullwise_worker.main.service_action", return_value=0) as service:
                     with self.assertRaises(SystemExit) as raised:
@@ -3056,7 +3128,7 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_main_update_cleanup_and_uninstall_do_not_require_worker_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "https://server.test"}, clear=True), \
                 patch.object(sys, "argv", ["pullwise-worker", "update", "--dry-run"]), \
                 patch("pullwise_worker.main.update_worker", return_value=0) as update:
                 with self.assertRaises(SystemExit) as raised:
@@ -3065,7 +3137,7 @@ class WorkerMainTest(unittest.TestCase):
             self.assertEqual(raised.exception.code, 0)
             self.assertEqual(update.call_args.args[0].worker_token, "")
 
-            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "https://server.test"}, clear=True), \
                 patch.object(sys, "argv", ["pullwise-worker", "cleanup", "--work-dir", tmp]), \
                 patch("pullwise_worker.main.cleanup_worker_resources") as cleanup:
                 with self.assertRaises(SystemExit) as raised:
@@ -3075,7 +3147,7 @@ class WorkerMainTest(unittest.TestCase):
             self.assertEqual(cleanup.call_args.args[0].worker_token, "")
             self.assertEqual(cleanup.call_args.args[0].work_dir, Path(tmp) / "pullwise-worker")
 
-            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "https://server.test"}, clear=True), \
                 patch.object(sys, "argv", ["pullwise-worker", "uninstall", "--remove-config", "--dry-run"]), \
                 patch("pullwise_worker.main.uninstall_worker", return_value=0) as uninstall:
                 with self.assertRaises(SystemExit) as raised:
