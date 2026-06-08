@@ -7,6 +7,7 @@ import base64
 import concurrent.futures
 import hashlib
 import json
+import math
 import os
 import platform
 import random
@@ -53,6 +54,9 @@ DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
 DEFAULT_OPENCODE_VARIANT = "medium"
 AUDIT_SWARM_PROTOCOL_VERSION = "audit-swarm/0.1"
 CONVERGENCE_PROTOCOL_VERSION = "pullwise-convergence/0.1"
+REVIEW_DECISION_EVENT_PROTOCOL_VERSION = "pullwise-review-decision/0.1"
+REVIEW_CALIBRATION_PROTOCOL_VERSION = "pullwise-review-calibration/0.2"
+REVIEW_SCORING_PROTOCOL_VERSION = "pullwise-review-score/0.1"
 CONVERGENCE_MIN_VERIFIED_CONFIDENCE = 0.75
 CONVERGENCE_MIN_UNVERIFIED_CONFIDENCE = 0.85
 AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
@@ -106,6 +110,18 @@ def env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return max(minimum, int(os.environ.get(name) or default))
     except ValueError:
         return default
+
+
+def env_float(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        value = float(os.environ.get(name) or default)
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
 
 
 def parse_verifier_scripts(value: str | None) -> list[str]:
@@ -178,6 +194,36 @@ class WorkerConfig:
         self.verifier_timeout_seconds = max(10, int(os.environ.get("PULLWISE_WORKER_VERIFIER_TIMEOUT_SECONDS") or 120))
         self.verifier_max_commands = max(1, int(os.environ.get("PULLWISE_WORKER_VERIFIER_MAX_COMMANDS") or 5))
         self.verifier_scripts = parse_verifier_scripts(os.environ.get("PULLWISE_WORKER_VERIFIER_SCRIPTS"))
+        self.review_calibration_mode = (
+            os.environ.get("PULLWISE_REVIEW_CALIBRATION_MODE", "shadow").strip().lower() or "shadow"
+        )
+        if self.review_calibration_mode not in {"off", "shadow", "audit_only", "enforce"}:
+            self.review_calibration_mode = "shadow"
+        self.review_calibration_model = (
+            os.environ.get("PULLWISE_REVIEW_CALIBRATION_MODEL", "relative_factor").strip().lower()
+            or "relative_factor"
+        )
+        if self.review_calibration_model not in {"relative_factor", "logit_beta"}:
+            self.review_calibration_model = "relative_factor"
+        self.review_calibration_half_life_days = env_float(
+            "PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS",
+            45.0,
+            minimum=1.0,
+        )
+        self.review_calibration_min_effective_samples = env_int(
+            "PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES",
+            20,
+            minimum=1,
+        )
+        self.review_calibration_enable_buckets = env_bool("PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS", False)
+        self.review_calibration_enable_hierarchy = env_bool("PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY", False)
+        self.review_calibration_enable_drift = env_bool("PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT", False)
+        self.review_calibration_sample_audit_rate = env_float(
+            "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE",
+            0.02,
+            minimum=0.0,
+            maximum=1.0,
+        )
         if require_worker_token and not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 

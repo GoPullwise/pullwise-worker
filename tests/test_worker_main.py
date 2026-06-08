@@ -2203,6 +2203,233 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(rejected_samples[0]["title"], "Unexpected source bug")
         self.assertEqual(state["open_findings"], [])
 
+    def test_review_calibration_shadow_builds_events_without_changing_reported_findings(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Shadow scored bug")])) or [])[0]
+        finding["confidence"] = 0.95
+        records: list[dict] = []
+
+        reported, rejected_reasons, _samples, _state = worker_main.apply_convergence_gate(
+            {"job_id": "job_shadow", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            checkout_dir,
+            [finding],
+            records,
+        )
+        result = worker_main.apply_review_calibration_decisions(
+            config(),
+            {"job_id": "job_shadow", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            reported,
+            records,
+            attempt_id="wk_1-1",
+        )
+
+        self.assertEqual(rejected_reasons, {})
+        self.assertEqual(result["reported_findings"], reported)
+        self.assertEqual(result["audit_only_findings"], [])
+        self.assertEqual(len(result["decision_events"]), 1)
+        event = result["decision_events"][0]
+        self.assertEqual(event["protocol"], "pullwise-review-decision/0.1")
+        self.assertEqual(event["decision"], "reported")
+        self.assertEqual(event["score_factors"]["scoreKind"], "ranking_score")
+        self.assertIn(event["score_factors"]["proposedDecision"], {"reported", "audit_only", "rejected"})
+
+    def test_review_calibration_audit_only_moves_unverified_out_of_formal_reporting(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Unverified high confidence bug")])) or [])[0]
+        finding["confidence"] = 0.95
+        finding["verificationStatus"] = "unverified"
+        records: list[dict] = []
+        reported, _rejected_reasons, _samples, _state = worker_main.apply_convergence_gate(
+            {"job_id": "job_audit", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            checkout_dir,
+            [finding],
+            records,
+        )
+
+        with patch.dict(os.environ, {"PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only"}, clear=False):
+            result = worker_main.apply_review_calibration_decisions(
+                config(),
+                {"job_id": "job_audit", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+                reported,
+                records,
+                attempt_id="wk_1-1",
+            )
+
+        self.assertEqual(result["reported_findings"], [])
+        self.assertEqual([item["title"] for item in result["audit_only_findings"]], ["Unverified high confidence bug"])
+        self.assertEqual(result["decision_events"][0]["decision"], "audit_only")
+        self.assertEqual(result["verified_suppression_count"], 0)
+
+    def test_review_calibration_server_policy_caps_local_enforce_to_shadow(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Server gated enforce bug")])) or [])[0]
+        finding["confidence"] = 0.95
+        finding["verificationStatus"] = "unverified"
+        records: list[dict] = []
+        reported, _rejected_reasons, _samples, _state = worker_main.apply_convergence_gate(
+            {"job_id": "job_policy", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+            checkout_dir,
+            [finding],
+            records,
+        )
+        job = {
+            "job_id": "job_policy",
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "a" * 40,
+            "review_calibration_context": {
+                "protocol": "pullwise-review-calibration/0.2",
+                "mode": "shadow",
+                "rollout_policy": {
+                    "requested_mode": "enforce",
+                    "effective_mode": "shadow",
+                    "enforce_gate": {"canConsiderEnforce": False},
+                },
+            },
+        }
+
+        with patch.dict(os.environ, {"PULLWISE_REVIEW_CALIBRATION_MODE": "enforce"}, clear=False):
+            result = worker_main.apply_review_calibration_decisions(
+                config(),
+                job,
+                reported,
+                records,
+                attempt_id="wk_1-1",
+            )
+
+        self.assertEqual([item["title"] for item in result["reported_findings"]], ["Server gated enforce bug"])
+        self.assertEqual(result["audit_only_findings"], [])
+        self.assertEqual(result["decision_events"][0]["decision"], "reported")
+        self.assertEqual(result["decision_events"][0]["score_factors"]["mode"], "shadow")
+        self.assertEqual(result["decision_events"][0]["score_factors"]["proposedDecision"], "audit_only")
+
+    def test_review_calibration_verified_guardrail_ignores_source_history_only_suppression(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Static proof noisy source bug")])) or [])[0]
+        finding["confidence"] = 0.8
+        finding["verificationStatus"] = "static_proof"
+        records = [
+            {
+                "stage": "convergence",
+                "decision": "reported",
+                "reason": "passed_convergence_gate",
+                "finding": finding,
+                "fingerprint": worker_main.finding_fingerprint(finding),
+                "source_stats": {"reported": 0, "confirmed": 0, "resolved": 0, "rejected": 100},
+            }
+        ]
+
+        with patch.dict(os.environ, {"PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only"}, clear=False):
+            result = worker_main.apply_review_calibration_decisions(
+                config(),
+                {"job_id": "job_guardrail", "repo": "acme/api", "branch": "main", "commit": "a" * 40},
+                [finding],
+                records,
+                attempt_id="wk_1-1",
+            )
+
+        self.assertEqual([item["title"] for item in result["reported_findings"]], ["Static proof noisy source bug"])
+        self.assertEqual(result["audit_only_findings"], [])
+        self.assertEqual(result["decision_events"][0]["decision_reason"], "verified_or_static_proof_guardrail")
+        self.assertTrue(result["decision_events"][0]["score_factors"]["guardrailApplied"])
+
+    def test_review_calibration_context_reliability_requires_effective_samples(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Sparse context bug")])) or [])[0]
+        finding["confidence"] = 0.95
+        finding["verificationStatus"] = "potential_risk"
+        record = {
+            "stage": "convergence",
+            "decision": "reported",
+            "reason": "passed_convergence_gate",
+            "finding": finding,
+            "fingerprint": worker_main.finding_fingerprint(finding),
+            "source_stats": {},
+        }
+        job = {
+            "job_id": "job_context",
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "a" * 40,
+            "review_calibration_context": {
+                "protocol": "pullwise-review-calibration/0.2",
+                "scope_key": "user:usr_1|repo:repo_123|branch:main",
+                "source_reliability": {
+                    "source:correctness reviewer|category:quality|status:potential_risk": {
+                        "posterior_mean": 0.2,
+                        "posterior_lb": 0.1,
+                        "effective_samples": 1,
+                    }
+                },
+            },
+        }
+
+        _features, sparse_score = worker_main.review_score_candidate(record, job, config())
+        self.assertEqual(sparse_score["reliability_source"], "prior")
+        self.assertAlmostEqual(sparse_score["source_adjustment"], 1.0)
+
+        job["review_calibration_context"]["source_reliability"][
+            "source:correctness reviewer|category:quality|status:potential_risk"
+        ]["effective_samples"] = 30
+        _features, active_score = worker_main.review_score_candidate(record, job, config())
+        self.assertEqual(active_score["reliability_source"], "review_calibration_context")
+        self.assertLess(active_score["source_adjustment"], 1.0)
+
+    def test_review_calibration_consumes_confidence_buckets_and_drift_safe_mode(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Drifted source bug")])) or [])[0]
+        finding["confidence"] = 0.92
+        record = {
+            "stage": "convergence",
+            "decision": "reported",
+            "reason": "passed_convergence_gate",
+            "finding": finding,
+            "fingerprint": worker_main.finding_fingerprint(finding),
+            "source_stats": {},
+        }
+        job = {
+            "job_id": "job_drift",
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "a" * 40,
+            "review_calibration_context": {
+                "protocol": "pullwise-review-calibration/0.2",
+                "scope_key": "user:usr_1|repo:repo_123|branch:main",
+                "confidence_calibration": {
+                    "global": {
+                        "0.90-0.95": {
+                            "bucket_precision": 0.40,
+                            "labeled_weight": 25,
+                        }
+                    }
+                },
+                "drift_state": {"source:correctness reviewer": "audit_only"},
+            },
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS": "true",
+                "PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT": "true",
+                "PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES": "20",
+                "PULLWISE_REVIEW_CALIBRATION_MODE": "audit_only",
+            },
+            clear=False,
+        ):
+            cfg = config()
+            _features, score = worker_main.review_score_candidate(record, job, cfg)
+            result = worker_main.apply_review_calibration_decisions(
+                cfg,
+                job,
+                [finding],
+                [record],
+                attempt_id="wk_1-1",
+            )
+
+        self.assertLess(score["calibrated_confidence"], 0.90)
+        self.assertEqual(score["drift_state"], "audit_only")
+        self.assertEqual(result["reported_findings"], [])
+        self.assertEqual([item["title"] for item in result["audit_only_findings"]], ["Drifted source bug"])
+        self.assertEqual(result["decision_events"][0]["decision_reason"], "drift_audit_only_source")
+
     def test_run_job_uploads_progress_result_and_cleans_checkout(self) -> None:
         worker = Worker(config())
         worker.client = Mock()

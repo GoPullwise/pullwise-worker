@@ -8,6 +8,7 @@ _PART_FILES = (
     "_main_part_03_preflight_verifier.py",
     "_main_part_04_review_audit_swarm.py",
     "_main_part_05_reportability_convergence.py",
+    "_main_part_09_review_calibration.py",
     "_main_part_06_audit_artifacts.py",
     "_main_part_07_readiness_doctor.py",
     "_main_part_08_lifecycle_cleanup.py",

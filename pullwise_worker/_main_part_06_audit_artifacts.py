@@ -8,6 +8,9 @@ def verification_audit_payload(
     reported_findings: list[dict],
     rejected_reasons: dict[str, int],
     rejected_samples: list[dict] | None = None,
+    audit_only_findings: list[dict] | None = None,
+    audit_only_samples: list[dict] | None = None,
+    verified_suppression_count: int = 0,
 ) -> dict:
     rejected_count = sum(rejected_reasons.values())
     status_counts = {status: 0 for status in _VERIFICATION_STATUSES}
@@ -16,17 +19,24 @@ def verification_audit_payload(
         if status not in status_counts:
             status = "potential_risk"
         status_counts[status] += 1
+    audit_only_findings = audit_only_findings or []
     parts = [
         f"{candidate_count} candidates evaluated",
         f"{len(reported_findings)} reported",
     ]
+    if audit_only_findings:
+        parts.append(f"{len(audit_only_findings)} retained for audit only")
     if rejected_count:
         parts.append(f"{rejected_count} rejected before reporting")
+    if verified_suppression_count:
+        parts.append(f"{verified_suppression_count} verified/static-proof candidates not formally reported")
     return {
         "candidateCount": max(0, int(candidate_count)),
         "reportedCount": len(reported_findings),
+        "auditOnlyCount": len(audit_only_findings),
         "rejectedCount": rejected_count,
         "downgradedCount": 0,
+        "verifiedSuppressionCount": max(0, int(verified_suppression_count or 0)),
         "verifiedCount": status_counts["verified"],
         "staticProofCount": status_counts["static_proof"],
         "potentialRiskCount": status_counts["potential_risk"],
@@ -37,6 +47,7 @@ def verification_audit_payload(
             if count > 0
         ],
         "rejectedSamples": [sample for sample in rejected_samples or [] if isinstance(sample, dict)][:5],
+        "auditOnlySamples": [sample for sample in audit_only_samples or [] if isinstance(sample, dict)][:5],
         "summary": "; ".join(parts) + ".",
     }
 
@@ -88,6 +99,7 @@ def audit_swarm_scan_artifacts(
         "verificationResults": len(results),
         "candidateCount": protocol_count(verification_audit.get("candidateCount") or verification_audit.get("candidate_count")),
         "reportedCount": protocol_count(verification_audit.get("reportedCount") or verification_audit.get("reported_count")),
+        "auditOnlyCount": protocol_count(verification_audit.get("auditOnlyCount") or verification_audit.get("audit_only_count")),
         "rejectedCount": protocol_count(verification_audit.get("rejectedCount") or verification_audit.get("rejected_count")),
         "verifiedCount": protocol_count(verification_audit.get("verifiedCount") or verification_audit.get("verified_count")),
         "staticProofCount": protocol_count(verification_audit.get("staticProofCount") or verification_audit.get("static_proof_count")),

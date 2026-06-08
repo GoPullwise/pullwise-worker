@@ -258,7 +258,10 @@ def rejected_candidate_sample(finding: object, reason: str) -> dict:
     return sample
 
 
-def filter_reportable_findings(findings: list[dict]) -> tuple[list[dict], dict[str, int], list[dict]]:
+def filter_reportable_findings(
+    findings: list[dict],
+    decision_records: list[dict] | None = None,
+) -> tuple[list[dict], dict[str, int], list[dict]]:
     reportable: list[dict] = []
     rejected_reasons: dict[str, int] = {}
     rejected_samples: list[dict] = []
@@ -270,6 +273,15 @@ def filter_reportable_findings(findings: list[dict]) -> tuple[list[dict], dict[s
         rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
         if len(rejected_samples) < 5:
             rejected_samples.append(rejected_candidate_sample(finding, reason))
+        if decision_records is not None:
+            decision_records.append(
+                {
+                    "stage": "reportability",
+                    "decision": "rejected",
+                    "reason": reason,
+                    "finding": finding if isinstance(finding, dict) else {},
+                }
+            )
     return reportable, rejected_reasons, rejected_samples
 
 
@@ -648,6 +660,7 @@ def apply_convergence_gate(
     job: dict,
     checkout_dir: Path,
     findings: list[dict],
+    decision_records: list[dict] | None = None,
 ) -> tuple[list[dict], dict[str, int], list[dict], dict]:
     context = convergence_context_for_job(job)
     previous_open = [
@@ -676,11 +689,26 @@ def apply_convergence_gate(
     rejected_reasons: dict[str, int] = {}
     rejected_samples: list[dict] = []
 
-    def reject(finding: dict, reason: str) -> None:
+    def record_decision(finding: dict, decision: str, reason: str, fingerprint: str, source_counts: dict | None = None) -> None:
+        if decision_records is None:
+            return
+        decision_records.append(
+            {
+                "stage": "convergence",
+                "decision": decision,
+                "reason": reason,
+                "finding": finding,
+                "fingerprint": fingerprint,
+                "source_stats": dict(source_counts or {}),
+            }
+        )
+
+    def reject(finding: dict, reason: str, fingerprint: str = "", source_counts: dict | None = None) -> None:
         rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
         bump_source_stat(source_stats, finding_source(finding), "rejected")
         if len(rejected_samples) < 5:
             rejected_samples.append(rejected_candidate_sample(finding, reason))
+        record_decision(finding, "rejected", reason, fingerprint or finding_fingerprint(finding), source_counts)
 
     for finding in findings:
         if not isinstance(finding, dict):
@@ -690,11 +718,11 @@ def apply_convergence_gate(
         source = finding_source(finding)
         source_counts = source_stats.get(source, {})
         if matched_fingerprint in seen_current_fingerprints:
-            reject(finding, "duplicate_finding")
+            reject(finding, "duplicate_finding", matched_fingerprint, source_counts)
             continue
         if matched_fingerprint in previous_by_fingerprint:
             if not finding_location_exists_in_checkout(checkout_dir, finding, previous_by_fingerprint[matched_fingerprint]):
-                reject(finding, "stale_previous_location")
+                reject(finding, "stale_previous_location", matched_fingerprint, source_counts)
                 continue
             reportable.append(finding)
             open_fingerprints.add(matched_fingerprint)
@@ -702,12 +730,13 @@ def apply_convergence_gate(
             bump_source_stat(source_stats, source, "reported")
             if str(finding.get("verificationStatus") or "").lower() in {"verified", "static_proof"}:
                 bump_source_stat(source_stats, source, "confirmed")
+            record_decision(finding, "reported", "matched_previous_open_finding", matched_fingerprint, source_counts)
             continue
         if has_prior_run and known_sources and source not in known_sources and not finding_has_verification_proof(finding):
-            reject(finding, "unknown_source_after_prior_run")
+            reject(finding, "unknown_source_after_prior_run", matched_fingerprint, source_counts)
             continue
         if statistically_calibrated_confidence(finding, source_counts) < convergence_min_confidence(finding):
-            reject(finding, "low_statistical_confidence")
+            reject(finding, "low_statistical_confidence", matched_fingerprint, source_counts)
             continue
         if has_prior_run:
             if not changed_files_loaded:
@@ -715,16 +744,16 @@ def apply_convergence_gate(
                 changed_files_loaded = True
             finding_files = finding_delta_files(finding)
             if changed_files is None or not finding_files or not (finding_files & changed_files):
-                reject(finding, "not_introduced_by_current_delta")
+                reject(finding, "not_introduced_by_current_delta", matched_fingerprint, source_counts)
                 continue
             if not changed_line_ranges_loaded:
                 changed_line_ranges = changed_line_ranges_between_heads(checkout_dir, previous_head_sha, current_head_sha, job=job)
                 changed_line_ranges_loaded = True
             if not finding_line_within_changed_ranges(finding, changed_line_ranges):
-                reject(finding, "not_introduced_by_current_delta")
+                reject(finding, "not_introduced_by_current_delta", matched_fingerprint, source_counts)
                 continue
             if not finding_location_exists_in_checkout(checkout_dir, finding):
-                reject(finding, "invalid_candidate_location")
+                reject(finding, "invalid_candidate_location", matched_fingerprint, source_counts)
                 continue
         reportable.append(finding)
         open_fingerprints.add(matched_fingerprint)
@@ -732,6 +761,7 @@ def apply_convergence_gate(
         bump_source_stat(source_stats, source, "reported")
         if str(finding.get("verificationStatus") or "").lower() in {"verified", "static_proof"}:
             bump_source_stat(source_stats, source, "confirmed")
+        record_decision(finding, "reported", "passed_convergence_gate", matched_fingerprint, source_counts)
 
     resolved_fingerprints = []
     for fingerprint, record in previous_by_fingerprint.items():

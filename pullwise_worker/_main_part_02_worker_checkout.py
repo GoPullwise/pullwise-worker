@@ -229,13 +229,28 @@ class Worker:
                 )
             projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
             candidate_count = len(projected_findings)
-            projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(projected_findings)
+            review_decision_records: list[dict] = []
+            projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+                projected_findings,
+                review_decision_records,
+            )
             projected_findings, convergence_rejected_reasons, convergence_rejected_samples, convergence_state = (
-                apply_convergence_gate(job, checkout_dir, projected_findings)
+                apply_convergence_gate(job, checkout_dir, projected_findings, review_decision_records)
             )
             for reason, count in convergence_rejected_reasons.items():
                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
             rejected_samples = [*rejected_samples, *convergence_rejected_samples][:5]
+            review_calibration = apply_review_calibration_decisions(
+                self.config,
+                job,
+                projected_findings,
+                review_decision_records,
+                attempt_id=attempt_id,
+            )
+            projected_findings = review_calibration["reported_findings"]
+            for reason, count in review_calibration["rejected_reasons"].items():
+                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
+            rejected_samples = [*rejected_samples, *review_calibration["rejected_samples"]][:5]
             audit_payload = filter_audit_swarm_payload_by_findings(audit_payload, projected_findings)
             summary = summarize(projected_findings)
             verification_audit = verification_audit_payload(
@@ -243,6 +258,9 @@ class Worker:
                 reported_findings=projected_findings,
                 rejected_reasons=rejected_reasons,
                 rejected_samples=rejected_samples,
+                audit_only_findings=review_calibration["audit_only_findings"],
+                audit_only_samples=review_calibration["audit_only_samples"],
+                verified_suppression_count=review_calibration["verified_suppression_count"],
             )
             if verifier_logs:
                 logs_summary = "\n".join([verifier_logs, logs_summary])[-1000:]
@@ -273,6 +291,7 @@ class Worker:
                 "preflight": preflight,
                 "verification_audit": verification_audit,
                 "convergence_state": convergence_state,
+                "review_decision_events": review_calibration["decision_events"],
                 "audit_swarm": audit_swarm,
             }
             if ai_usage:
