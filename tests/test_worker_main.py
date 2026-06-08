@@ -2491,6 +2491,49 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(score["cohort_key"], provider_key)
         self.assertLess(score["source_adjustment"], 1.0)
 
+    def test_review_calibration_prefers_provider_model_confidence_bucket(self) -> None:
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Provider bucket bug")])) or [])[0]
+        finding["confidence"] = 0.92
+        finding["verificationStatus"] = "potential_risk"
+        record = {
+            "stage": "convergence",
+            "decision": "reported",
+            "reason": "passed_convergence_gate",
+            "finding": finding,
+            "fingerprint": worker_main.finding_fingerprint(finding),
+            "source_stats": {},
+        }
+        provider_key = "provider:codex|model:gpt 5 5|source:correctness reviewer|category:quality|status:potential_risk"
+        job = {
+            "job_id": "job_provider_bucket",
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "a" * 40,
+            "review_calibration_context": {
+                "protocol": "pullwise-review-calibration/0.2",
+                "scope_key": "user:usr_1|repo:repo_123|branch:main",
+                "confidence_calibration": {
+                    provider_key: {
+                        "0.90-0.95": {
+                            "bucket_precision": 0.40,
+                            "labeled_weight": 25,
+                        }
+                    },
+                    "global": {
+                        "0.90-0.95": {
+                            "bucket_precision": 0.95,
+                            "labeled_weight": 25,
+                        }
+                    },
+                },
+            },
+        }
+
+        with patch.dict(os.environ, {"PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS": "true"}, clear=False):
+            _features, score = worker_main.review_score_candidate(record, job, config())
+
+        self.assertAlmostEqual(score["calibrated_confidence"], 0.66)
+
     def test_review_calibration_samples_rejected_candidates_for_manual_review(self) -> None:
         finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Low confidence sample bug")])) or [])[0]
         finding["confidence"] = 0.10
