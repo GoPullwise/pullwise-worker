@@ -2291,6 +2291,13 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(event["decision"], "reported")
         self.assertEqual(event["score_factors"]["scoreKind"], "ranking_score")
         self.assertIn(event["score_factors"]["proposedDecision"], {"reported", "audit_only", "rejected"})
+        self.assertEqual(event["base_sha"], "")
+        self.assertEqual(event["head_sha"], "a" * 40)
+        self.assertEqual(event["score_factors"]["workerVersion"], worker_main.__version__)
+        self.assertEqual(event["score_factors"]["auditProtocol"], worker_main.AUDIT_SWARM_PROTOCOL_VERSION)
+        self.assertEqual(event["score_factors"]["promptVersion"], "pullwise-review-prompt/0.1")
+        self.assertEqual(event["score_factors"]["providerChain"], "codex")
+        self.assertIn("decisionScore", event["score_factors"])
 
     def test_review_calibration_audit_only_moves_unverified_out_of_formal_reporting(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())

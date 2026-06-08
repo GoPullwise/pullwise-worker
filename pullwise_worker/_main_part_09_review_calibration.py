@@ -12,11 +12,19 @@ _REVIEW_SOURCE_FACTOR_MAX = 1.15
 _REVIEW_POTENTIAL_RISK_REPORT_THRESHOLD = 0.82
 _REVIEW_POTENTIAL_RISK_AUDIT_THRESHOLD = 0.65
 _REVIEW_UNVERIFIED_AUDIT_THRESHOLD = 0.60
+_REVIEW_PROMPT_VERSION = "pullwise-review-prompt/0.1"
+_REVIEW_VERIFIER_VERSION = "pullwise-worker-verifier/0.1"
+_REVIEW_STATIC_CHECKER_VERSION = "pullwise-static-checker/0.1"
 
 
 def review_text(value: object, limit: int = 160) -> str:
     text = re.sub(r"\s+", " ", str(value or "").strip())
     return text[:limit]
+
+
+def review_git_sha(value: object) -> str:
+    text = review_text(value, 80).lower()
+    return text if re.fullmatch(r"[0-9a-f]{40}", text) else ""
 
 
 def review_probability(value: object) -> float:
@@ -432,6 +440,16 @@ def review_decision_event(
     candidate_id = str(features.get("candidate_id") or "")
     fingerprint = str(features.get("fingerprint") or "")
     commit = str(job.get("resolved_commit") or job.get("commit") or "").strip()
+    convergence_context = job.get("convergence_context") if isinstance(job.get("convergence_context"), dict) else {}
+    base_sha = review_git_sha(
+        job.get("base_sha")
+        or job.get("baseSha")
+        or job.get("base_commit")
+        or job.get("baseCommit")
+        or convergence_context.get("previous_head_sha")
+        or convergence_context.get("previousHeadSha")
+    )
+    head_sha = review_git_sha(job.get("head_sha") or job.get("headSha") or commit)
     source = str(features.get("source") or "reviewer")
     status = str(features.get("verification_status") or "potential_risk")
     branch = str(job.get("branch") or "main").strip() or "main"
@@ -456,6 +474,7 @@ def review_decision_event(
     provider_chain = list(getattr(config, "provider_chain", []) or [])
     provider = provider_chain[0] if provider_chain else getattr(config, "provider", "")
     model = getattr(config, "codex_model", "") if provider == "codex" else getattr(config, "opencode_model", "")
+    provider_chain_text = ",".join(review_text(item, 40) for item in provider_chain if review_text(item, 40))
     return {
         "protocol": REVIEW_DECISION_EVENT_PROTOCOL_VERSION,
         "event_id": event_id,
@@ -469,6 +488,8 @@ def review_decision_event(
         "repo_full_name": review_text(job.get("repo"), 160),
         "branch": branch,
         "commit_sha": commit,
+        "base_sha": base_sha,
+        "head_sha": head_sha or commit,
         "candidate_id": candidate_id,
         "fingerprint": fingerprint,
         "source": source,
@@ -506,6 +527,23 @@ def review_decision_event(
             "reliabilitySource": score.get("reliability_source") or "prior",
             "cohortKey": score.get("cohort_key") or "",
             "driftState": score.get("drift_state") or "normal",
+            "rawConfidence": features.get("raw_confidence"),
+            "calibratedConfidence": score.get("calibrated_confidence"),
+            "sourceFactor": score.get("source_factor"),
+            "sourceAdjustment": score.get("source_adjustment"),
+            "evidenceStrength": score.get("evidence_strength"),
+            "deltaRelevance": score.get("delta_relevance"),
+            "categoryAdjustment": score.get("category_adjustment"),
+            "truthProbability": score.get("truth_probability"),
+            "decisionScore": score.get("decision_score"),
+            "providerChain": provider_chain_text,
+            "workerVersion": __version__,
+            "auditProtocol": AUDIT_SWARM_PROTOCOL_VERSION,
+            "promptVersion": _REVIEW_PROMPT_VERSION,
+            "verifierVersion": _REVIEW_VERIFIER_VERSION,
+            "staticCheckerVersion": _REVIEW_STATIC_CHECKER_VERSION,
+            "baseSha": base_sha,
+            "headSha": head_sha or commit,
         },
         "created_at": int(time.time()),
     }
