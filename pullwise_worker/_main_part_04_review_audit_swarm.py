@@ -239,6 +239,17 @@ def review_prompt(job: dict) -> str:
         f"Write every human-facing review output field in {language_name}. "
         "Keep JSON keys, enum values, file paths, commands, identifiers, and code excerpts unchanged."
     )
+    architecture_summary = job.get("architecture_summary") if isinstance(job.get("architecture_summary"), dict) else {}
+    if not architecture_summary and isinstance(job.get("architectureSummary"), dict):
+        architecture_summary = job.get("architectureSummary") or {}
+    architecture_prompt = str(architecture_summary.get("promptText") or "").strip()
+    if architecture_prompt and len(architecture_prompt) > REPOSITORY_GRAPH_MAX_PROMPT_CHARS:
+        architecture_prompt = architecture_prompt[: REPOSITORY_GRAPH_MAX_PROMPT_CHARS - 3].rstrip() + "..."
+    architecture_instruction = (
+        f"Repository architecture context:\n{architecture_prompt}\n"
+        if architecture_prompt
+        else ""
+    )
     convergence_instruction = ""
     if previous_head_sha or open_findings:
         prior_refs = []
@@ -277,6 +288,7 @@ def review_prompt(job: dict) -> str:
         "If a candidate has no file/line, no evidence, and no verifiable hypothesis, omit it. "
         f"{language_instruction} "
         f"{convergence_instruction} "
+        f"{architecture_instruction}"
         f"Repository: {job.get('repo')} branch: {job.get('branch')} commit: {job.get('commit')}."
     )
 

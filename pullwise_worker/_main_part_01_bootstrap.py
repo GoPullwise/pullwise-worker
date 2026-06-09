@@ -349,6 +349,7 @@ class PullwiseClient:
         message: str = "",
         logs_summary: str = "",
         audit_swarm: dict | None = None,
+        repository_graph: dict | None = None,
     ) -> None:
         payload = {
             "phase": phase,
@@ -359,6 +360,8 @@ class PullwiseClient:
         }
         if audit_swarm:
             payload["audit_swarm"] = audit_swarm
+        if repository_graph:
+            payload["repository_graph"] = repository_graph
         self.post(f"/worker/jobs/{job_id}/progress", payload)
 
     def result(self, job_id: str, payload: dict) -> None:

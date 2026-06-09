@@ -359,6 +359,21 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertIn("Write every human-facing review output field in English.", prompt)
 
+    def test_review_prompt_includes_repository_graph_architecture_summary(self) -> None:
+        prompt = worker_main.review_prompt(
+            {
+                "repo": "acme/api",
+                "branch": "main",
+                "commit": "abc123",
+                "architecture_summary": {
+                    "promptText": "Repository architecture: API routes call worker result reconciliation.",
+                },
+            }
+        )
+
+        self.assertIn("Repository architecture context:", prompt)
+        self.assertIn("worker result reconciliation", prompt)
+
     def test_run_codex_review_normalizes_checkout_absolute_file_paths(self) -> None:
         worker_config = config()
         checkout_dir = Path(worker_config.work_dir) / "job_1"
@@ -3033,6 +3048,48 @@ class WorkerMainTest(unittest.TestCase):
         self.assertGreaterEqual(worker.client.progress.call_count, 3)
         rmtree.assert_called_with(checkout_dir, ignore_errors=True)
 
+    def test_run_job_uploads_repository_graph_progress_and_result(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        graph = {
+            "version": "repository-graph/0.1",
+            "nodes": [{"id": "file:src/app.py", "label": "app.py", "type": "entrypoint", "path": "src/app.py"}],
+            "edges": [],
+            "architectureSummary": {
+                "entrypoints": ["src/app.py"],
+                "modules": ["src"],
+                "promptText": "Repository architecture: src/app.py handles requests.",
+            },
+        }
+        review_jobs = []
+
+        def run_review(_config: WorkerConfig, job: dict, _checkout_dir: Path) -> tuple[dict, dict, str]:
+            review_jobs.append(dict(job))
+            self.assertTrue(
+                any(call.kwargs.get("repository_graph") == graph for call in worker.client.progress.call_args_list)
+            )
+            return audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"
+
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
+            patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}) as collect_preflight, \
+            patch("pullwise_worker.main.build_repository_graph", return_value=graph) as build_graph, \
+            patch(
+                "pullwise_worker.main.run_verifier_commands",
+                return_value=({"enabled": False, "runs": []}, [], "verifier disabled"),
+            ), \
+            patch("pullwise_worker.main.run_codex_review", side_effect=run_review), \
+            patch.object(worker, "upload_result_with_retry") as upload_result, \
+            patch("pullwise_worker.main.shutil.rmtree"):
+            worker.run_job({"job_id": "job_graph", "attempt": 1, "repo": "acme/api", "commit": "pending"})
+
+        collect_preflight.assert_called_once()
+        build_graph.assert_called_once()
+        self.assertEqual(review_jobs[0]["architecture_summary"], graph["architectureSummary"])
+        graph_progress = [call for call in worker.client.progress.call_args_list if call.kwargs.get("repository_graph")]
+        self.assertEqual(graph_progress[0].kwargs["repository_graph"], graph)
+        result_payload = upload_result.call_args.args[1]
+        self.assertEqual(result_payload["repository_graph"], graph)
+
     def test_run_job_fails_repository_too_large_before_verifier_or_review(self) -> None:
         with patch.dict(
             os.environ,
@@ -3386,6 +3443,21 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer worker-token")
         self.assertEqual(json.loads(request.data.decode("utf-8")), {"worker_id": "wk_1"})
         self.assertEqual(response.json(), {"ok": True})
+
+    def test_pullwise_client_progress_uploads_repository_graph(self) -> None:
+        cfg = config()
+        client = PullwiseClient(cfg)
+        with patch.object(client, "post", return_value=PullwiseResponse(b"{}")) as post:
+            client.progress(
+                "job_1",
+                "index",
+                30,
+                "Repository graph ready",
+                repository_graph={"version": "repository-graph/0.1", "nodes": [], "edges": []},
+            )
+
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["repository_graph"]["version"], "repository-graph/0.1")
 
     def test_once_loop_executes_lifecycle_command_from_heartbeat(self) -> None:
         worker = Worker(config())

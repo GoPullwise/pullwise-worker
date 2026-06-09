@@ -171,6 +171,7 @@ class Worker:
         started = time.monotonic()
         duration_ms = 0
         job_error = ""
+        repository_graph = {}
         try:
             self.client.progress(
                 job_id,
@@ -196,6 +197,33 @@ class Worker:
                 ),
             )
             preflight = collect_preflight_metadata(self.config, job, checkout_dir)
+            try:
+                repository_graph = build_repository_graph(self.config, job, checkout_dir, preflight)
+            except Exception:
+                repository_graph = {}
+                limitations = preflight.get("limitations")
+                if not isinstance(limitations, list):
+                    limitations = []
+                    preflight["limitations"] = limitations
+                limitations.append("Repository graph generation failed; review continued without graph context.")
+            if repository_graph:
+                job["repository_graph"] = repository_graph
+                architecture_summary = repository_graph.get("architectureSummary")
+                if isinstance(architecture_summary, dict):
+                    job["architecture_summary"] = architecture_summary
+                self.client.progress(
+                    job_id,
+                    "index",
+                    PHASE_PROGRESS["index"],
+                    "Repository graph ready",
+                    audit_swarm=audit_swarm_scan_artifacts(
+                        "preflight",
+                        config=self.config,
+                        preflight=preflight,
+                        summary="Repository graph is ready.",
+                    ),
+                    repository_graph=repository_graph,
+                )
             try:
                 verifier, verifier_findings, verifier_logs = run_verifier_commands(self.config, job, checkout_dir, preflight)
             except Exception as exc:
@@ -300,6 +328,8 @@ class Worker:
                 "review_decision_events": review_calibration["decision_events"],
                 "audit_swarm": audit_swarm,
             }
+            if repository_graph:
+                payload["repository_graph"] = repository_graph
             if ai_usage:
                 payload["ai_usage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
