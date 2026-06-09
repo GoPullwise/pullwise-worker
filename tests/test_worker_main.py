@@ -28,6 +28,7 @@ from pullwise_worker.main import (
     audit_swarm_output_schema,
     audit_swarm_payload_from_findings,
     audit_swarm_scan_artifacts,
+    build_repository_graph,
     checkout_dir_for_job,
     cleanup_checkouts,
     cleanup_worker_resources,
@@ -162,6 +163,69 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(stats["fileCount"], 2)
         self.assertEqual(stats["totalBytes"], 2)
         self.assertTrue(stats["scanStoppedEarly"])
+
+    def test_build_repository_graph_detects_project_structure(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "src" / "screens").mkdir(parents=True)
+            (checkout_dir / "src" / "lib").mkdir(parents=True)
+            (checkout_dir / "tests").mkdir()
+            (checkout_dir / ".github" / "workflows").mkdir(parents=True)
+            (checkout_dir / "src" / "App.jsx").write_text(
+                'import Flow from "./screens/flow.jsx";\nexport default Flow;\n',
+                encoding="utf-8",
+            )
+            (checkout_dir / "src" / "screens" / "flow.jsx").write_text(
+                'import { api } from "../lib/api.js";\nexport function Flow() { return api; }\n',
+                encoding="utf-8",
+            )
+            (checkout_dir / "src" / "lib" / "api.js").write_text("export const api = {};\n", encoding="utf-8")
+            (checkout_dir / "tests" / "flow.test.jsx").write_text("test('flow', () => {});\n", encoding="utf-8")
+            (checkout_dir / "package.json").write_text(
+                '{"scripts":{"dev":"vite","test":"vitest"},"dependencies":{"@vitejs/plugin-react":"latest"}}',
+                encoding="utf-8",
+            )
+            (checkout_dir / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+
+            graph = build_repository_graph(
+                cfg,
+                {"repo": "octocat/app", "branch": "main", "commit": "abc123"},
+                checkout_dir,
+                {"languages": ["JavaScript/TypeScript"], "packageManagers": ["npm"]},
+            )
+
+        self.assertEqual(graph["version"], "repository-graph/0.1")
+        self.assertEqual(graph["repo"], "octocat/app")
+        self.assertIn("JavaScript", graph["stats"]["languages"])
+        node_ids = {node["id"] for node in graph["nodes"]}
+        self.assertIn("file:src/App.jsx", node_ids)
+        self.assertIn("dir:src/screens", node_ids)
+        self.assertIn("file:tests/flow.test.jsx", node_ids)
+        self.assertIn("file:.github/workflows/ci.yml", node_ids)
+        edge_pairs = {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]}
+        self.assertIn(("file:src/App.jsx", "file:src/screens/flow.jsx", "imports"), edge_pairs)
+        self.assertIn("src/App.jsx", graph["architectureSummary"]["entrypoints"])
+        self.assertIn("Repository architecture:", graph["architectureSummary"]["promptText"])
+        self.assertNotIn(str(checkout_dir), json.dumps(graph))
+
+    def test_build_repository_graph_caps_large_repositories_deterministically(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "src").mkdir()
+            for index in range(180):
+                (checkout_dir / "src" / f"module_{index}.py").write_text(
+                    f"from src import module_{max(0, index - 1)}\n",
+                    encoding="utf-8",
+                )
+            first = build_repository_graph(cfg, {"repo": "octocat/large"}, checkout_dir, {})
+            second = build_repository_graph(cfg, {"repo": "octocat/large"}, checkout_dir, {})
+
+        self.assertEqual(first, second)
+        self.assertLessEqual(len(first["nodes"]), 120)
+        self.assertLessEqual(len(first["edges"]), 240)
+        self.assertTrue(first["stats"]["truncated"])
 
     def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
         payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
