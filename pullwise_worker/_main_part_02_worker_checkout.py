@@ -622,11 +622,6 @@ _SECRET_PATTERNS = [
         "regex": re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,255}\b"),
     },
     {
-        "kind": "stripe_live_secret_key",
-        "label": "Stripe live secret key",
-        "regex": re.compile(r"\bsk_live_[A-Za-z0-9]{16,}\b"),
-    },
-    {
         "kind": "slack_token",
         "label": "Slack token",
         "regex": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
