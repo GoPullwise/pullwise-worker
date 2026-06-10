@@ -699,7 +699,7 @@ class WorkerMainTest(unittest.TestCase):
                 "pullwise_worker.main.safe_tool_version",
                 side_effect=lambda name, command: {
                     "name": name,
-                    "command": " ".join(command),
+                    "command": worker_main.public_tool_version_command(command),
                     "available": True,
                     "exitCode": 0,
                     "output": f"{name} ok",
