@@ -451,11 +451,14 @@ def checkout_root_is_owned(work_dir: Path) -> bool:
 def clone_repository(job: dict, checkout_dir: Path) -> str:
     shutil.rmtree(checkout_dir, ignore_errors=True)
     checkout_dir.parent.mkdir(parents=True, exist_ok=True)
+    clone_token = job.get("clone_token")
     clone_url = str(job.get("clone_url") or "")
     if not clone_url:
         repo = str(job.get("repo") or "")
-        clone_url = f"https://github.com/{repo}.git"
-    git_env = git_auth_env(job.get("clone_token"))
+        clone_url = f"{worker_github_web_url()}/{repo}.git"
+    if clone_token_value(clone_token):
+        clone_url = trusted_clone_url_for_token(job, clone_url, clone_token)
+    git_env = git_auth_env(clone_token, clone_url, job.get("repo"))
     commit = str(job.get("commit") or "pending")
     clone_command = ["git", "clone"]
     if not commit or commit == "pending":
@@ -518,10 +521,84 @@ def clone_token_value(clone_token: object) -> str:
     return str(token or "")
 
 
-def git_auth_env(clone_token: object) -> dict[str, str] | None:
+_REPO_FULL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def worker_github_web_url() -> str:
+    raw = (
+        os.environ.get("PULLWISE_GITHUB_WEB_URL")
+        or os.environ.get("GITHUB_WEB_URL")
+        or "https://github.com"
+    ).strip().rstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path not in {"", "/"}:
+        raise RuntimeError("PULLWISE_GITHUB_WEB_URL must be an absolute GitHub web HTTP(S) origin.")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise RuntimeError("PULLWISE_GITHUB_WEB_URL must be an absolute GitHub web HTTP(S) origin.")
+    return raw
+
+
+def validate_repo_full_name(repo: object) -> str:
+    value = str(repo or "").strip()
+    if not _REPO_FULL_NAME_RE.fullmatch(value):
+        raise RuntimeError("Repository must be a GitHub full name like owner/repo.")
+    return value
+
+
+def clone_token_repo(clone_token: object) -> str:
+    repo = clone_token.get("repo") if isinstance(clone_token, dict) else None
+    return str(repo or "").strip()
+
+
+def expected_clone_repo(job: dict | None, clone_token: object) -> str:
+    job_repo = str(job.get("repo") or "").strip() if isinstance(job, dict) else ""
+    token_repo = clone_token_repo(clone_token)
+    if job_repo:
+        job_repo = validate_repo_full_name(job_repo)
+    if token_repo:
+        token_repo = validate_repo_full_name(token_repo)
+    if job_repo and token_repo and job_repo.lower() != token_repo.lower():
+        raise RuntimeError("Clone token repository does not match job repository.")
+    return token_repo or validate_repo_full_name(job_repo)
+
+
+def trusted_clone_url_for_repo(repo: object, clone_url: object) -> str:
+    repo_name = validate_repo_full_name(repo)
+    if clone_url is None or clone_url == "":
+        clone_url = f"{worker_github_web_url()}/{repo_name}.git"
+    if not isinstance(clone_url, str):
+        raise RuntimeError("Repository clone URL must be an HTTP(S) URL.")
+    clone_url = clone_url.strip()
+    if not clone_url or any(char in clone_url for char in "\r\n"):
+        raise RuntimeError("Repository clone URL must be an HTTP(S) URL.")
+    parsed = urllib.parse.urlparse(clone_url)
+    allowed = urllib.parse.urlparse(worker_github_web_url())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("Repository clone URL must be an HTTP(S) URL.")
+    if parsed.netloc.lower() != allowed.netloc.lower():
+        raise RuntimeError("Repository clone URL host does not match configured GitHub host.")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise RuntimeError("Repository clone URL must not include query or fragment.")
+    clone_path = parsed.path.rstrip("/")
+    expected_path = clone_path[:-4] if clone_path.lower().endswith(".git") else clone_path
+    if expected_path.lower() != f"/{repo_name.lower()}":
+        raise RuntimeError("Repository clone URL path does not match requested repository.")
+    return urllib.parse.urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), clone_path, "", "", ""))
+
+
+def trusted_clone_url_for_token(job: dict | None, clone_url: object, clone_token: object) -> str:
+    return trusted_clone_url_for_repo(expected_clone_repo(job, clone_token), clone_url)
+
+
+def git_extra_header_key(clone_url: str) -> str:
+    return f"http.{clone_url.rstrip('/')}.extraHeader"
+
+
+def git_auth_env(clone_token: object, clone_url: object = None, repo: object = None) -> dict[str, str] | None:
     token = clone_token_value(clone_token)
     if not token:
         return None
+    scoped_clone_url = trusted_clone_url_for_token({"repo": repo}, clone_url, clone_token)
     basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
     env = os.environ.copy()
     env.update(
@@ -530,7 +607,7 @@ def git_auth_env(clone_token: object) -> dict[str, str] | None:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_KEY_0": git_extra_header_key(scoped_clone_url),
             "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
         }
     )

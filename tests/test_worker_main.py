@@ -1734,7 +1734,11 @@ func writeHealth() {}
                 checkout_dir,
                 previous,
                 current,
-                job={"clone_token": {"token": "repo-token"}},
+                job={
+                    "repo": "acme/api",
+                    "clone_url": "https://github.com/acme/api.git",
+                    "clone_token": {"token": "repo-token", "repo": "acme/api"},
+                },
             )
 
         self.assertEqual(changed, {"src/app.py", "README.md"})
@@ -1742,6 +1746,10 @@ func writeHealth() {}
         self.assertEqual(run.call_args_list[1].args[0], ["git", "-C", str(checkout_dir), "fetch", "--depth", "1", "origin", previous])
         self.assertNotIn("repo-token", run.call_args_list[1].args[0])
         self.assertIn("Authorization: Basic", run.call_args_list[1].kwargs["env"]["GIT_CONFIG_VALUE_0"])
+        self.assertEqual(
+            run.call_args_list[1].kwargs["env"]["GIT_CONFIG_KEY_0"],
+            "http.https://github.com/acme/api.git.extraHeader",
+        )
         self.assertEqual(run.call_args_list[2].args[0], ["git", "-C", str(checkout_dir), "diff", "--name-only", f"{previous}..{current}"])
 
     def test_convergence_gate_allows_new_finding_when_delta_touches_file(self) -> None:
@@ -3632,7 +3640,7 @@ func writeHealth() {}
                     "branch": "main",
                     "commit": "pending",
                     "clone_url": "https://github.com/acme/api.git",
-                    "clone_token": {"token": "short-token"},
+                    "clone_token": {"token": "short-token", "repo": "acme/api"},
                 },
                 Path("checkout"),
             )
@@ -3645,7 +3653,39 @@ func writeHealth() {}
         self.assertEqual(clone_command[-2], "https://github.com/acme/api.git")
         self.assertNotIn("short-token", " ".join(clone_command))
         self.assertNotIn("short-token", " ".join(str(value) for value in clone_env.values()))
-        self.assertEqual(clone_env["GIT_CONFIG_KEY_0"], "http.extraHeader")
+        self.assertEqual(clone_env["GIT_CONFIG_KEY_0"], "http.https://github.com/acme/api.git.extraHeader")
+
+    def test_clone_repository_rejects_clone_token_for_untrusted_clone_url(self) -> None:
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            with self.assertRaisesRegex(RuntimeError, "host does not match configured GitHub host"):
+                clone_repository(
+                    {
+                        "repo": "acme/api",
+                        "branch": "main",
+                        "commit": "pending",
+                        "clone_url": "https://evil.example/acme/api.git",
+                        "clone_token": {"token": "short-token", "repo": "acme/api"},
+                    },
+                    Path("checkout"),
+                )
+
+        run.assert_not_called()
+
+    def test_clone_repository_rejects_clone_token_for_wrong_repository_path(self) -> None:
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            with self.assertRaisesRegex(RuntimeError, "path does not match requested repository"):
+                clone_repository(
+                    {
+                        "repo": "acme/api",
+                        "branch": "main",
+                        "commit": "pending",
+                        "clone_url": "https://github.com/acme/other.git",
+                        "clone_token": {"token": "short-token", "repo": "acme/api"},
+                    },
+                    Path("checkout"),
+                )
+
+        run.assert_not_called()
 
     @unittest.skipIf(shutil.which("git") is None, "git is required for clone integration coverage")
     def test_clone_repository_can_checkout_pinned_non_tip_commit(self) -> None:
@@ -4468,13 +4508,27 @@ func writeHealth() {}
 
         service.assert_not_called()
 
-    def test_lifecycle_uninstall_exits_without_systemd_authorization(self) -> None:
+    def test_lifecycle_uninstall_without_systemd_authorization_fails(self) -> None:
         with patch("pullwise_worker.main.uninstall_worker", return_value=1) as uninstall, \
             patch("pullwise_worker.main.service_action", return_value=1) as service:
-            self.assertEqual(execute_lifecycle_command("uninstall"), 0)
+            self.assertEqual(execute_lifecycle_command("uninstall"), 2)
 
         uninstall.assert_not_called()
         service.assert_not_called()
+
+    def test_remote_lifecycle_uninstall_reports_failed_not_succeeded(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+
+        handled = worker.handle_lifecycle_command({"id": "cmd_uninstall", "command": "uninstall"})
+
+        self.assertFalse(handled)
+        self.assertEqual(worker.client.command_status.call_args_list[0].args, ("cmd_uninstall", "running"))
+        self.assertEqual(worker.client.command_status.call_args_list[1].args, ("cmd_uninstall", "failed"))
+        self.assertEqual(
+            worker.client.command_status.call_args_list[1].kwargs,
+            {"error": "uninstall command exited 2"},
+        )
 
     def test_write_scan_summary_redacts_tokens(self) -> None:
         cfg = config()

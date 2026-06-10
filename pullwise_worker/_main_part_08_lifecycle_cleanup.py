@@ -14,11 +14,16 @@ def service_action(action: str, *, dry_run: bool = False, no_block: bool = False
 
 
 def execute_lifecycle_command(action: str) -> int:
-    if action in {"stop", "uninstall"}:
+    if action == "stop":
         # Admin-queued lifecycle commands run inside the unprivileged service
         # process. Exit cleanly and let Restart=on-failure keep it stopped.
-        # Full local uninstall still requires root via `pullwise-worker uninstall`.
         return 0
+    if action == "uninstall":
+        print(
+            "Remote uninstall is not supported. Run `pullwise-worker uninstall` locally with root privileges.",
+            file=sys.stderr,
+        )
+        return 2
     return 2
 
 

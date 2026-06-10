@@ -491,6 +491,12 @@ def fetch_git_head(checkout_dir: Path, head_sha: str, job: dict | None = None) -
     head = normalized_head_sha(head_sha)
     if not head:
         return False
+    git_env = None
+    if isinstance(job, dict):
+        try:
+            git_env = git_auth_env(job.get("clone_token"), job.get("clone_url"), job.get("repo"))
+        except RuntimeError:
+            return False
     try:
         subprocess.run(
             ["git", "-C", str(checkout_dir), "fetch", "--depth", "1", "origin", head],
@@ -499,7 +505,7 @@ def fetch_git_head(checkout_dir: Path, head_sha: str, job: dict | None = None) -
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600),
-            env=git_auth_env(job.get("clone_token")) if isinstance(job, dict) else None,
+            env=git_env,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
