@@ -112,7 +112,7 @@ if [ "${SERVICE_NODE_MAJOR:-0}" -lt 20 ]; then
   exit 1
 fi
 
-python3 -m pip install --upgrade "$WORKER_PACKAGE"
+python3 -m pip install --upgrade --force-reinstall --no-cache-dir "$WORKER_PACKAGE"
 
 write_env_value() {
   local key="$1"

@@ -4352,7 +4352,10 @@ func writeHealth() {}
 
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
         self.assertEqual(code, 0)
-        self.assertIn(f"/custom/python -m pip install --upgrade {expected_package}", printed)
+        self.assertIn(
+            f"/custom/python -m pip install --upgrade --force-reinstall --no-cache-dir {expected_package}",
+            printed,
+        )
         run.assert_not_called()
 
     def test_update_falls_back_to_python3_when_service_interpreter_is_missing(self) -> None:
@@ -4370,7 +4373,10 @@ func writeHealth() {}
 
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
         self.assertEqual(code, 0)
-        self.assertIn(f"python3 -m pip install --upgrade {expected_package}", printed)
+        self.assertIn(
+            f"python3 -m pip install --upgrade --force-reinstall --no-cache-dir {expected_package}",
+            printed,
+        )
         run.assert_not_called()
 
     def test_update_dry_run_restarts_service_before_running_doctor(self) -> None:
@@ -4441,6 +4447,8 @@ func writeHealth() {}
                     "pip",
                     "install",
                     "--upgrade",
+                    "--force-reinstall",
+                    "--no-cache-dir",
                     expected_package,
                 ],
             )
@@ -4536,6 +4544,7 @@ func writeHealth() {}
         self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
         self.assertIn(f'DEFAULT_WORKER_VERSION="{__version__}"', install_script)
         self.assertIn("https://github.com/GoPullwise/pullwise-worker/releases/download/v${DEFAULT_WORKER_VERSION}/pullwise_worker-${DEFAULT_WORKER_VERSION}-py3-none-any.whl", install_script)
+        self.assertIn("pip install --upgrade --force-reinstall --no-cache-dir", install_script)
         self.assertNotIn("pullwise-worker==0.1.0", install_script)
         self.assertIn("PULLWISE_CODEX_PACKAGE", install_script)
         self.assertIn("@openai/codex@0.135.0", install_script)

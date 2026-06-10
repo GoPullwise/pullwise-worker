@@ -83,7 +83,16 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE") or "/etc/pullwise-worker/worker.env")
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE") or "/etc/pullwise-worker/worker.env.bak")
     bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH") or "/usr/local/bin/pullwise-worker")
-    install_command = [python_bin, "-m", "pip", "install", "--upgrade", package]
+    install_command = [
+        python_bin,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--force-reinstall",
+        "--no-cache-dir",
+        package,
+    ]
     commands = [
         ["systemctl", "stop", "pullwise-worker"],
         install_command,
