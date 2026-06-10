@@ -172,6 +172,7 @@ class Worker:
         duration_ms = 0
         job_error = ""
         repository_graph = {}
+        semantic_graph = {}
         try:
             self.client.progress(
                 job_id,
@@ -198,9 +199,10 @@ class Worker:
             )
             preflight = collect_preflight_metadata(self.config, job, checkout_dir)
             try:
-                repository_graph = build_repository_graph(self.config, job, checkout_dir, preflight)
+                repository_graph, semantic_graph = build_repository_graph_bundle(self.config, job, checkout_dir, preflight)
             except Exception:
                 repository_graph = {}
+                semantic_graph = {}
                 limitations = preflight.get("limitations")
                 if not isinstance(limitations, list):
                     limitations = []
@@ -208,6 +210,8 @@ class Worker:
                 limitations.append("Repository graph generation failed; review continued without graph context.")
             if repository_graph:
                 job["repository_graph"] = repository_graph
+                if semantic_graph:
+                    job["semantic_graph"] = semantic_graph
                 architecture_summary = repository_graph.get("architectureSummary")
                 if isinstance(architecture_summary, dict):
                     job["architecture_summary"] = architecture_summary
@@ -223,6 +227,7 @@ class Worker:
                         summary="Repository graph is ready.",
                     ),
                     repository_graph=repository_graph,
+                    semantic_graph=semantic_graph,
                 )
             try:
                 verifier, verifier_findings, verifier_logs = run_verifier_commands(self.config, job, checkout_dir, preflight)
@@ -330,6 +335,8 @@ class Worker:
             }
             if repository_graph:
                 payload["repository_graph"] = repository_graph
+            if semantic_graph:
+                payload["semantic_graph"] = semantic_graph
             if ai_usage:
                 payload["ai_usage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)

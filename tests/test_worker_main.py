@@ -28,7 +28,7 @@ from pullwise_worker.main import (
     audit_swarm_output_schema,
     audit_swarm_payload_from_findings,
     audit_swarm_scan_artifacts,
-    build_repository_graph,
+    build_repository_graph_bundle,
     checkout_dir_for_job,
     cleanup_checkouts,
     cleanup_worker_resources,
@@ -188,7 +188,7 @@ class WorkerMainTest(unittest.TestCase):
             )
             (checkout_dir / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
 
-            graph = build_repository_graph(
+            graph, semantic_graph = build_repository_graph_bundle(
                 cfg,
                 {"repo": "octocat/app", "branch": "main", "commit": "abc123"},
                 checkout_dir,
@@ -207,11 +207,12 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn(("file:src/App.jsx", "file:src/screens/flow.jsx", "imports"), edge_pairs)
         self.assertIn("src/App.jsx", graph["architectureSummary"]["entrypoints"])
         self.assertIn("Repository architecture:", graph["architectureSummary"]["promptText"])
-        self.assertIn("semanticGraph", graph)
-        semantic_node_labels = {node["label"] for node in graph["semanticGraph"]["nodes"]}
+        self.assertNotIn("semanticGraph", graph)
+        semantic_node_labels = {node["label"] for node in semantic_graph["nodes"]}
         self.assertIn("Flow", semantic_node_labels)
         self.assertIn("Code semantics:", graph["architectureSummary"]["promptText"])
         self.assertNotIn(str(checkout_dir), json.dumps(graph))
+        self.assertNotIn(str(checkout_dir), json.dumps(semantic_graph))
 
     def test_build_repository_graph_caps_large_repositories_deterministically(self) -> None:
         cfg = config()
@@ -225,14 +226,15 @@ class WorkerMainTest(unittest.TestCase):
                     f"    return module_{max(0, index - 1)}\n",
                     encoding="utf-8",
                 )
-            first = build_repository_graph(cfg, {"repo": "octocat/large"}, checkout_dir, {})
-            second = build_repository_graph(cfg, {"repo": "octocat/large"}, checkout_dir, {})
+            first, first_semantic = build_repository_graph_bundle(cfg, {"repo": "octocat/large"}, checkout_dir, {})
+            second, second_semantic = build_repository_graph_bundle(cfg, {"repo": "octocat/large"}, checkout_dir, {})
 
         self.assertEqual(first, second)
+        self.assertEqual(first_semantic, second_semantic)
         self.assertLessEqual(len(first["nodes"]), 120)
         self.assertLessEqual(len(first["edges"]), 240)
-        self.assertLessEqual(len(first["semanticGraph"]["nodes"]), 120)
-        self.assertLessEqual(len(first["semanticGraph"]["edges"]), 240)
+        self.assertLessEqual(len(first_semantic["nodes"]), 120)
+        self.assertLessEqual(len(first_semantic["edges"]), 240)
         self.assertTrue(first["stats"]["truncated"])
 
     def test_build_repository_graph_extracts_generic_language_semantics(self) -> None:
@@ -254,9 +256,8 @@ func writeHealth() {}
 """.strip(),
                 encoding="utf-8",
             )
-            graph = build_repository_graph(cfg, {"repo": "octocat/go"}, checkout_dir, {})
+            _graph, semantic = build_repository_graph_bundle(cfg, {"repo": "octocat/go"}, checkout_dir, {})
 
-        semantic = graph["semanticGraph"]
         labels = {node["label"] for node in semantic["nodes"]}
         self.assertIn("Server", labels)
         self.assertIn("HandleHealth", labels)
@@ -294,12 +295,12 @@ func writeHealth() {}
                 "pullwise_worker.main.subprocess.run",
                 return_value=Mock(returncode=0, stdout=json.dumps(agent_payload), stderr=""),
             ) as run:
-                graph = build_repository_graph(cfg, {"repo": "octocat/templates"}, checkout_dir, {})
+                _graph, semantic_graph = build_repository_graph_bundle(cfg, {"repo": "octocat/templates"}, checkout_dir, {})
 
         run.assert_called_once()
-        self.assertEqual(graph["semanticGraph"]["stats"]["source"], "agent_fallback")
-        self.assertEqual(graph["semanticGraph"]["nodes"][0]["label"], "Widget")
-        self.assertIn("Agent fallback covered template semantics.", graph["semanticGraph"]["reviewHints"])
+        self.assertEqual(semantic_graph["stats"]["source"], "agent_fallback")
+        self.assertEqual(semantic_graph["nodes"][0]["label"], "Widget")
+        self.assertIn("Agent fallback covered template semantics.", semantic_graph["reviewHints"])
 
     def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
         payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
@@ -3135,6 +3136,12 @@ func writeHealth() {}
                 "promptText": "Repository architecture: src/app.py handles requests.",
             },
         }
+        semantic_graph = {
+            "version": "semantic-code-graph/0.1",
+            "stats": {"source": "static", "symbols": 1, "relationships": 0},
+            "nodes": [{"id": "symbol:src/app.py:app", "label": "app", "type": "function", "path": "src/app.py"}],
+            "edges": [],
+        }
         review_jobs = []
 
         def run_review(_config: WorkerConfig, job: dict, _checkout_dir: Path) -> tuple[dict, dict, str]:
@@ -3142,11 +3149,14 @@ func writeHealth() {}
             self.assertTrue(
                 any(call.kwargs.get("repository_graph") == graph for call in worker.client.progress.call_args_list)
             )
+            self.assertTrue(
+                any(call.kwargs.get("semantic_graph") == semantic_graph for call in worker.client.progress.call_args_list)
+            )
             return audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"
 
         with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
             patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}) as collect_preflight, \
-            patch("pullwise_worker.main.build_repository_graph", return_value=graph) as build_graph, \
+            patch("pullwise_worker.main.build_repository_graph_bundle", return_value=(graph, semantic_graph)) as build_graph, \
             patch(
                 "pullwise_worker.main.run_verifier_commands",
                 return_value=({"enabled": False, "runs": []}, [], "verifier disabled"),
@@ -3159,10 +3169,13 @@ func writeHealth() {}
         collect_preflight.assert_called_once()
         build_graph.assert_called_once()
         self.assertEqual(review_jobs[0]["architecture_summary"], graph["architectureSummary"])
+        self.assertEqual(review_jobs[0]["semantic_graph"], semantic_graph)
         graph_progress = [call for call in worker.client.progress.call_args_list if call.kwargs.get("repository_graph")]
         self.assertEqual(graph_progress[0].kwargs["repository_graph"], graph)
+        self.assertEqual(graph_progress[0].kwargs["semantic_graph"], semantic_graph)
         result_payload = upload_result.call_args.args[1]
         self.assertEqual(result_payload["repository_graph"], graph)
+        self.assertEqual(result_payload["semantic_graph"], semantic_graph)
 
     def test_run_job_fails_repository_too_large_before_verifier_or_review(self) -> None:
         with patch.dict(
@@ -3528,10 +3541,12 @@ func writeHealth() {}
                 30,
                 "Repository graph ready",
                 repository_graph={"version": "repository-graph/0.1", "nodes": [], "edges": []},
+                semantic_graph={"version": "semantic-code-graph/0.1", "nodes": [], "edges": []},
             )
 
         payload = post.call_args.args[1]
         self.assertEqual(payload["repository_graph"]["version"], "repository-graph/0.1")
+        self.assertEqual(payload["semantic_graph"]["version"], "semantic-code-graph/0.1")
 
     def test_once_loop_executes_lifecycle_command_from_heartbeat(self) -> None:
         worker = Worker(config())

@@ -170,7 +170,7 @@ _REPOSITORY_SEMANTIC_CALL_EXCLUDES = {
 }
 
 
-def build_repository_graph(config: WorkerConfig, job: dict, checkout_dir: Path, preflight: dict) -> dict:
+def build_repository_graph_bundle(config: WorkerConfig, job: dict, checkout_dir: Path, preflight: dict) -> tuple[dict, dict]:
     files = repository_graph_files(checkout_dir)
     semantic_graph = build_repository_semantic_graph(config, job, files, checkout_dir)
     nodes = repository_graph_nodes(files, checkout_dir, preflight)
@@ -189,9 +189,12 @@ def build_repository_graph(config: WorkerConfig, job: dict, checkout_dir: Path, 
         "edges": edges,
         "architectureSummary": summary,
     }
-    if semantic_graph:
-        payload["semanticGraph"] = semantic_graph
-    return payload
+    return payload, semantic_graph
+
+
+def build_repository_graph(config: WorkerConfig, job: dict, checkout_dir: Path, preflight: dict) -> dict:
+    repository_graph, _semantic_graph = build_repository_graph_bundle(config, job, checkout_dir, preflight)
+    return repository_graph
 
 
 def repository_graph_generated_at(job: dict) -> int:
