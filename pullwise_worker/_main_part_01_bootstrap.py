@@ -188,6 +188,12 @@ class WorkerConfig:
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
         self.max_repo_files = env_int("PULLWISE_MAX_REPO_FILES", _DEFAULT_MAX_REPO_FILES, minimum=1)
         self.max_repo_bytes = env_int("PULLWISE_MAX_REPO_BYTES", _DEFAULT_MAX_REPO_BYTES, minimum=1)
+        self.semantic_graph_agent_fallback = env_bool("PULLWISE_SEMANTIC_GRAPH_AGENT_FALLBACK", False)
+        self.semantic_graph_agent_min_symbols = env_int("PULLWISE_SEMANTIC_GRAPH_AGENT_MIN_SYMBOLS", 8, minimum=0)
+        self.semantic_graph_agent_timeout_seconds = max(
+            30,
+            int(os.environ.get("PULLWISE_SEMANTIC_GRAPH_AGENT_TIMEOUT_SECONDS") or 180),
+        )
         self.cleanup_interval_seconds = max(60, int(os.environ.get("PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS") or 3600))
         self.log_retention_seconds = max(0, int(os.environ.get("PULLWISE_LOG_RETENTION_SECONDS") or 14 * 24 * 60 * 60))
         self.max_log_bytes = max(1, int(os.environ.get("PULLWISE_MAX_LOG_BYTES") or 1024 * 1024 * 1024))

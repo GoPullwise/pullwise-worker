@@ -207,6 +207,10 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn(("file:src/App.jsx", "file:src/screens/flow.jsx", "imports"), edge_pairs)
         self.assertIn("src/App.jsx", graph["architectureSummary"]["entrypoints"])
         self.assertIn("Repository architecture:", graph["architectureSummary"]["promptText"])
+        self.assertIn("semanticGraph", graph)
+        semantic_node_labels = {node["label"] for node in graph["semanticGraph"]["nodes"]}
+        self.assertIn("Flow", semantic_node_labels)
+        self.assertIn("Code semantics:", graph["architectureSummary"]["promptText"])
         self.assertNotIn(str(checkout_dir), json.dumps(graph))
 
     def test_build_repository_graph_caps_large_repositories_deterministically(self) -> None:
@@ -216,7 +220,9 @@ class WorkerMainTest(unittest.TestCase):
             (checkout_dir / "src").mkdir()
             for index in range(180):
                 (checkout_dir / "src" / f"module_{index}.py").write_text(
-                    f"from src import module_{max(0, index - 1)}\n",
+                    f"from src import module_{max(0, index - 1)}\n"
+                    f"def run_module_{index}():\n"
+                    f"    return module_{max(0, index - 1)}\n",
                     encoding="utf-8",
                 )
             first = build_repository_graph(cfg, {"repo": "octocat/large"}, checkout_dir, {})
@@ -225,7 +231,75 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertLessEqual(len(first["nodes"]), 120)
         self.assertLessEqual(len(first["edges"]), 240)
+        self.assertLessEqual(len(first["semanticGraph"]["nodes"]), 120)
+        self.assertLessEqual(len(first["semanticGraph"]["edges"]), 240)
         self.assertTrue(first["stats"]["truncated"])
+
+    def test_build_repository_graph_extracts_generic_language_semantics(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "internal" / "api").mkdir(parents=True)
+            (checkout_dir / "internal" / "api" / "server.go").write_text(
+                """
+package api
+
+type Server struct {}
+
+func (s *Server) HandleHealth() {
+    writeHealth()
+}
+
+func writeHealth() {}
+""".strip(),
+                encoding="utf-8",
+            )
+            graph = build_repository_graph(cfg, {"repo": "octocat/go"}, checkout_dir, {})
+
+        semantic = graph["semanticGraph"]
+        labels = {node["label"] for node in semantic["nodes"]}
+        self.assertIn("Server", labels)
+        self.assertIn("HandleHealth", labels)
+        self.assertIn("writeHealth", labels)
+        edge_labels = {(edge["source"], edge["target"], edge["type"]) for edge in semantic["edges"]}
+        node_by_label = {node["label"]: node for node in semantic["nodes"]}
+        self.assertIn((node_by_label["HandleHealth"]["id"], node_by_label["writeHealth"]["id"], "calls"), edge_labels)
+
+    def test_build_repository_graph_can_use_agent_semantic_fallback(self) -> None:
+        cfg = config()
+        cfg.semantic_graph_agent_fallback = True
+        cfg.semantic_graph_agent_min_symbols = 8
+        cfg.semantic_graph_agent_timeout_seconds = 30
+        agent_payload = {
+            "version": "semantic-code-graph/0.1",
+            "summary": "Agent inferred a component graph.",
+            "nodes": [
+                {
+                    "id": "symbol:index.html:Widget",
+                    "label": "Widget",
+                    "type": "component",
+                    "path": "index.html",
+                    "line": 4,
+                    "signature": "Widget",
+                    "importance": 0.8,
+                }
+            ],
+            "edges": [],
+            "reviewHints": ["Agent fallback covered template semantics."],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "index.html").write_text("<x-widget></x-widget>\n", encoding="utf-8")
+            with patch(
+                "pullwise_worker.main.subprocess.run",
+                return_value=Mock(returncode=0, stdout=json.dumps(agent_payload), stderr=""),
+            ) as run:
+                graph = build_repository_graph(cfg, {"repo": "octocat/templates"}, checkout_dir, {})
+
+        run.assert_called_once()
+        self.assertEqual(graph["semanticGraph"]["stats"]["source"], "agent_fallback")
+        self.assertEqual(graph["semanticGraph"]["nodes"][0]["label"], "Widget")
+        self.assertIn("Agent fallback covered template semantics.", graph["semanticGraph"]["reviewHints"])
 
     def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
         payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
