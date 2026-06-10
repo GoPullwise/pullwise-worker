@@ -59,6 +59,7 @@ from pullwise_worker.main import (
     verifier_command_env,
     uninstall_worker,
     update_worker,
+    worker_config_for_job,
     worker_readiness_checks,
     write_scan_summary,
 )
@@ -134,6 +135,42 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(worker_config.max_repo_files, 2000)
         self.assertEqual(worker_config.max_repo_bytes, 50 * 1024 * 1024)
+
+    def test_worker_config_for_job_applies_server_agent_overrides_without_mutating_base(self) -> None:
+        worker_config = config()
+        worker_config.codex_reasoning_effort = "medium"
+        worker_config.opencode_variant = "medium"
+
+        job_config = worker_config_for_job(
+            worker_config,
+            {
+                "agentConfig": {
+                    "codex": {"reasoningEffort": "xhigh"},
+                    "opencode": {"variant": "xhigh"},
+                }
+            },
+        )
+
+        self.assertIsNot(job_config, worker_config)
+        self.assertEqual(job_config.codex_reasoning_effort, "xhigh")
+        self.assertEqual(job_config.opencode_variant, "xhigh")
+        self.assertEqual(worker_config.codex_reasoning_effort, "medium")
+        self.assertEqual(worker_config.opencode_variant, "medium")
+
+    def test_worker_config_for_job_rejects_unknown_agent_overrides(self) -> None:
+        worker_config = config()
+
+        job_config = worker_config_for_job(
+            worker_config,
+            {
+                "agent_config": {
+                    "codex": {"reasoning_effort": 'xhigh" --unsafe'},
+                    "opencode": {"variant": "turbo"},
+                }
+            },
+        )
+
+        self.assertIs(job_config, worker_config)
 
     def test_repository_resource_stats_excludes_git_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

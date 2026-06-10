@@ -2,6 +2,36 @@ from __future__ import annotations
 
 # Loaded by main.py; keep definitions in that module's globals for compatibility.
 
+AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
+
+
+def normalized_agent_reasoning_level(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip().lower()
+    return normalized if normalized in AGENT_REASONING_LEVELS else ""
+
+
+def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
+    agent_config = job.get("agent_config") if isinstance(job.get("agent_config"), dict) else job.get("agentConfig")
+    if not isinstance(agent_config, dict):
+        return base_config
+    codex = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
+    opencode = agent_config.get("opencode") if isinstance(agent_config.get("opencode"), dict) else {}
+    codex_reasoning_effort = normalized_agent_reasoning_level(
+        codex.get("reasoning_effort") or codex.get("reasoningEffort")
+    )
+    opencode_variant = normalized_agent_reasoning_level(opencode.get("variant"))
+    if not codex_reasoning_effort and not opencode_variant:
+        return base_config
+    config = copy.copy(base_config)
+    if codex_reasoning_effort:
+        config.codex_reasoning_effort = codex_reasoning_effort
+    if opencode_variant:
+        config.opencode_variant = opencode_variant
+    return config
+
+
 class Worker:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
@@ -166,8 +196,9 @@ class Worker:
 
     def run_job(self, job: dict) -> None:
         job_id = safe_job_id(job.get("job_id"))
+        job_config = worker_config_for_job(self.config, job)
         attempt_id = f"{self.config.worker_id}-{job.get('attempt') or 1}"
-        checkout_dir = checkout_dir_for_job(self.config.work_dir, job_id)
+        checkout_dir = checkout_dir_for_job(job_config.work_dir, job_id)
         started = time.monotonic()
         duration_ms = 0
         job_error = ""
@@ -180,12 +211,12 @@ class Worker:
                 "clone",
                 PHASE_PROGRESS["clone"],
                 "Cloning repository",
-                audit_swarm=audit_swarm_scan_artifacts("clone", config=self.config, summary="Cloning repository."),
+                audit_swarm=audit_swarm_scan_artifacts("clone", config=job_config, summary="Cloning repository."),
             )
             resolved_commit = clone_repository(job, checkout_dir)
             job["resolved_commit"] = resolved_commit
             job["commit"] = resolved_commit
-            limit_preflight = enforce_repository_limits(self.config, job, checkout_dir)
+            limit_preflight = enforce_repository_limits(job_config, job, checkout_dir)
             self.client.progress(
                 job_id,
                 "index",
@@ -193,14 +224,14 @@ class Worker:
                 "Repository ready",
                 audit_swarm=audit_swarm_scan_artifacts(
                     "preflight",
-                    config=self.config,
+                    config=job_config,
                     preflight=limit_preflight,
                     summary="Repository checkout is ready.",
                 ),
             )
-            preflight = collect_preflight_metadata(self.config, job, checkout_dir)
+            preflight = collect_preflight_metadata(job_config, job, checkout_dir)
             try:
-                repository_graph, semantic_graph = build_repository_graph_bundle(self.config, job, checkout_dir, preflight)
+                repository_graph, semantic_graph = build_repository_graph_bundle(job_config, job, checkout_dir, preflight)
             except Exception:
                 repository_graph = {}
                 semantic_graph = {}
@@ -228,7 +259,7 @@ class Worker:
                     "Repository graph ready",
                     audit_swarm=audit_swarm_scan_artifacts(
                         "preflight",
-                        config=self.config,
+                        config=job_config,
                         preflight=preflight,
                         summary="Repository graph is ready.",
                     ),
@@ -237,11 +268,11 @@ class Worker:
                     impact_graph=impact_graph,
                 )
             try:
-                verifier, verifier_findings, verifier_logs = run_verifier_commands(self.config, job, checkout_dir, preflight)
+                verifier, verifier_findings, verifier_logs = run_verifier_commands(job_config, job, checkout_dir, preflight)
             except Exception as exc:
                 verifier = {
-                    "enabled": self.config.verifier_enabled,
-                    "summary": f"Verifier failed before completing: {redact_secrets(str(exc), self.config)}"[:500],
+                    "enabled": job_config.verifier_enabled,
+                    "summary": f"Verifier failed before completing: {redact_secrets(str(exc), job_config)}"[:500],
                     "runs": [],
                 }
                 verifier_findings = []
@@ -261,12 +292,12 @@ class Worker:
                 verifier_logs,
                 audit_swarm=audit_swarm_scan_artifacts(
                     "discovery",
-                    config=self.config,
+                    config=job_config,
                     preflight=preflight,
                     summary="Repository preflight is complete; reviewer agents are discovering issue cards.",
                 ),
             )
-            audit_payload, summary, logs_summary = run_codex_review(self.config, job, checkout_dir)
+            audit_payload, summary, logs_summary = run_codex_review(job_config, job, checkout_dir)
             ai_usage = normalize_ai_usage(audit_payload.get("ai_usage"))
             if verifier_findings:
                 audit_payload = merge_audit_swarm_payloads(
@@ -287,7 +318,7 @@ class Worker:
                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
             rejected_samples = [*rejected_samples, *convergence_rejected_samples][:5]
             review_calibration = apply_review_calibration_decisions(
-                self.config,
+                job_config,
                 job,
                 projected_findings,
                 review_decision_records,
@@ -313,7 +344,7 @@ class Worker:
             duration_ms = int((time.monotonic() - started) * 1000)
             audit_swarm = audit_swarm_scan_artifacts(
                 "report",
-                config=self.config,
+                config=job_config,
                 audit_payload=audit_payload,
                 preflight=preflight,
                 verification_audit=verification_audit,
@@ -353,15 +384,15 @@ class Worker:
             try:
                 self.upload_result_with_retry(job_id, payload)
             except Exception as exc:
-                self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), job_config)}"[:500]
                 job_error = self.last_error
-                write_scan_summary(self.config, job_id, "upload_failed", duration_ms, self.last_error)
+                write_scan_summary(job_config, job_id, "upload_failed", duration_ms, self.last_error)
                 return
-            write_scan_summary(self.config, job_id, "done", duration_ms, "")
+            write_scan_summary(job_config, job_id, "done", duration_ms, "")
             self.last_error = None
         except Exception as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
-            error = redact_secrets(str(exc)[:500], self.config)
+            error = redact_secrets(str(exc)[:500], job_config)
             error_code = str(getattr(exc, "error_code", "") or "").strip()
             error_preflight = getattr(exc, "preflight", None)
             if not isinstance(error_preflight, dict):
@@ -377,7 +408,7 @@ class Worker:
                 "attempt_id": attempt_id,
                 "audit_swarm": audit_swarm_scan_artifacts(
                     "failed",
-                    config=self.config,
+                    config=job_config,
                     preflight=error_preflight,
                     summary=error,
                 ),
@@ -394,17 +425,17 @@ class Worker:
             try:
                 self.upload_result_with_retry(job_id, error_payload)
             except Exception as upload_exc:
-                self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), self.config)}"[:500]
+                self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), job_config)}"[:500]
                 job_error = self.last_error
-                write_scan_summary(self.config, job_id, "upload_failed", duration_ms, self.last_error)
+                write_scan_summary(job_config, job_id, "upload_failed", duration_ms, self.last_error)
                 return
-            write_scan_summary(self.config, job_id, "failed", duration_ms, error)
+            write_scan_summary(job_config, job_id, "failed", duration_ms, error)
             self.last_error = error
             job_error = error
         finally:
-            if job_error and self.config.failed_checkout_retention_seconds > 0:
+            if job_error and job_config.failed_checkout_retention_seconds > 0:
                 marker = failed_checkout_marker(checkout_dir)
-                marker.write_text(str(int(time.time()) + self.config.failed_checkout_retention_seconds), encoding="utf-8")
+                marker.write_text(str(int(time.time()) + job_config.failed_checkout_retention_seconds), encoding="utf-8")
             else:
                 shutil.rmtree(checkout_dir, ignore_errors=True)
 
