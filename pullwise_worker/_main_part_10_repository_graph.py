@@ -5,12 +5,15 @@ from __future__ import annotations
 import ast
 import hashlib
 
-REPOSITORY_GRAPH_PROTOCOL_VERSION = "repository-graph/0.1"
+REPOSITORY_GRAPH_LEGACY_PROTOCOL_VERSION = "repository-graph/0.1"
+REPOSITORY_GRAPH_PROTOCOL_VERSION = "repository-graph/0.2"
 REPOSITORY_SEMANTIC_GRAPH_PROTOCOL_VERSION = "semantic-code-graph/0.1"
+REPOSITORY_IMPACT_GRAPH_PROTOCOL_VERSION = "impact-graph/0.1"
 REPOSITORY_GRAPH_MAX_NODES = 120
 REPOSITORY_GRAPH_MAX_EDGES = 240
 REPOSITORY_GRAPH_MAX_SEMANTIC_NODES = 120
 REPOSITORY_GRAPH_MAX_SEMANTIC_EDGES = 240
+REPOSITORY_GRAPH_MAX_IMPACT_TARGETS = 120
 REPOSITORY_GRAPH_MAX_PROMPT_CHARS = 2048
 REPOSITORY_GRAPH_IGNORED_DIRS = {
     ".git",
@@ -55,7 +58,31 @@ _REPOSITORY_GRAPH_SOURCE_EXTENSIONS = {
     ".vue",
 }
 _REPOSITORY_GRAPH_CONFIG_EXTENSIONS = {".json", ".toml", ".yaml", ".yml"}
+_REPOSITORY_GRAPH_DOC_EXTENSIONS = {".adoc", ".md", ".mdx", ".rst"}
 _REPOSITORY_GRAPH_JS_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_REPOSITORY_GRAPH_DOC_NAMES = {
+    "ARCHITECTURE",
+    "ARCHITECTURE.adoc",
+    "ARCHITECTURE.md",
+    "ARCHITECTURE.mdx",
+    "ARCHITECTURE.rst",
+    "CHANGELOG",
+    "CHANGELOG.adoc",
+    "CHANGELOG.md",
+    "CHANGELOG.mdx",
+    "CHANGELOG.rst",
+    "CONTRIBUTING",
+    "CONTRIBUTING.adoc",
+    "CONTRIBUTING.md",
+    "CONTRIBUTING.mdx",
+    "CONTRIBUTING.rst",
+    "README",
+    "README.adoc",
+    "README.md",
+    "README.mdx",
+    "README.rst",
+}
+_REPOSITORY_GRAPH_DOC_DIRS = {"adr", "architecture", "doc", "docs"}
 _REPOSITORY_GRAPH_MANIFEST_FILES = {
     "Cargo.toml",
     "Dockerfile",
@@ -104,11 +131,22 @@ _REPOSITORY_GRAPH_LANGUAGE_BY_EXTENSION = {
 }
 _REPOSITORY_GRAPH_NODE_TYPE_PRIORITY = {
     "entrypoint": 0,
-    "workflow": 1,
-    "manifest": 2,
-    "module": 3,
-    "test": 4,
-    "file": 5,
+    "test": 1,
+    "doc": 2,
+    "workflow": 3,
+    "manifest": 4,
+    "config": 5,
+    "module": 6,
+    "file": 7,
+}
+_REPOSITORY_GRAPH_EDGE_TYPE_PRIORITY = {
+    "tests": 0,
+    "documents": 1,
+    "configures": 2,
+    "imports": 3,
+    "contains": 4,
+    "depends_on": 5,
+    "calls": 6,
 }
 _REPOSITORY_SEMANTIC_NODE_TYPE_PRIORITY = {
     "route": 0,
@@ -176,7 +214,8 @@ def build_repository_graph_bundle(config: WorkerConfig, job: dict, checkout_dir:
     nodes = repository_graph_nodes(files, checkout_dir, preflight)
     edges = repository_graph_edges(files, checkout_dir, nodes)
     nodes, edges, truncated = cap_repository_graph(nodes, edges)
-    summary = repository_graph_summary(job, nodes, edges, truncated, semantic_graph)
+    impact_graph = build_repository_impact_graph(job, nodes, edges, truncated)
+    summary = repository_graph_summary(job, nodes, edges, truncated, semantic_graph, impact_graph)
     payload = {
         "version": REPOSITORY_GRAPH_PROTOCOL_VERSION,
         "generatedAt": repository_graph_generated_at(job),
@@ -188,6 +227,7 @@ def build_repository_graph_bundle(config: WorkerConfig, job: dict, checkout_dir:
         "nodes": nodes,
         "edges": edges,
         "architectureSummary": summary,
+        "impactGraph": impact_graph,
     }
     return payload, semantic_graph
 
@@ -244,6 +284,8 @@ def repository_graph_include_file(relative_path: str) -> bool:
         return False
     name = parts[-1]
     suffix = PurePosixPath(relative_path).suffix
+    if repository_graph_is_doc(relative_path):
+        return True
     if name in _REPOSITORY_GRAPH_MANIFEST_FILES:
         return True
     if relative_path.startswith(".github/workflows/") and suffix in {".yml", ".yaml"}:
@@ -289,6 +331,11 @@ def repository_graph_edges(files: list[Path], checkout_dir: Path, nodes: list[di
     node_ids = {str(node.get("id") or "") for node in nodes}
     file_paths = {repository_graph_relative_path(path, checkout_dir) for path in files}
     file_paths.discard("")
+    node_type_by_path = {
+        str(node.get("path") or ""): str(node.get("type") or "")
+        for node in nodes
+        if str(node.get("id") or "").startswith("file:")
+    }
     edges_by_key: dict[tuple[str, str, str], dict] = {}
     for file_path in sorted(file_paths):
         parent_parts = file_path.split("/")[:-1]
@@ -303,26 +350,29 @@ def repository_graph_edges(files: list[Path], checkout_dir: Path, nodes: list[di
             )
     for path in sorted(files, key=lambda item: repository_graph_relative_path(item, checkout_dir)):
         source_path = repository_graph_relative_path(path, checkout_dir)
-        suffix = PurePosixPath(source_path).suffix
-        if suffix in _REPOSITORY_GRAPH_JS_EXTENSIONS:
-            for target_path in repository_graph_js_import_targets(path, checkout_dir, source_path, file_paths):
-                repository_graph_add_edge(
+        for reference in repository_graph_import_target_references(path, checkout_dir, source_path, file_paths):
+            target_path = str(reference.get("target") or "")
+            repository_graph_add_edge(
+                edges_by_key,
+                f"file:{source_path}",
+                f"file:{target_path}",
+                "imports",
+                node_ids,
+            )
+            if repository_graph_is_test(source_path) and repository_graph_is_source_target(target_path, node_type_by_path):
+                repository_graph_add_traceability_edge(
                     edges_by_key,
                     f"file:{source_path}",
                     f"file:{target_path}",
-                    "imports",
+                    "tests",
                     node_ids,
+                    confidence=0.95,
+                    evidence=[reference.get("evidence")],
                 )
-        elif suffix == ".py":
-            for target_path in repository_graph_python_import_targets(path, checkout_dir, source_path, file_paths):
-                repository_graph_add_edge(
-                    edges_by_key,
-                    f"file:{source_path}",
-                    f"file:{target_path}",
-                    "imports",
-                    node_ids,
-                )
-    return sorted(edges_by_key.values(), key=lambda edge: (edge["type"], edge["source"], edge["target"]))
+    repository_graph_add_test_traceability_edges(files, checkout_dir, node_ids, file_paths, node_type_by_path, edges_by_key)
+    repository_graph_add_document_traceability_edges(nodes, files, checkout_dir, node_ids, file_paths, node_type_by_path, edges_by_key)
+    repository_graph_add_config_traceability_edges(nodes, files, checkout_dir, node_ids, node_type_by_path, edges_by_key)
+    return sorted(edges_by_key.values(), key=repository_graph_edge_sort_key)
 
 
 def repository_graph_add_edge(
@@ -346,6 +396,726 @@ def repository_graph_add_edge(
         "type": edge_type,
         "weight": 1,
     }
+
+
+def repository_graph_traceability_edge(
+    source: str,
+    target: str,
+    edge_type: str,
+    *,
+    confidence: float,
+    evidence: list[dict] | None = None,
+    weight: int = 1,
+) -> dict:
+    clean_type = repository_graph_text(edge_type, limit=40)
+    if clean_type not in {"configures", "documents", "tests"}:
+        clean_type = "documents"
+    clean_source = repository_graph_text(source, limit=180)
+    clean_target = repository_graph_text(target, limit=180)
+    try:
+        clean_confidence = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        clean_confidence = 0.6
+    try:
+        clean_weight = max(1, int(weight))
+    except (TypeError, ValueError):
+        clean_weight = 1
+    edge = {
+        "id": f"{clean_type}:{clean_source}->{clean_target}"[:240],
+        "source": clean_source,
+        "target": clean_target,
+        "type": clean_type,
+        "weight": clean_weight,
+        "confidence": round(clean_confidence, 2),
+    }
+    clean_evidence = repository_graph_traceability_evidence(evidence)
+    if clean_evidence:
+        edge["evidence"] = clean_evidence
+    return edge
+
+
+def repository_graph_add_traceability_edge(
+    edges_by_key: dict[tuple[str, str, str], dict],
+    source: str,
+    target: str,
+    edge_type: str,
+    node_ids: set[str],
+    *,
+    confidence: float,
+    evidence: list[dict] | None = None,
+    weight: int = 1,
+) -> None:
+    if source not in node_ids or target not in node_ids or source == target:
+        return
+    edge = repository_graph_traceability_edge(
+        source,
+        target,
+        edge_type,
+        confidence=confidence,
+        evidence=evidence,
+        weight=weight,
+    )
+    key = (source, target, edge["type"])
+    if key not in edges_by_key:
+        edges_by_key[key] = edge
+        return
+    existing = edges_by_key[key]
+    existing["weight"] = max(1, int(existing.get("weight") or 1)) + max(1, int(edge.get("weight") or 1))
+    existing["confidence"] = round(max(float(existing.get("confidence") or 0.0), float(edge.get("confidence") or 0.0)), 2)
+    merged_evidence = []
+    for item in [*(existing.get("evidence") or []), *(edge.get("evidence") or [])]:
+        if isinstance(item, dict) and item not in merged_evidence:
+            merged_evidence.append(item)
+        if len(merged_evidence) >= 4:
+            break
+    if merged_evidence:
+        existing["evidence"] = merged_evidence
+
+
+def repository_graph_traceability_evidence(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    evidence = []
+    for item in value:
+        clean_item = repository_graph_traceability_evidence_item(item)
+        if clean_item and clean_item not in evidence:
+            evidence.append(clean_item)
+        if len(evidence) >= 4:
+            break
+    return evidence
+
+
+def repository_graph_traceability_evidence_item(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    kind = repository_graph_text(value.get("kind"), limit=40)
+    file_path = repository_graph_evidence_file(value.get("file"))
+    if not kind or not file_path:
+        return {}
+    try:
+        line = int(value.get("line") or 0)
+    except (TypeError, ValueError):
+        line = 0
+    if line <= 0:
+        return {}
+    text = repository_graph_evidence_text(value.get("text"))
+    item = {"kind": kind, "file": file_path, "line": line}
+    if text:
+        item["text"] = text
+    return item
+
+
+def repository_graph_evidence(kind: str, file_path: str, line: int, text: str = "") -> dict:
+    return repository_graph_traceability_evidence_item(
+        {
+            "kind": kind,
+            "file": file_path,
+            "line": line,
+            "text": text,
+        }
+    )
+
+
+def repository_graph_evidence_file(value: object) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw or "\x00" in raw or raw.startswith("/") or _WINDOWS_DRIVE_RE.match(raw):
+        return ""
+    normalized = repository_graph_normalize_posix_path(raw)
+    if not normalized or normalized.startswith("../") or normalized == "..":
+        return ""
+    return normalized[:180]
+
+
+def repository_graph_evidence_text(value: object, limit: int = 180) -> str:
+    text = str(value or "").replace("\x00", " ").replace("\r", " ").replace("\n", " ").strip()
+    text = re.sub(r"\b[A-Za-z]:[/\\][^\s'\"`<>)]*", "[absolute-path]", text)
+    text = re.sub(
+        r"(?<![A-Za-z0-9:])/(?:Users|home|tmp|var|private|workspace|workspaces|mnt|opt|repo|repos|runner|build|app|src)"
+        r"(?:/[^\s'\"`<>)]*)+",
+        "[absolute-path]",
+        text,
+    )
+    return text[:limit]
+
+
+def repository_graph_import_target_references(
+    path: Path,
+    checkout_dir: Path,
+    source_path: str,
+    file_paths: set[str],
+) -> list[dict]:
+    suffix = PurePosixPath(source_path).suffix
+    if suffix in _REPOSITORY_GRAPH_JS_EXTENSIONS:
+        return repository_graph_js_import_target_references(path, checkout_dir, source_path, file_paths)
+    if suffix == ".py":
+        return repository_graph_python_import_target_references(path, checkout_dir, source_path, file_paths)
+    return []
+
+
+def repository_graph_js_import_target_references(
+    path: Path,
+    checkout_dir: Path,
+    source_path: str,
+    file_paths: set[str],
+) -> list[dict]:
+    del checkout_dir
+    text = repository_graph_read_source_prefix(path)
+    references = []
+    seen = set()
+    for line_number, line in enumerate(text.splitlines()[:300], start=1):
+        specs = []
+        specs.extend(match.group(1) for match in re.finditer(r"\bfrom\s+['\"]([^'\"]+)['\"]", line))
+        specs.extend(match.group(1) for match in re.finditer(r"^\s*import\s+['\"]([^'\"]+)['\"]", line))
+        specs.extend(match.group(1) for match in re.finditer(r"\brequire\(\s*['\"]([^'\"]+)['\"]\s*\)", line))
+        for specifier in specs:
+            target = repository_graph_resolve_js_import(source_path, specifier, file_paths)
+            key = (source_path, target)
+            if not target or key in seen:
+                continue
+            seen.add(key)
+            references.append(
+                {
+                    "target": target,
+                    "evidence": repository_graph_evidence("import", source_path, line_number, line),
+                }
+            )
+    return references
+
+
+def repository_graph_python_import_target_references(
+    path: Path,
+    checkout_dir: Path,
+    source_path: str,
+    file_paths: set[str],
+) -> list[dict]:
+    del checkout_dir
+    text = repository_graph_read_source_prefix(path)
+    references = []
+    seen = set()
+    for line_number, line in enumerate(text.splitlines()[:300], start=1):
+        targets = []
+        from_match = re.match(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\s+(.+)$", line)
+        if from_match:
+            package = from_match.group(1)
+            imported_names = [
+                part.strip().split(" ", 1)[0]
+                for part in from_match.group(2).split(",")
+                if part.strip() and part.strip() != "*"
+            ]
+            targets.extend(repository_graph_resolve_python_import(package, imported_names, file_paths))
+        else:
+            import_match = re.match(r"^\s*import\s+(.+)$", line)
+            if import_match:
+                for imported in import_match.group(1).split(","):
+                    module = imported.strip().split(" ", 1)[0]
+                    targets.extend(repository_graph_resolve_python_import(module, [], file_paths))
+        for target in targets:
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            references.append(
+                {
+                    "target": target,
+                    "evidence": repository_graph_evidence("import", source_path, line_number, line),
+                }
+            )
+    return references
+
+
+def repository_graph_add_test_traceability_edges(
+    files: list[Path],
+    checkout_dir: Path,
+    node_ids: set[str],
+    file_paths: set[str],
+    node_type_by_path: dict[str, str],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    source_paths = sorted(path for path in file_paths if repository_graph_is_source_target(path, node_type_by_path))
+    test_files = [
+        (repository_graph_relative_path(path, checkout_dir), path)
+        for path in files
+        if repository_graph_is_test(repository_graph_relative_path(path, checkout_dir))
+    ]
+    for test_path, path in sorted(test_files):
+        matched_targets = set()
+        for target_path, confidence in repository_graph_test_path_matches(test_path, source_paths):
+            matched_targets.add(target_path)
+            repository_graph_add_traceability_edge(
+                edges_by_key,
+                f"file:{test_path}",
+                f"file:{target_path}",
+                "tests",
+                node_ids,
+                confidence=confidence,
+                evidence=[repository_graph_evidence("path_match", test_path, 1, f"{test_path} matches {target_path}")],
+            )
+        text = repository_graph_read_source_prefix(path)
+        weak_count = 0
+        for target_path in source_paths:
+            if target_path in matched_targets:
+                continue
+            term = repository_graph_source_mention_term(target_path)
+            if not term:
+                continue
+            mention = repository_graph_first_mention(text, term)
+            if not mention:
+                continue
+            weak_count += 1
+            repository_graph_add_traceability_edge(
+                edges_by_key,
+                f"file:{test_path}",
+                f"file:{target_path}",
+                "tests",
+                node_ids,
+                confidence=0.6,
+                evidence=[repository_graph_evidence("mention", test_path, mention[0], mention[1])],
+            )
+            if weak_count >= 8:
+                break
+
+
+def repository_graph_test_path_matches(test_path: str, source_paths: list[str]) -> list[tuple[str, float]]:
+    test_pure = PurePosixPath(test_path)
+    clean_stem = repository_graph_clean_test_stem(test_pure.stem)
+    if not clean_stem:
+        return []
+    parent_parts = list(test_pure.parent.parts)
+    if parent_parts and parent_parts[0] in {"test", "tests"}:
+        parent_parts = parent_parts[1:]
+    candidate_roots = {clean_stem}
+    if parent_parts:
+        candidate_roots.add("/".join([*parent_parts, clean_stem]))
+    matches = []
+    for source_path in source_paths:
+        source_no_suffix = repository_graph_path_without_suffix(source_path)
+        source_no_src = source_no_suffix[4:] if source_no_suffix.startswith("src/") else source_no_suffix
+        if source_no_suffix in candidate_roots or source_no_src in candidate_roots:
+            matches.append((source_path, 0.85))
+            continue
+        source_stem = PurePosixPath(source_path).stem
+        source_parts = set(PurePosixPath(source_path).parts[:-1])
+        if source_stem == clean_stem and (not parent_parts or bool(source_parts.intersection(parent_parts))):
+            matches.append((source_path, 0.75))
+    return sorted(dict(matches).items(), key=lambda item: item[0])[:12]
+
+
+def repository_graph_clean_test_stem(stem: str) -> str:
+    clean = re.sub(r"(\.test|\.spec|_test|-test)$", "", str(stem or ""), flags=re.IGNORECASE)
+    clean = re.sub(r"^(test_|test-)", "", clean, flags=re.IGNORECASE)
+    return clean.strip("._-")
+
+
+def repository_graph_path_without_suffix(relative_path: str) -> str:
+    pure = PurePosixPath(relative_path)
+    suffix = pure.suffix
+    return relative_path[: -len(suffix)] if suffix else relative_path
+
+
+def repository_graph_source_mention_term(source_path: str) -> str:
+    stem = PurePosixPath(source_path).stem
+    if stem in {"__init__", "index", "main", "app"}:
+        parent = PurePosixPath(source_path).parent.name
+        stem = parent if parent else stem
+    stem = re.sub(r"[^A-Za-z0-9_]+", "", stem)
+    return stem if len(stem) >= 4 else ""
+
+
+def repository_graph_first_mention(text: str, term: str) -> tuple[int, str] | None:
+    if not text or not term:
+        return None
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", re.IGNORECASE)
+    for line_number, line in enumerate(text.splitlines()[:400], start=1):
+        if pattern.search(line):
+            return line_number, line
+    return None
+
+
+def repository_graph_add_document_traceability_edges(
+    nodes: list[dict],
+    files: list[Path],
+    checkout_dir: Path,
+    node_ids: set[str],
+    file_paths: set[str],
+    node_type_by_path: dict[str, str],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    source_paths = sorted(path for path in file_paths if repository_graph_is_source_target(path, node_type_by_path))
+    doc_files = [
+        (repository_graph_relative_path(path, checkout_dir), path)
+        for path in files
+        if repository_graph_is_doc(repository_graph_relative_path(path, checkout_dir))
+    ]
+    for doc_path, path in sorted(doc_files):
+        text = repository_graph_read_source_prefix(path)
+        direct_count = 0
+        for target_path in source_paths:
+            mention = repository_graph_first_path_mention(text, target_path)
+            if not mention:
+                continue
+            direct_count += 1
+            repository_graph_add_traceability_edge(
+                edges_by_key,
+                f"file:{doc_path}",
+                f"file:{target_path}",
+                "documents",
+                node_ids,
+                confidence=0.95,
+                evidence=[repository_graph_evidence("path", doc_path, mention[0], mention[1])],
+            )
+            if direct_count >= 12:
+                break
+        for target_id, target_path in repository_graph_doc_path_matches(doc_path, nodes):
+            repository_graph_add_traceability_edge(
+                edges_by_key,
+                f"file:{doc_path}",
+                target_id,
+                "documents",
+                node_ids,
+                confidence=0.75,
+                evidence=[repository_graph_evidence("path_match", doc_path, 1, f"{doc_path} matches {target_path}")],
+            )
+        if repository_graph_is_readme(doc_path):
+            for target_id, target_path in repository_graph_readme_targets(nodes):
+                repository_graph_add_traceability_edge(
+                    edges_by_key,
+                    f"file:{doc_path}",
+                    target_id,
+                    "documents",
+                    node_ids,
+                    confidence=0.6,
+                    evidence=[repository_graph_evidence("readme", doc_path, 1, f"README covers {target_path}")],
+                )
+
+
+def repository_graph_first_path_mention(text: str, relative_path: str) -> tuple[int, str] | None:
+    if not text or not relative_path:
+        return None
+    lower_path = relative_path.lower()
+    for line_number, line in enumerate(text.splitlines()[:400], start=1):
+        if lower_path in line.lower():
+            return line_number, line
+    return None
+
+
+def repository_graph_doc_path_matches(doc_path: str, nodes: list[dict]) -> list[tuple[str, str]]:
+    pure = PurePosixPath(doc_path)
+    stem = pure.stem.lower()
+    if not stem or stem in {"architecture", "changelog", "contributing", "readme"}:
+        return []
+    matches = []
+    doc_parts = list(pure.parts)
+    if doc_parts and doc_parts[0] in _REPOSITORY_GRAPH_DOC_DIRS:
+        doc_parts = doc_parts[1:]
+    doc_without_suffix = "/".join([*doc_parts[:-1], stem]) if doc_parts[:-1] else stem
+    for node in nodes:
+        if node.get("type") != "module":
+            continue
+        node_id = str(node.get("id") or "")
+        path = str(node.get("path") or "")
+        if not node_id or not path:
+            continue
+        path_no_src = path[4:] if path.startswith("src/") else path
+        if path.split("/")[-1].lower() == stem or path_no_src.lower() == doc_without_suffix:
+            matches.append((node_id, path))
+    return sorted(dict(matches).items(), key=lambda item: item[0])[:8]
+
+
+def repository_graph_readme_targets(nodes: list[dict]) -> list[tuple[str, str]]:
+    targets = []
+    for node in sorted(nodes, key=repository_graph_node_sort_key):
+        node_type = str(node.get("type") or "")
+        path = str(node.get("path") or "")
+        node_id = str(node.get("id") or "")
+        if not path or not node_id:
+            continue
+        if node_type == "entrypoint" or (node_type == "module" and path.count("/") == 0):
+            targets.append((node_id, path))
+        if len(targets) >= 8:
+            break
+    return targets
+
+
+def repository_graph_add_config_traceability_edges(
+    nodes: list[dict],
+    files: list[Path],
+    checkout_dir: Path,
+    node_ids: set[str],
+    node_type_by_path: dict[str, str],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    target_groups = repository_graph_configure_target_groups(nodes)
+    for path in sorted(files, key=lambda item: repository_graph_relative_path(item, checkout_dir)):
+        config_path = repository_graph_relative_path(path, checkout_dir)
+        node_type = node_type_by_path.get(config_path) or repository_graph_file_node_type(config_path)
+        if node_type not in {"config", "manifest", "workflow"}:
+            continue
+        name = PurePosixPath(config_path).name
+        text = repository_graph_read_source_prefix(path)
+        if name == "package.json":
+            repository_graph_package_json_configures(config_path, text, node_ids, target_groups, edges_by_key)
+        elif name == "pyproject.toml":
+            repository_graph_pyproject_configures(config_path, text, node_ids, target_groups, edges_by_key)
+        elif name == "tsconfig.json":
+            repository_graph_tsconfig_configures(config_path, text, node_ids, target_groups, edges_by_key)
+        elif config_path.startswith(".github/workflows/"):
+            repository_graph_workflow_configures(config_path, text, node_ids, target_groups, edges_by_key)
+        elif name == "Dockerfile":
+            repository_graph_add_configures_to_targets(
+                config_path,
+                [*target_groups["entrypoints"], *target_groups["source"], *target_groups["tests"]],
+                node_ids,
+                edges_by_key,
+                confidence=0.75,
+                evidence=repository_graph_evidence("dockerfile", config_path, 1, "Dockerfile runtime image"),
+            )
+        else:
+            repository_graph_generic_configures(config_path, text, node_ids, target_groups, edges_by_key)
+
+
+def repository_graph_configure_target_groups(nodes: list[dict]) -> dict[str, list[tuple[str, str]]]:
+    entrypoints = []
+    tests = []
+    source = []
+    for node in sorted(nodes, key=repository_graph_node_sort_key):
+        node_id = str(node.get("id") or "")
+        path = str(node.get("path") or "")
+        node_type = str(node.get("type") or "")
+        if not node_id or not path:
+            continue
+        if node_type == "entrypoint":
+            entrypoints.append((node_id, path))
+        elif node_type == "test":
+            tests.append((node_id, path))
+        elif node_type == "module" and path in {"src", "tests", "test"}:
+            if path == "src":
+                source.insert(0, (node_id, path))
+            else:
+                tests.insert(0, (node_id, path))
+        elif node_type == "file" and path.startswith("src/"):
+            source.append((node_id, path))
+    return {
+        "entrypoints": entrypoints[:8],
+        "source": source[:8],
+        "tests": tests[:8],
+    }
+
+
+def repository_graph_package_json_configures(
+    config_path: str,
+    text: str,
+    node_ids: set[str],
+    target_groups: dict[str, list[tuple[str, str]]],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    try:
+        package_json = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        package_json = {}
+    scripts = package_json.get("scripts") if isinstance(package_json, dict) else {}
+    if not isinstance(scripts, dict):
+        return
+    for script_name, command in sorted(scripts.items()):
+        command_text = str(command or "")
+        fragment = repository_graph_command_fragment(command_text) or str(script_name)
+        evidence = repository_graph_evidence("script", config_path, 1, f"{script_name}: {fragment}")
+        lowered = f"{script_name} {command_text}".lower()
+        if any(token in lowered for token in ("test", "vitest", "jest", "pytest")):
+            repository_graph_add_configures_to_targets(
+                config_path,
+                [*target_groups["tests"], *target_groups["source"]],
+                node_ids,
+                edges_by_key,
+                confidence=0.85,
+                evidence=evidence,
+            )
+        if any(token in lowered for token in ("build", "dev", "start", "lint", "typecheck", "tsc", "vite", "next")):
+            repository_graph_add_configures_to_targets(
+                config_path,
+                [*target_groups["entrypoints"], *target_groups["source"]],
+                node_ids,
+                edges_by_key,
+                confidence=0.8,
+                evidence=evidence,
+            )
+
+
+def repository_graph_pyproject_configures(
+    config_path: str,
+    text: str,
+    node_ids: set[str],
+    target_groups: dict[str, list[tuple[str, str]]],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    lowered = text.lower()
+    if any(token in lowered for token in ("pytest", "tool.pytest", "unittest")):
+        repository_graph_add_configures_to_targets(
+            config_path,
+            [*target_groups["tests"], *target_groups["source"]],
+            node_ids,
+            edges_by_key,
+            confidence=0.8,
+            evidence=repository_graph_evidence("pyproject", config_path, repository_graph_first_line_number(text, "pytest"), "pyproject pytest"),
+        )
+    if any(token in lowered for token in ("ruff", "mypy", "coverage")):
+        repository_graph_add_configures_to_targets(
+            config_path,
+            target_groups["source"],
+            node_ids,
+            edges_by_key,
+            confidence=0.75,
+            evidence=repository_graph_evidence("pyproject", config_path, 1, "pyproject static checks"),
+        )
+
+
+def repository_graph_tsconfig_configures(
+    config_path: str,
+    text: str,
+    node_ids: set[str],
+    target_groups: dict[str, list[tuple[str, str]]],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    try:
+        config = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        config = {}
+    raw_patterns = []
+    if isinstance(config, dict):
+        for key in ("files", "include"):
+            values = config.get(key)
+            if isinstance(values, list):
+                raw_patterns.extend(str(item or "") for item in values)
+    matched_targets = []
+    for pattern in raw_patterns:
+        matched_targets.extend(repository_graph_targets_for_pattern(pattern, target_groups))
+    if not matched_targets:
+        matched_targets = [*target_groups["entrypoints"], *target_groups["source"]]
+    repository_graph_add_configures_to_targets(
+        config_path,
+        matched_targets,
+        node_ids,
+        edges_by_key,
+        confidence=0.85,
+        evidence=repository_graph_evidence("tsconfig", config_path, 1, f"tsconfig {', '.join(raw_patterns[:2])}" if raw_patterns else "tsconfig"),
+    )
+
+
+def repository_graph_workflow_configures(
+    config_path: str,
+    text: str,
+    node_ids: set[str],
+    target_groups: dict[str, list[tuple[str, str]]],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    lowered = text.lower()
+    fragment = repository_graph_command_fragment(text) or "workflow commands"
+    line = repository_graph_first_command_line_number(text)
+    if any(token in lowered for token in ("test", "vitest", "jest", "pytest")):
+        repository_graph_add_configures_to_targets(
+            config_path,
+            [*target_groups["tests"], *target_groups["source"]],
+            node_ids,
+            edges_by_key,
+            confidence=0.8,
+            evidence=repository_graph_evidence("workflow", config_path, line, fragment),
+        )
+    if any(token in lowered for token in ("build", "lint", "typecheck", "tsc", "mypy", "ruff")):
+        repository_graph_add_configures_to_targets(
+            config_path,
+            [*target_groups["entrypoints"], *target_groups["source"]],
+            node_ids,
+            edges_by_key,
+            confidence=0.75,
+            evidence=repository_graph_evidence("workflow", config_path, line, fragment),
+        )
+
+
+def repository_graph_generic_configures(
+    config_path: str,
+    text: str,
+    node_ids: set[str],
+    target_groups: dict[str, list[tuple[str, str]]],
+    edges_by_key: dict[tuple[str, str, str], dict],
+) -> None:
+    lowered = text.lower()
+    if "tests" in lowered or "test/" in lowered:
+        repository_graph_add_configures_to_targets(
+            config_path,
+            target_groups["tests"],
+            node_ids,
+            edges_by_key,
+            confidence=0.6,
+            evidence=repository_graph_evidence("config", config_path, 1, "config references tests"),
+        )
+    if "src" in lowered:
+        repository_graph_add_configures_to_targets(
+            config_path,
+            target_groups["source"],
+            node_ids,
+            edges_by_key,
+            confidence=0.6,
+            evidence=repository_graph_evidence("config", config_path, 1, "config references src"),
+        )
+
+
+def repository_graph_add_configures_to_targets(
+    config_path: str,
+    targets: list[tuple[str, str]],
+    node_ids: set[str],
+    edges_by_key: dict[tuple[str, str, str], dict],
+    *,
+    confidence: float,
+    evidence: dict,
+) -> None:
+    for target_id, _target_path in targets[:12]:
+        repository_graph_add_traceability_edge(
+            edges_by_key,
+            f"file:{config_path}",
+            target_id,
+            "configures",
+            node_ids,
+            confidence=confidence,
+            evidence=[evidence],
+        )
+
+
+def repository_graph_targets_for_pattern(
+    pattern: str,
+    target_groups: dict[str, list[tuple[str, str]]],
+) -> list[tuple[str, str]]:
+    normalized = repository_graph_normalize_posix_path(str(pattern or "").split("*", 1)[0].rstrip("/"))
+    targets = []
+    for target in [*target_groups["entrypoints"], *target_groups["source"], *target_groups["tests"]]:
+        _target_id, target_path = target
+        if normalized and (target_path == normalized or target_path.startswith(f"{normalized}/") or normalized.startswith(f"{target_path}/")):
+            targets.append(target)
+    return targets
+
+
+def repository_graph_command_fragment(text: str) -> str:
+    pattern = re.compile(
+        r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|dev|start|lint|typecheck)\b|"
+        r"\b(?:pytest|vitest|jest|tsc|mypy|ruff|docker\s+build)\b",
+        re.IGNORECASE,
+    )
+    match = pattern.search(str(text or ""))
+    if match:
+        return match.group(0)[:180]
+    return ""
+
+
+def repository_graph_first_line_number(text: str, term: str) -> int:
+    lowered_term = term.lower()
+    for line_number, line in enumerate(str(text or "").splitlines()[:400], start=1):
+        if lowered_term in line.lower():
+            return line_number
+    return 1
+
+
+def repository_graph_first_command_line_number(text: str) -> int:
+    for line_number, line in enumerate(str(text or "").splitlines()[:400], start=1):
+        if repository_graph_command_fragment(line):
+            return line_number
+    return 1
 
 
 def build_repository_semantic_graph(config: WorkerConfig | None, job: dict, files: list[Path], checkout_dir: Path) -> dict:
@@ -491,7 +1261,11 @@ def repository_semantic_agent_prompt(job: dict, files: list[Path], checkout_dir:
             break
     static_count = len(static_graph.get("nodes") or []) if isinstance(static_graph, dict) else 0
     return (
-        "Build a semantic code graph for this repository. Return only JSON with top-level "
+        "Build a semantic code graph for this repository. "
+        "If the agent CLI supports subagents, split suitable independent analysis across multiple "
+        "subagents according to repository shape and task scope to reduce context pressure; aggregate "
+        "their results yourself and preserve the required final JSON output structure exactly. "
+        "Return only JSON with top-level "
         "`version`, `summary`, `nodes`, `edges`, and optional `reviewHints`. "
         f"`version` must be `{REPOSITORY_SEMANTIC_GRAPH_PROTOCOL_VERSION}`. "
         "Nodes must use repository-relative `path`, `id`, `label`, `type`, optional `line`, "
@@ -1590,12 +2364,215 @@ def cap_repository_graph(nodes: list[dict], edges: list[dict]) -> tuple[list[dic
     kept_ids = {str(node.get("id") or "") for node in capped_nodes}
     filtered_edges = [
         edge
-        for edge in sorted(edges, key=lambda item: (item.get("type", ""), item.get("source", ""), item.get("target", "")))
+        for edge in sorted(edges, key=repository_graph_edge_sort_key)
         if edge.get("source") in kept_ids and edge.get("target") in kept_ids
     ]
     capped_edges = filtered_edges[:REPOSITORY_GRAPH_MAX_EDGES]
     truncated = len(sorted_nodes) > len(capped_nodes) or len(edges) > len(capped_edges)
     return capped_nodes, capped_edges, truncated
+
+
+def build_repository_impact_graph(job: dict, nodes: list[dict], edges: list[dict], truncated: bool) -> dict:
+    node_by_id = {str(node.get("id") or ""): node for node in nodes if isinstance(node, dict)}
+    source_target_ids = {
+        node_id
+        for node_id, node in node_by_id.items()
+        if repository_graph_is_impact_target_node(node)
+    }
+    changed_files = repository_graph_changed_files(job)
+    relation_sources: dict[str, dict[str, list[dict]]] = {
+        node_id: {"tests": [], "documents": [], "configures": [], "imports": [], "importedBy": [], "symbols": []}
+        for node_id in source_target_ids
+    }
+    tests_with_targets = set()
+    docs_with_targets = set()
+    for edge in sorted(edges, key=repository_graph_edge_sort_key):
+        source_id = str(edge.get("source") or "")
+        target_id = str(edge.get("target") or "")
+        edge_type = str(edge.get("type") or "")
+        if edge_type in {"tests", "documents", "configures"} and target_id in source_target_ids:
+            relation = repository_graph_impact_relation(node_by_id.get(source_id) or {}, edge)
+            if relation:
+                relation_sources[target_id][edge_type].append(relation)
+                if edge_type == "tests":
+                    tests_with_targets.add(source_id)
+                elif edge_type == "documents":
+                    docs_with_targets.add(source_id)
+            continue
+        if edge_type == "imports":
+            if source_id in source_target_ids:
+                relation = repository_graph_impact_relation(node_by_id.get(target_id) or {}, edge)
+                if relation:
+                    relation_sources[source_id]["imports"].append(relation)
+            if target_id in source_target_ids:
+                relation = repository_graph_impact_relation(node_by_id.get(source_id) or {}, edge)
+                if relation:
+                    relation_sources[target_id]["importedBy"].append(relation)
+    targets = []
+    for node_id in source_target_ids:
+        node = node_by_id.get(node_id) or {}
+        relations = relation_sources.get(node_id) or {}
+        gaps = []
+        if str(node.get("type") or "") != "module":
+            if not relations.get("tests"):
+                gaps.append("no_direct_tests")
+            if not relations.get("documents"):
+                gaps.append("no_direct_docs")
+        target = {
+            "id": node_id,
+            "path": repository_graph_text(node.get("path"), limit=180),
+            "label": repository_graph_text(node.get("label"), limit=80),
+            "type": repository_graph_text(node.get("type"), limit=40),
+            "risk": repository_graph_impact_risk(node, relations, gaps),
+            "relations": {key: relations.get(key, [])[:40] for key in ("tests", "documents", "configures", "imports", "importedBy", "symbols")},
+            "gaps": gaps,
+        }
+        targets.append(target)
+    targets = sorted(targets, key=repository_graph_impact_target_sort_key)[:REPOSITORY_GRAPH_MAX_IMPACT_TARGETS]
+    kept_paths = {target["path"] for target in targets}
+    tests_without_targets = [
+        str(node.get("path") or "")
+        for node_id, node in sorted(node_by_id.items())
+        if node.get("type") == "test" and node_id not in tests_with_targets
+    ][:40]
+    docs_without_targets = [
+        str(node.get("path") or "")
+        for node_id, node in sorted(node_by_id.items())
+        if node.get("type") == "doc" and node_id not in docs_with_targets
+    ][:40]
+    coverage = {
+        "sourceFilesWithoutTests": [target["path"] for target in targets if "no_direct_tests" in target.get("gaps", [])][:40],
+        "sourceFilesWithoutDocs": [target["path"] for target in targets if "no_direct_docs" in target.get("gaps", [])][:40],
+        "testsWithoutTargets": tests_without_targets,
+        "docsWithoutTargets": docs_without_targets,
+    }
+    stats = {
+        "targets": len(targets),
+        "testedTargets": sum(1 for target in targets if target["relations"].get("tests")),
+        "documentedTargets": sum(1 for target in targets if target["relations"].get("documents")),
+        "configuredTargets": sum(1 for target in targets if target["relations"].get("configures")),
+        "testsEdges": sum(1 for edge in edges if edge.get("type") == "tests"),
+        "documentsEdges": sum(1 for edge in edges if edge.get("type") == "documents"),
+        "configuresEdges": sum(1 for edge in edges if edge.get("type") == "configures"),
+        "changedFiles": len(changed_files),
+        "truncated": bool(truncated or len(source_target_ids) > len(kept_paths)),
+    }
+    return {
+        "version": REPOSITORY_IMPACT_GRAPH_PROTOCOL_VERSION,
+        "mode": "changeset" if changed_files else "repository",
+        "summary": (
+            f"Impact graph: {stats['targets']} targets, {stats['testsEdges']} test links, "
+            f"{stats['documentsEdges']} doc links, {stats['configuresEdges']} config links."
+        ),
+        "stats": stats,
+        "changedFiles": changed_files,
+        "targets": targets,
+        "coverage": coverage,
+        "promptText": repository_impact_prompt_text(targets, coverage),
+    }
+
+
+def repository_graph_changed_files(job: dict) -> list[str]:
+    raw_changed = job.get("changed_files") if isinstance(job, dict) else []
+    if not isinstance(raw_changed, list):
+        raw_changed = job.get("changedFiles") if isinstance(job, dict) else []
+    changed = []
+    if isinstance(raw_changed, list):
+        for item in raw_changed:
+            file_path = repository_graph_evidence_file(item)
+            if file_path and file_path not in changed:
+                changed.append(file_path)
+            if len(changed) >= 120:
+                break
+    return changed
+
+
+def repository_graph_is_impact_target_node(node: dict) -> bool:
+    node_type = str(node.get("type") or "")
+    path = str(node.get("path") or "")
+    if node_type == "module":
+        return path == "src" or path.startswith("src/")
+    return node_type in {"entrypoint", "file"} and repository_graph_is_source_path(path)
+
+
+def repository_graph_impact_relation(node: dict, edge: dict) -> dict:
+    node_id = repository_graph_text(node.get("id"), limit=180)
+    path = repository_graph_text(node.get("path"), limit=180)
+    if not node_id or not path:
+        return {}
+    relation = {
+        "id": node_id,
+        "path": path,
+        "label": repository_graph_text(node.get("label"), limit=80) or PurePosixPath(path).name,
+        "type": repository_graph_text(node.get("type"), limit=40),
+    }
+    if edge.get("confidence") is not None:
+        try:
+            relation["confidence"] = round(max(0.0, min(1.0, float(edge.get("confidence")))), 2)
+        except (TypeError, ValueError):
+            pass
+    evidence = repository_graph_traceability_evidence(edge.get("evidence") if isinstance(edge.get("evidence"), list) else [])
+    if evidence:
+        relation["evidence"] = evidence
+    return relation
+
+
+def repository_graph_impact_risk(node: dict, relations: dict[str, list[dict]], gaps: list[str]) -> float:
+    try:
+        importance = float(node.get("importance") or 0.5)
+    except (TypeError, ValueError):
+        importance = 0.5
+    risk = 0.28 + (importance * 0.45)
+    risk += min(0.15, len(relations.get("importedBy") or []) * 0.03)
+    risk += min(0.08, len(relations.get("configures") or []) * 0.02)
+    if "no_direct_tests" in gaps:
+        risk += 0.12
+    if "no_direct_docs" in gaps:
+        risk += 0.05
+    return round(max(0.0, min(1.0, risk)), 2)
+
+
+def repository_graph_impact_target_sort_key(target: dict) -> tuple[float, str]:
+    return (-float(target.get("risk") or 0.0), str(target.get("path") or ""))
+
+
+def repository_impact_prompt_text(targets: list[dict], coverage: dict) -> str:
+    lines = ["Impact context:"]
+    for target in targets[:8]:
+        path = repository_graph_text(target.get("path"), limit=120)
+        relations = target.get("relations") if isinstance(target.get("relations"), dict) else {}
+        tests = repository_graph_impact_relation_paths(relations.get("tests"))
+        docs = repository_graph_impact_relation_paths(relations.get("documents"))
+        config = repository_graph_impact_relation_paths(relations.get("configures"))
+        parts = [
+            f"tests: {', '.join(tests[:3]) if tests else 'none detected'}",
+            f"docs: {', '.join(docs[:2]) if docs else 'none detected'}",
+            f"config: {', '.join(config[:2]) if config else 'none detected'}",
+        ]
+        if path:
+            lines.append(f"- {path} -> {'; '.join(parts)}.")
+    gaps = []
+    for path in (coverage.get("sourceFilesWithoutTests") or [])[:3]:
+        gaps.append(f"{path} has no direct tests")
+    for path in (coverage.get("sourceFilesWithoutDocs") or [])[:3]:
+        gaps.append(f"{path} has no direct docs")
+    if gaps:
+        lines.append(f"- Coverage gaps: {'; '.join(gaps[:4])}.")
+    prompt_text = "\n".join(lines)
+    return prompt_text[:1200]
+
+
+def repository_graph_impact_relation_paths(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    paths = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        path = repository_graph_text(item.get("path"), limit=120)
+        if path and path not in paths:
+            paths.append(path)
+    return paths
 
 
 def repository_graph_summary(
@@ -1604,6 +2581,7 @@ def repository_graph_summary(
     edges: list[dict],
     truncated: bool,
     semantic_graph: dict | None = None,
+    impact_graph: dict | None = None,
 ) -> dict:
     entrypoints = [str(node.get("path") or "") for node in nodes if node.get("type") == "entrypoint"][:8]
     modules = [str(node.get("path") or "") for node in nodes if node.get("type") == "module"][:12]
@@ -1645,6 +2623,10 @@ def repository_graph_summary(
             f"- Code semantics: {semantic_summary or f'{semantic_nodes_count} symbols, {semantic_edges_count} relationships'}."
         )
         prompt_lines.extend(repository_semantic_prompt_lines(semantic_graph))
+    if isinstance(impact_graph, dict):
+        impact_prompt = str(impact_graph.get("promptText") or "").strip()[:1200]
+        if impact_prompt:
+            prompt_lines.append(impact_prompt)
     if review_hints:
         prompt_lines.append(f"- Review hints: {' '.join(review_hints)}")
     prompt_text = "\n".join(prompt_lines)
@@ -1702,12 +2684,16 @@ def repository_graph_file_node_type(relative_path: str) -> str:
     suffix = PurePosixPath(relative_path).suffix
     if repository_graph_is_entrypoint(relative_path):
         return "entrypoint"
-    if relative_path.startswith(".github/workflows/") and suffix in {".yml", ".yaml"}:
-        return "workflow"
     if repository_graph_is_test(relative_path):
         return "test"
+    if repository_graph_is_doc(relative_path):
+        return "doc"
+    if relative_path.startswith(".github/workflows/") and suffix in {".yml", ".yaml"}:
+        return "workflow"
     if name in _REPOSITORY_GRAPH_MANIFEST_FILES:
         return "manifest"
+    if suffix in _REPOSITORY_GRAPH_CONFIG_EXTENSIONS:
+        return "config"
     return "file"
 
 
@@ -1718,24 +2704,42 @@ def repository_graph_file_tags(relative_path: str, node_type: str) -> list[str]:
         tags.append(language.lower())
     if relative_path.startswith("src/") and "source" not in tags:
         tags.append("source")
+    if node_type == "doc":
+        tags.append("documentation")
+    if node_type == "config":
+        tags.append("configuration")
     return sorted(dict.fromkeys(tags))
 
 
 def repository_graph_node_importance(node_type: str) -> float:
     if node_type == "entrypoint":
         return 1.0
-    if node_type == "workflow":
-        return 0.82
-    if node_type == "manifest":
-        return 0.78
     if node_type == "test":
-        return 0.66
+        return 0.74
+    if node_type == "doc":
+        return 0.7
+    if node_type == "workflow":
+        return 0.68
+    if node_type == "manifest":
+        return 0.64
+    if node_type == "config":
+        return 0.6
     return 0.5
 
 
 def repository_graph_node_sort_key(node: dict) -> tuple[int, str]:
     node_type = str(node.get("type") or "file")
     return (_REPOSITORY_GRAPH_NODE_TYPE_PRIORITY.get(node_type, 99), str(node.get("id") or ""))
+
+
+def repository_graph_edge_sort_key(edge: dict) -> tuple[int, str, str, str]:
+    edge_type = str(edge.get("type") or "")
+    return (
+        _REPOSITORY_GRAPH_EDGE_TYPE_PRIORITY.get(edge_type, 99),
+        edge_type,
+        str(edge.get("source") or ""),
+        str(edge.get("target") or ""),
+    )
 
 
 def repository_graph_is_entrypoint(relative_path: str) -> bool:
@@ -1754,6 +2758,40 @@ def repository_graph_is_test(relative_path: str) -> bool:
         or ".test." in name
         or ".spec." in name
     )
+
+
+def repository_graph_is_doc(relative_path: str) -> bool:
+    normalized = repository_graph_normalize_posix_path(relative_path)
+    if not normalized:
+        return False
+    pure = PurePosixPath(normalized)
+    name = pure.name
+    suffix = pure.suffix
+    if name in _REPOSITORY_GRAPH_DOC_NAMES:
+        return True
+    if suffix in _REPOSITORY_GRAPH_DOC_EXTENSIONS:
+        return True
+    parts = pure.parts
+    return bool(parts and parts[0] in _REPOSITORY_GRAPH_DOC_DIRS and suffix in _REPOSITORY_GRAPH_DOC_EXTENSIONS)
+
+
+def repository_graph_is_readme(relative_path: str) -> bool:
+    name = PurePosixPath(relative_path).name.upper()
+    return name == "README" or name.startswith("README.")
+
+
+def repository_graph_is_source_path(relative_path: str) -> bool:
+    suffix = PurePosixPath(relative_path).suffix
+    return (
+        suffix in _REPOSITORY_GRAPH_SOURCE_EXTENSIONS
+        and not repository_graph_is_test(relative_path)
+        and not repository_graph_is_doc(relative_path)
+    )
+
+
+def repository_graph_is_source_target(relative_path: str, node_type_by_path: dict[str, str]) -> bool:
+    node_type = node_type_by_path.get(relative_path) or repository_graph_file_node_type(relative_path)
+    return node_type in {"entrypoint", "file"} and repository_graph_is_source_path(relative_path)
 
 
 def repository_graph_js_import_targets(

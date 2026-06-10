@@ -277,7 +277,11 @@ def review_prompt(job: dict) -> str:
         if prior_refs:
             convergence_instruction += f" Prior open findings to verify: {', '.join(prior_refs)}."
     return (
-        "Run the Audit Swarm protocol for this repository. Return only JSON with top-level "
+        "Run the Audit Swarm protocol for this repository. "
+        "If the agent CLI supports subagents, split suitable independent analysis across multiple "
+        "subagents according to repository shape and task scope to reduce context pressure; aggregate "
+        "their results yourself and preserve the required final JSON output structure exactly. "
+        "Return only JSON with top-level "
         "`audit_protocol`, `issue_cards`, and `verification_results`. Do not return Pullwise legacy "
         "`findings`. Each issue card is a hypothesis and must include a concrete title, severity "
         "(P0/P1/P2/P3/P4 or critical/high/medium/low/info), one or more repository-relative locations, "

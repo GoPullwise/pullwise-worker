@@ -195,7 +195,7 @@ class WorkerMainTest(unittest.TestCase):
                 {"languages": ["JavaScript/TypeScript"], "packageManagers": ["npm"]},
             )
 
-        self.assertEqual(graph["version"], "repository-graph/0.1")
+        self.assertEqual(graph["version"], "repository-graph/0.2")
         self.assertEqual(graph["repo"], "octocat/app")
         self.assertIn("JavaScript", graph["stats"]["languages"])
         node_ids = {node["id"] for node in graph["nodes"]}
@@ -213,6 +213,86 @@ class WorkerMainTest(unittest.TestCase):
         self.assertIn("Code semantics:", graph["architectureSummary"]["promptText"])
         self.assertNotIn(str(checkout_dir), json.dumps(graph))
         self.assertNotIn(str(checkout_dir), json.dumps(semantic_graph))
+
+    def test_build_repository_graph_emits_traceability_and_impact_graph(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout_dir = Path(tmp)
+            (checkout_dir / "src" / "auth").mkdir(parents=True)
+            (checkout_dir / "tests" / "auth").mkdir(parents=True)
+            (checkout_dir / "docs").mkdir()
+            (checkout_dir / "config").mkdir()
+            (checkout_dir / ".github" / "workflows").mkdir(parents=True)
+            (checkout_dir / "src" / "app.py").write_text(
+                "from src.auth.session import create_session\n\ncreate_session()\n",
+                encoding="utf-8",
+            )
+            (checkout_dir / "src" / "auth" / "session.py").write_text(
+                "def create_session():\n    return 'ok'\n",
+                encoding="utf-8",
+            )
+            (checkout_dir / "tests" / "auth" / "test_session.py").write_text(
+                "from src.auth import session\n\n\ndef test_create_session():\n    assert session.create_session()\n",
+                encoding="utf-8",
+            )
+            (checkout_dir / "docs" / "auth.md").write_text(
+                f"Auth flow documentation references src/auth/session.py from {checkout_dir / 'private-notes.md'}.\n",
+                encoding="utf-8",
+            )
+            (checkout_dir / "README.md").write_text("Run the app from src/app.py.\n", encoding="utf-8")
+            (checkout_dir / "config" / "settings.yaml").write_text("src: src\n", encoding="utf-8")
+            (checkout_dir / "package.json").write_text(
+                '{"scripts":{"test":"pytest tests","build":"python src/app.py"}}',
+                encoding="utf-8",
+            )
+            (checkout_dir / "pyproject.toml").write_text("[tool.pytest.ini_options]\ntestpaths=['tests']\n", encoding="utf-8")
+            (checkout_dir / "tsconfig.json").write_text('{"include":["src/**/*.ts","tests/**/*.ts"]}', encoding="utf-8")
+            (checkout_dir / ".github" / "workflows" / "ci.yml").write_text(
+                "name: ci\njobs:\n  test:\n    steps:\n      - run: npm test\n      - run: npm run build\n",
+                encoding="utf-8",
+            )
+            (checkout_dir / "Dockerfile").write_text("FROM python:3.12\nCOPY src /app/src\n", encoding="utf-8")
+
+            graph, _semantic_graph = build_repository_graph_bundle(
+                cfg,
+                {"repo": "octocat/auth", "branch": "main", "commit": "abc123"},
+                checkout_dir,
+                {"languages": ["Python"], "packageManagers": ["npm"]},
+            )
+
+        node_types = {node["id"]: node["type"] for node in graph["nodes"]}
+        self.assertEqual(node_types["file:README.md"], "doc")
+        self.assertEqual(node_types["file:docs/auth.md"], "doc")
+        self.assertEqual(node_types["file:config/settings.yaml"], "config")
+        edge_pairs = {(edge["source"], edge["target"], edge["type"]) for edge in graph["edges"]}
+        self.assertIn(("file:tests/auth/test_session.py", "file:src/auth/session.py", "tests"), edge_pairs)
+        self.assertIn(("file:docs/auth.md", "file:src/auth/session.py", "documents"), edge_pairs)
+        self.assertIn(("file:docs/auth.md", "dir:src/auth", "documents"), edge_pairs)
+        self.assertTrue(any(edge[0] == "file:package.json" and edge[2] == "configures" for edge in edge_pairs))
+        self.assertTrue(any(edge[0] == "file:.github/workflows/ci.yml" and edge[2] == "configures" for edge in edge_pairs))
+        trace_edges = [edge for edge in graph["edges"] if edge["type"] in {"tests", "documents", "configures"}]
+        self.assertTrue(trace_edges)
+        for edge in trace_edges:
+            self.assertIn("confidence", edge)
+            self.assertLessEqual(len(edge.get("evidence", [])), 4)
+            for evidence in edge.get("evidence", []):
+                self.assertLessEqual(len(evidence["kind"]), 40)
+                self.assertFalse(Path(evidence["file"]).is_absolute())
+                self.assertGreater(evidence["line"], 0)
+                self.assertLessEqual(len(evidence.get("text", "")), 180)
+                self.assertNotIn("\n", evidence.get("text", ""))
+                self.assertNotIn("\x00", evidence.get("text", ""))
+
+        impact_graph = graph["impactGraph"]
+        self.assertEqual(impact_graph["version"], "impact-graph/0.1")
+        session_target = next(target for target in impact_graph["targets"] if target["path"] == "src/auth/session.py")
+        self.assertTrue(session_target["relations"]["tests"])
+        self.assertTrue(session_target["relations"]["documents"])
+        self.assertTrue(session_target["relations"]["configures"])
+        self.assertIn("Impact context:", impact_graph["promptText"])
+        self.assertIn("src/auth/session.py", impact_graph["promptText"])
+        self.assertIn("Impact context:", graph["architectureSummary"]["promptText"])
+        self.assertNotIn(str(checkout_dir), json.dumps(graph))
 
     def test_build_repository_graph_caps_large_repositories_deterministically(self) -> None:
         cfg = config()
@@ -433,6 +513,25 @@ func writeHealth() {}
         prompt = worker_main.review_prompt({"repo": "acme/api", "branch": "main", "commit": "pending"})
 
         self.assertIn("Write every human-facing review output field in English.", prompt)
+
+    def test_review_prompt_encourages_subagents_without_changing_output_shape(self) -> None:
+        prompt = worker_main.review_prompt({"repo": "acme/api", "branch": "main", "commit": "pending"})
+
+        self.assertIn("If the agent CLI supports subagents", prompt)
+        self.assertIn("preserve the required final JSON output structure exactly", prompt)
+        self.assertIn("Return only JSON with top-level `audit_protocol`, `issue_cards`, and `verification_results`", prompt)
+
+    def test_repository_semantic_agent_prompt_encourages_subagents_without_changing_output_shape(self) -> None:
+        prompt = worker_main.repository_semantic_agent_prompt(
+            {"repo": "acme/api", "branch": "main", "commit": "pending"},
+            [],
+            Path("checkout"),
+            {"nodes": []},
+        )
+
+        self.assertIn("If the agent CLI supports subagents", prompt)
+        self.assertIn("preserve the required final JSON output structure exactly", prompt)
+        self.assertIn("Return only JSON with top-level `version`, `summary`, `nodes`, `edges`, and optional `reviewHints`", prompt)
 
     def test_review_prompt_includes_repository_graph_architecture_summary(self) -> None:
         prompt = worker_main.review_prompt(
@@ -3134,8 +3233,14 @@ func writeHealth() {}
     def test_run_job_uploads_repository_graph_progress_and_result(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
+        impact_graph = {
+            "version": "impact-graph/0.1",
+            "mode": "repository",
+            "targets": [{"id": "file:src/app.py", "path": "src/app.py", "relations": {}}],
+            "promptText": "Impact context:\n- src/app.py -> tests: none detected; docs: none detected; config: none detected.",
+        }
         graph = {
-            "version": "repository-graph/0.1",
+            "version": "repository-graph/0.2",
             "nodes": [{"id": "file:src/app.py", "label": "app.py", "type": "entrypoint", "path": "src/app.py"}],
             "edges": [],
             "architectureSummary": {
@@ -3143,6 +3248,7 @@ func writeHealth() {}
                 "modules": ["src"],
                 "promptText": "Repository architecture: src/app.py handles requests.",
             },
+            "impactGraph": impact_graph,
         }
         semantic_graph = {
             "version": "semantic-code-graph/0.1",
@@ -3159,6 +3265,9 @@ func writeHealth() {}
             )
             self.assertTrue(
                 any(call.kwargs.get("semantic_graph") == semantic_graph for call in worker.client.progress.call_args_list)
+            )
+            self.assertTrue(
+                any(call.kwargs.get("impact_graph") == impact_graph for call in worker.client.progress.call_args_list)
             )
             return audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"
 
@@ -3178,12 +3287,15 @@ func writeHealth() {}
         build_graph.assert_called_once()
         self.assertEqual(review_jobs[0]["architecture_summary"], graph["architectureSummary"])
         self.assertEqual(review_jobs[0]["semantic_graph"], semantic_graph)
+        self.assertEqual(review_jobs[0]["impact_graph"], impact_graph)
         graph_progress = [call for call in worker.client.progress.call_args_list if call.kwargs.get("repository_graph")]
         self.assertEqual(graph_progress[0].kwargs["repository_graph"], graph)
         self.assertEqual(graph_progress[0].kwargs["semantic_graph"], semantic_graph)
+        self.assertEqual(graph_progress[0].kwargs["impact_graph"], impact_graph)
         result_payload = upload_result.call_args.args[1]
         self.assertEqual(result_payload["repository_graph"], graph)
         self.assertEqual(result_payload["semantic_graph"], semantic_graph)
+        self.assertEqual(result_payload["impact_graph"], impact_graph)
 
     def test_run_job_fails_repository_too_large_before_verifier_or_review(self) -> None:
         with patch.dict(
@@ -3548,13 +3660,15 @@ func writeHealth() {}
                 "index",
                 30,
                 "Repository graph ready",
-                repository_graph={"version": "repository-graph/0.1", "nodes": [], "edges": []},
+                repository_graph={"version": "repository-graph/0.2", "nodes": [], "edges": []},
                 semantic_graph={"version": "semantic-code-graph/0.1", "nodes": [], "edges": []},
+                impact_graph={"version": "impact-graph/0.1", "targets": []},
             )
 
         payload = post.call_args.args[1]
-        self.assertEqual(payload["repository_graph"]["version"], "repository-graph/0.1")
+        self.assertEqual(payload["repository_graph"]["version"], "repository-graph/0.2")
         self.assertEqual(payload["semantic_graph"]["version"], "semantic-code-graph/0.1")
+        self.assertEqual(payload["impact_graph"]["version"], "impact-graph/0.1")
 
     def test_once_loop_executes_lifecycle_command_from_heartbeat(self) -> None:
         worker = Worker(config())

@@ -173,6 +173,7 @@ class Worker:
         job_error = ""
         repository_graph = {}
         semantic_graph = {}
+        impact_graph = {}
         try:
             self.client.progress(
                 job_id,
@@ -203,6 +204,7 @@ class Worker:
             except Exception:
                 repository_graph = {}
                 semantic_graph = {}
+                impact_graph = {}
                 limitations = preflight.get("limitations")
                 if not isinstance(limitations, list):
                     limitations = []
@@ -212,6 +214,10 @@ class Worker:
                 job["repository_graph"] = repository_graph
                 if semantic_graph:
                     job["semantic_graph"] = semantic_graph
+                raw_impact_graph = repository_graph.get("impactGraph") if isinstance(repository_graph, dict) else {}
+                impact_graph = raw_impact_graph if isinstance(raw_impact_graph, dict) else {}
+                if impact_graph:
+                    job["impact_graph"] = impact_graph
                 architecture_summary = repository_graph.get("architectureSummary")
                 if isinstance(architecture_summary, dict):
                     job["architecture_summary"] = architecture_summary
@@ -228,6 +234,7 @@ class Worker:
                     ),
                     repository_graph=repository_graph,
                     semantic_graph=semantic_graph,
+                    impact_graph=impact_graph,
                 )
             try:
                 verifier, verifier_findings, verifier_logs = run_verifier_commands(self.config, job, checkout_dir, preflight)
@@ -337,6 +344,8 @@ class Worker:
                 payload["repository_graph"] = repository_graph
             if semantic_graph:
                 payload["semantic_graph"] = semantic_graph
+            if impact_graph:
+                payload["impact_graph"] = impact_graph
             if ai_usage:
                 payload["ai_usage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)

@@ -357,6 +357,7 @@ class PullwiseClient:
         audit_swarm: dict | None = None,
         repository_graph: dict | None = None,
         semantic_graph: dict | None = None,
+        impact_graph: dict | None = None,
     ) -> None:
         payload = {
             "phase": phase,
@@ -371,6 +372,8 @@ class PullwiseClient:
             payload["repository_graph"] = repository_graph
         if semantic_graph:
             payload["semantic_graph"] = semantic_graph
+        if impact_graph:
+            payload["impact_graph"] = impact_graph
         self.post(f"/worker/jobs/{job_id}/progress", payload)
 
     def result(self, job_id: str, payload: dict) -> None:
