@@ -61,6 +61,14 @@ def mark_codex_auth_failure(config: WorkerConfig, detail: str) -> None:
         _codex_auth_failure_detail = clipped
 
 
+def clear_codex_auth_failure() -> None:
+    global _codex_auth_failure_until, _codex_auth_failure_detail
+
+    with _CODEX_AUTH_FAILURE_LOCK:
+        _codex_auth_failure_until = 0.0
+        _codex_auth_failure_detail = ""
+
+
 def looks_like_codex_auth_failure(detail: str) -> bool:
     lowered = str(detail or "").lower()
     return any(marker.lower() in lowered for marker in _CODEX_AUTH_FAILURE_MARKERS)

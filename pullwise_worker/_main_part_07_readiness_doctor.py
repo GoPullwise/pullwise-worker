@@ -181,15 +181,9 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     if config.codex_model:
         command.extend(["--model", config.codex_model])
     command.append('Return only JSON: {"ok": true}')
-    auth_failure = codex_auth_failure_error(config)
-    if auth_failure:
-        return False, auth_failure
     if not _CODEX_EXEC_LOCK.acquire(blocking=False):
         return True, "ready check deferred while codex is running"
     try:
-        auth_failure = codex_auth_failure_error(config)
-        if auth_failure:
-            return False, auth_failure
         completed = subprocess.run(
             command,
             text=True,
@@ -208,6 +202,7 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     output = redact_secrets((completed.stderr or completed.stdout).strip(), config)
     detail = output.splitlines()[0] if output else f"exit {completed.returncode}"
     if completed.returncode == 0:
+        clear_codex_auth_failure()
         return True, "ready"
     if looks_like_codex_auth_failure(output):
         mark_codex_auth_failure(config, output)
