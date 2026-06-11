@@ -118,31 +118,25 @@ def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
     max_repo_files = normalized_positive_int(repository_limits.get("maxFiles"))
     max_repo_bytes = normalized_positive_int(repository_limits.get("maxBytes"))
     provider_chain = normalized_agent_provider_chain(agent_config.get("providerChain"))
-    codex_command = normalized_agent_config_text(codex.get("command"))
     codex_model = normalized_agent_config_text(codex.get("model"))
     codex_reasoning_effort = normalized_agent_reasoning_level(codex.get("reasoningEffort"))
-    opencode_command = normalized_agent_config_text(opencode.get("command"))
     opencode_model = normalized_agent_config_text(opencode.get("model"))
     opencode_variant = normalized_agent_reasoning_level(opencode.get("variant"))
     if not provider_chain:
         raise RuntimeError("Worker job agentConfig.providerChain is required.")
-    if "codex" in provider_chain and not (codex_command and codex_model and codex_reasoning_effort):
-        raise RuntimeError("Worker job agentConfig.codex command, model, and reasoningEffort are required.")
-    if "opencode" in provider_chain and not (opencode_command and opencode_model and opencode_variant):
-        raise RuntimeError("Worker job agentConfig.opencode command, model, and variant are required.")
+    if "codex" in provider_chain and not (codex_model and codex_reasoning_effort):
+        raise RuntimeError("Worker job agentConfig.codex model and reasoningEffort are required.")
+    if "opencode" in provider_chain and not (opencode_model and opencode_variant):
+        raise RuntimeError("Worker job agentConfig.opencode model and variant are required.")
     if not max_repo_files or not max_repo_bytes:
         raise RuntimeError("Worker job repositoryLimits.maxFiles and maxBytes are required.")
     config = copy.copy(base_config)
     config.provider_chain = provider_chain
     config.provider = provider_chain[0]
-    if codex_command:
-        config.codex_command = codex_command
     if codex_model:
         config.codex_model = codex_model
     if codex_reasoning_effort:
         config.codex_reasoning_effort = codex_reasoning_effort
-    if opencode_command:
-        config.opencode_command = opencode_command
     if opencode_model:
         config.opencode_model = opencode_model
     if opencode_variant:
