@@ -41,62 +41,100 @@ def normalized_agent_provider_chain(value: object) -> list[str]:
     return providers
 
 
+def normalized_positive_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (OverflowError, TypeError, ValueError):
+        return 0
+
+
+def effective_agent_config_value(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or len(text) > AGENT_CONFIG_TEXT_MAX_LENGTH:
+        return ""
+    if any(char in text for char in "\r\n\x00"):
+        return ""
+    return text
+
+
+def effective_agent_config_payload(config: WorkerConfig, provider: object = None) -> dict:
+    provider_chain = normalized_agent_provider_chain(getattr(config, "provider_chain", []))
+    selected_provider = (
+        normalized_agent_provider(provider)
+        or (provider_chain[0] if provider_chain else "")
+        or normalized_agent_provider(getattr(config, "provider", ""))
+        or "codex"
+    )
+    if selected_provider == "opencode":
+        cli = effective_agent_config_value(getattr(config, "opencode_command", ""))
+        model = effective_agent_config_value(getattr(config, "opencode_model", ""))
+        reasoning_effort = normalized_agent_reasoning_level(getattr(config, "opencode_variant", ""))
+    else:
+        selected_provider = "codex"
+        cli = effective_agent_config_value(getattr(config, "codex_command", ""))
+        model = effective_agent_config_value(getattr(config, "codex_model", ""))
+        reasoning_effort = normalized_agent_reasoning_level(getattr(config, "codex_reasoning_effort", ""))
+    return {
+        "provider": selected_provider,
+        "providerChain": provider_chain or [selected_provider],
+        "agent": {
+            "cli": selected_provider,
+            "command": cli,
+            "model": model,
+            "reasoningEffort": reasoning_effort,
+        },
+        "cli": cli,
+        "model": model,
+        "reasoningEffort": reasoning_effort,
+        "codex": {
+            "cli": effective_agent_config_value(getattr(config, "codex_command", "")),
+            "command": effective_agent_config_value(getattr(config, "codex_command", "")),
+            "model": effective_agent_config_value(getattr(config, "codex_model", "")),
+            "reasoningEffort": normalized_agent_reasoning_level(getattr(config, "codex_reasoning_effort", "")),
+        },
+        "opencode": {
+            "cli": effective_agent_config_value(getattr(config, "opencode_command", "")),
+            "command": effective_agent_config_value(getattr(config, "opencode_command", "")),
+            "model": effective_agent_config_value(getattr(config, "opencode_model", "")),
+            "variant": normalized_agent_reasoning_level(getattr(config, "opencode_variant", "")),
+            "reasoningEffort": normalized_agent_reasoning_level(getattr(config, "opencode_variant", "")),
+        },
+    }
+
+
 def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
-    agent_config = job.get("agent_config") if isinstance(job.get("agent_config"), dict) else job.get("agentConfig")
+    agent_config = job.get("agentConfig")
+    repository_limits = job.get("repositoryLimits")
     if not isinstance(agent_config, dict):
-        return base_config
-    agent = agent_config.get("agent") if isinstance(agent_config.get("agent"), dict) else {}
+        raise RuntimeError("Worker job is missing server agentConfig.")
+    if not isinstance(repository_limits, dict):
+        raise RuntimeError("Worker job is missing server repositoryLimits.")
     codex = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
     opencode = agent_config.get("opencode") if isinstance(agent_config.get("opencode"), dict) else {}
-    provider_chain = normalized_agent_provider_chain(
-        agent_config.get("provider_chain") or agent_config.get("providerChain")
-    )
-    if not provider_chain:
-        provider = normalized_agent_provider(agent.get("cli") or agent_config.get("provider"))
-        if provider:
-            provider_chain = [provider]
-    primary_provider = provider_chain[0] if provider_chain else normalized_agent_provider(agent.get("cli"))
-    codex_command = normalized_agent_config_text(codex.get("command") or codex.get("cli"))
-    codex_model = normalized_agent_config_text(
-        codex.get("model") or codex.get("modelName") or codex.get("model_name")
-    )
-    codex_reasoning_effort = normalized_agent_reasoning_level(
-        codex.get("reasoning_effort")
-        or codex.get("reasoningEffort")
-        or (agent.get("reasoning_effort") if primary_provider == "codex" else None)
-        or (agent.get("reasoningEffort") if primary_provider == "codex" else None)
-    )
-    if not codex_model and primary_provider == "codex":
-        codex_model = normalized_agent_config_text(agent.get("model") or agent.get("modelName") or agent.get("model_name"))
-    opencode_command = normalized_agent_config_text(opencode.get("command") or opencode.get("cli"))
-    opencode_model = normalized_agent_config_text(
-        opencode.get("model") or opencode.get("modelName") or opencode.get("model_name")
-    )
+    max_repo_files = normalized_positive_int(repository_limits.get("maxFiles"))
+    max_repo_bytes = normalized_positive_int(repository_limits.get("maxBytes"))
+    provider_chain = normalized_agent_provider_chain(agent_config.get("providerChain"))
+    codex_command = normalized_agent_config_text(codex.get("command"))
+    codex_model = normalized_agent_config_text(codex.get("model"))
+    codex_reasoning_effort = normalized_agent_reasoning_level(codex.get("reasoningEffort"))
+    opencode_command = normalized_agent_config_text(opencode.get("command"))
+    opencode_model = normalized_agent_config_text(opencode.get("model"))
     opencode_variant = normalized_agent_reasoning_level(opencode.get("variant"))
-    if not opencode_variant and primary_provider == "opencode":
-        opencode_variant = normalized_agent_reasoning_level(
-            agent.get("reasoning_effort") or agent.get("reasoningEffort")
-        )
-    if not opencode_model and primary_provider == "opencode":
-        opencode_model = normalized_agent_config_text(
-            agent.get("model") or agent.get("modelName") or agent.get("model_name")
-        )
-    if not any(
-        [
-            provider_chain,
-            codex_command,
-            codex_model,
-            codex_reasoning_effort,
-            opencode_command,
-            opencode_model,
-            opencode_variant,
-        ]
-    ):
-        return base_config
+    if not provider_chain:
+        raise RuntimeError("Worker job agentConfig.providerChain is required.")
+    if "codex" in provider_chain and not (codex_command and codex_model and codex_reasoning_effort):
+        raise RuntimeError("Worker job agentConfig.codex command, model, and reasoningEffort are required.")
+    if "opencode" in provider_chain and not (opencode_command and opencode_model and opencode_variant):
+        raise RuntimeError("Worker job agentConfig.opencode command, model, and variant are required.")
+    if not max_repo_files or not max_repo_bytes:
+        raise RuntimeError("Worker job repositoryLimits.maxFiles and maxBytes are required.")
     config = copy.copy(base_config)
-    if provider_chain:
-        config.provider_chain = provider_chain
-        config.provider = provider_chain[0]
+    config.provider_chain = provider_chain
+    config.provider = provider_chain[0]
     if codex_command:
         config.codex_command = codex_command
     if codex_model:
@@ -109,6 +147,8 @@ def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
         config.opencode_model = opencode_model
     if opencode_variant:
         config.opencode_variant = opencode_variant
+    config.max_repo_files = max_repo_files
+    config.max_repo_bytes = max_repo_bytes
     return config
 
 
@@ -168,7 +208,7 @@ class Worker:
                     jobs = []
                     if not loop_error:
                         try:
-                            claim_limit = 1 if once else free_slots
+                            claim_limit = 1 if once else min(free_slots, self.config.max_claim_jobs)
                             jobs = self.client.claim_many(claim_limit)
                         except PullwiseRequestError as exc:
                             self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
@@ -185,7 +225,7 @@ class Worker:
                 elif once:
                     concurrent.futures.wait(running)
                     return
-                time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error))
+                time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error, free_slots=free_slots))
 
     def cleanup_resources_if_due(self, active_jobs: object, *, force: bool = False) -> None:
         current = time.monotonic()
@@ -227,7 +267,7 @@ class Worker:
             self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
         return False
 
-    def next_poll_sleep(self, *, claimed_jobs: int, loop_error: bool) -> float:
+    def next_poll_sleep(self, *, claimed_jobs: int, loop_error: bool, free_slots: int | None = None) -> float:
         if loop_error:
             self._error_poll_count += 1
             self._empty_poll_count = 0
@@ -235,7 +275,15 @@ class Worker:
         elif claimed_jobs:
             self._error_poll_count = 0
             self._empty_poll_count = 0
-            base = self.config.poll_seconds
+            base = min(self.config.poll_seconds, 1)
+        elif free_slots is not None:
+            self._error_poll_count = 0
+            self._empty_poll_count = 0
+            capacity = max(1, self.config.max_concurrent_jobs)
+            if max(0, free_slots) >= capacity:
+                base = self.config.poll_seconds
+            else:
+                base = max(self.config.poll_seconds, min(self.config.max_backoff_seconds, self.config.poll_seconds * 2))
         else:
             self._error_poll_count = 0
             self._empty_poll_count += 1
@@ -276,16 +324,29 @@ class Worker:
 
     def run_job(self, job: dict) -> None:
         job_id = safe_job_id(job.get("job_id"))
-        job_config = worker_config_for_job(self.config, job)
+        job_config = self.config
+        configured_agent = {}
         attempt_id = f"{self.config.worker_id}-{job.get('attempt') or 1}"
-        checkout_dir = checkout_dir_for_job(job_config.work_dir, job_id)
+        checkout_dir = checkout_dir_for_job(self.config.work_dir, job_id)
         started = time.monotonic()
         duration_ms = 0
         job_error = ""
+        current_stage = "clone"
+        resolved_commit = ""
         repository_graph = {}
         semantic_graph = {}
         impact_graph = {}
+        preflight: dict = {}
+        audit_payload: dict = empty_audit_swarm_payload()
+        verification_audit: dict = {}
+        candidate_count = 0
+        rejected_reasons: dict[str, int] = {}
+        logs_summary = ""
+        job_trace_checkpoints: list[dict] = []
         try:
+            job_config = worker_config_for_job(self.config, job)
+            configured_agent = effective_agent_config_payload(job_config)
+            checkout_dir = checkout_dir_for_job(job_config.work_dir, job_id)
             self.client.progress(
                 job_id,
                 "clone",
@@ -296,6 +357,14 @@ class Worker:
             resolved_commit = clone_repository(job, checkout_dir)
             job["resolved_commit"] = resolved_commit
             job["commit"] = resolved_commit
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    "clone",
+                    summary="Repository cloned.",
+                    details={"commit": resolved_commit[:12], "repo": job.get("repo")},
+                )
+            )
+            current_stage = "preflight"
             limit_preflight = enforce_repository_limits(job_config, job, checkout_dir)
             self.client.progress(
                 job_id,
@@ -310,17 +379,47 @@ class Worker:
                 ),
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    "preflight",
+                    summary=protocol_multiline_text(preflight.get("summary")) or "Repository preflight collected.",
+                    details={
+                        "mode": preflight.get("mode"),
+                        "execution": preflight.get("execution"),
+                        "languages": preflight.get("languages"),
+                        "packageManagers": preflight.get("packageManagers"),
+                        "repositoryStats": limit_preflight.get("repositoryStats"),
+                    },
+                )
+            )
+            current_stage = "graph"
+            graph_status = "ok"
+            graph_summary = "Repository graph is ready."
             try:
                 repository_graph, semantic_graph = build_repository_graph_bundle(job_config, job, checkout_dir, preflight)
             except Exception:
                 repository_graph = {}
                 semantic_graph = {}
                 impact_graph = {}
+                graph_status = "warning"
+                graph_summary = "Repository graph generation failed; review continued without graph context."
                 limitations = preflight.get("limitations")
                 if not isinstance(limitations, list):
                     limitations = []
                     preflight["limitations"] = limitations
-                limitations.append("Repository graph generation failed; review continued without graph context.")
+                limitations.append(graph_summary)
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    "graph",
+                    status=graph_status,
+                    summary=graph_summary,
+                    counts={
+                        "nodes": len(repository_graph.get("nodes") or []) if isinstance(repository_graph, dict) else 0,
+                        "semanticNodes": len(semantic_graph.get("nodes") or []) if isinstance(semantic_graph, dict) else 0,
+                        "impactTargets": len(impact_graph.get("targets") or []) if isinstance(impact_graph, dict) else 0,
+                    },
+                )
+            )
             if repository_graph:
                 job["repository_graph"] = repository_graph
                 if semantic_graph:
@@ -347,6 +446,7 @@ class Worker:
                     semantic_graph=semantic_graph,
                     impact_graph=impact_graph,
                 )
+            current_stage = "verifier"
             try:
                 verifier, verifier_findings, verifier_logs = run_verifier_commands(job_config, job, checkout_dir, preflight)
             except Exception as exc:
@@ -358,6 +458,17 @@ class Worker:
                 verifier_findings = []
                 verifier_logs = verifier["summary"]
             preflight["verifier"] = verifier
+            verifier_runs = verifier.get("runs") if isinstance(verifier.get("runs"), list) else []
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    "verifier",
+                    status="warning" if protocol_multiline_text(verifier.get("summary")).startswith("Verifier failed") else "ok",
+                    summary=protocol_multiline_text(verifier.get("summary")) or "Verifier stage completed.",
+                    counts={"runs": len(verifier_runs), "findings": len(verifier_findings)},
+                    details={"enabled": verifier.get("enabled") is True},
+                    logs_summary=verifier_logs,
+                )
+            )
             if verifier.get("enabled") and verifier.get("runs"):
                 preflight["execution"] = "allowlisted_verifier_scripts"
                 preflight["summary"] = (
@@ -377,8 +488,12 @@ class Worker:
                     summary="Repository preflight is complete; reviewer agents are discovering issue cards.",
                 ),
             )
+            current_stage = "agent"
             audit_payload, summary, logs_summary = run_codex_review(job_config, job, checkout_dir)
-            ai_usage = normalize_ai_usage(audit_payload.get("ai_usage"))
+            effective_agent_config = audit_payload.get("effectiveAgentConfig") if isinstance(audit_payload.get("effectiveAgentConfig"), dict) else {}
+            if not effective_agent_config:
+                effective_agent_config = configured_agent
+            ai_usage = normalize_ai_usage(audit_payload.get("aiUsage"))
             if verifier_findings:
                 audit_payload = merge_audit_swarm_payloads(
                     audit_swarm_payload_from_findings(verifier_findings, verifier_role="verifier"),
@@ -386,11 +501,30 @@ class Worker:
                 )
             projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
             candidate_count = len(projected_findings)
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    "agent",
+                    summary="Provider review payload normalized.",
+                    counts={
+                        "issueCards": len(audit_payload.get("issue_cards") or []) if isinstance(audit_payload, dict) else 0,
+                        "verificationResults": len(audit_payload.get("verification_results") or [])
+                        if isinstance(audit_payload, dict)
+                        else 0,
+                        "candidateCount": candidate_count,
+                    },
+                    details={
+                        "providerChain": getattr(job_config, "provider_chain", []),
+                        "model": ai_usage.get("model"),
+                    },
+                    logs_summary=logs_summary,
+                )
+            )
             review_decision_records: list[dict] = []
             projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(
                 projected_findings,
                 review_decision_records,
             )
+            current_stage = "filter"
             projected_findings, convergence_rejected_reasons, convergence_rejected_samples, convergence_state = (
                 apply_convergence_gate(job, checkout_dir, projected_findings, review_decision_records)
             )
@@ -409,6 +543,7 @@ class Worker:
                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
             rejected_samples = [*rejected_samples, *review_calibration["rejected_samples"]][:5]
             audit_payload = filter_audit_swarm_payload_by_findings(audit_payload, projected_findings)
+            audit_payload["effectiveAgentConfig"] = effective_agent_config
             summary = summarize(projected_findings)
             verification_audit = verification_audit_payload(
                 candidate_count=candidate_count,
@@ -421,7 +556,58 @@ class Worker:
             )
             if verifier_logs:
                 logs_summary = "\n".join([verifier_logs, logs_summary])[-1000:]
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    "filter",
+                    summary=verification_audit.get("summary") or "Audit candidates filtered for reporting.",
+                    counts={
+                        "candidateCountBeforeFilter": candidate_count,
+                        "reportedCount": verification_audit.get("reportedCount"),
+                        "auditOnlyCount": verification_audit.get("auditOnlyCount"),
+                        "rejectedCount": verification_audit.get("rejectedCount"),
+                    },
+                    details={
+                        "rejectionReasons": [
+                            {"reason": reason, "count": count}
+                            for reason, count in sorted(rejected_reasons.items())
+                            if count > 0
+                        ]
+                    },
+                )
+            )
             duration_ms = int((time.monotonic() - started) * 1000)
+            current_stage = "report"
+            completion_audit = completion_audit_payload(
+                result_status="done",
+                audit_payload=audit_payload,
+                preflight=preflight,
+                verification_audit=verification_audit,
+                logs_summary=logs_summary,
+                candidate_count=candidate_count,
+                rejected_reasons=rejected_reasons,
+            )
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    "report",
+                    status=(
+                        "failed"
+                        if completion_audit.get("status") == "failed"
+                        else "warning" if completion_audit.get("status") == "warning" else "ok"
+                    ),
+                    summary=completion_audit.get("summary") or "Worker result payload is ready.",
+                    counts={
+                        "reportedCount": verification_audit.get("reportedCount"),
+                        "issueCards": len(audit_payload.get("issue_cards") or []) if isinstance(audit_payload, dict) else 0,
+                    },
+                )
+            )
+            job_trace = job_trace_payload(
+                result_status="done",
+                checkpoints=job_trace_checkpoints,
+                candidate_count_before_filter=candidate_count,
+                rejected_reasons=rejected_reasons,
+                next_retry_hint=completion_audit.get("retryReason") if completion_audit.get("retryRecommended") else "",
+            )
             audit_swarm = audit_swarm_scan_artifacts(
                 "report",
                 config=job_config,
@@ -450,6 +636,11 @@ class Worker:
                 "convergence_state": convergence_state,
                 "review_decision_events": review_calibration["decision_events"],
                 "audit_swarm": audit_swarm,
+                "effectiveAgentConfig": effective_agent_config,
+                "completion_audit": completion_audit,
+                "completionAudit": completion_audit,
+                "job_trace": job_trace,
+                "jobTrace": job_trace,
             }
             if repository_graph:
                 payload["repository_graph"] = repository_graph
@@ -458,7 +649,7 @@ class Worker:
             if impact_graph:
                 payload["impact_graph"] = impact_graph
             if ai_usage:
-                payload["ai_usage"] = ai_usage
+                payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
             self.client.progress(job_id, "report", 100, "Uploading result", logs_summary, audit_swarm=audit_swarm)
             try:
@@ -477,6 +668,33 @@ class Worker:
             error_preflight = getattr(exc, "preflight", None)
             if not isinstance(error_preflight, dict):
                 error_preflight = {}
+            failure_preflight = error_preflight or preflight
+            completion_audit = completion_audit_payload(
+                result_status="failed",
+                audit_payload=audit_payload,
+                preflight=failure_preflight,
+                verification_audit=verification_audit,
+                logs_summary=logs_summary,
+                candidate_count=candidate_count,
+                rejected_reasons=rejected_reasons,
+                error=error,
+                error_code=error_code,
+            )
+            job_trace_checkpoints.append(
+                job_trace_checkpoint(
+                    current_stage,
+                    status="failed",
+                    summary=error,
+                    details={"errorCode": error_code, "retryRecommended": completion_audit.get("retryRecommended")},
+                )
+            )
+            job_trace = job_trace_payload(
+                result_status="failed",
+                checkpoints=job_trace_checkpoints,
+                candidate_count_before_filter=candidate_count,
+                rejected_reasons=rejected_reasons,
+                next_retry_hint=completion_audit.get("retryReason"),
+            )
             error_payload = {
                 "status": "failed",
                 "audit_protocol": AUDIT_SWARM_PROTOCOL_VERSION,
@@ -489,18 +707,24 @@ class Worker:
                 "audit_swarm": audit_swarm_scan_artifacts(
                     "failed",
                     config=job_config,
-                    preflight=error_preflight,
+                    preflight=failure_preflight,
                     summary=error,
                 ),
+                "completion_audit": completion_audit,
+                "completionAudit": completion_audit,
+                "job_trace": job_trace,
+                "jobTrace": job_trace,
             }
             if error_code:
                 error_payload["error_code"] = error_code
                 error_payload["errorCode"] = error_code
-            if error_preflight:
-                error_payload["preflight"] = error_preflight
-            if job.get("resolved_commit"):
-                error_payload["commit"] = job["resolved_commit"]
-                error_payload["resolved_commit"] = job["resolved_commit"]
+            if failure_preflight:
+                error_payload["preflight"] = failure_preflight
+            if configured_agent:
+                error_payload["effectiveAgentConfig"] = configured_agent
+            if resolved_commit:
+                error_payload["commit"] = resolved_commit
+                error_payload["resolved_commit"] = resolved_commit
             error_payload["result_checksum"] = result_checksum(error_payload)
             try:
                 self.upload_result_with_retry(job_id, error_payload)

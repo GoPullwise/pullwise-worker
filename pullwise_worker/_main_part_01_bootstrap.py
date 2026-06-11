@@ -163,6 +163,7 @@ class WorkerConfig:
         self.provider = getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "codex"
         self.provider_chain = parse_provider_chain(os.environ.get("PULLWISE_PROVIDER_CHAIN"), self.provider)
         self.max_concurrent_jobs = max(1, int(getattr(args, "max_concurrent_jobs", None) or os.environ.get("PULLWISE_MAX_CONCURRENT_JOBS") or 1))
+        self.max_claim_jobs = max(1, int(getattr(args, "max_claim_jobs", None) or os.environ.get("PULLWISE_WORKER_MAX_CLAIM_JOBS") or 2))
         self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))
         self.poll_jitter_seconds = max(0.0, float(os.environ.get("PULLWISE_WORKER_POLL_JITTER_SECONDS") or 2))
         self.max_backoff_seconds = max(self.poll_seconds, int(os.environ.get("PULLWISE_WORKER_MAX_BACKOFF_SECONDS") or 60))
@@ -187,8 +188,8 @@ class WorkerConfig:
         self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
-        self.max_repo_files = env_int("PULLWISE_MAX_REPO_FILES", _DEFAULT_MAX_REPO_FILES, minimum=1)
-        self.max_repo_bytes = env_int("PULLWISE_MAX_REPO_BYTES", _DEFAULT_MAX_REPO_BYTES, minimum=1)
+        self.max_repo_files = _DEFAULT_MAX_REPO_FILES
+        self.max_repo_bytes = _DEFAULT_MAX_REPO_BYTES
         self.semantic_graph_agent_fallback = env_bool("PULLWISE_SEMANTIC_GRAPH_AGENT_FALLBACK", False)
         self.semantic_graph_agent_min_symbols = env_int("PULLWISE_SEMANTIC_GRAPH_AGENT_MIN_SYMBOLS", 8, minimum=0)
         self.semantic_graph_agent_timeout_seconds = max(
@@ -335,7 +336,7 @@ class PullwiseClient:
     def claim(self) -> dict | None:
         response = self.post(
             "/worker/jobs/claim",
-            {"worker_id": self.config.worker_id, "max_jobs": self.config.max_concurrent_jobs},
+            {"worker_id": self.config.worker_id, "max_jobs": min(self.config.max_concurrent_jobs, self.config.max_claim_jobs)},
         )
         return response.json().get("job")
 
@@ -392,6 +393,7 @@ def main() -> None:
     parser.add_argument("--server-url")
     parser.add_argument("--worker-id")
     parser.add_argument("--max-concurrent-jobs", type=int)
+    parser.add_argument("--max-claim-jobs", type=int)
     parser.add_argument("--poll-seconds", type=int)
     parser.add_argument("--work-dir")
     parser.add_argument("--checkout-root")

@@ -52,6 +52,369 @@ def verification_audit_payload(
     }
 
 
+def completion_audit_payload(
+    *,
+    result_status: str,
+    audit_payload: dict | None = None,
+    preflight: dict | None = None,
+    verification_audit: dict | None = None,
+    logs_summary: str = "",
+    candidate_count: int = 0,
+    rejected_reasons: dict[str, int] | None = None,
+    error: str = "",
+    error_code: str = "",
+) -> dict:
+    audit_payload = audit_payload if isinstance(audit_payload, dict) else {}
+    preflight = preflight if isinstance(preflight, dict) else {}
+    verification_audit = verification_audit if isinstance(verification_audit, dict) else {}
+    rejected_reasons = rejected_reasons if isinstance(rejected_reasons, dict) else {}
+    cards = [item for item in (first_list(audit_payload, "issue_cards", "issueCards") or []) if isinstance(item, dict)]
+    results = [
+        item
+        for item in (first_list(audit_payload, "verification_results", "verificationResults") or [])
+        if isinstance(item, dict)
+    ]
+    blockers: list[str] = []
+    warnings: list[str] = []
+    checks: list[dict] = []
+    retry_recommended = False
+    retry_reason = ""
+    normalized_status = clean_protocol_text(result_status).lower()
+
+    if normalized_status == "done":
+        card_ids = {audit_swarm_resolved_issue_id(card, index) for index, card in enumerate(cards)}
+        missing_locations = []
+        missing_claims = []
+        missing_evidence = []
+        missing_reproduction = []
+        missing_suggested_tests = []
+        for index, card in enumerate(cards):
+            issue_id = audit_swarm_resolved_issue_id(card, index) or f"issue-{index + 1}"
+            if not audit_swarm_locations(card):
+                missing_locations.append(issue_id)
+            if not protocol_multiline_text(card.get("claim")):
+                missing_claims.append(issue_id)
+            if not protocol_text_items(card.get("evidence")):
+                missing_evidence.append(issue_id)
+            if not protocol_multiline_text(card.get("reproduction_idea") or card.get("reproductionIdea")):
+                missing_reproduction.append(issue_id)
+            if not protocol_multiline_text(card.get("suggested_test") or card.get("suggestedTest")):
+                missing_suggested_tests.append(issue_id)
+        _completion_audit_append_check(
+            checks,
+            check_id="issue_card_locations",
+            failed_ids=missing_locations,
+            noun="issue cards",
+            ok_count=len(cards) - len(missing_locations),
+            detail_label="missing repository-relative locations",
+            blockers=blockers,
+        )
+        _completion_audit_append_check(
+            checks,
+            check_id="issue_card_claims",
+            failed_ids=missing_claims,
+            noun="issue cards",
+            ok_count=len(cards) - len(missing_claims),
+            detail_label="missing claim text",
+            blockers=blockers,
+        )
+        _completion_audit_append_check(
+            checks,
+            check_id="issue_card_evidence",
+            failed_ids=missing_evidence,
+            noun="issue cards",
+            ok_count=len(cards) - len(missing_evidence),
+            detail_label="missing evidence",
+            blockers=blockers,
+        )
+        _completion_audit_append_check(
+            checks,
+            check_id="issue_card_reproduction_ideas",
+            failed_ids=missing_reproduction,
+            noun="issue cards",
+            ok_count=len(cards) - len(missing_reproduction),
+            detail_label="missing reproduction ideas",
+            blockers=blockers,
+        )
+        _completion_audit_append_check(
+            checks,
+            check_id="issue_card_suggested_tests",
+            failed_ids=missing_suggested_tests,
+            noun="issue cards",
+            ok_count=len(cards) - len(missing_suggested_tests),
+            detail_label="missing suggested tests",
+            blockers=blockers,
+        )
+        unknown_result_issue_ids = []
+        single_placeholder_id = audit_swarm_single_placeholder_issue_id(cards)
+        for result in results:
+            resolved_issue_id = audit_swarm_resolved_verification_issue_id(result, single_placeholder_id)
+            if resolved_issue_id and resolved_issue_id not in card_ids:
+                unknown_result_issue_ids.append(resolved_issue_id)
+        unknown_result_issue_ids = dedupe_text(unknown_result_issue_ids)
+        if unknown_result_issue_ids:
+            message = (
+                "Verification results reference unknown issue ids: "
+                + ", ".join(unknown_result_issue_ids[:5])
+                + "."
+            )
+            blockers.append(message)
+            checks.append(
+                {
+                    "id": "verification_issue_references",
+                    "status": "failed",
+                    "summary": message,
+                    "details": unknown_result_issue_ids[:5],
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "id": "verification_issue_references",
+                    "status": "passed",
+                    "summary": f"All {len(results)} verification results reference known issue ids.",
+                }
+            )
+        negative_evidence_sources = completion_audit_negative_evidence_sources(preflight, logs_summary)
+        if cards:
+            checks.append(
+                {
+                    "id": "empty_result_negative_evidence",
+                    "status": "passed",
+                    "summary": f"Reported findings present; empty-result evidence checks are not required for {len(cards)} issue cards.",
+                }
+            )
+        else:
+            evidence_status = "passed" if len(negative_evidence_sources) >= 2 else "warning"
+            evidence_summary = (
+                f"Empty result is backed by negative evidence from {', '.join(negative_evidence_sources)}."
+                if evidence_status == "passed"
+                else "Empty result has limited negative evidence from preflight/verifier/logs."
+            )
+            if evidence_status == "warning":
+                warnings.append(evidence_summary)
+            checks.append(
+                {
+                    "id": "empty_result_negative_evidence",
+                    "status": evidence_status,
+                    "summary": evidence_summary,
+                    "details": negative_evidence_sources,
+                }
+            )
+        short_output_status = "passed"
+        short_output_summary = "Provider output did not look suspiciously short."
+        short_logs = clean_protocol_text(logs_summary)
+        if not cards and not results and candidate_count == 0 and len(short_logs) < 24:
+            short_output_status = "warning"
+            short_output_summary = "Provider output/log summary looks unusually short for an empty review result."
+            warnings.append(short_output_summary)
+            retry_recommended = True
+            retry_reason = short_output_summary
+        checks.append(
+            {
+                "id": "provider_output_shape",
+                "status": short_output_status,
+                "summary": short_output_summary,
+            }
+        )
+    else:
+        classification = completion_audit_failed_retry_classification(error_code, error)
+        retry_recommended = classification["retryRecommended"]
+        retry_reason = classification["retryReason"]
+        if classification["status"] == "warning":
+            warnings.append(classification["summary"])
+        checks.append(
+            {
+                "id": "failed_result_retryability",
+                "status": classification["status"],
+                "summary": classification["summary"],
+            }
+        )
+
+    final_status = "failed" if blockers else "warning" if warnings else "passed"
+    summary_parts = [f"{len(checks)} deterministic checks", f"{len(blockers)} blockers", f"{len(warnings)} warnings"]
+    summary = f"{final_status}: " + ", ".join(summary_parts) + "."
+    if retry_reason:
+        summary = f"{summary} Retry hint: {retry_reason}"
+    return {
+        "protocol": "pullwise-completion-audit/0.1",
+        "status": final_status,
+        "blockers": blockers[:10],
+        "warnings": warnings[:10],
+        "checks": checks[:10],
+        "retryRecommended": retry_recommended,
+        "retryReason": retry_reason,
+        "summary": summary,
+    }
+
+
+def _completion_audit_append_check(
+    checks: list[dict],
+    *,
+    check_id: str,
+    failed_ids: list[str],
+    noun: str,
+    ok_count: int,
+    detail_label: str,
+    blockers: list[str],
+) -> None:
+    failed_ids = dedupe_text(failed_ids)
+    if failed_ids:
+        message = f"{len(failed_ids)} {noun} are {detail_label}: {', '.join(failed_ids[:5])}."
+        blockers.append(message)
+        checks.append({"id": check_id, "status": "failed", "summary": message, "details": failed_ids[:5]})
+        return
+    checks.append(
+        {
+            "id": check_id,
+            "status": "passed",
+            "summary": f"All {max(0, int(ok_count))} {noun} passed the {detail_label} check.",
+        }
+    )
+
+
+def completion_audit_negative_evidence_sources(preflight: dict, logs_summary: str) -> list[str]:
+    sources = []
+    if preflight:
+        sources.append("preflight")
+    verifier = preflight.get("verifier") if isinstance(preflight.get("verifier"), dict) else {}
+    if verifier or protocol_multiline_text(logs_summary):
+        sources.append("verifier")
+    if protocol_multiline_text(logs_summary):
+        sources.append("logs")
+    return dedupe_text(sources)
+
+
+def completion_audit_failed_retry_classification(error_code: str, error: str) -> dict:
+    normalized_code = clean_protocol_text(error_code)
+    detail = protocol_multiline_text(error)
+    lowered = detail.lower()
+    if normalized_code == REPOSITORY_TOO_LARGE_ERROR_CODE:
+        reason = "Repository exceeds configured limits; retry only after repository size or worker limits change."
+        return {
+            "status": "passed",
+            "retryRecommended": False,
+            "retryReason": reason,
+            "summary": reason,
+        }
+    if "auth failure" in lowered or "authentication" in lowered or "login" in lowered:
+        reason = "Provider authentication must be repaired before retrying this job."
+        return {
+            "status": "passed",
+            "retryRecommended": False,
+            "retryReason": reason,
+            "summary": reason,
+        }
+    if any(marker in lowered for marker in ("timed out", "timeout", "temporarily disabled", "connection", "network")):
+        reason = "This failure looks transient; retry is recommended after the provider or network recovers."
+        return {
+            "status": "passed",
+            "retryRecommended": True,
+            "retryReason": reason,
+            "summary": reason,
+        }
+    if "all review providers failed" in lowered:
+        reason = "All configured review providers failed before producing a valid payload; retry is recommended."
+        return {
+            "status": "passed",
+            "retryRecommended": True,
+            "retryReason": reason,
+            "summary": reason,
+        }
+    reason = "Retryability could not be classified deterministically from the worker failure."
+    return {
+        "status": "warning",
+        "retryRecommended": False,
+        "retryReason": "",
+        "summary": reason,
+    }
+
+
+def job_trace_checkpoint(
+    stage: str,
+    *,
+    status: str = "ok",
+    summary: str = "",
+    counts: dict | None = None,
+    details: dict | None = None,
+    logs_summary: str = "",
+) -> dict:
+    normalized_status = clean_protocol_text(status).lower()
+    if normalized_status not in {"ok", "warning", "failed"}:
+        normalized_status = "ok"
+    payload = {
+        "stage": clean_protocol_text(stage),
+        "status": normalized_status,
+        "summary": protocol_multiline_text(summary)[:400],
+        "counts": _job_trace_counts_payload(counts),
+        "details": _job_trace_value(details),
+        "logsSummary": protocol_multiline_text(logs_summary)[:240],
+    }
+    return {key: value for key, value in payload.items() if value not in ("", [], {})}
+
+
+def job_trace_payload(
+    *,
+    result_status: str,
+    checkpoints: list[dict],
+    candidate_count_before_filter: int = 0,
+    rejected_reasons: dict[str, int] | None = None,
+    next_retry_hint: str = "",
+) -> dict:
+    rejected_reasons = rejected_reasons if isinstance(rejected_reasons, dict) else {}
+    payload = {
+        "protocol": "pullwise-job-trace/0.1",
+        "status": clean_protocol_text(result_status).lower() or "done",
+        "checkpoints": [item for item in checkpoints if isinstance(item, dict)][:12],
+        "candidateCountBeforeFilter": max(0, int(candidate_count_before_filter or 0)),
+        "rejectionReasons": [
+            {"reason": clean_protocol_text(reason), "count": protocol_count(count)}
+            for reason, count in sorted(rejected_reasons.items())
+            if clean_protocol_text(reason) and protocol_count(count)
+        ],
+        "nextRetryHint": protocol_multiline_text(next_retry_hint)[:240],
+    }
+    if payload["checkpoints"]:
+        payload["summary"] = protocol_multiline_text(payload["checkpoints"][-1].get("summary"))[:240]
+    return {key: value for key, value in payload.items() if value not in ("", [], {})}
+
+
+def _job_trace_counts_payload(value: object) -> dict:
+    source = value if isinstance(value, dict) else {}
+    counts = {}
+    for key, raw in source.items():
+        normalized_key = clean_protocol_text(key)
+        count = protocol_count(raw)
+        if normalized_key and count:
+            counts[normalized_key] = count
+    return counts
+
+
+def _job_trace_value(value: object) -> object:
+    if isinstance(value, dict):
+        payload = {}
+        for key, item in value.items():
+            normalized_key = clean_protocol_text(key)
+            normalized_value = _job_trace_value(item)
+            if normalized_key and normalized_value not in ("", [], {}):
+                payload[normalized_key] = normalized_value
+        return payload
+    if isinstance(value, list):
+        items = []
+        for item in value[:6]:
+            normalized_item = _job_trace_value(item)
+            if normalized_item not in ("", [], {}):
+                items.append(normalized_item)
+        return items
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value, 3)
+    return protocol_multiline_text(value)[:200]
+
+
 def audit_swarm_scan_artifacts(
     stage: str,
     *,

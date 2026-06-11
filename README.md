@@ -13,7 +13,7 @@ python -m pullwise_worker.main
 The worker loop:
 
 1. sends `POST /worker/heartbeat`
-2. claims queued jobs up to `free_slots` with `POST /worker/jobs/claim`
+2. claims queued jobs up to `min(free_slots, PULLWISE_WORKER_MAX_CLAIM_JOBS)` with `POST /worker/jobs/claim`
 3. clones the repository using the short-lived clone token returned by the server
 4. runs the configured review provider chain
 5. uploads progress and final result
@@ -27,6 +27,7 @@ Required environment:
 - `PULLWISE_PROVIDER` optional, defaults to `codex`
 - `PULLWISE_PROVIDER_CHAIN` optional, defaults to `codex`; use `codex,opencode` for Codex-first fallback
 - `PULLWISE_MAX_CONCURRENT_JOBS` optional, defaults to `1`
+- `PULLWISE_WORKER_MAX_CLAIM_JOBS` optional, defaults to `2`
 - `PULLWISE_WORKER_POLL_SECONDS` optional, defaults to `5`
 - `PULLWISE_WORKER_POLL_JITTER_SECONDS` optional, defaults to `2`
 - `PULLWISE_WORKER_MAX_BACKOFF_SECONDS` optional, defaults to `60`
@@ -45,8 +46,6 @@ Required environment:
 - `PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS` optional, defaults to `3600`
 - `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
-- `PULLWISE_MAX_REPO_FILES` optional, defaults to `2000`; repositories above this file count fail before verifier or AI review
-- `PULLWISE_MAX_REPO_BYTES` optional, defaults to `52428800` (50 MiB); repositories above this checkout size fail before verifier or AI review
 - `PULLWISE_REVIEW_CALIBRATION_MODE` optional, defaults to `shadow`; use `audit_only` or `enforce` only after server-side shadow evaluation passes
 - `PULLWISE_REVIEW_CALIBRATION_MODEL` optional, defaults to `relative_factor`; set to `logit_beta` to emit `truth_probability`
 - `PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS` optional, defaults to `45`
@@ -63,7 +62,7 @@ Required environment:
 Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old verifier logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
 Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker defaults to `opencode/big-pickle` with variant `medium`.
-When the server includes per-job `agentConfig`, the worker applies that review's provider chain plus Codex/OpenCode command, model, and reasoning settings without changing the process-wide defaults.
+When the server includes per-job `agentConfig`, the worker applies that review's provider chain plus Codex/OpenCode command, model, and reasoning settings without changing the process-wide defaults. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
 
 Codex `exec` calls are serialized inside the worker because Codex keeps local login state under the service user's home directory. If Codex reports an authentication or refresh-token failure, the worker cools down further Codex launches for `PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS` and then uses the next configured provider, if any.
 

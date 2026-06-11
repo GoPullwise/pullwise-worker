@@ -34,6 +34,7 @@ from pullwise_worker.main import (
     cleanup_worker_resources,
     clone_repository,
     collect_preflight_metadata,
+    completion_audit_payload,
     codex_ready_check,
     default_worker_package,
     execute_lifecycle_command,
@@ -73,6 +74,26 @@ def audit_payload(issue_cards: list[dict] | None = None, verification_results: l
     }
 
 
+def worker_job(**overrides: object) -> dict:
+    payload = {
+        "job_id": "job_1",
+        "attempt": 1,
+        "repo": "acme/api",
+        "commit": "pending",
+        "agentConfig": {
+            "providerChain": ["codex"],
+            "codex": {
+                "command": "codex",
+                "model": "gpt-5.5",
+                "reasoningEffort": "medium",
+            },
+        },
+        "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+    }
+    payload.update(overrides)
+    return payload
+
+
 def issue_card(
     title: str,
     *,
@@ -93,7 +114,11 @@ def issue_card(
         "locations": [{"file": file, "startLine": line, "endLine": line}] if file else [],
         "claim": f"{title} claim.",
         "evidence": evidence if evidence is not None else ["Concrete evidence."],
+        "reproduction_idea": f"Reproduce {title.lower()} in a focused checkout.",
+        "suggested_test": f"Add a regression test for {title.lower()}.",
         "false_positive_checks": ["Check for upstream guard."],
+        "violated_invariants": ["The behavior should remain deterministic."],
+        "limitations": [],
     }
 
 
@@ -135,6 +160,7 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertEqual(worker_config.max_repo_files, 2000)
         self.assertEqual(worker_config.max_repo_bytes, 50 * 1024 * 1024)
+        self.assertEqual(worker_config.max_claim_jobs, 2)
 
     def test_worker_config_for_job_applies_server_agent_overrides_without_mutating_base(self) -> None:
         worker_config = config()
@@ -153,7 +179,7 @@ class WorkerMainTest(unittest.TestCase):
                 "agentConfig": {
                     "providerChain": ["codex", "opencode"],
                     "codex": {
-                        "cli": "codex-nightly",
+                        "command": "codex-nightly",
                         "model": "gpt-5.5-codex",
                         "reasoningEffort": "xhigh",
                     },
@@ -162,7 +188,8 @@ class WorkerMainTest(unittest.TestCase):
                         "model": "openai/gpt-5",
                         "variant": "high",
                     },
-                }
+                },
+                "repositoryLimits": {"maxFiles": 321, "maxBytes": 654321},
             },
         )
 
@@ -175,6 +202,8 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(job_config.opencode_command, "opencode-cli")
         self.assertEqual(job_config.opencode_model, "openai/gpt-5")
         self.assertEqual(job_config.opencode_variant, "high")
+        self.assertEqual(job_config.max_repo_files, 321)
+        self.assertEqual(job_config.max_repo_bytes, 654321)
         self.assertEqual(worker_config.provider_chain, ["codex"])
         self.assertEqual(worker_config.codex_command, "codex")
         self.assertEqual(worker_config.codex_model, "gpt-5.5")
@@ -183,52 +212,37 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(worker_config.opencode_model, "opencode/big-pickle")
         self.assertEqual(worker_config.opencode_variant, "medium")
 
-    def test_worker_config_for_job_applies_top_level_agent_config(self) -> None:
+    def test_worker_config_for_job_requires_canonical_server_payload(self) -> None:
         worker_config = config()
 
-        job_config = worker_config_for_job(
-            worker_config,
-            {
-                "agent_config": {
-                    "agent": {
-                        "cli": "opencode",
-                        "model": "openai/gpt-5.1",
-                        "reasoning_effort": "high",
-                    }
-                }
-            },
-        )
-
-        self.assertIsNot(job_config, worker_config)
-        self.assertEqual(job_config.provider, "opencode")
-        self.assertEqual(job_config.provider_chain, ["opencode"])
-        self.assertEqual(job_config.opencode_model, "openai/gpt-5.1")
-        self.assertEqual(job_config.opencode_variant, "high")
+        with self.assertRaisesRegex(RuntimeError, "agentConfig"):
+            worker_config_for_job(worker_config, {"agent_config": {"providerChain": ["codex"]}})
+        with self.assertRaisesRegex(RuntimeError, "repositoryLimits"):
+            worker_config_for_job(worker_config, {"agentConfig": {"providerChain": ["codex"]}})
 
     def test_worker_config_for_job_rejects_unknown_agent_overrides(self) -> None:
         worker_config = config()
 
-        job_config = worker_config_for_job(
-            worker_config,
-            {
-                "agent_config": {
-                    "providerChain": ["codex --unsafe"],
-                    "agent": {"cli": "shell"},
-                    "codex": {
-                        "command": "codex --unsafe",
-                        "model": "gpt-5.5\nbad",
-                        "reasoning_effort": 'xhigh" --unsafe',
+        with self.assertRaisesRegex(RuntimeError, "providerChain"):
+            worker_config_for_job(
+                worker_config,
+                {
+                    "agentConfig": {
+                        "providerChain": ["codex --unsafe"],
+                        "codex": {
+                            "command": "codex --unsafe",
+                            "model": "gpt-5.5\nbad",
+                            "reasoningEffort": 'xhigh" --unsafe',
+                        },
+                        "opencode": {
+                            "command": "opencode --flag",
+                            "model": "openai/gpt-5\rbad",
+                            "variant": "turbo",
+                        },
                     },
-                    "opencode": {
-                        "command": "opencode --flag",
-                        "model": "openai/gpt-5\rbad",
-                        "variant": "turbo",
-                    },
-                }
-            },
-        )
-
-        self.assertIs(job_config, worker_config)
+                    "repositoryLimits": {"maxFiles": 1, "maxBytes": 1},
+                },
+            )
 
     def test_repository_resource_stats_excludes_git_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -564,6 +578,48 @@ func writeHealth() {}
         self.assertEqual(by_kind["verifier_verdict"]["verdict"], "confirmed")
         command_blocks = [block for block in blocks if block["kind"] == "command" and block.get("command")]
         self.assertEqual(command_blocks[0]["command"], "pnpm test auth -- refresh-token-rotation")
+
+    def test_completion_audit_flags_missing_card_fields_and_unknown_verification_ids(self) -> None:
+        audit = completion_audit_payload(
+            result_status="done",
+            audit_payload=audit_payload(
+                [
+                    {
+                        **issue_card("Missing contract", issue_id="issue-missing", file="", evidence=[]),
+                        "claim": "",
+                        "reproduction_idea": "",
+                        "suggested_test": "",
+                    }
+                ],
+                [
+                    {
+                        "issue_id": "issue-other",
+                        "verifier_role": "prover",
+                        "verdict": "confirmed",
+                        "confidence": 0.9,
+                        "proof_type": "static_proof",
+                        "proof_strength": 2,
+                        "evidence": ["Verifier checked the wrong issue id."],
+                        "commands_run": [],
+                        "result_summary": "Verifier checked the wrong issue id.",
+                    }
+                ],
+            ),
+            preflight={"mode": "static", "verifier": {"enabled": False, "runs": []}},
+            verification_audit={"candidateCount": 1, "reportedCount": 1},
+            logs_summary="review ok",
+            candidate_count=1,
+            rejected_reasons={},
+        )
+
+        checks = {check["id"]: check for check in audit["checks"]}
+        self.assertEqual(audit["status"], "failed")
+        self.assertTrue(audit["blockers"])
+        self.assertEqual(checks["issue_card_locations"]["status"], "failed")
+        self.assertEqual(checks["issue_card_evidence"]["status"], "failed")
+        self.assertEqual(checks["issue_card_reproduction_ideas"]["status"], "failed")
+        self.assertEqual(checks["issue_card_suggested_tests"]["status"], "failed")
+        self.assertEqual(checks["verification_issue_references"]["status"], "failed")
 
     def test_review_prompt_reuses_prior_issue_ids_for_convergence(self) -> None:
         prompt = worker_main.review_prompt(
@@ -3282,7 +3338,7 @@ func writeHealth() {}
                     }
                 ],
             )
-            audit_with_usage["ai_usage"] = {
+            audit_with_usage["aiUsage"] = {
                 "model": "gpt-5.5",
                 "input_tokens": 123,
                 "output_tokens": 45,
@@ -3294,7 +3350,7 @@ func writeHealth() {}
                 "review ok",
             )
 
-            worker.run_job({"job_id": "job_1", "attempt": 2, "repo": "acme/api", "commit": "pending"})
+            worker.run_job(worker_job(job_id="job_1", attempt=2, repo="acme/api", commit="pending"))
 
         clone_repository.assert_called_once()
         self.assertEqual(clone_repository.call_args.args[1], checkout_dir)
@@ -3314,13 +3370,20 @@ func writeHealth() {}
         self.assertNotIn("findings", result_payload)
         self.assertEqual(result_payload["convergence_state"]["protocol"], "pullwise-convergence/0.1")
         self.assertEqual(result_payload["convergence_state"]["open_findings"][0]["title"], "Bug")
-        self.assertEqual(
-            result_payload["ai_usage"],
-            {"model": "gpt-5.5"},
-        )
+        self.assertEqual(result_payload["aiUsage"], {"model": "gpt-5.5"})
         self.assertEqual(result_payload["verification_audit"]["candidateCount"], 1)
         self.assertEqual(result_payload["verification_audit"]["reportedCount"], 1)
         self.assertEqual(result_payload["verification_audit"]["rejectedCount"], 0)
+        self.assertEqual(result_payload["completion_audit"], result_payload["completionAudit"])
+        self.assertEqual(result_payload["completion_audit"]["protocol"], "pullwise-completion-audit/0.1")
+        self.assertEqual(result_payload["completion_audit"]["status"], "passed")
+        self.assertEqual(result_payload["job_trace"], result_payload["jobTrace"])
+        self.assertEqual(result_payload["job_trace"]["protocol"], "pullwise-job-trace/0.1")
+        self.assertEqual(result_payload["job_trace"]["candidateCountBeforeFilter"], 1)
+        self.assertEqual(
+            [checkpoint["stage"] for checkpoint in result_payload["job_trace"]["checkpoints"]],
+            ["clone", "preflight", "graph", "verifier", "agent", "filter", "report"],
+        )
         self.assertEqual(result_payload["result_checksum"], result_checksum({k: v for k, v in result_payload.items() if k != "result_checksum"}))
         self.assertGreaterEqual(worker.client.progress.call_count, 3)
         rmtree.assert_called_with(checkout_dir, ignore_errors=True)
@@ -3376,7 +3439,7 @@ func writeHealth() {}
             patch("pullwise_worker.main.run_codex_review", side_effect=run_review), \
             patch.object(worker, "upload_result_with_retry") as upload_result, \
             patch("pullwise_worker.main.shutil.rmtree"):
-            worker.run_job({"job_id": "job_graph", "attempt": 1, "repo": "acme/api", "commit": "pending"})
+            worker.run_job(worker_job(job_id="job_graph", attempt=1, repo="acme/api", commit="pending"))
 
         collect_preflight.assert_called_once()
         build_graph.assert_called_once()
@@ -3393,15 +3456,7 @@ func writeHealth() {}
         self.assertEqual(result_payload["impact_graph"], impact_graph)
 
     def test_run_job_fails_repository_too_large_before_verifier_or_review(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "PULLWISE_MAX_REPO_FILES": "1",
-                "PULLWISE_MAX_REPO_BYTES": str(50 * 1024 * 1024),
-            },
-            clear=False,
-        ):
-            worker = Worker(config())
+        worker = Worker(config())
         worker.client = Mock()
         resolved_commit = "0123456789abcdef0123456789abcdef01234567"
 
@@ -3415,7 +3470,15 @@ func writeHealth() {}
             patch("pullwise_worker.main.collect_preflight_metadata") as collect_preflight, \
             patch("pullwise_worker.main.run_verifier_commands") as run_verifier, \
             patch("pullwise_worker.main.run_codex_review") as run_codex_review:
-            worker.run_job({"job_id": "job_large", "attempt": 1, "repo": "acme/large", "commit": "pending"})
+            worker.run_job(
+                worker_job(
+                    job_id="job_large",
+                    attempt=1,
+                    repo="acme/large",
+                    commit="pending",
+                    repositoryLimits={"maxFiles": 1, "maxBytes": 50 * 1024 * 1024},
+                )
+            )
 
         collect_preflight.assert_not_called()
         run_verifier.assert_not_called()
@@ -3432,6 +3495,12 @@ func writeHealth() {}
         self.assertTrue(payload["preflight"]["repositoryLimitExceeded"])
         self.assertEqual(payload["preflight"]["repositoryLimitReasons"], ["file_count"])
         self.assertIn("Repository is too large", payload["error"])
+        self.assertEqual(payload["completion_audit"], payload["completionAudit"])
+        self.assertEqual(payload["completion_audit"]["status"], "passed")
+        self.assertFalse(payload["completion_audit"]["retryRecommended"])
+        self.assertEqual(payload["job_trace"], payload["jobTrace"])
+        self.assertEqual(payload["job_trace"]["status"], "failed")
+        self.assertIn("Repository exceeds configured limits", payload["job_trace"]["nextRetryHint"])
 
     def test_run_job_continues_when_verifier_errors(self) -> None:
         worker = Worker(config())
@@ -3445,7 +3514,7 @@ func writeHealth() {}
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
             ), \
             patch("pullwise_worker.main.shutil.rmtree"):
-            worker.run_job({"job_id": "job_verifier_error", "attempt": 1, "repo": "acme/api"})
+            worker.run_job(worker_job(job_id="job_verifier_error", attempt=1, repo="acme/api"))
 
         result_payload = worker.client.result.call_args.args[1]
         self.assertEqual(result_payload["status"], "done")
@@ -3494,7 +3563,7 @@ func writeHealth() {}
                 ),
             ), \
             patch("pullwise_worker.main.shutil.rmtree"):
-            worker.run_job({"job_id": "job_verifier_findings", "attempt": 1, "repo": "acme/api"})
+            worker.run_job(worker_job(job_id="job_verifier_findings", attempt=1, repo="acme/api"))
 
         result_payload = worker.client.result.call_args.args[1]
         self.assertEqual(result_payload["preflight"]["execution"], "allowlisted_verifier_scripts")
@@ -3532,7 +3601,7 @@ func writeHealth() {}
             ), \
             patch("pullwise_worker.main.time.sleep"), \
             patch("pullwise_worker.main.shutil.rmtree"):
-            worker.run_job({"job_id": "job_retry", "attempt": 1, "repo": "acme/api"})
+            worker.run_job(worker_job(job_id="job_retry", attempt=1, repo="acme/api"))
 
         self.assertEqual(worker.client.result.call_count, 2)
         first_payload = worker.client.result.call_args_list[0].args[1]
@@ -3563,7 +3632,7 @@ func writeHealth() {}
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
             ):
-            worker.run_job({"job_id": "job_success_after_failure", "attempt": 1, "repo": "acme/api"})
+            worker.run_job(worker_job(job_id="job_success_after_failure", attempt=1, repo="acme/api"))
 
         self.assertIsNone(worker.last_error)
         self.assertFalse(checkout_dir.exists())
@@ -3582,7 +3651,7 @@ func writeHealth() {}
             ), \
             patch("pullwise_worker.main.time.sleep"), \
             patch("pullwise_worker.main.shutil.rmtree"):
-            worker.run_job({"job_id": "job_timeout", "attempt": 1, "repo": "acme/api"})
+            worker.run_job(worker_job(job_id="job_timeout", attempt=1, repo="acme/api"))
 
         self.assertEqual(worker.client.result.call_count, 2)
         statuses = [call.args[1]["status"] for call in worker.client.result.call_args_list]
@@ -3602,7 +3671,7 @@ func writeHealth() {}
             ), \
             patch("pullwise_worker.main.time.sleep"), \
             patch("pullwise_worker.main.shutil.rmtree"):
-            worker.run_job({"job_id": "job_http_retry", "attempt": 1, "repo": "acme/api"})
+            worker.run_job(worker_job(job_id="job_http_retry", attempt=1, repo="acme/api"))
 
         self.assertEqual(worker.client.result.call_count, 2)
         self.assertIsNone(worker.last_error)
@@ -3616,7 +3685,9 @@ func writeHealth() {}
         self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False), 5)
         self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False), 10)
         self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False), 20)
-        self.assertEqual(worker.next_poll_sleep(claimed_jobs=1, loop_error=False), 5)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=1, loop_error=False), 1)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False, free_slots=2), 5)
+        self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=False, free_slots=1), 10)
         self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=True), 5)
         self.assertEqual(worker.next_poll_sleep(claimed_jobs=0, loop_error=True), 10)
 
@@ -3702,6 +3773,24 @@ func writeHealth() {}
         self.assertEqual(run_job.call_count, 1)
         self.assertEqual(run_job.call_args.args[0]["job_id"], "job_1")
         sleep.assert_not_called()
+
+    def test_loop_limits_claim_batch_below_free_slots(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        worker = Worker(config())
+        worker.config.max_concurrent_jobs = 5
+        worker.config.max_claim_jobs = 2
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.return_value = []
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch("pullwise_worker.main.time.sleep", side_effect=StopLoop):
+            with self.assertRaises(StopLoop):
+                worker.run()
+
+        worker.client.claim_many.assert_called_once_with(2)
 
     def test_refresh_readiness_reports_codex_specific_state_with_opencode_fallback(self) -> None:
         worker = Worker(config())
@@ -4228,11 +4317,15 @@ func writeHealth() {}
             return Mock(returncode=0, stdout="", stderr="")
 
         with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run) as run:
-            run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
+            payload, _summary, _logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
 
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertIn('model_reasoning_effort="high"', command)
+        self.assertEqual(payload["effectiveAgentConfig"]["provider"], "codex")
+        self.assertEqual(payload["effectiveAgentConfig"]["cli"], "codex")
+        self.assertEqual(payload["effectiveAgentConfig"]["model"], "gpt-5.5")
+        self.assertEqual(payload["effectiveAgentConfig"]["reasoningEffort"], "high")
 
     def test_run_codex_review_falls_back_to_opencode_after_codex_failure(self) -> None:
         cfg = config()
@@ -4256,6 +4349,10 @@ func writeHealth() {}
         self.assertEqual(findings[0]["title"], "Fallback")
         self.assertEqual(summary["low"], 1)
         self.assertIn("codex failed", logs)
+        self.assertEqual(payload["effectiveAgentConfig"]["provider"], "opencode")
+        self.assertEqual(payload["effectiveAgentConfig"]["cli"], "opencode")
+        self.assertEqual(payload["effectiveAgentConfig"]["model"], "openai/gpt-5")
+        self.assertEqual(payload["effectiveAgentConfig"]["reasoningEffort"], "xhigh")
 
     def test_run_codex_review_surfaces_codex_json_error_detail(self) -> None:
         cfg = config()
@@ -4817,8 +4914,6 @@ func writeHealth() {}
         self.assertIn('write_env_value PULLWISE_CODEX_REASONING_EFFORT "${PULLWISE_CODEX_REASONING_EFFORT:-medium}"', install_script)
         self.assertIn('write_env_value PULLWISE_OPENCODE_MODEL "${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}"', install_script)
         self.assertIn('write_env_value PULLWISE_OPENCODE_VARIANT "${PULLWISE_OPENCODE_VARIANT:-medium}"', install_script)
-        self.assertIn('write_env_value PULLWISE_MAX_REPO_FILES "2000"', install_script)
-        self.assertIn('write_env_value PULLWISE_MAX_REPO_BYTES "52428800"', install_script)
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODE "shadow"', install_script)
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODEL "relative_factor"', install_script)
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS "45"', install_script)
@@ -4832,8 +4927,6 @@ func writeHealth() {}
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
-        self.assertIn("PULLWISE_MAX_REPO_FILES=2000", env_template)
-        self.assertIn("PULLWISE_MAX_REPO_BYTES=52428800", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODE=shadow", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODEL=relative_factor", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS=45", env_template)
@@ -4850,8 +4943,6 @@ func writeHealth() {}
             "PULLWISE_OPENCODE_COMMAND",
             "PULLWISE_OPENCODE_MODEL",
             "PULLWISE_OPENCODE_VARIANT",
-            "PULLWISE_MAX_REPO_FILES",
-            "PULLWISE_MAX_REPO_BYTES",
             "PULLWISE_REVIEW_CALIBRATION_MODE",
             "PULLWISE_REVIEW_CALIBRATION_MODEL",
             "PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS",

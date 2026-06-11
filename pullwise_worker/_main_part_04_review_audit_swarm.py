@@ -24,8 +24,10 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
             ai_usage = normalize_ai_usage(provider_result[3] if len(provider_result) > 3 else {})
             audit_payload = normalize_audit_swarm_files_for_checkout(audit_payload, checkout_dir)
             audit_payload = merge_audit_swarm_payloads(deterministic_payload, audit_payload)
+            effective_agent_config = effective_agent_config_payload(config, provider)
+            audit_payload["effectiveAgentConfig"] = effective_agent_config
             if ai_usage:
-                audit_payload["ai_usage"] = ai_usage
+                audit_payload["aiUsage"] = ai_usage
             summary = summarize(audit_swarm_findings_from_payload(audit_payload) or [])
             if errors:
                 logs_summary = "\n".join([*errors, logs_summary])[-1000:]
@@ -114,7 +116,7 @@ def ai_usage_payload(model: object) -> dict:
 def normalize_ai_usage(value: object) -> dict:
     if not isinstance(value, dict):
         return {}
-    return ai_usage_payload(value.get("model") or value.get("modelName") or value.get("model_name"))
+    return ai_usage_payload(value.get("model"))
 
 
 def codex_failure_detail(raw_output: str, config: WorkerConfig) -> str:
