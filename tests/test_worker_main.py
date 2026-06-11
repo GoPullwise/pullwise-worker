@@ -138,24 +138,72 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_worker_config_for_job_applies_server_agent_overrides_without_mutating_base(self) -> None:
         worker_config = config()
+        worker_config.provider = "codex"
+        worker_config.provider_chain = ["codex"]
+        worker_config.codex_command = "codex"
+        worker_config.codex_model = "gpt-5.5"
         worker_config.codex_reasoning_effort = "medium"
+        worker_config.opencode_command = "opencode"
+        worker_config.opencode_model = "opencode/big-pickle"
         worker_config.opencode_variant = "medium"
 
         job_config = worker_config_for_job(
             worker_config,
             {
                 "agentConfig": {
-                    "codex": {"reasoningEffort": "xhigh"},
-                    "opencode": {"variant": "xhigh"},
+                    "providerChain": ["codex", "opencode"],
+                    "codex": {
+                        "cli": "codex-nightly",
+                        "model": "gpt-5.5-codex",
+                        "reasoningEffort": "xhigh",
+                    },
+                    "opencode": {
+                        "command": "opencode-cli",
+                        "model": "openai/gpt-5",
+                        "variant": "high",
+                    },
                 }
             },
         )
 
         self.assertIsNot(job_config, worker_config)
+        self.assertEqual(job_config.provider, "codex")
+        self.assertEqual(job_config.provider_chain, ["codex", "opencode"])
+        self.assertEqual(job_config.codex_command, "codex-nightly")
+        self.assertEqual(job_config.codex_model, "gpt-5.5-codex")
         self.assertEqual(job_config.codex_reasoning_effort, "xhigh")
-        self.assertEqual(job_config.opencode_variant, "xhigh")
+        self.assertEqual(job_config.opencode_command, "opencode-cli")
+        self.assertEqual(job_config.opencode_model, "openai/gpt-5")
+        self.assertEqual(job_config.opencode_variant, "high")
+        self.assertEqual(worker_config.provider_chain, ["codex"])
+        self.assertEqual(worker_config.codex_command, "codex")
+        self.assertEqual(worker_config.codex_model, "gpt-5.5")
         self.assertEqual(worker_config.codex_reasoning_effort, "medium")
+        self.assertEqual(worker_config.opencode_command, "opencode")
+        self.assertEqual(worker_config.opencode_model, "opencode/big-pickle")
         self.assertEqual(worker_config.opencode_variant, "medium")
+
+    def test_worker_config_for_job_applies_top_level_agent_config(self) -> None:
+        worker_config = config()
+
+        job_config = worker_config_for_job(
+            worker_config,
+            {
+                "agent_config": {
+                    "agent": {
+                        "cli": "opencode",
+                        "model": "openai/gpt-5.1",
+                        "reasoning_effort": "high",
+                    }
+                }
+            },
+        )
+
+        self.assertIsNot(job_config, worker_config)
+        self.assertEqual(job_config.provider, "opencode")
+        self.assertEqual(job_config.provider_chain, ["opencode"])
+        self.assertEqual(job_config.opencode_model, "openai/gpt-5.1")
+        self.assertEqual(job_config.opencode_variant, "high")
 
     def test_worker_config_for_job_rejects_unknown_agent_overrides(self) -> None:
         worker_config = config()
@@ -164,8 +212,18 @@ class WorkerMainTest(unittest.TestCase):
             worker_config,
             {
                 "agent_config": {
-                    "codex": {"reasoning_effort": 'xhigh" --unsafe'},
-                    "opencode": {"variant": "turbo"},
+                    "providerChain": ["codex --unsafe"],
+                    "agent": {"cli": "shell"},
+                    "codex": {
+                        "command": "codex --unsafe",
+                        "model": "gpt-5.5\nbad",
+                        "reasoning_effort": 'xhigh" --unsafe',
+                    },
+                    "opencode": {
+                        "command": "opencode --flag",
+                        "model": "openai/gpt-5\rbad",
+                        "variant": "turbo",
+                    },
                 }
             },
         )

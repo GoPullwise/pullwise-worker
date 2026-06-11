@@ -3,6 +3,7 @@ from __future__ import annotations
 # Loaded by main.py; keep definitions in that module's globals for compatibility.
 
 AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
+AGENT_CONFIG_TEXT_MAX_LENGTH = 128
 
 
 def normalized_agent_reasoning_level(value: object) -> str:
@@ -12,21 +13,100 @@ def normalized_agent_reasoning_level(value: object) -> str:
     return normalized if normalized in AGENT_REASONING_LEVELS else ""
 
 
+def normalized_agent_config_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if not normalized or len(normalized) > AGENT_CONFIG_TEXT_MAX_LENGTH:
+        return ""
+    if any(char in normalized for char in "\r\n\x00"):
+        return ""
+    if any(char.isspace() for char in normalized):
+        return ""
+    return normalized
+
+
+def normalized_agent_provider(value: object) -> str:
+    provider = normalized_agent_config_text(value).lower()
+    return provider if provider in SUPPORTED_REVIEW_PROVIDERS else ""
+
+
+def normalized_agent_provider_chain(value: object) -> list[str]:
+    candidates = value if isinstance(value, list) else [value]
+    providers: list[str] = []
+    for candidate in candidates:
+        provider = normalized_agent_provider(candidate)
+        if provider and provider not in providers:
+            providers.append(provider)
+    return providers
+
+
 def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
     agent_config = job.get("agent_config") if isinstance(job.get("agent_config"), dict) else job.get("agentConfig")
     if not isinstance(agent_config, dict):
         return base_config
+    agent = agent_config.get("agent") if isinstance(agent_config.get("agent"), dict) else {}
     codex = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
     opencode = agent_config.get("opencode") if isinstance(agent_config.get("opencode"), dict) else {}
+    provider_chain = normalized_agent_provider_chain(
+        agent_config.get("provider_chain") or agent_config.get("providerChain")
+    )
+    if not provider_chain:
+        provider = normalized_agent_provider(agent.get("cli") or agent_config.get("provider"))
+        if provider:
+            provider_chain = [provider]
+    primary_provider = provider_chain[0] if provider_chain else normalized_agent_provider(agent.get("cli"))
+    codex_command = normalized_agent_config_text(codex.get("command") or codex.get("cli"))
+    codex_model = normalized_agent_config_text(
+        codex.get("model") or codex.get("modelName") or codex.get("model_name")
+    )
     codex_reasoning_effort = normalized_agent_reasoning_level(
-        codex.get("reasoning_effort") or codex.get("reasoningEffort")
+        codex.get("reasoning_effort")
+        or codex.get("reasoningEffort")
+        or (agent.get("reasoning_effort") if primary_provider == "codex" else None)
+        or (agent.get("reasoningEffort") if primary_provider == "codex" else None)
+    )
+    if not codex_model and primary_provider == "codex":
+        codex_model = normalized_agent_config_text(agent.get("model") or agent.get("modelName") or agent.get("model_name"))
+    opencode_command = normalized_agent_config_text(opencode.get("command") or opencode.get("cli"))
+    opencode_model = normalized_agent_config_text(
+        opencode.get("model") or opencode.get("modelName") or opencode.get("model_name")
     )
     opencode_variant = normalized_agent_reasoning_level(opencode.get("variant"))
-    if not codex_reasoning_effort and not opencode_variant:
+    if not opencode_variant and primary_provider == "opencode":
+        opencode_variant = normalized_agent_reasoning_level(
+            agent.get("reasoning_effort") or agent.get("reasoningEffort")
+        )
+    if not opencode_model and primary_provider == "opencode":
+        opencode_model = normalized_agent_config_text(
+            agent.get("model") or agent.get("modelName") or agent.get("model_name")
+        )
+    if not any(
+        [
+            provider_chain,
+            codex_command,
+            codex_model,
+            codex_reasoning_effort,
+            opencode_command,
+            opencode_model,
+            opencode_variant,
+        ]
+    ):
         return base_config
     config = copy.copy(base_config)
+    if provider_chain:
+        config.provider_chain = provider_chain
+        config.provider = provider_chain[0]
+    if codex_command:
+        config.codex_command = codex_command
+    if codex_model:
+        config.codex_model = codex_model
     if codex_reasoning_effort:
         config.codex_reasoning_effort = codex_reasoning_effort
+    if opencode_command:
+        config.opencode_command = opencode_command
+    if opencode_model:
+        config.opencode_model = opencode_model
     if opencode_variant:
         config.opencode_variant = opencode_variant
     return config
