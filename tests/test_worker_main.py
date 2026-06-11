@@ -162,22 +162,22 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(worker_config.max_repo_bytes, 50 * 1024 * 1024)
         self.assertEqual(worker_config.max_claim_jobs, 2)
 
-    def test_worker_config_for_job_applies_server_agent_overrides_without_mutating_base(self) -> None:
+    def test_worker_config_for_job_keeps_local_agent_env_without_mutating_base(self) -> None:
         worker_config = config()
-        worker_config.provider = "codex"
-        worker_config.provider_chain = ["codex"]
-        worker_config.codex_command = "codex"
-        worker_config.codex_model = "gpt-5.5"
-        worker_config.codex_reasoning_effort = "medium"
-        worker_config.opencode_command = "opencode"
-        worker_config.opencode_model = "opencode/big-pickle"
-        worker_config.opencode_variant = "medium"
+        worker_config.provider = "opencode"
+        worker_config.provider_chain = ["opencode", "codex"]
+        worker_config.codex_command = "/opt/server-pullwise/ops/codex-node22"
+        worker_config.codex_model = "gpt-env"
+        worker_config.codex_reasoning_effort = "high"
+        worker_config.opencode_command = "/opt/server-pullwise/ops/opencode"
+        worker_config.opencode_model = "opencode/env"
+        worker_config.opencode_variant = "xhigh"
 
         job_config = worker_config_for_job(
             worker_config,
             {
                 "agentConfig": {
-                    "providerChain": ["codex", "opencode"],
+                    "providerChain": ["codex"],
                     "codex": {
                         "command": "codex-nightly",
                         "model": "gpt-5.5-codex",
@@ -194,55 +194,57 @@ class WorkerMainTest(unittest.TestCase):
         )
 
         self.assertIsNot(job_config, worker_config)
-        self.assertEqual(job_config.provider, "codex")
-        self.assertEqual(job_config.provider_chain, ["codex", "opencode"])
-        self.assertEqual(job_config.codex_command, "codex-nightly")
-        self.assertEqual(job_config.codex_model, "gpt-5.5-codex")
-        self.assertEqual(job_config.codex_reasoning_effort, "xhigh")
-        self.assertEqual(job_config.opencode_command, "opencode-cli")
-        self.assertEqual(job_config.opencode_model, "openai/gpt-5")
-        self.assertEqual(job_config.opencode_variant, "high")
+        self.assertEqual(job_config.provider, "opencode")
+        self.assertEqual(job_config.provider_chain, ["opencode", "codex"])
+        self.assertEqual(job_config.codex_command, "/opt/server-pullwise/ops/codex-node22")
+        self.assertEqual(job_config.codex_model, "gpt-env")
+        self.assertEqual(job_config.codex_reasoning_effort, "high")
+        self.assertEqual(job_config.opencode_command, "/opt/server-pullwise/ops/opencode")
+        self.assertEqual(job_config.opencode_model, "opencode/env")
+        self.assertEqual(job_config.opencode_variant, "xhigh")
         self.assertEqual(job_config.max_repo_files, 321)
         self.assertEqual(job_config.max_repo_bytes, 654321)
-        self.assertEqual(worker_config.provider_chain, ["codex"])
-        self.assertEqual(worker_config.codex_command, "codex")
-        self.assertEqual(worker_config.codex_model, "gpt-5.5")
-        self.assertEqual(worker_config.codex_reasoning_effort, "medium")
-        self.assertEqual(worker_config.opencode_command, "opencode")
-        self.assertEqual(worker_config.opencode_model, "opencode/big-pickle")
-        self.assertEqual(worker_config.opencode_variant, "medium")
+        self.assertEqual(worker_config.provider_chain, ["opencode", "codex"])
+        self.assertEqual(worker_config.codex_command, "/opt/server-pullwise/ops/codex-node22")
+        self.assertEqual(worker_config.codex_model, "gpt-env")
+        self.assertEqual(worker_config.codex_reasoning_effort, "high")
+        self.assertEqual(worker_config.opencode_command, "/opt/server-pullwise/ops/opencode")
+        self.assertEqual(worker_config.opencode_model, "opencode/env")
+        self.assertEqual(worker_config.opencode_variant, "xhigh")
 
     def test_worker_config_for_job_requires_canonical_server_payload(self) -> None:
         worker_config = config()
 
-        with self.assertRaisesRegex(RuntimeError, "agentConfig"):
-            worker_config_for_job(worker_config, {"agent_config": {"providerChain": ["codex"]}})
         with self.assertRaisesRegex(RuntimeError, "repositoryLimits"):
-            worker_config_for_job(worker_config, {"agentConfig": {"providerChain": ["codex"]}})
+            worker_config_for_job(worker_config, {"agent_config": {"providerChain": ["codex"]}})
 
-    def test_worker_config_for_job_rejects_unknown_agent_overrides(self) -> None:
+    def test_worker_config_for_job_ignores_unknown_agent_overrides(self) -> None:
         worker_config = config()
 
-        with self.assertRaisesRegex(RuntimeError, "providerChain"):
-            worker_config_for_job(
-                worker_config,
-                {
-                    "agentConfig": {
-                        "providerChain": ["codex --unsafe"],
-                        "codex": {
-                            "command": "codex --unsafe",
-                            "model": "gpt-5.5\nbad",
-                            "reasoningEffort": 'xhigh" --unsafe',
-                        },
-                        "opencode": {
-                            "command": "opencode --flag",
-                            "model": "openai/gpt-5\rbad",
-                            "variant": "turbo",
-                        },
+        job_config = worker_config_for_job(
+            worker_config,
+            {
+                "agentConfig": {
+                    "providerChain": ["codex --unsafe"],
+                    "codex": {
+                        "command": "codex --unsafe",
+                        "model": "gpt-5.5\nbad",
+                        "reasoningEffort": 'xhigh" --unsafe',
                     },
-                    "repositoryLimits": {"maxFiles": 1, "maxBytes": 1},
+                    "opencode": {
+                        "command": "opencode --flag",
+                        "model": "openai/gpt-5\rbad",
+                        "variant": "turbo",
+                    },
                 },
-            )
+                "repositoryLimits": {"maxFiles": 1, "maxBytes": 1},
+            },
+        )
+
+        self.assertEqual(job_config.provider_chain, worker_config.provider_chain)
+        self.assertEqual(job_config.codex_command, worker_config.codex_command)
+        self.assertEqual(job_config.max_repo_files, 1)
+        self.assertEqual(job_config.max_repo_bytes, 1)
 
     def test_repository_resource_stats_excludes_git_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
