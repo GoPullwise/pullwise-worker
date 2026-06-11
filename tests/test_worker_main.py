@@ -4526,6 +4526,18 @@ func writeHealth() {}
         self.assertFalse(ok)
         self.assertEqual(detail, "not logged in")
 
+    def test_codex_ready_check_retries_after_cached_auth_failure(self) -> None:
+        cfg = config()
+        worker_main.mark_codex_auth_failure(cfg, "not authenticated; run codex login")
+        completed = Mock(returncode=0, stdout='{"ok": true}', stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
+            ok, detail = codex_ready_check(cfg)
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "ready")
+        run.assert_called_once()
+
     def test_codex_ready_check_defers_when_codex_invocation_is_running(self) -> None:
         cfg = config()
         self.assertTrue(worker_main._CODEX_EXEC_LOCK.acquire(blocking=False))
