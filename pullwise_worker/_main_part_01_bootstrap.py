@@ -6,6 +6,7 @@ import argparse
 import base64
 import concurrent.futures
 import copy
+import ctypes
 import hashlib
 import json
 import math
@@ -49,6 +50,8 @@ _VERIFIER_HOME_DIR_NAME = ".verifier-home"
 _VERIFIER_TMP_DIR_NAME = ".verifier-tmp"
 _CHECKOUT_ROOT_SENTINEL_NAME = ".pullwise-checkout-root"
 _CHECKOUT_RUNTIME_DIR_NAMES = {_VERIFIER_HOME_DIR_NAME, _VERIFIER_TMP_DIR_NAME}
+_PROC_MEMINFO_PATH = "/proc/meminfo"
+DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex", "opencode"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
@@ -172,6 +175,158 @@ def env_float(name: str, default: float, *, minimum: float | None = None, maximu
     return value
 
 
+def metric_percent(numerator: int | float | None, denominator: int | float | None) -> float | None:
+    if numerator is None or denominator is None or denominator <= 0:
+        return None
+    return round(max(0.0, min(100.0, (float(numerator) / float(denominator)) * 100.0)), 1)
+
+
+def linux_memory_bytes() -> tuple[int | None, int | None]:
+    try:
+        with open(_PROC_MEMINFO_PATH, "r", encoding="utf-8") as meminfo:
+            values: dict[str, int] = {}
+            for line in meminfo:
+                key, _, rest = line.partition(":")
+                amount = rest.strip().split(" ", 1)[0]
+                if amount.isdigit():
+                    values[key] = int(amount) * 1024
+    except OSError:
+        return None, None
+
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    if available is None:
+        available = sum(values.get(key, 0) for key in ("MemFree", "Buffers", "Cached"))
+    return total, available
+
+
+def windows_memory_bytes() -> tuple[int | None, int | None]:
+    if platform.system().lower() != "windows":
+        return None, None
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(MemoryStatusEx)
+    try:
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None, None
+    except (AttributeError, OSError):
+        return None, None
+    return int(status.ullTotalPhys), int(status.ullAvailPhys)
+
+
+def sysconf_memory_bytes() -> tuple[int | None, int | None]:
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        page_count = int(os.sysconf("SC_PHYS_PAGES"))
+    except (AttributeError, OSError, ValueError):
+        return None, None
+    total = page_size * page_count if page_size > 0 and page_count > 0 else None
+    return total, None
+
+
+def worker_memory_payload() -> dict:
+    total, available = linux_memory_bytes()
+    if total is None:
+        total, available = windows_memory_bytes()
+    if total is None:
+        total, available = sysconf_memory_bytes()
+
+    used = total - available if total is not None and available is not None else None
+    return {
+        "totalBytes": total,
+        "availableBytes": available,
+        "usedBytes": used,
+        "usedPercent": metric_percent(used, total),
+    }
+
+
+def worker_load_average_payload() -> dict | None:
+    try:
+        one, five, fifteen = os.getloadavg()
+    except (AttributeError, OSError):
+        return None
+    return {
+        "oneMinute": round(float(one), 2),
+        "fiveMinute": round(float(five), 2),
+        "fifteenMinute": round(float(fifteen), 2),
+    }
+
+
+def worker_cpu_payload() -> dict:
+    return {
+        "logicalCount": os.cpu_count(),
+        "loadAverage": worker_load_average_payload(),
+    }
+
+
+def existing_storage_path(path: str) -> str:
+    candidate = os.path.abspath(path or os.getcwd())
+    while candidate and not os.path.exists(candidate):
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    return candidate or os.path.abspath(os.getcwd())
+
+
+def worker_storage_payload(path: str) -> dict:
+    requested_path = os.path.abspath(path or os.getcwd())
+    measured_path = existing_storage_path(requested_path)
+    try:
+        usage = shutil.disk_usage(measured_path)
+    except OSError:
+        return {
+            "path": requested_path,
+            "measuredPath": measured_path,
+            "totalBytes": None,
+            "usedBytes": None,
+            "freeBytes": None,
+            "usedPercent": None,
+        }
+
+    used = usage.total - usage.free
+    return {
+        "path": requested_path,
+        "measuredPath": measured_path,
+        "totalBytes": int(usage.total),
+        "usedBytes": int(used),
+        "freeBytes": int(usage.free),
+        "usedPercent": metric_percent(used, usage.total),
+    }
+
+
+def worker_machine_metrics_payload(*, storage_path: str, timestamp: int | None = None) -> dict:
+    return {
+        "ok": True,
+        "collectedAt": int(timestamp if timestamp is not None else time.time()),
+        "worker": {
+            "hostname": platform.node(),
+            "platform": platform.platform(),
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "pythonVersion": platform.python_version(),
+            "processId": os.getpid(),
+        },
+        "cpu": worker_cpu_payload(),
+        "memory": worker_memory_payload(),
+        "storage": worker_storage_payload(storage_path),
+    }
+
+
 def parse_verifier_scripts(value: str | None) -> list[str]:
     raw_items = value.split(",") if value else _VERIFIER_DEFAULT_SCRIPTS
     scripts = []
@@ -233,6 +388,11 @@ class WorkerConfig:
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
         self.codex_auth_failure_cooldown_seconds = max(0, int(os.environ.get("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS") or 3600))
         self.readiness_check_seconds = max(10, int(os.environ.get("PULLWISE_READINESS_CHECK_SECONDS") or 60))
+        self.machine_metrics_interval_seconds = env_int(
+            "PULLWISE_WORKER_MACHINE_METRICS_SECONDS",
+            DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS,
+            minimum=1,
+        )
         self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
@@ -369,24 +529,25 @@ class PullwiseClient:
         codex_ready: bool | None = None,
         systemd_active: bool | None = None,
         doctor_checked_at: int | None = None,
+        machine_metrics: dict | None = None,
     ) -> dict:
-        response = self.post(
-            "/worker/heartbeat",
-            {
-                "worker_id": self.config.worker_id,
-                "version": __version__,
-                "provider": self.config.provider,
-                "max_concurrent_jobs": self.config.max_concurrent_jobs,
-                "running_jobs": running_jobs,
-                "free_slots": max(0, self.config.max_concurrent_jobs - running_jobs),
-                "hostname": socket.gethostname(),
-                "last_error": last_error,
-                "doctor_status": doctor_status,
-                "codex_ready": codex_ready,
-                "systemd_active": systemd_active,
-                "doctor_checked_at": doctor_checked_at,
-            },
-        )
+        payload = {
+            "worker_id": self.config.worker_id,
+            "version": __version__,
+            "provider": self.config.provider,
+            "max_concurrent_jobs": self.config.max_concurrent_jobs,
+            "running_jobs": running_jobs,
+            "free_slots": max(0, self.config.max_concurrent_jobs - running_jobs),
+            "hostname": socket.gethostname(),
+            "last_error": last_error,
+            "doctor_status": doctor_status,
+            "codex_ready": codex_ready,
+            "systemd_active": systemd_active,
+            "doctor_checked_at": doctor_checked_at,
+        }
+        if isinstance(machine_metrics, dict):
+            payload["machine_metrics"] = machine_metrics
+        response = self.post("/worker/heartbeat", payload)
         return response.json()
 
     def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:

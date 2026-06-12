@@ -157,6 +157,7 @@ class Worker:
         self._empty_poll_count = 0
         self._error_poll_count = 0
         self._last_cleanup_at = 0.0
+        self._machine_metrics_checked_at = 0.0
 
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
@@ -177,6 +178,7 @@ class Worker:
                 loop_error = False
                 claimed_jobs = 0
                 heartbeat_payload: dict = {}
+                machine_metrics = self.machine_metrics_if_due()
                 try:
                     heartbeat_response = self.client.heartbeat(
                         running_jobs=len(running),
@@ -184,6 +186,7 @@ class Worker:
                         doctor_status=self._doctor_status,
                         codex_ready=self._codex_ready,
                         doctor_checked_at=int(self._readiness_checked_at) if self._readiness_checked_at else None,
+                        machine_metrics=machine_metrics,
                     )
                     if isinstance(heartbeat_response, dict):
                         heartbeat_payload = heartbeat_response
@@ -220,6 +223,18 @@ class Worker:
                     concurrent.futures.wait(running)
                     return
                 time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error, free_slots=free_slots))
+
+    def machine_metrics_if_due(self) -> dict | None:
+        current = time.time()
+        if current - self._machine_metrics_checked_at < self.config.machine_metrics_interval_seconds:
+            return None
+        self._machine_metrics_checked_at = current
+        try:
+            return worker_machine_metrics_payload(storage_path=str(self.config.work_dir), timestamp=int(current))
+        except Exception as exc:
+            error = f"machine metrics failed: {redact_secrets(str(exc), self.config)}"
+            self.last_error = f"{self.last_error}; {error}"[:500] if self.last_error else error[:500]
+            return None
 
     def cleanup_resources_if_due(self, active_jobs: object, *, force: bool = False) -> None:
         current = time.monotonic()

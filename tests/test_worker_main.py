@@ -3730,6 +3730,31 @@ func writeHealth() {}
         self.assertIn("heartbeat failed", worker.last_error)
         self.assertIn("invalid JSON response", worker.last_error)
 
+    def test_once_loop_sends_machine_metrics_on_heartbeat(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.return_value = []
+        expected_metrics = {
+            "ok": True,
+            "collectedAt": 1781200000,
+            "worker": {"hostname": "worker-host"},
+            "cpu": {"logicalCount": 8, "loadAverage": None},
+            "memory": {"usedPercent": 62.5},
+            "storage": {"usedPercent": 40.0},
+        }
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch("pullwise_worker.main.worker_machine_metrics_payload", return_value=expected_metrics) as collect, \
+            patch("pullwise_worker.main.time.time", return_value=1781200000), \
+            patch("pullwise_worker.main.time.sleep") as sleep:
+            worker.run(once=True)
+
+        collect.assert_called_once_with(storage_path=str(worker.config.work_dir), timestamp=1781200000)
+        worker.client.heartbeat.assert_called_once()
+        self.assertIs(worker.client.heartbeat.call_args.kwargs["machine_metrics"], expected_metrics)
+        sleep.assert_not_called()
+
     def test_once_loop_reports_malformed_claim_json_without_crashing(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
