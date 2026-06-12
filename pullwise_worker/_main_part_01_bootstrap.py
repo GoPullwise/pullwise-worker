@@ -55,6 +55,13 @@ DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
 DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
 DEFAULT_OPENCODE_VARIANT = "medium"
+DEFAULT_SERVICE_USER = "pullwise-worker"
+DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
+DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+DEFAULT_PROVIDER_AUTH_PATH = (
+    f"{DEFAULT_SERVICE_PATH}:{DEFAULT_SERVICE_HOME}/.local/bin:"
+    f"{DEFAULT_SERVICE_HOME}/.codex/bin:{DEFAULT_SERVICE_HOME}/.opencode/bin"
+)
 AUDIT_SWARM_PROTOCOL_VERSION = "audit-swarm/0.1"
 CONVERGENCE_PROTOCOL_VERSION = "pullwise-convergence/0.1"
 REVIEW_DECISION_EVENT_PROTOCOL_VERSION = "pullwise-review-decision/0.1"
@@ -75,9 +82,14 @@ AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
     "risk",
 }
 CODEX_LOGIN_COMMAND = (
-    "sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker "
-    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+    f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
+    f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
     "codex login --device-auth"
+)
+OPENCODE_AUTH_COMMAND = (
+    f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
+    f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
+    "opencode auth login --provider opencode"
 )
 _CODEX_AUTH_FAILURE_MARKERS = (
     "401 Unauthorized",
@@ -90,6 +102,38 @@ _CODEX_EXEC_LOCK = Lock()
 _CODEX_AUTH_FAILURE_LOCK = Lock()
 _codex_auth_failure_until = 0.0
 _codex_auth_failure_detail = ""
+
+
+def service_user_command(config: WorkerConfig | None, command: list[str]) -> str:
+    service_user = str(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
+    service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    service_path = str(getattr(config, "service_path", None) or DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
+    path_parts = [
+        service_path,
+        f"{service_home}/.local/bin",
+        f"{service_home}/.codex/bin",
+        f"{service_home}/.opencode/bin",
+    ]
+    path = ":".join(dict.fromkeys(part for part in path_parts if part))
+    quoted_command = " ".join(shlex.quote(str(part)) for part in command if str(part))
+    return (
+        f"sudo -u {shlex.quote(service_user)} env "
+        f"HOME={shlex.quote(service_home)} PATH={shlex.quote(path)} {quoted_command}"
+    )
+
+
+def codex_login_command(config: WorkerConfig) -> str:
+    return service_user_command(config, [config.codex_command, "login", "--device-auth"])
+
+
+def opencode_provider_id(config: WorkerConfig | None) -> str:
+    model = str(getattr(config, "opencode_model", None) or DEFAULT_OPENCODE_MODEL).strip()
+    provider = model.split("/", 1)[0].strip() if model else ""
+    return provider or "opencode"
+
+
+def opencode_auth_command(config: WorkerConfig) -> str:
+    return service_user_command(config, [config.opencode_command, "auth", "login", "--provider", opencode_provider_id(config)])
 
 
 def parse_provider_chain(value: str | None, fallback: str = "codex") -> list[str]:
@@ -182,6 +226,9 @@ class WorkerConfig:
         self.opencode_command = os.environ.get("PULLWISE_OPENCODE_COMMAND", "opencode").strip() or "opencode"
         self.opencode_model = os.environ.get("PULLWISE_OPENCODE_MODEL", DEFAULT_OPENCODE_MODEL).strip() or DEFAULT_OPENCODE_MODEL
         self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", DEFAULT_OPENCODE_VARIANT).strip() or DEFAULT_OPENCODE_VARIANT
+        self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
+        self.service_home = os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+        self.service_path = os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
         self.codex_auth_failure_cooldown_seconds = max(0, int(os.environ.get("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS") or 3600))
