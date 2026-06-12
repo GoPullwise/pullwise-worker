@@ -42,6 +42,7 @@ def service_user_doctor_command(bin_path: Path) -> list[str]:
         or "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
     service_bin = str(bin_path).replace("\\", "/")
+    doctor_command = f'cd "$HOME" && exec {shlex.quote(service_bin)} doctor'
     return [
         "runuser",
         "-u",
@@ -50,8 +51,9 @@ def service_user_doctor_command(bin_path: Path) -> list[str]:
         "env",
         f"HOME={service_home}",
         f"PATH={service_path}",
-        service_bin,
-        "doctor",
+        "sh",
+        "-lc",
+        doctor_command,
     ]
 
 

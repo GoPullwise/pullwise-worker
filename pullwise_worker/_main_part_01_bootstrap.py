@@ -87,12 +87,12 @@ AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
 CODEX_LOGIN_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
-    "codex login --device-auth"
+    "sh -lc 'cd \"$HOME\" && exec codex login --device-auth'"
 )
 OPENCODE_AUTH_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
-    "opencode auth login --provider opencode"
+    "sh -lc 'cd \"$HOME\" && exec opencode auth login --provider opencode'"
 )
 _CODEX_AUTH_FAILURE_MARKERS = (
     "401 Unauthorized",
@@ -119,9 +119,11 @@ def service_user_command(config: WorkerConfig | None, command: list[str]) -> str
     ]
     path = ":".join(dict.fromkeys(part for part in path_parts if part))
     quoted_command = " ".join(shlex.quote(str(part)) for part in command if str(part))
+    shell_command = f'cd "$HOME" && exec {quoted_command}'
     return (
         f"sudo -u {shlex.quote(service_user)} env "
-        f"HOME={shlex.quote(service_home)} PATH={shlex.quote(path)} {quoted_command}"
+        f"HOME={shlex.quote(service_home)} PATH={shlex.quote(path)} "
+        f"sh -lc {shlex.quote(shell_command)}"
     )
 
 
