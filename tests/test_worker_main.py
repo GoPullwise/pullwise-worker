@@ -4685,6 +4685,36 @@ func writeHealth() {}
         self.assertFalse(ok)
         self.assertEqual(detail, "not authenticated for minimax")
 
+    def test_opencode_auth_check_does_not_treat_provider_catalog_as_login(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout="Available providers:\nopencode\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "not authenticated for opencode")
+
+    def test_opencode_auth_check_rejects_explicit_unauthenticated_provider(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout="opencode not authenticated\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "not authenticated for opencode")
+
+    def test_opencode_auth_check_accepts_explicit_authenticated_provider(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout="opencode authenticated\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg)
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for opencode")
+
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
 
@@ -4715,7 +4745,8 @@ func writeHealth() {}
             ), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
             patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
-            patch("pullwise_worker.main.PullwiseClient") as client_class:
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("builtins.print") as print_mock:
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
@@ -4723,6 +4754,8 @@ func writeHealth() {}
         heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
         self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
         self.assertFalse(heartbeat_kwargs["codex_ready"])
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertIn(CODEX_LOGIN_COMMAND, printed)
 
     def test_codex_ready_check_identifies_login_failure(self) -> None:
         cfg = config()

@@ -115,7 +115,7 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 
 def run_doctor(config: WorkerConfig) -> bool:
-    checks, provider_ready = worker_readiness_checks(config)
+    checks, _provider_ready = worker_readiness_checks(config)
     codex_ready = readiness_check_ok(checks, "codex_ready")
     systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", "pullwise-worker"])
     checks.append(("systemd", systemd_ok, systemd_detail))
@@ -137,10 +137,10 @@ def run_doctor(config: WorkerConfig) -> bool:
     for name, ok, detail in checks:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
     codex_login_check = next((check for check in checks if check[0] == "codex_ready"), None)
-    if not provider_ready and "codex" in config.provider_chain and codex_login_check and not codex_login_check[1]:
+    if "codex" in config.provider_chain and codex_login_check and not codex_login_check[1]:
         print(f"Codex may require device authorization. Run: {codex_login_command(config)}")
     opencode_check = next((check for check in checks if check[0] == "opencode_ready"), None)
-    if not provider_ready and "opencode" in config.provider_chain and opencode_check and not opencode_check[1]:
+    if "opencode" in config.provider_chain and opencode_check and not opencode_check[1]:
         print(f"OpenCode may require provider API credentials. Run: {opencode_auth_command(config)}")
     return first_failed_check(checks) is None
 
@@ -154,6 +154,45 @@ def command_ok(command: list[str]) -> tuple[bool, str]:
         return False, "not found"
     except Exception as exc:
         return False, str(exc)
+
+
+def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
+    provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider.lower())}([^a-z0-9_-]|$)")
+    ready_markers = (
+        "authenticated",
+        "logged in",
+        "logged-in",
+        "active",
+        "configured",
+        "connected",
+        "valid",
+        "enabled",
+        "true",
+        "yes",
+        "✓",
+        "✔",
+    )
+    missing_markers = (
+        "not authenticated",
+        "not logged in",
+        "not logged-in",
+        "unauthenticated",
+        "missing",
+        "no credentials",
+        "no api key",
+        "invalid",
+        "false",
+        "disabled",
+    )
+    for line in output.splitlines():
+        lowered = line.lower()
+        if not provider_pattern.search(lowered):
+            continue
+        if any(marker in lowered for marker in missing_markers):
+            continue
+        if any(marker in lowered for marker in ready_markers):
+            return True
+    return False
 
 
 def opencode_auth_check(config: WorkerConfig) -> tuple[bool, str]:
@@ -175,8 +214,7 @@ def opencode_auth_check(config: WorkerConfig) -> tuple[bool, str]:
     detail = output.splitlines()[0] if output else f"exit {completed.returncode}"
     if completed.returncode != 0:
         return False, detail
-    provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider.lower())}([^a-z0-9_-]|$)")
-    if any(provider_pattern.search(line.lower()) for line in output.splitlines()):
+    if opencode_auth_output_has_ready_provider(output, provider):
         return True, f"authenticated for {provider}"
     return False, f"not authenticated for {provider}"
 
