@@ -170,7 +170,7 @@ def uninstall_worker(
         completed = subprocess.run(["systemctl", "daemon-reload"])
         if completed.returncode != 0:
             return completed.returncode
-    print("Worker disabled locally. Disable or delete it from Pullwise admin separately.")
+    print("Worker disabled locally.")
     return 0
 
 

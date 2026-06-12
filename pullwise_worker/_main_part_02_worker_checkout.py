@@ -337,6 +337,16 @@ class Worker:
         rejected_reasons: dict[str, int] = {}
         logs_summary = ""
         job_trace_checkpoints: list[dict] = []
+
+        def current_job_trace(result_status: str = "running", next_retry_hint: str = "") -> dict:
+            return job_trace_payload(
+                result_status=result_status,
+                checkpoints=job_trace_checkpoints,
+                candidate_count_before_filter=candidate_count,
+                rejected_reasons=rejected_reasons,
+                next_retry_hint=next_retry_hint,
+            )
+
         try:
             job_config = worker_config_for_job(self.config, job)
             configured_agent = effective_agent_config_payload(job_config)
@@ -358,6 +368,14 @@ class Worker:
                     details={"commit": resolved_commit[:12], "repo": job.get("repo")},
                 )
             )
+            self.client.progress(
+                job_id,
+                "clone",
+                PHASE_PROGRESS["clone"],
+                "Repository cloned",
+                audit_swarm=audit_swarm_scan_artifacts("clone", config=job_config, summary="Repository cloned."),
+                job_trace=current_job_trace(),
+            )
             current_stage = "preflight"
             limit_preflight = enforce_repository_limits(job_config, job, checkout_dir)
             self.client.progress(
@@ -371,6 +389,7 @@ class Worker:
                     preflight=limit_preflight,
                     summary="Repository checkout is ready.",
                 ),
+                job_trace=current_job_trace(),
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
             job_trace_checkpoints.append(
@@ -385,6 +404,19 @@ class Worker:
                         "repositoryStats": limit_preflight.get("repositoryStats"),
                     },
                 )
+            )
+            self.client.progress(
+                job_id,
+                "index",
+                PHASE_PROGRESS["index"],
+                "Repository preflight ready",
+                audit_swarm=audit_swarm_scan_artifacts(
+                    "preflight",
+                    config=job_config,
+                    preflight=preflight,
+                    summary="Repository preflight collected.",
+                ),
+                job_trace=current_job_trace(),
             )
             current_stage = "graph"
             graph_status = "ok"
@@ -439,6 +471,21 @@ class Worker:
                     repository_graph=repository_graph,
                     semantic_graph=semantic_graph,
                     impact_graph=impact_graph,
+                    job_trace=current_job_trace(),
+                )
+            else:
+                self.client.progress(
+                    job_id,
+                    "index",
+                    PHASE_PROGRESS["index"],
+                    graph_summary,
+                    audit_swarm=audit_swarm_scan_artifacts(
+                        "preflight",
+                        config=job_config,
+                        preflight=preflight,
+                        summary=graph_summary,
+                    ),
+                    job_trace=current_job_trace(),
                 )
             current_stage = "verifier"
             try:
@@ -481,6 +528,7 @@ class Worker:
                     preflight=preflight,
                     summary="Repository preflight is complete; reviewer agents are discovering issue cards.",
                 ),
+                job_trace=current_job_trace(),
             )
             current_stage = "agent"
             audit_payload, summary, logs_summary = run_codex_review(job_config, job, checkout_dir)
@@ -512,6 +560,20 @@ class Worker:
                     },
                     logs_summary=logs_summary,
                 )
+            )
+            self.client.progress(
+                job_id,
+                "ai",
+                PHASE_PROGRESS["ai"],
+                "Codex review complete",
+                logs_summary,
+                audit_swarm=audit_swarm_scan_artifacts(
+                    "discovery",
+                    config=job_config,
+                    preflight=preflight,
+                    summary="Provider review completed.",
+                ),
+                job_trace=current_job_trace(),
             )
             review_decision_records: list[dict] = []
             projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(
@@ -645,7 +707,16 @@ class Worker:
             if ai_usage:
                 payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
-            self.client.progress(job_id, "report", 100, "Uploading result", logs_summary, audit_swarm=audit_swarm)
+            self.client.progress(
+                job_id,
+                "report",
+                100,
+                "Uploading result",
+                logs_summary,
+                audit_swarm=audit_swarm,
+                completion_audit=completion_audit,
+                job_trace=job_trace,
+            )
             try:
                 self.upload_result_with_retry(job_id, payload)
             except Exception as exc:
@@ -721,6 +792,16 @@ class Worker:
                 error_payload["resolved_commit"] = resolved_commit
             error_payload["result_checksum"] = result_checksum(error_payload)
             try:
+                self.client.progress(
+                    job_id,
+                    "report",
+                    PHASE_PROGRESS["report"],
+                    "Uploading failed result",
+                    error,
+                    audit_swarm=error_payload["audit_swarm"],
+                    completion_audit=completion_audit,
+                    job_trace=job_trace,
+                )
                 self.upload_result_with_retry(job_id, error_payload)
             except Exception as upload_exc:
                 self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), job_config)}"[:500]

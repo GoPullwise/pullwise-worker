@@ -62,7 +62,7 @@ Required environment:
 Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old verifier logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
 Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. OpenCode is not used unless it appears in `PULLWISE_PROVIDER_CHAIN`; when enabled, the worker defaults to `opencode/big-pickle` with variant `medium`.
-When the server includes per-job `agentConfig`, the worker applies that review's provider chain plus Codex/OpenCode command, model, and reasoning settings without changing the process-wide defaults. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
+When the server includes per-job `agentConfig`, the worker applies that review's provider chain plus per-provider model and reasoning settings without changing the process-wide defaults. Executable command paths such as `PULLWISE_CODEX_COMMAND` and `PULLWISE_OPENCODE_COMMAND` remain local worker configuration and are not overridden by job policy. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
 
 Codex `exec` calls are serialized inside the worker because Codex keeps local login state under the service user's home directory. If Codex reports an authentication or refresh-token failure, the worker cools down further Codex launches for `PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS` and then uses the next configured provider, if any.
 
@@ -88,7 +88,7 @@ export PULLWISE_WORKER_TOKEN
 curl -fsSL https://pullwise.example.com/install-worker.sh | bash -s -- --server https://pullwise.example.com --worker-id wk_x
 ```
 
-The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, force-reinstalls the worker package from `PULLWISE_WORKER_PACKAGE` or, by default, from the `v0.4.2` GitHub Release wheel, installs the pinned Codex CLI package from `PULLWISE_CODEX_PACKAGE` when `codex` is missing (default `@openai/codex@0.135.0`), installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.
+The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, force-reinstalls the worker package from `PULLWISE_WORKER_PACKAGE` or, by default, from the GitHub Release wheel version currently pinned by `deploy/install-worker.sh` and `deploy/worker.env.template` (currently `v0.4.15`), installs the pinned Codex CLI package from `PULLWISE_CODEX_PACKAGE` when `codex` is missing (default `@openai/codex@0.135.0`), installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.
 
 ## Release
 
@@ -116,6 +116,9 @@ pullwise-worker uninstall
 systemd authorization. Admin-queued stop commands are handled by the running
 worker exiting cleanly; the installed unit uses `Restart=on-failure` so the
 service stays stopped.
+`pullwise-worker uninstall` first unregisters the worker from the server when
+`PULLWISE_WORKER_TOKEN` is configured, then removes the local service. A stopped
+worker stays in the registry; an uninstalled worker is removed from admin lists.
 
 Codex must be authenticated for the service user before Codex scans can run:
 

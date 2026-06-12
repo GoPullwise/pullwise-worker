@@ -160,8 +160,9 @@ class WorkerConfig:
             )
         self.worker_token = getattr(args, "worker_token", None) or os.environ.get("PULLWISE_WORKER_TOKEN") or ""
         self.worker_id = getattr(args, "worker_id", None) or os.environ.get("PULLWISE_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
-        self.provider = getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "codex"
-        self.provider_chain = parse_provider_chain(os.environ.get("PULLWISE_PROVIDER_CHAIN"), self.provider)
+        configured_provider = str(getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "").strip().lower()
+        self.provider_chain = parse_provider_chain(os.environ.get("PULLWISE_PROVIDER_CHAIN"), configured_provider or "codex")
+        self.provider = configured_provider or self.provider_chain[0]
         self.max_concurrent_jobs = max(1, int(getattr(args, "max_concurrent_jobs", None) or os.environ.get("PULLWISE_MAX_CONCURRENT_JOBS") or 1))
         self.max_claim_jobs = max(1, int(getattr(args, "max_claim_jobs", None) or os.environ.get("PULLWISE_WORKER_MAX_CLAIM_JOBS") or 2))
         self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))
@@ -297,6 +298,20 @@ class PullwiseClient:
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
+    def delete(self, path: str) -> PullwiseResponse:
+        request = urllib.request.Request(
+            f"{self.config.server_url}{path}",
+            headers=self.headers,
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return PullwiseResponse(response.read())
+        except urllib.error.HTTPError as exc:
+            reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
+            raise PullwiseHTTPError(f"HTTP {exc.code}: {reason}", exc.code) from exc
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            raise PullwiseRequestError(str(exc)) from exc
 
     def heartbeat(
         self,
@@ -360,6 +375,8 @@ class PullwiseClient:
         repository_graph: dict | None = None,
         semantic_graph: dict | None = None,
         impact_graph: dict | None = None,
+        completion_audit: dict | None = None,
+        job_trace: dict | None = None,
     ) -> None:
         payload = {
             "phase": phase,
@@ -376,10 +393,42 @@ class PullwiseClient:
             payload["semantic_graph"] = semantic_graph
         if impact_graph:
             payload["impact_graph"] = impact_graph
+        if completion_audit:
+            payload["completion_audit"] = completion_audit
+            payload["completionAudit"] = completion_audit
+        if job_trace:
+            payload["job_trace"] = job_trace
+            payload["jobTrace"] = job_trace
         self.post(f"/worker/jobs/{job_id}/progress", payload)
 
     def result(self, job_id: str, payload: dict) -> None:
         self.post(f"/worker/jobs/{job_id}/result", payload)
+
+
+def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False) -> bool:
+    if not config.worker_token:
+        if dry_run:
+            print("skip server registry unregister: PULLWISE_WORKER_TOKEN is not set")
+        return False
+    if dry_run:
+        print(f"DELETE {config.server_url}/worker/registry")
+        return True
+    PullwiseClient(config).delete("/worker/registry")
+    return True
+
+
+def uninstall_worker_command(args: argparse.Namespace) -> int:
+    try:
+        config = WorkerConfig(args, require_worker_token=False)
+    except ValueError as exc:
+        print(f"server registry unregister skipped: {exc}", file=sys.stderr)
+    else:
+        try:
+            unregister_worker_from_server(config, dry_run=args.dry_run)
+        except PullwiseRequestError as exc:
+            print(f"server registry unregister failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
+            return 1
+    return uninstall_worker(remove_config=args.remove_config, remove_logs=args.remove_logs, dry_run=args.dry_run)
 
 
 def main() -> None:
@@ -410,7 +459,7 @@ def main() -> None:
     if args.command in {"start", "stop", "status", "restart"}:
         raise SystemExit(service_action(args.command, dry_run=args.dry_run))
     if args.command == "uninstall":
-        raise SystemExit(uninstall_worker(remove_config=args.remove_config, remove_logs=args.remove_logs, dry_run=args.dry_run))
+        raise SystemExit(uninstall_worker_command(args))
     require_worker_token = args.command in {"run", "doctor"}
     try:
         config = WorkerConfig(args, require_worker_token=require_worker_token)

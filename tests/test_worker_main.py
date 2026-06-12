@@ -3386,6 +3386,12 @@ func writeHealth() {}
         )
         self.assertEqual(result_payload["result_checksum"], result_checksum({k: v for k, v in result_payload.items() if k != "result_checksum"}))
         self.assertGreaterEqual(worker.client.progress.call_count, 3)
+        progress_payloads = [call.kwargs for call in worker.client.progress.call_args_list]
+        self.assertTrue(any(payload.get("job_trace", {}).get("status") == "running" for payload in progress_payloads))
+        final_progress = progress_payloads[-1]
+        self.assertEqual(final_progress["completion_audit"]["protocol"], "pullwise-completion-audit/0.1")
+        self.assertEqual(final_progress["completion_audit"], result_payload["completion_audit"])
+        self.assertEqual(final_progress["job_trace"], result_payload["job_trace"])
         rmtree.assert_called_with(checkout_dir, ignore_errors=True)
 
     def test_run_job_uploads_repository_graph_progress_and_result(self) -> None:
@@ -3501,6 +3507,9 @@ func writeHealth() {}
         self.assertEqual(payload["job_trace"], payload["jobTrace"])
         self.assertEqual(payload["job_trace"]["status"], "failed")
         self.assertIn("Repository exceeds configured limits", payload["job_trace"]["nextRetryHint"])
+        final_progress = worker.client.progress.call_args_list[-1].kwargs
+        self.assertEqual(final_progress["completion_audit"], payload["completion_audit"])
+        self.assertEqual(final_progress["job_trace"], payload["job_trace"])
 
     def test_run_job_continues_when_verifier_errors(self) -> None:
         worker = Worker(config())
@@ -3847,12 +3856,18 @@ func writeHealth() {}
                 repository_graph={"version": "repository-graph/0.2", "nodes": [], "edges": []},
                 semantic_graph={"version": "semantic-code-graph/0.1", "nodes": [], "edges": []},
                 impact_graph={"version": "impact-graph/0.1", "targets": []},
+                completion_audit={"protocol": "pullwise-completion-audit/0.1", "status": "passed"},
+                job_trace={"protocol": "pullwise-job-trace/0.1", "status": "running"},
             )
 
         payload = post.call_args.args[1]
         self.assertEqual(payload["repository_graph"]["version"], "repository-graph/0.2")
         self.assertEqual(payload["semantic_graph"]["version"], "semantic-code-graph/0.1")
         self.assertEqual(payload["impact_graph"]["version"], "impact-graph/0.1")
+        self.assertEqual(payload["completion_audit"], payload["completionAudit"])
+        self.assertEqual(payload["completion_audit"]["protocol"], "pullwise-completion-audit/0.1")
+        self.assertEqual(payload["job_trace"], payload["jobTrace"])
+        self.assertEqual(payload["job_trace"]["protocol"], "pullwise-job-trace/0.1")
 
     def test_once_loop_executes_lifecycle_command_from_heartbeat(self) -> None:
         worker = Worker(config())
@@ -4306,6 +4321,27 @@ func writeHealth() {}
         self.assertEqual(cfg.opencode_model, "openai/gpt-5")
         self.assertEqual(cfg.opencode_variant, "xhigh")
 
+    def test_worker_config_defaults_provider_to_first_provider_chain_entry(self) -> None:
+        namespace = Namespace(
+            server_url="https://server.test",
+            worker_token="worker-token",
+            worker_id="wk_1",
+            max_concurrent_jobs=2,
+            poll_seconds=1,
+            work_dir=tempfile.mkdtemp(),
+            checkout_root=None,
+            log_dir=tempfile.mkdtemp(),
+            provider=None,
+            codex_command=None,
+            codex_timeout_seconds=60,
+        )
+
+        with patch.dict("os.environ", {"PULLWISE_PROVIDER_CHAIN": "opencode,codex"}, clear=True):
+            cfg = WorkerConfig(namespace)
+
+        self.assertEqual(cfg.provider_chain, ["opencode", "codex"])
+        self.assertEqual(cfg.provider, "opencode")
+
     def test_run_codex_review_uses_configured_codex_model_and_effort(self) -> None:
         cfg = config()
         cfg.codex_model = "gpt-5.5"
@@ -4460,6 +4496,54 @@ func writeHealth() {}
 
             self.assertEqual(raised.exception.code, 0)
             uninstall.assert_called_once_with(remove_config=True, remove_logs=False, dry_run=True)
+
+    def test_main_uninstall_unregisters_worker_before_local_cleanup(self) -> None:
+        events = []
+        client = Mock()
+        client.delete.side_effect = lambda path: events.append(("delete", path))
+
+        def local_uninstall(**kwargs):
+            events.append(("uninstall", kwargs))
+            return 0
+
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_SERVER_URL": "https://server.test",
+                "PULLWISE_WORKER_TOKEN": "worker-token",
+                "PULLWISE_WORKER_ID": "wk_1",
+            },
+            clear=True,
+        ), patch.object(sys, "argv", ["pullwise-worker", "uninstall", "--remove-config"]), \
+            patch("pullwise_worker.main.PullwiseClient", return_value=client), \
+            patch("pullwise_worker.main.uninstall_worker", side_effect=local_uninstall):
+            with self.assertRaises(SystemExit) as raised:
+                worker_main.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(events[0], ("delete", "/worker/registry"))
+        self.assertEqual(events[1], ("uninstall", {"remove_config": True, "remove_logs": False, "dry_run": False}))
+
+    def test_main_uninstall_aborts_local_cleanup_when_registry_unregister_fails(self) -> None:
+        client = Mock()
+        client.delete.side_effect = PullwiseRequestError("connection refused")
+
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_SERVER_URL": "https://server.test",
+                "PULLWISE_WORKER_TOKEN": "worker-token",
+                "PULLWISE_WORKER_ID": "wk_1",
+            },
+            clear=True,
+        ), patch.object(sys, "argv", ["pullwise-worker", "uninstall"]), \
+            patch("pullwise_worker.main.PullwiseClient", return_value=client), \
+            patch("pullwise_worker.main.uninstall_worker", return_value=0) as local_uninstall:
+            with self.assertRaises(SystemExit) as raised:
+                worker_main.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        local_uninstall.assert_not_called()
 
     def test_run_doctor_prints_device_auth_login_command_when_codex_is_not_ready(self) -> None:
         cfg = config()
