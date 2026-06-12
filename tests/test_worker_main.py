@@ -5045,10 +5045,9 @@ func writeHealth() {}
         self.assertNotIn("filelock>=3.20.3", workflow)
         self.assertNotIn("requests", pyproject)
 
-    def test_deploy_assets_cover_install_systemd_logrotate_and_lifecycle(self) -> None:
+    def test_deploy_assets_cover_service_env_logrotate_and_lifecycle(self) -> None:
         deploy_root = Path(__file__).resolve().parents[1] / "deploy"
         expected = [
-            "install-worker.sh",
             "worker.env.template",
             "pullwise-worker.service",
             "logrotate.conf",
@@ -5060,33 +5059,12 @@ func writeHealth() {}
 
         for name in expected:
             self.assertTrue((deploy_root / name).exists(), name)
-        install_script = (deploy_root / "install-worker.sh").read_text(encoding="utf-8")
+        self.assertFalse(
+            (deploy_root / "install-worker.sh").exists(),
+            "server /install-worker.sh is the only supported worker installer",
+        )
         env_template = (deploy_root / "worker.env.template").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
-        self.assertIn("PULLWISE_WORKER_PACKAGE", install_script)
-        self.assertIn(f'DEFAULT_WORKER_VERSION="{__version__}"', install_script)
-        self.assertIn("https://github.com/GoPullwise/pullwise-worker/releases/download/v${DEFAULT_WORKER_VERSION}/pullwise_worker-${DEFAULT_WORKER_VERSION}-py3-none-any.whl", install_script)
-        self.assertIn("pip install --upgrade --force-reinstall --no-cache-dir", install_script)
-        self.assertNotIn("pullwise-worker==0.1.0", install_script)
-        self.assertIn("PULLWISE_CODEX_PACKAGE", install_script)
-        self.assertIn("@openai/codex@0.135.0", install_script)
-        self.assertIn("--codex-package", install_script)
-        self.assertIn("--provider-chain", install_script)
-        self.assertIn('write_env_value PULLWISE_CODEX_MODEL "${PULLWISE_CODEX_MODEL:-gpt-5.5}"', install_script)
-        self.assertIn('write_env_value PULLWISE_CODEX_REASONING_EFFORT "${PULLWISE_CODEX_REASONING_EFFORT:-medium}"', install_script)
-        self.assertIn('OPENCODE_MODEL="${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}"', install_script)
-        self.assertIn('OPENCODE_AUTH_PROVIDER="${OPENCODE_MODEL%%/*}"', install_script)
-        self.assertIn('write_env_value PULLWISE_OPENCODE_MODEL "$OPENCODE_MODEL"', install_script)
-        self.assertIn('write_env_value PULLWISE_OPENCODE_VARIANT "${PULLWISE_OPENCODE_VARIANT:-medium}"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODE "shadow"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODEL "relative_factor"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS "45"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES "20"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS "false"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY "false"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT "false"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE "0.02"', install_script)
-        self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW "0.03"', install_script)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
@@ -5117,43 +5095,7 @@ func writeHealth() {}
             "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE",
             "PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW",
         ):
-            self.assertIn(key, install_script)
             self.assertIn(key, env_template)
-        self.assertIn("uname -s", install_script)
-        self.assertIn("uname -m", install_script)
-        self.assertIn("need_cmd python3", install_script)
-        self.assertIn("Python 3.9 or newer", install_script)
-        self.assertIn("need_cmd git", install_script)
-        self.assertIn("Node.js 20+ is required", install_script)
-        self.assertIn("Node.js 20+ must be available to $SERVICE_USER", install_script)
-        self.assertIn("PULLWISE_PYTHON_BIN", install_script)
-        self.assertIn("run_as_service_user \"$BIN_PATH\" doctor || true", install_script)
-        self.assertIn("codex login --device-auth", install_script)
-        self.assertIn("OpenCode API/provider credentials", install_script)
-        self.assertIn("auth login --provider $OPENCODE_AUTH_PROVIDER", install_script)
-        self.assertIn("PULLWISE_OPENCODE_MODEL=deepseek/deepseek-v4-pro", install_script)
-        self.assertIn("auth login --provider deepseek", install_script)
-        self.assertIn("PULLWISE_OPENCODE_MODEL=minimax/MiniMax-M3", install_script)
-        self.assertIn("auth login --provider minimax", install_script)
-        self.assertIn("OpenCode generic template", install_script)
-        self.assertIn("OpenCode interactive provider selection", install_script)
-        self.assertIn("auth list", install_script)
-        self.assertIn('write_env_value PULLWISE_SERVICE_USER "$SERVICE_USER"', install_script)
-        self.assertIn('write_env_value PULLWISE_SERVICE_HOME "$DATA_DIR"', install_script)
-        self.assertIn("PULLWISE_WORKER_TOKEN", install_script)
-        self.assertIn("--worker-token-file", install_script)
-        self.assertIn('write_env_value PULLWISE_SERVER_URL "$SERVER_URL"', install_script)
-        self.assertIn('write_env_value PULLWISE_WORKER_TOKEN "$WORKER_TOKEN"', install_script)
-        self.assertIn('while IFS="=" read -r key value', install_script)
-        self.assertIn('export "$key=$value"', install_script)
-        self.assertNotIn("PULLWISE_SERVER_URL=$SERVER_URL", install_script)
-        self.assertNotIn("PULLWISE_WORKER_TOKEN=$WORKER_TOKEN", install_script)
-        self.assertNotIn(". /etc/pullwise-worker/worker.env", install_script)
-        self.assertNotIn("--worker-token) WORKER_TOKEN", install_script)
-        self.assertNotIn("$(dirname \"$0\")", install_script)
-        self.assertNotIn("cp \"$(dirname", install_script)
-        self.assertNotIn("pww_", install_script)
-        self.assertIn("Restart=on-failure", install_script)
         self.assertIn("Restart=on-failure", service)
         self.assertNotIn("Restart=always", service)
         self.assertIn("ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker", service)

@@ -88,7 +88,7 @@ export PULLWISE_WORKER_TOKEN
 curl -fsSL https://pullwise.example.com/install-worker.sh | bash -s -- --server https://pullwise.example.com --worker-id wk_x
 ```
 
-The installer creates a `pullwise-worker` system user, writes `/etc/pullwise-worker/worker.env` with mode `0640`, force-reinstalls the worker package from `PULLWISE_WORKER_PACKAGE` or, by default, from the GitHub Release wheel version currently pinned by `deploy/install-worker.sh` and `deploy/worker.env.template` (currently `v0.4.15`), installs the pinned Codex CLI package from `PULLWISE_CODEX_PACKAGE` when `codex` is missing (default `@openai/codex@0.135.0`), installs a systemd unit, enables logrotate, starts the worker, and runs `pullwise-worker doctor`.
+The installer is served by Pullwise Server at `/install-worker.sh`. It creates a worker-specific system user, writes a locked-down worker env file, installs the selected worker package, installs Codex/OpenCode CLIs when needed, installs a systemd unit and logrotate config, starts the worker, and runs `pullwise-worker doctor`. The worker package intentionally does not ship a second install script; server is the single installer source of truth.
 
 ## Release
 
