@@ -3809,6 +3809,21 @@ func writeHealth() {}
         self.assertEqual(run_job.call_args.args[0]["job_id"], "job_1")
         sleep.assert_not_called()
 
+    def test_once_loop_reports_unhandled_job_exception(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.return_value = [{"job_id": "job_boom"}]
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch.object(worker, "run_job", side_effect=RuntimeError("boom")), \
+            patch("pullwise_worker.main.time.sleep") as sleep:
+            worker.run(once=True)
+
+        worker.client.claim_many.assert_called_once_with(1)
+        sleep.assert_not_called()
+        self.assertIn("job job_boom failed unexpectedly: boom", worker.last_error)
+
     def test_loop_limits_claim_batch_below_free_slots(self) -> None:
         class StopLoop(Exception):
             pass

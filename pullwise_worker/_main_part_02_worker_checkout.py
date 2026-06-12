@@ -164,14 +164,18 @@ class Worker:
         self.cleanup_resources_if_due([], force=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_concurrent_jobs) as executor:
             running: dict[concurrent.futures.Future[None], dict] = {}
-            while True:
-                done = [future for future in running if future.done()]
-                for future in done:
+
+            def collect_finished_jobs(futures: list[concurrent.futures.Future[None]]) -> None:
+                for future in futures:
                     job = running.pop(future)
                     try:
                         future.result()
                     except Exception as exc:
                         self.last_error = f"job {job.get('job_id')} failed unexpectedly: {exc}"[:500]
+
+            while True:
+                done = [future for future in running if future.done()]
+                collect_finished_jobs(done)
                 self.cleanup_resources_if_due(running.values())
                 free_slots = max(0, self.config.max_concurrent_jobs - len(running))
                 ready = self.refresh_readiness_if_due()
@@ -225,9 +229,11 @@ class Worker:
                     claimed_jobs = len(jobs)
                     if once:
                         concurrent.futures.wait(running)
+                        collect_finished_jobs([future for future in running if future.done()])
                         return
                 elif once:
                     concurrent.futures.wait(running)
+                    collect_finished_jobs([future for future in running if future.done()])
                     return
                 time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error, free_slots=free_slots))
 
