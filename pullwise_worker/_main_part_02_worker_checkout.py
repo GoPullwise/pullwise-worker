@@ -179,9 +179,16 @@ class Worker:
                 claimed_jobs = 0
                 heartbeat_payload: dict = {}
                 machine_metrics = self.machine_metrics_if_due()
+                active_job_ids = []
+                for job in running.values():
+                    try:
+                        active_job_ids.append(safe_job_id(job.get("job_id") if isinstance(job, dict) else job))
+                    except ValueError:
+                        continue
                 try:
                     heartbeat_response = self.client.heartbeat(
                         running_jobs=len(running),
+                        active_job_ids=active_job_ids,
                         last_error=self.last_error,
                         doctor_status=self._doctor_status,
                         codex_ready=self._codex_ready,

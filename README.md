@@ -97,7 +97,7 @@ To publish a worker package:
 1. In GitHub, open Actions -> Release -> Run workflow.
 2. Enter the version, for example `0.1.0`.
 
-The workflow updates `pyproject.toml` and `pullwise_worker/__init__.py`, commits the version bump, creates `v<version>`, builds the wheel and source archive, and uploads both to the GitHub Release. Pullwise server install commands can then use that version directly.
+The workflow updates `pyproject.toml`, `pullwise_worker/__init__.py`, and `deploy/worker.env.template`, commits the version bump, creates `v<version>`, builds the wheel and source archive, and uploads both to the GitHub Release. Pullwise server install commands can then use that version directly.
 
 Useful lifecycle commands:
 

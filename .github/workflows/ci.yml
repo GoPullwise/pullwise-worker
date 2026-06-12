@@ -27,7 +27,6 @@ jobs:
         run: python -m pip check
       - name: Check shell scripts
         run: |
-          bash -n ./deploy/install-worker.sh
           bash -n ./deploy/update-worker.sh
           bash -n ./deploy/restart-worker.sh
           bash -n ./deploy/uninstall-worker.sh

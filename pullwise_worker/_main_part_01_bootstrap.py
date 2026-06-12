@@ -524,6 +524,7 @@ class PullwiseClient:
         self,
         *,
         running_jobs: int = 0,
+        active_job_ids: list[str] | None = None,
         last_error: str | None = None,
         doctor_status: str | None = None,
         codex_ready: bool | None = None,
@@ -545,6 +546,8 @@ class PullwiseClient:
             "systemd_active": systemd_active,
             "doctor_checked_at": doctor_checked_at,
         }
+        if active_job_ids is not None:
+            payload["active_job_ids"] = [str(job_id) for job_id in active_job_ids if str(job_id or "").strip()]
         if isinstance(machine_metrics, dict):
             payload["machine_metrics"] = machine_metrics
         response = self.post("/worker/heartbeat", payload)

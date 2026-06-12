@@ -3827,6 +3827,38 @@ func writeHealth() {}
 
         worker.client.claim_many.assert_called_once_with(2)
 
+    def test_loop_reports_active_job_ids_on_heartbeat(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        worker = Worker(config())
+        worker.config.max_concurrent_jobs = 1
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.return_value = [{"job_id": "job_active"}]
+        release_job = threading.Event()
+        sleep_calls = 0
+
+        def run_job(_job: dict) -> None:
+            release_job.wait(2)
+
+        def sleep_once_then_stop(_seconds: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                release_job.set()
+                raise StopLoop()
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch.object(worker, "run_job", side_effect=run_job), \
+            patch("pullwise_worker.main.time.sleep", side_effect=sleep_once_then_stop):
+            with self.assertRaises(StopLoop):
+                worker.run()
+
+        self.assertGreaterEqual(worker.client.heartbeat.call_count, 2)
+        self.assertEqual(worker.client.heartbeat.call_args.kwargs["running_jobs"], 1)
+        self.assertEqual(worker.client.heartbeat.call_args.kwargs["active_job_ids"], ["job_active"])
+
     def test_refresh_readiness_reports_codex_specific_state_with_opencode_fallback(self) -> None:
         worker = Worker(config())
         checks = [
@@ -3869,6 +3901,17 @@ func writeHealth() {}
         self.assertEqual(request.get_header("Authorization"), "Bearer worker-token")
         self.assertEqual(json.loads(request.data.decode("utf-8")), {"worker_id": "wk_1"})
         self.assertEqual(response.json(), {"ok": True})
+
+    def test_pullwise_client_heartbeat_includes_active_job_ids(self) -> None:
+        cfg = config()
+        client = PullwiseClient(cfg)
+
+        with patch.object(client, "post", return_value=PullwiseResponse(b"{}")) as post:
+            client.heartbeat(running_jobs=2, active_job_ids=["job_1", "", "job_2"])
+
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["running_jobs"], 2)
+        self.assertEqual(payload["active_job_ids"], ["job_1", "job_2"])
 
     def test_pullwise_client_progress_uploads_repository_graph(self) -> None:
         cfg = config()
@@ -5039,6 +5082,7 @@ func writeHealth() {}
         self.assertIn('"pip-audit>=2.9,<2.10"', workflow)
         self.assertIn('"filelock>=3.19.1,<3.20"', workflow)
         self.assertIn('python -m unittest discover -s tests -p "test_*.py"', workflow)
+        self.assertNotIn("deploy/install-worker.sh", workflow)
         self.assertIn("dependencies = []", pyproject)
         self.assertIn("no third-party runtime dependencies", audit_requirements)
         self.assertNotIn("pip>=26.1", workflow)

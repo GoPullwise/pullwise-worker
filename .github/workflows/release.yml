@@ -56,10 +56,6 @@ jobs:
           replacements = {
               Path("pyproject.toml"): (r'^version = "[^"]+"', f'version = "{version}"'),
               Path("pullwise_worker/__init__.py"): (r'^__version__ = "[^"]+"', f'__version__ = "{version}"'),
-              Path("deploy/install-worker.sh"): (
-                  r'^DEFAULT_WORKER_VERSION="[^"]+"',
-                  f'DEFAULT_WORKER_VERSION="{version}"',
-              ),
               Path("deploy/worker.env.template"): (
                   r'^PULLWISE_WORKER_PACKAGE=.*$',
                   f'PULLWISE_WORKER_PACKAGE=https://github.com/GoPullwise/pullwise-worker/releases/download/v{version}/pullwise_worker-{version}-py3-none-any.whl',
@@ -76,13 +72,13 @@ jobs:
       - name: Commit package version
         if: github.ref_type != 'tag'
         run: |
-          if git diff --quiet -- pyproject.toml pullwise_worker/__init__.py deploy/install-worker.sh deploy/worker.env.template; then
+          if git diff --quiet -- pyproject.toml pullwise_worker/__init__.py deploy/worker.env.template; then
             echo "Package version already set to $RELEASE_VERSION"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml pullwise_worker/__init__.py deploy/install-worker.sh deploy/worker.env.template
+          git add pyproject.toml pullwise_worker/__init__.py deploy/worker.env.template
           git commit -m "Release pullwise-worker v$RELEASE_VERSION"
           git push origin "HEAD:$GITHUB_REF_NAME"
 
