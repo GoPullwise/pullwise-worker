@@ -18,6 +18,7 @@ import pullwise_worker.main as worker_main
 from pullwise_worker import __version__
 from pullwise_worker.main import (
     CODEX_LOGIN_COMMAND,
+    OPENCODE_AUTH_COMMAND,
     PullwiseClient,
     PullwiseHTTPError,
     PullwiseRequestError,
@@ -3934,12 +3935,14 @@ func writeHealth() {}
                 ],
             ), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
+            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
             checks, provider_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
         self.assertFalse(by_name["codex_ready"][0])
         self.assertTrue(by_name["opencode"][0])
+        self.assertTrue(by_name["opencode_ready"][0])
         self.assertTrue(by_name["provider_ready"][0])
         self.assertTrue(provider_ready)
 
@@ -4444,6 +4447,7 @@ func writeHealth() {}
                 side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")],
             ), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
+            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class:
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
@@ -4562,6 +4566,42 @@ func writeHealth() {}
         self.assertIn(CODEX_LOGIN_COMMAND, printed)
         self.assertIn("--device-auth", printed)
 
+    def test_run_doctor_prints_opencode_auth_command_when_opencode_is_configured_but_missing(self) -> None:
+        cfg = config()
+        cfg.provider_chain = ["opencode"]
+
+        with patch(
+                "pullwise_worker.main.command_ok",
+                side_effect=[(True, "git ok"), (False, "not found"), (True, "active")],
+            ), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("builtins.print") as print_mock:
+            client_class.return_value.heartbeat.return_value = None
+            run_doctor(cfg)
+
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertIn(OPENCODE_AUTH_COMMAND, printed)
+        self.assertIn("auth login --provider opencode", printed)
+
+    def test_opencode_auth_command_uses_provider_from_model_prefix(self) -> None:
+        cfg = config()
+        cfg.opencode_model = "deepseek/deepseek-v4-pro"
+
+        command = worker_main.opencode_auth_command(cfg)
+
+        self.assertIn("opencode auth login --provider deepseek", command)
+
+    def test_opencode_auth_check_requires_current_model_provider(self) -> None:
+        cfg = config()
+        cfg.opencode_model = "minimax/MiniMax-M3"
+        completed = Mock(returncode=0, stdout="deepseek\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "not authenticated for minimax")
+
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
 
@@ -4591,6 +4631,7 @@ func writeHealth() {}
                 ],
             ), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
+            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class:
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
@@ -5008,7 +5049,9 @@ func writeHealth() {}
         self.assertIn("--provider-chain", install_script)
         self.assertIn('write_env_value PULLWISE_CODEX_MODEL "${PULLWISE_CODEX_MODEL:-gpt-5.5}"', install_script)
         self.assertIn('write_env_value PULLWISE_CODEX_REASONING_EFFORT "${PULLWISE_CODEX_REASONING_EFFORT:-medium}"', install_script)
-        self.assertIn('write_env_value PULLWISE_OPENCODE_MODEL "${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}"', install_script)
+        self.assertIn('OPENCODE_MODEL="${PULLWISE_OPENCODE_MODEL:-opencode/big-pickle}"', install_script)
+        self.assertIn('OPENCODE_AUTH_PROVIDER="${OPENCODE_MODEL%%/*}"', install_script)
+        self.assertIn('write_env_value PULLWISE_OPENCODE_MODEL "$OPENCODE_MODEL"', install_script)
         self.assertIn('write_env_value PULLWISE_OPENCODE_VARIANT "${PULLWISE_OPENCODE_VARIANT:-medium}"', install_script)
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODE "shadow"', install_script)
         self.assertIn('write_env_value PULLWISE_REVIEW_CALIBRATION_MODEL "relative_factor"', install_script)
@@ -5061,6 +5104,17 @@ func writeHealth() {}
         self.assertIn("PULLWISE_PYTHON_BIN", install_script)
         self.assertIn("run_as_service_user \"$BIN_PATH\" doctor || true", install_script)
         self.assertIn("codex login --device-auth", install_script)
+        self.assertIn("OpenCode API/provider credentials", install_script)
+        self.assertIn("auth login --provider $OPENCODE_AUTH_PROVIDER", install_script)
+        self.assertIn("PULLWISE_OPENCODE_MODEL=deepseek/deepseek-v4-pro", install_script)
+        self.assertIn("auth login --provider deepseek", install_script)
+        self.assertIn("PULLWISE_OPENCODE_MODEL=minimax/MiniMax-M3", install_script)
+        self.assertIn("auth login --provider minimax", install_script)
+        self.assertIn("OpenCode generic template", install_script)
+        self.assertIn("OpenCode interactive provider selection", install_script)
+        self.assertIn("auth list", install_script)
+        self.assertIn('write_env_value PULLWISE_SERVICE_USER "$SERVICE_USER"', install_script)
+        self.assertIn('write_env_value PULLWISE_SERVICE_HOME "$DATA_DIR"', install_script)
         self.assertIn("PULLWISE_WORKER_TOKEN", install_script)
         self.assertIn("--worker-token-file", install_script)
         self.assertIn('write_env_value PULLWISE_SERVER_URL "$SERVER_URL"', install_script)

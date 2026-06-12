@@ -54,7 +54,11 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
     if "opencode" in config.provider_chain:
         opencode_ok, opencode_detail = command_ok([config.opencode_command, "--version"])
         checks.append(("opencode", opencode_ok, opencode_detail))
-        if opencode_ok:
+        opencode_auth_ok, opencode_auth_detail = (
+            opencode_auth_check(config) if opencode_ok else (False, "skipped until opencode CLI passes --version")
+        )
+        checks.append(("opencode_ready", opencode_auth_ok, opencode_auth_detail))
+        if opencode_ok and opencode_auth_ok:
             ready_providers.append("opencode")
     provider_ready = bool(ready_providers)
     checks.append(("provider_ready", provider_ready, ", ".join(ready_providers) if provider_ready else "no configured provider is ready"))
@@ -68,7 +72,7 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
 
 def first_failed_check(checks: list[tuple[str, bool, str]]) -> tuple[str, bool, str] | None:
     provider_ready = readiness_check_ok(checks, "provider_ready")
-    optional_provider_checks = {"node", "codex", "codex_ready", "opencode"}
+    optional_provider_checks = {"node", "codex", "codex_ready", "opencode", "opencode_ready"}
     for check in checks:
         name, ok, _detail = check
         if ok:
@@ -134,7 +138,10 @@ def run_doctor(config: WorkerConfig) -> bool:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
     codex_login_check = next((check for check in checks if check[0] == "codex_ready"), None)
     if not provider_ready and "codex" in config.provider_chain and codex_login_check and not codex_login_check[1]:
-        print(f"Codex may require device authorization. Run: {CODEX_LOGIN_COMMAND}")
+        print(f"Codex may require device authorization. Run: {codex_login_command(config)}")
+    opencode_check = next((check for check in checks if check[0] == "opencode_ready"), None)
+    if not provider_ready and "opencode" in config.provider_chain and opencode_check and not opencode_check[1]:
+        print(f"OpenCode may require provider API credentials. Run: {opencode_auth_command(config)}")
     return first_failed_check(checks) is None
 
 
@@ -147,6 +154,31 @@ def command_ok(command: list[str]) -> tuple[bool, str]:
         return False, "not found"
     except Exception as exc:
         return False, str(exc)
+
+
+def opencode_auth_check(config: WorkerConfig) -> tuple[bool, str]:
+    provider = opencode_provider_id(config)
+    try:
+        completed = subprocess.run(
+            [config.opencode_command, "auth", "list"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+        )
+    except FileNotFoundError:
+        return False, "opencode not found"
+    except Exception as exc:
+        return False, str(exc)
+
+    output = redact_secrets("\n".join([completed.stdout or "", completed.stderr or ""]).strip(), config)
+    detail = output.splitlines()[0] if output else f"exit {completed.returncode}"
+    if completed.returncode != 0:
+        return False, detail
+    provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider.lower())}([^a-z0-9_-]|$)")
+    if any(provider_pattern.search(line.lower()) for line in output.splitlines()):
+        return True, f"authenticated for {provider}"
+    return False, f"not authenticated for {provider}"
 
 
 def node_version_check() -> tuple[bool, str]:
