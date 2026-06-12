@@ -4599,6 +4599,26 @@ func writeHealth() {}
             self.assertEqual(raised.exception.code, 0)
             uninstall.assert_called_once_with(remove_config=True, remove_logs=False, dry_run=True)
 
+    def test_main_update_and_cleanup_do_not_require_valid_server_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+                patch.object(sys, "argv", ["pullwise-worker", "update", "--dry-run"]), \
+                patch("pullwise_worker.main.update_worker", return_value=0) as update:
+                with self.assertRaises(SystemExit) as raised:
+                    worker_main.main()
+
+            self.assertEqual(raised.exception.code, 0)
+            self.assertEqual(update.call_args.args[0].server_url, "http://server.test")
+
+            with patch.dict(os.environ, {"PULLWISE_SERVER_URL": "http://server.test"}, clear=True), \
+                patch.object(sys, "argv", ["pullwise-worker", "cleanup", "--work-dir", tmp]), \
+                patch("pullwise_worker.main.cleanup_worker_resources") as cleanup:
+                with self.assertRaises(SystemExit) as raised:
+                    worker_main.main()
+
+            self.assertEqual(raised.exception.code, 0)
+            self.assertEqual(cleanup.call_args.args[0].server_url, "http://server.test")
+
     def test_main_uninstall_unregisters_worker_before_local_cleanup(self) -> None:
         events = []
         client = Mock()

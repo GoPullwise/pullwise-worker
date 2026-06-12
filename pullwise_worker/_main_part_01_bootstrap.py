@@ -349,10 +349,16 @@ def server_url_allowed(server_url: str, *, allow_insecure: bool = False) -> bool
 
 
 class WorkerConfig:
-    def __init__(self, args: argparse.Namespace, *, require_worker_token: bool = True) -> None:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        *,
+        require_worker_token: bool = True,
+        validate_server_url: bool = True,
+    ) -> None:
         self.server_url = (getattr(args, "server_url", None) or os.environ.get("PULLWISE_SERVER_URL") or "http://localhost:8080").rstrip("/")
         self.allow_insecure_server_url = env_bool("PULLWISE_ALLOW_INSECURE_SERVER_URL", False)
-        if not server_url_allowed(self.server_url, allow_insecure=self.allow_insecure_server_url):
+        if validate_server_url and not server_url_allowed(self.server_url, allow_insecure=self.allow_insecure_server_url):
             raise ValueError(
                 "PULLWISE_SERVER_URL must use https unless it points to localhost/127.0.0.1 "
                 "or PULLWISE_ALLOW_INSECURE_SERVER_URL=true is set."
@@ -676,7 +682,11 @@ def main() -> None:
         raise SystemExit(uninstall_worker_command(args))
     require_worker_token = args.command in {"run", "doctor"}
     try:
-        config = WorkerConfig(args, require_worker_token=require_worker_token)
+        config = WorkerConfig(
+            args,
+            require_worker_token=require_worker_token,
+            validate_server_url=args.command not in {"update", "cleanup"},
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2) from exc
