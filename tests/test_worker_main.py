@@ -4284,10 +4284,25 @@ func writeHealth() {}
         self.assertEqual(set(location_schema["required"]) - set(location), set())
         self.assertEqual(location["lines"], "7")
 
-    def test_worker_config_defaults_to_codex_only_provider_chain(self) -> None:
-        cfg = config()
+    def test_worker_config_defaults_to_codex_opencode_provider_chain(self) -> None:
+        namespace = Namespace(
+            server_url="https://server.test",
+            worker_token="worker-token",
+            worker_id="wk_1",
+            max_concurrent_jobs=2,
+            poll_seconds=1,
+            work_dir=tempfile.mkdtemp(),
+            checkout_root=None,
+            log_dir=tempfile.mkdtemp(),
+            provider=None,
+            codex_command="codex",
+            codex_timeout_seconds=60,
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = WorkerConfig(namespace)
 
-        self.assertEqual(cfg.provider_chain, ["codex"])
+        self.assertEqual(cfg.provider_chain, ["codex", "opencode"])
+        self.assertEqual(cfg.provider, "codex")
         self.assertEqual(cfg.codex_model, "gpt-5.5")
         self.assertEqual(cfg.codex_reasoning_effort, "medium")
         self.assertEqual(cfg.codex_auth_failure_cooldown_seconds, 3600)
@@ -5109,6 +5124,7 @@ func writeHealth() {}
         )
         env_template = (deploy_root / "worker.env.template").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
+        self.assertIn("PULLWISE_PROVIDER_CHAIN=codex,opencode", env_template)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
         self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)

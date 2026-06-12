@@ -4,7 +4,7 @@
 
 **Goal:** Add configurable Codex-first worker provider fallback to OpenCode, with explicit model and effort/variant controls.
 
-**Architecture:** Keep the worker pull loop unchanged. Replace the single hard-coded `run_codex_review` dispatch with a provider chain resolver that defaults to the current Codex-only behavior and optionally tries OpenCode after Codex fails. Build each provider command from `WorkerConfig`, parse the same strict JSON findings schema, and return the same `(findings, summary, logs_summary)` tuple.
+**Architecture:** Keep the worker pull loop unchanged. Replace the single hard-coded `run_codex_review` dispatch with a provider chain resolver that defaults to Codex first and OpenCode fallback. Build each provider command from `WorkerConfig`, parse the same strict JSON findings schema, and return the same `(findings, summary, logs_summary)` tuple.
 
 **Tech Stack:** Python 3.9 standard library, `unittest`, Codex CLI `codex exec`, OpenCode CLI `opencode run`.
 
@@ -19,7 +19,7 @@
 **Step 1: Write failing tests**
 
 Add tests proving:
-- default provider chain is `["codex"]`
+- default provider chain is `["codex", "opencode"]`
 - `PULLWISE_PROVIDER_CHAIN=codex,opencode` is parsed in order
 - Codex model is optional and effort defaults to `xhigh`
 - OpenCode command/model/variant are optional and default to `opencode`, empty model, empty variant
