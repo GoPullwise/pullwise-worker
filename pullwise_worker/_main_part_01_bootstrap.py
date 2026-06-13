@@ -92,7 +92,7 @@ CODEX_LOGIN_COMMAND = (
 OPENCODE_AUTH_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
-    "sh -lc 'cd \"$HOME\" && exec opencode auth login --provider opencode'"
+    "sh -lc 'cd \"$HOME\" && exec opencode auth login'"
 )
 _CODEX_AUTH_FAILURE_MARKERS = (
     "401 Unauthorized",
@@ -138,7 +138,7 @@ def opencode_provider_id(config: WorkerConfig | None) -> str:
 
 
 def opencode_auth_command(config: WorkerConfig) -> str:
-    return service_user_command(config, [config.opencode_command, "auth", "login", "--provider", opencode_provider_id(config)])
+    return service_user_command(config, [config.opencode_command, "auth", "login"])
 
 
 def parse_provider_chain(value: str | None, fallback: str = "codex,opencode") -> list[str]:

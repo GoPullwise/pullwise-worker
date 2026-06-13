@@ -129,19 +129,11 @@ sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/
 When `PULLWISE_PROVIDER_CHAIN` includes `opencode`, authenticate OpenCode for the same service user before relying on fallback:
 
 ```bash
-sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth login --provider opencode
+sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth login
 ```
 
-OpenCode provider examples:
+Check OpenCode auth status with:
 
 ```bash
-PULLWISE_OPENCODE_MODEL=deepseek/deepseek-v4-pro
-sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth login --provider deepseek
-
-PULLWISE_OPENCODE_MODEL=minimax/MiniMax-M3
-sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth login --provider minimax
-
-# Generic: choose interactively, or set PULLWISE_OPENCODE_MODEL=<provider>/<model>
-# and run opencode auth login --provider <provider>.
-sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth login
+sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth list
 ```

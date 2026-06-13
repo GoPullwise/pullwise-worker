@@ -157,7 +157,14 @@ def command_ok(command: list[str]) -> tuple[bool, str]:
 
 
 def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
-    provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider.lower())}([^a-z0-9_-]|$)")
+    provider_id = provider.lower()
+    provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider_id)}([^a-z0-9_-]|$)")
+    catalog_markers = (
+        "available providers",
+        "supported providers",
+        "select a provider",
+        "choose a provider",
+    )
     ready_markers = (
         "authenticated",
         "logged in",
@@ -167,6 +174,9 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
         "connected",
         "valid",
         "enabled",
+        "api key",
+        "api-key",
+        "apikey",
         "true",
         "yes",
         "✓",
@@ -180,10 +190,13 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
         "missing",
         "no credentials",
         "no api key",
+        "no api-key",
+        "no apikey",
         "invalid",
         "false",
         "disabled",
     )
+    provider_catalog = any(marker in output.lower() for marker in catalog_markers)
     for line in output.splitlines():
         lowered = line.lower()
         if not provider_pattern.search(lowered):
@@ -191,6 +204,8 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
         if any(marker in lowered for marker in missing_markers):
             continue
         if any(marker in lowered for marker in ready_markers):
+            return True
+        if not provider_catalog and lowered.strip(" \t-*") == provider_id:
             return True
     return False
 
