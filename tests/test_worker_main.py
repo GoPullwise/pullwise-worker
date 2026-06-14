@@ -4531,7 +4531,7 @@ func writeHealth() {}
             checkout_root=None,
             log_dir=tempfile.mkdtemp(),
             provider=None,
-            codex_command="codex",
+            codex_command=None,
             codex_timeout_seconds=60,
         )
         with patch.dict(os.environ, {}, clear=True):
@@ -4539,10 +4539,11 @@ func writeHealth() {}
 
         self.assertEqual(cfg.provider_chain, [])
         self.assertEqual(cfg.provider, "")
+        self.assertEqual(cfg.codex_command, worker_main.DEFAULT_CODEX_COMMAND)
         self.assertEqual(cfg.codex_model, "gpt-5.5")
         self.assertEqual(cfg.codex_reasoning_effort, "medium")
         self.assertEqual(cfg.codex_auth_failure_cooldown_seconds, 3600)
-        self.assertEqual(cfg.opencode_command, "opencode")
+        self.assertEqual(cfg.opencode_command, worker_main.DEFAULT_OPENCODE_COMMAND)
         self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
         self.assertEqual(cfg.opencode_variant, "medium")
 
@@ -4954,7 +4955,8 @@ func writeHealth() {}
 
         command = worker_main.opencode_auth_command(cfg)
 
-        self.assertIn("opencode auth login", command)
+        self.assertIn(cfg.opencode_command, command)
+        self.assertIn("auth login", command)
         self.assertNotIn("--provider", command)
 
     def test_opencode_auth_check_uses_subscription_plan_provider_models(self) -> None:

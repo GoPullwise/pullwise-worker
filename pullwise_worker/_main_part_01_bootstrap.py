@@ -384,18 +384,20 @@ class WorkerConfig:
         self.work_dir = Path(checkout_root) if checkout_root else Path(work_dir or tempfile.gettempdir()) / "pullwise-worker"
         log_dir = getattr(args, "log_dir", None) or os.environ.get("PULLWISE_LOG_DIR")
         self.log_dir = Path(log_dir) if log_dir else Path(tempfile.gettempdir()) / "pullwise-worker-logs"
-        self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or "codex"
+        self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
+        self.service_home = os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+        self.service_path = os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
+        default_codex_command = default_provider_command(self.service_home, "codex")
+        default_opencode_command = default_provider_command(self.service_home, "opencode")
+        self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or default_codex_command
         self.codex_model = os.environ.get("PULLWISE_CODEX_MODEL", DEFAULT_CODEX_MODEL).strip() or DEFAULT_CODEX_MODEL
         self.codex_reasoning_effort = (
             os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", DEFAULT_CODEX_REASONING_EFFORT).strip()
             or DEFAULT_CODEX_REASONING_EFFORT
         )
-        self.opencode_command = os.environ.get("PULLWISE_OPENCODE_COMMAND", "opencode").strip() or "opencode"
+        self.opencode_command = os.environ.get("PULLWISE_OPENCODE_COMMAND", default_opencode_command).strip() or default_opencode_command
         self.opencode_model = DEFAULT_OPENCODE_MODEL
         self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", DEFAULT_OPENCODE_VARIANT).strip() or DEFAULT_OPENCODE_VARIANT
-        self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
-        self.service_home = os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
-        self.service_path = os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
         self.codex_auth_failure_cooldown_seconds = max(0, int(os.environ.get("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS") or 3600))
