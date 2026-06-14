@@ -510,21 +510,6 @@ class PullwiseClient:
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
-    def get(self, path: str) -> PullwiseResponse:
-        request = urllib.request.Request(
-            f"{self.config.server_url}{path}",
-            headers=self.headers,
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return PullwiseResponse(response.read())
-        except urllib.error.HTTPError as exc:
-            reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
-            raise PullwiseHTTPError(f"HTTP {exc.code}: {reason}", exc.code) from exc
-        except (OSError, TimeoutError, urllib.error.URLError) as exc:
-            raise PullwiseRequestError(str(exc)) from exc
-
     def delete(self, path: str) -> PullwiseResponse:
         request = urllib.request.Request(
             f"{self.config.server_url}{path}",
@@ -574,12 +559,7 @@ class PullwiseClient:
         return response.json()
 
     def agent_configs(self) -> dict:
-        try:
-            response = self.post("/worker/agent-configs", {"worker_id": self.config.worker_id})
-        except PullwiseHTTPError as exc:
-            if exc.status_code != 404:
-                raise
-            response = self.get("/subscription-plans/agent-configs")
+        response = self.post("/worker/agent-configs", {"worker_id": self.config.worker_id})
         return response.json()
 
     def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:

@@ -3962,17 +3962,15 @@ func writeHealth() {}
         post.assert_called_once_with("/worker/agent-configs", {"worker_id": "wk_1"})
         self.assertEqual(payload, {"agentConfigs": {}})
 
-    def test_pullwise_client_falls_back_to_public_agent_configs_when_worker_route_is_missing(self) -> None:
+    def test_pullwise_client_requires_worker_agent_configs_route(self) -> None:
         cfg = config()
         client = PullwiseClient(cfg)
 
-        with patch.object(client, "post", side_effect=PullwiseHTTPError("HTTP 404: Not Found", 404)) as post, \
-            patch.object(client, "get", return_value=PullwiseResponse(b'{"agentConfigs": {"free": {}}}')) as get:
-            payload = client.agent_configs()
+        with patch.object(client, "post", side_effect=PullwiseHTTPError("HTTP 404: Not Found", 404)) as post:
+            with self.assertRaises(PullwiseHTTPError):
+                client.agent_configs()
 
         post.assert_called_once_with("/worker/agent-configs", {"worker_id": "wk_1"})
-        get.assert_called_once_with("/subscription-plans/agent-configs")
-        self.assertEqual(payload, {"agentConfigs": {"free": {}}})
 
     def test_pullwise_client_progress_uploads_repository_graph(self) -> None:
         cfg = config()
