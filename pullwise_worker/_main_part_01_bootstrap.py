@@ -61,6 +61,8 @@ DEFAULT_OPENCODE_VARIANT = "medium"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
 DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/.codex/bin/codex"
+DEFAULT_OPENCODE_COMMAND = f"{DEFAULT_SERVICE_HOME}/.opencode/bin/opencode"
 DEFAULT_PROVIDER_AUTH_PATH = (
     f"{DEFAULT_SERVICE_PATH}:{DEFAULT_SERVICE_HOME}/.local/bin:"
     f"{DEFAULT_SERVICE_HOME}/.codex/bin:{DEFAULT_SERVICE_HOME}/.opencode/bin"
@@ -87,12 +89,12 @@ AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
 CODEX_LOGIN_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
-    "sh -lc 'cd \"$HOME\" && exec codex login --device-auth'"
+    f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_CODEX_COMMAND} login --device-auth'"
 )
 OPENCODE_AUTH_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
-    "sh -lc 'cd \"$HOME\" && exec opencode auth login'"
+    f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_OPENCODE_COMMAND} auth login'"
 )
 _CODEX_AUTH_FAILURE_MARKERS = (
     "401 Unauthorized",
@@ -133,6 +135,11 @@ def codex_login_command(config: WorkerConfig) -> str:
 
 def opencode_auth_command(config: WorkerConfig) -> str:
     return service_user_command(config, [config.opencode_command, "auth", "login"])
+
+
+def default_provider_command(service_home: str, provider: str) -> str:
+    home = str(service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    return f"{home.rstrip('/')}/.{provider}/bin/{provider}"
 
 
 def parse_provider_chain(value: str | None, fallback: str = "") -> list[str]:
