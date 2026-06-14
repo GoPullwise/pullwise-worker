@@ -5409,6 +5409,16 @@ func writeHealth() {}
                     safe_rmtree(allowed, allowed)
             self.assertTrue(allowed.exists())
 
+    def test_safe_rmtree_reports_when_target_survives_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            allowed = Path(tmp) / "allowed"
+            allowed.mkdir()
+
+            with patch("pullwise_worker.main.shutil.rmtree", return_value=None):
+                with self.assertRaises(OSError):
+                    safe_rmtree(allowed, allowed)
+            self.assertTrue(allowed.exists())
+
     def test_ci_dependency_bounds_keep_python_39_support(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
