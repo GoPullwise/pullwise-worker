@@ -3485,13 +3485,13 @@ func writeHealth() {}
         def run_review(_config: WorkerConfig, job: dict, _checkout_dir: Path) -> tuple[dict, dict, str]:
             review_jobs.append(dict(job))
             self.assertTrue(
-                any(call.kwargs.get("repository_graph") == graph for call in worker.client.progress.call_args_list)
+                any(call.kwargs.get("repositoryGraph") == graph for call in worker.client.progress.call_args_list)
             )
             self.assertTrue(
-                any(call.kwargs.get("semantic_graph") == semantic_graph for call in worker.client.progress.call_args_list)
+                any(call.kwargs.get("semanticGraph") == semantic_graph for call in worker.client.progress.call_args_list)
             )
             self.assertTrue(
-                any(call.kwargs.get("impact_graph") == impact_graph for call in worker.client.progress.call_args_list)
+                any(call.kwargs.get("impactGraph") == impact_graph for call in worker.client.progress.call_args_list)
             )
             return audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"
 
@@ -3512,14 +3512,17 @@ func writeHealth() {}
         self.assertEqual(review_jobs[0]["architecture_summary"], graph["architectureSummary"])
         self.assertEqual(review_jobs[0]["semantic_graph"], semantic_graph)
         self.assertEqual(review_jobs[0]["impact_graph"], impact_graph)
-        graph_progress = [call for call in worker.client.progress.call_args_list if call.kwargs.get("repository_graph")]
-        self.assertEqual(graph_progress[0].kwargs["repository_graph"], graph)
-        self.assertEqual(graph_progress[0].kwargs["semantic_graph"], semantic_graph)
-        self.assertEqual(graph_progress[0].kwargs["impact_graph"], impact_graph)
+        graph_progress = [call for call in worker.client.progress.call_args_list if call.kwargs.get("repositoryGraph")]
+        self.assertEqual(graph_progress[0].kwargs["repositoryGraph"], graph)
+        self.assertEqual(graph_progress[0].kwargs["semanticGraph"], semantic_graph)
+        self.assertEqual(graph_progress[0].kwargs["impactGraph"], impact_graph)
         result_payload = upload_result.call_args.args[1]
-        self.assertEqual(result_payload["repository_graph"], graph)
-        self.assertEqual(result_payload["semantic_graph"], semantic_graph)
-        self.assertEqual(result_payload["impact_graph"], impact_graph)
+        self.assertEqual(result_payload["repositoryGraph"], graph)
+        self.assertEqual(result_payload["semanticGraph"], semantic_graph)
+        self.assertEqual(result_payload["impactGraph"], impact_graph)
+        self.assertNotIn("repository_graph", result_payload)
+        self.assertNotIn("semantic_graph", result_payload)
+        self.assertNotIn("impact_graph", result_payload)
 
     def test_run_job_fails_repository_too_large_before_verifier_or_review(self) -> None:
         worker = Worker(config())
@@ -4016,17 +4019,20 @@ func writeHealth() {}
                 "index",
                 30,
                 "Repository graph ready",
-                repository_graph={"version": "repository-graph/0.2", "nodes": [], "edges": []},
-                semantic_graph={"version": "semantic-code-graph/0.1", "nodes": [], "edges": []},
-                impact_graph={"version": "impact-graph/0.1", "targets": []},
+                repositoryGraph={"version": "repository-graph/0.2", "nodes": [], "edges": []},
+                semanticGraph={"version": "semantic-code-graph/0.1", "nodes": [], "edges": []},
+                impactGraph={"version": "impact-graph/0.1", "targets": []},
                 completion_audit={"protocol": "pullwise-completion-audit/0.1", "status": "passed"},
                 job_trace={"protocol": "pullwise-job-trace/0.1", "status": "running"},
             )
 
         payload = post.call_args.args[1]
-        self.assertEqual(payload["repository_graph"]["version"], "repository-graph/0.2")
-        self.assertEqual(payload["semantic_graph"]["version"], "semantic-code-graph/0.1")
-        self.assertEqual(payload["impact_graph"]["version"], "impact-graph/0.1")
+        self.assertEqual(payload["repositoryGraph"]["version"], "repository-graph/0.2")
+        self.assertEqual(payload["semanticGraph"]["version"], "semantic-code-graph/0.1")
+        self.assertEqual(payload["impactGraph"]["version"], "impact-graph/0.1")
+        self.assertNotIn("repository_graph", payload)
+        self.assertNotIn("semantic_graph", payload)
+        self.assertNotIn("impact_graph", payload)
         self.assertEqual(payload["completion_audit"], payload["completionAudit"])
         self.assertEqual(payload["completion_audit"]["protocol"], "pullwise-completion-audit/0.1")
         self.assertEqual(payload["job_trace"], payload["jobTrace"])
