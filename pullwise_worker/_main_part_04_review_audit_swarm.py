@@ -163,6 +163,9 @@ def extract_codex_error_detail(raw_output: str) -> str | None:
 
 
 def codex_review_command(config: WorkerConfig, schema_path: str, output_path: str, prompt: str) -> list[str]:
+    scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
+    if not scope_ok:
+        raise RuntimeError(scope_detail)
     command = [
         config.codex_command,
         "exec",
@@ -208,6 +211,9 @@ def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: 
 
 
 def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
+    scope_ok, scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
+    if not scope_ok:
+        raise RuntimeError(scope_detail)
     command = [config.opencode_command, "run"]
     if config.opencode_model:
         command.extend(["--model", config.opencode_model])

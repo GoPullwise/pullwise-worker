@@ -132,7 +132,7 @@ def config() -> WorkerConfig:
         checkout_root=None,
         log_dir=tempfile.mkdtemp(),
         provider="codex",
-        codex_command="codex",
+        codex_command=None,
         codex_timeout_seconds=60,
     )
     return WorkerConfig(namespace)
@@ -4464,11 +4464,12 @@ func writeHealth() {}
             output_path.write_text(json.dumps(audit_payload([issue_card("Bug", severity="P2")])), encoding="utf-8")
             return Mock(returncode=0, stdout=json.dumps(audit_payload()), stderr="")
 
+        cfg = config()
         with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run) as run:
-            payload, summary, _logs = run_codex_review(config(), {"repo": "acme/api"}, Path("checkout"))
+            payload, summary, _logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
 
         command = run.call_args.args[0]
-        self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertEqual(command[:2], [cfg.codex_command, "exec"])
         self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--ignore-user-config", command)
         self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="medium"')
@@ -4688,26 +4689,25 @@ func writeHealth() {}
         self.assertEqual(
             effective_config["codex"],
             {
-                "cli": "codex",
-                "command": "codex",
+                "cli": cfg.codex_command,
+                "command": cfg.codex_command,
                 "model": "gpt-5.5",
                 "reasoningEffort": "high",
             },
         )
         self.assertEqual(effective_config["agent"], effective_config["codex"])
-        self.assertEqual(effective_config["opencode"]["command"], "opencode")
+        self.assertEqual(effective_config["opencode"]["command"], cfg.opencode_command)
 
     def test_run_codex_review_falls_back_to_opencode_after_codex_failure(self) -> None:
         cfg = config()
         cfg.provider_chain = ["codex", "opencode"]
-        cfg.opencode_command = "opencode"
         cfg.opencode_model = "openai/gpt-5"
         cfg.opencode_variant = "xhigh"
 
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
-            if command[:2] == ["codex", "exec"]:
+            if command[:2] == [cfg.codex_command, "exec"]:
                 return Mock(returncode=1, stdout="", stderr="codex failed")
-            self.assertEqual(command[:2], ["opencode", "run"])
+            self.assertEqual(command[:2], [cfg.opencode_command, "run"])
             self.assertEqual(command[command.index("--model") + 1], "openai/gpt-5")
             self.assertEqual(command[command.index("--variant") + 1], "xhigh")
             return Mock(returncode=0, stdout=json.dumps(audit_payload([issue_card("Fallback", severity="low")])), stderr="")
@@ -5188,7 +5188,7 @@ func writeHealth() {}
         command = run.call_args.args[0]
         self.assertTrue(ok)
         self.assertEqual(detail, "ready")
-        self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertEqual(command[:2], [cfg.codex_command, "exec"])
         self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--json", command)

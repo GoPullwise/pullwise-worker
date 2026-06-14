@@ -350,6 +350,9 @@ def opencode_auth_check(config: WorkerConfig, agent_configs: dict | None = None)
     requirements = opencode_required_provider_specs(agent_configs)
     if not requirements:
         return True, "no subscription plan requires opencode"
+    scope_ok, scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
+    if not scope_ok:
+        return False, scope_detail
     try:
         completed = subprocess.run(
             [config.opencode_command, "auth", "list"],
@@ -419,6 +422,9 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     if not _CODEX_EXEC_LOCK.acquire(blocking=False):
         return True, "ready check deferred while codex is running"
     try:
+        scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
+        if not scope_ok:
+            return False, scope_detail
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "codex-ready.json"
             command = [
