@@ -140,6 +140,14 @@ def config() -> WorkerConfig:
     return WorkerConfig(namespace)
 
 
+def configure_instance_provider_commands(cfg: WorkerConfig) -> Path:
+    service_home = Path(tempfile.mkdtemp()) / "worker-home"
+    cfg.service_home = str(service_home)
+    cfg.codex_command = str(service_home / ".codex" / "bin" / "codex")
+    cfg.opencode_command = str(service_home / ".opencode" / "bin" / "opencode")
+    return service_home
+
+
 def agent_configs_payload(
     *,
     free_chain: list[str] | None = None,
@@ -4034,6 +4042,7 @@ func writeHealth() {}
 
     def test_worker_readiness_checks_cover_dependencies_paths_and_disk(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
 
         with patch("pullwise_worker.main.command_ok", side_effect=[(False, "git missing"), (True, "v22.21.0"), (True, "codex ok")]), \
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
@@ -4059,6 +4068,7 @@ func writeHealth() {}
 
     def test_worker_readiness_rejects_remote_http_server_url_if_config_is_mutated(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
         cfg.server_url = "http://server.test"
 
         with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok")]), \
@@ -4076,10 +4086,60 @@ func writeHealth() {}
         self.assertFalse(by_name["server_url"][0])
         self.assertEqual(by_name["server_url"][1], "http://server.test")
 
+    def test_worker_readiness_rejects_codex_command_outside_service_home(self) -> None:
+        cfg = config()
+        service_home = configure_instance_provider_commands(cfg)
+        cfg.codex_command = "/usr/local/bin/codex"
+
+        with patch("pullwise_worker.main.command_ok", return_value=(True, "ok")) as command, \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["codex"],
+                pro_chain=["codex"],
+                max_chain=["codex"],
+            )
+            checks, provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["codex"][0])
+        self.assertIn("outside worker home", by_name["codex"][1])
+        self.assertIn(str(service_home), by_name["codex"][1])
+        self.assertFalse(by_name["codex_ready"][0])
+        self.assertEqual(by_name["codex_ready"][1], "skipped until codex CLI passes --version")
+        self.assertFalse(provider_ready)
+        self.assertEqual(command.call_args_list[0].args[0], ["git", "--version"])
+
+    def test_worker_readiness_rejects_opencode_command_outside_service_home(self) -> None:
+        cfg = config()
+        service_home = configure_instance_provider_commands(cfg)
+        cfg.opencode_command = "/usr/local/bin/opencode"
+
+        with patch("pullwise_worker.main.command_ok", return_value=(True, "ok")) as command, \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated")), \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["opencode"],
+                pro_chain=["opencode"],
+                max_chain=["opencode"],
+            )
+            checks, provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["opencode"][0])
+        self.assertIn("outside worker home", by_name["opencode"][1])
+        self.assertIn(str(service_home), by_name["opencode"][1])
+        self.assertFalse(by_name["opencode_ready"][0])
+        self.assertEqual(by_name["opencode_ready"][1], "skipped until opencode CLI passes --version")
+        self.assertFalse(provider_ready)
+        self.assertEqual(command.call_args_list[0].args[0], ["git", "--version"])
+
     def test_worker_readiness_does_not_use_opencode_when_codex_login_fails(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["codex", "opencode"]
-        cfg.opencode_command = "opencode"
 
         with patch(
                 "pullwise_worker.main.command_ok",
@@ -4106,6 +4166,7 @@ func writeHealth() {}
 
     def test_worker_readiness_checks_opencode_provider_from_subscription_plans(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["codex"]
         completed = Mock(
             returncode=0,
@@ -4713,6 +4774,7 @@ func writeHealth() {}
 
     def test_run_doctor_checks_dependencies_capacity_paths_and_heartbeat(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
 
         with patch(
                 "pullwise_worker.main.command_ok",
@@ -4843,6 +4905,7 @@ func writeHealth() {}
 
     def test_run_doctor_prints_device_auth_login_command_when_codex_is_not_ready(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
 
         with patch(
                 "pullwise_worker.main.command_ok",
@@ -4865,6 +4928,7 @@ func writeHealth() {}
 
     def test_run_doctor_prints_opencode_auth_command_when_opencode_is_configured_but_missing(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["opencode"]
 
         with patch(
@@ -5023,6 +5087,7 @@ func writeHealth() {}
 
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
 
         with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")]), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
@@ -5042,6 +5107,7 @@ func writeHealth() {}
 
     def test_run_doctor_reports_degraded_when_codex_is_not_ready(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["codex", "opencode"]
 
         with patch(
