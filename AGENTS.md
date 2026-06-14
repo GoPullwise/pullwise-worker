@@ -30,3 +30,45 @@ worker instance's config.
 
 Multiple workers on the same server are supported only if each worker uses its
 own `service_home` for Codex/OpenCode binaries, config, cache, and auth state.
+
+## Server-Controlled Agent Policy
+
+The worker can advertise local provider capability, but review policy comes from
+server-provided subscription plan agent configs and per-job `agentConfig`.
+
+- Treat `PULLWISE_PROVIDER_CHAIN` as local installed capability/order, not as the
+  source of plan policy.
+- `doctor` must load free/pro/max agent configs from the server. If they cannot
+  be loaded or validated, do not silently fall back to the local provider chain.
+- A claimed job must include `agentConfig` and `repositoryLimits`; reject jobs
+  that omit them instead of using local defaults.
+- When a job includes Codex in `agentConfig.providerChain`, require Codex model
+  and reasoning effort. When it includes OpenCode, require OpenCode model and
+  variant.
+- Repository size limits used by worker preflight come from the job's
+  `repositoryLimits`, not from local plan assumptions.
+
+## Readiness Semantics
+
+Provider readiness is plan-aware and provider-specific.
+
+- `provider_ready` means at least one provider required by the loaded plan
+  configs is ready.
+- `codex_ready` is only the Codex login/readiness state. It can be false while
+  `provider_ready` is true if OpenCode is the usable fallback.
+- Only check providers required by the loaded plan configs.
+- OpenCode readiness must validate the model provider IDs required by plan
+  configs, for example `minimax` for `minimax/MiniMax-M3`; any unrelated
+  OpenCode auth entry is not enough.
+- Login/auth instructions printed by `doctor` must use the same instance-scoped
+  command environment documented above.
+
+## Instance-Scoped Files
+
+Do not share mutable runtime files between worker instances.
+
+- `service_home`, `checkout_root`, `log_dir`, provider home/config/cache dirs,
+  and service-user commands must stay instance-scoped.
+- Cleanup/update/doctor helpers must operate inside the configured worker roots.
+- Avoid fixed global paths for checkouts, logs, provider state, or auth files
+  unless they are only base directories containing per-worker subdirectories.

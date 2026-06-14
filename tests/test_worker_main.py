@@ -5582,6 +5582,17 @@ func writeHealth() {}
             self.assertIn("load_worker_env", wrapper)
             self.assertIn(str(env_file), wrapper)
 
+    def test_worker_wrapper_exports_provider_home_environment(self) -> None:
+        wrapper = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk_1/worker.env"))
+
+        self.assertIn('SERVICE_HOME="${PULLWISE_SERVICE_HOME:-/var/lib/pullwise-worker}"', wrapper)
+        self.assertIn('export HOME="$SERVICE_HOME"', wrapper)
+        self.assertIn('export USERPROFILE="$SERVICE_HOME"', wrapper)
+        self.assertIn('export CODEX_HOME="$SERVICE_HOME/.codex"', wrapper)
+        self.assertIn('export XDG_CONFIG_HOME="$SERVICE_HOME/.config"', wrapper)
+        self.assertIn('export XDG_CACHE_HOME="$SERVICE_HOME/.cache"', wrapper)
+        self.assertIn('export XDG_DATA_HOME="$SERVICE_HOME/.local/share"', wrapper)
+
     def test_update_restores_existing_env_when_upgrade_fails(self) -> None:
         cfg = config()
         expected_package = default_worker_package()
