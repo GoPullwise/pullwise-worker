@@ -4939,7 +4939,8 @@ func writeHealth() {}
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
         self.assertIn(worker_main.opencode_auth_command(cfg), printed)
         self.assertIn("OpenCode interactive provider selection. Run:", printed)
-        self.assertIn("opencode auth login", printed)
+        self.assertIn(cfg.opencode_command, printed)
+        self.assertIn("auth login", printed)
         self.assertNotIn("auth login --provider", printed)
         self.assertNotIn("OpenCode may require provider API credentials", printed)
 
