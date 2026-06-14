@@ -17,6 +17,7 @@ worker instance's config.
   - `CODEX_HOME=$service_home/.codex`
   - `XDG_CONFIG_HOME=$service_home/.config`
   - `XDG_CACHE_HOME=$service_home/.cache`
+  - `XDG_DATA_HOME=$service_home/.local/share`
   - `PATH` including only the service path and this worker's local tool dirs
 - Do not inherit global provider credentials such as root `HOME`,
   root `CODEX_HOME`, or global API-key based readiness when checking or running
