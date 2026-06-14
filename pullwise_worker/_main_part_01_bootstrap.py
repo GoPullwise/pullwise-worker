@@ -131,12 +131,6 @@ def codex_login_command(config: WorkerConfig) -> str:
     return service_user_command(config, [config.codex_command, "login", "--device-auth"])
 
 
-def opencode_provider_id(config: WorkerConfig | None) -> str:
-    model = str(getattr(config, "opencode_model", None) or DEFAULT_OPENCODE_MODEL).strip()
-    provider = model.split("/", 1)[0].strip() if model else ""
-    return provider or "opencode"
-
-
 def opencode_auth_command(config: WorkerConfig) -> str:
     return service_user_command(config, [config.opencode_command, "auth", "login"])
 
