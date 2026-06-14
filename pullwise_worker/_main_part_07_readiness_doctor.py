@@ -156,8 +156,41 @@ def command_ok(command: list[str]) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def opencode_auth_output_plain(output: str) -> str:
+    return re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", str(output or ""))
+
+
+def opencode_auth_output_has_ready_credential(output: str) -> bool:
+    output = opencode_auth_output_plain(output)
+    lowered_output = output.lower()
+    if "credential" not in lowered_output:
+        return False
+    api_credential_pattern = re.compile(r"(^|[^a-z0-9_-])api([^a-z0-9_-]|$)")
+    missing_markers = (
+        "not authenticated",
+        "not logged in",
+        "not logged-in",
+        "unauthenticated",
+        "missing",
+        "no credentials",
+        "no api key",
+        "no api-key",
+        "no apikey",
+        "invalid",
+        "false",
+        "disabled",
+    )
+    for line in output.splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in missing_markers):
+            continue
+        if api_credential_pattern.search(lowered):
+            return True
+    return False
+
+
 def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
-    output = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", output)
+    output = opencode_auth_output_plain(output)
     provider_id = provider.lower()
     provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider_id)}([^a-z0-9_-]|$)")
     catalog_markers = (
@@ -236,6 +269,13 @@ def opencode_auth_check(config: WorkerConfig) -> tuple[bool, str]:
         return False, detail
     if opencode_auth_output_has_ready_provider(output, provider):
         return True, f"authenticated for {provider}"
+    if opencode_auth_output_has_ready_credential(output):
+        model = str(getattr(config, "opencode_model", "") or "").strip() or DEFAULT_OPENCODE_MODEL
+        return (
+            False,
+            f"not authenticated for {provider}; PULLWISE_OPENCODE_MODEL={model}; "
+            "credentials exist for another OpenCode provider",
+        )
     return False, f"not authenticated for {provider}"
 
 

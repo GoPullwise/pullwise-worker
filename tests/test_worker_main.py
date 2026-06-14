@@ -4773,6 +4773,27 @@ func writeHealth() {}
         self.assertTrue(ok)
         self.assertEqual(detail, "authenticated for minimax")
 
+    def test_opencode_auth_check_reports_mismatched_authenticated_provider(self) -> None:
+        cfg = config()
+        cfg.opencode_model = "opencode/big-pickle"
+        completed = Mock(
+            returncode=0,
+            stdout=(
+                "Credentials ~/.local/share/opencode/auth.json\n"
+                "MiniMax Token Plan (minimaxi.com) api\n"
+                "1 credential\n"
+            ),
+            stderr="",
+        )
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertIn("not authenticated for opencode", detail)
+        self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", detail)
+        self.assertIn("credentials exist for another OpenCode provider", detail)
+
     def test_opencode_auth_check_rejects_explicit_unauthenticated_provider(self) -> None:
         cfg = config()
         completed = Mock(returncode=0, stdout="opencode not authenticated\n", stderr="")
@@ -5156,27 +5177,45 @@ func writeHealth() {}
 
         service.assert_not_called()
 
-    def test_lifecycle_uninstall_without_systemd_authorization_fails(self) -> None:
-        with patch("pullwise_worker.main.uninstall_worker", return_value=1) as uninstall, \
-            patch("pullwise_worker.main.service_action", return_value=1) as service:
-            self.assertEqual(execute_lifecycle_command("uninstall"), 2)
+    def test_lifecycle_remote_uninstall_cleans_instance_home_and_logs_without_systemd_authorization(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            instance_home = Path(tmp) / "wk_1"
+            log_dir = Path(tmp) / "logs" / "wk_1"
+            cfg.service_home = str(instance_home)
+            cfg.work_dir = instance_home / "checkouts"
+            cfg.log_dir = log_dir
+            (cfg.work_dir / "job_1").mkdir(parents=True)
+            (cfg.work_dir / "job_1" / "repo.txt").write_text("checkout", encoding="utf-8")
+            (instance_home / ".codex").mkdir()
+            (instance_home / ".codex" / "auth.json").write_text("token", encoding="utf-8")
+            log_dir.mkdir(parents=True)
+            (log_dir / "worker.log").write_text("log", encoding="utf-8")
 
-        uninstall.assert_not_called()
-        service.assert_not_called()
+            with patch("pullwise_worker.main.uninstall_worker", return_value=1) as uninstall, \
+                patch("pullwise_worker.main.service_action", return_value=1) as service:
+                self.assertEqual(execute_lifecycle_command("uninstall", cfg), 0)
 
-    def test_remote_lifecycle_uninstall_reports_failed_not_succeeded(self) -> None:
-        worker = Worker(config())
+            self.assertFalse(instance_home.exists())
+            self.assertFalse(log_dir.exists())
+            uninstall.assert_not_called()
+            service.assert_not_called()
+
+    def test_remote_lifecycle_uninstall_reports_succeeded_after_cleanup(self) -> None:
+        cfg = config()
+        Path(cfg.work_dir, "job_1").mkdir(parents=True)
+        Path(cfg.work_dir, "job_1", "repo.txt").write_text("checkout", encoding="utf-8")
+        Path(cfg.log_dir, "worker.log").write_text("log", encoding="utf-8")
+        worker = Worker(cfg)
         worker.client = Mock()
 
         handled = worker.handle_lifecycle_command({"id": "cmd_uninstall", "command": "uninstall"})
 
-        self.assertFalse(handled)
+        self.assertTrue(handled)
         self.assertEqual(worker.client.command_status.call_args_list[0].args, ("cmd_uninstall", "running"))
-        self.assertEqual(worker.client.command_status.call_args_list[1].args, ("cmd_uninstall", "failed"))
-        self.assertEqual(
-            worker.client.command_status.call_args_list[1].kwargs,
-            {"error": "uninstall command exited 2"},
-        )
+        self.assertEqual(worker.client.command_status.call_args_list[1].args, ("cmd_uninstall", "succeeded"))
+        self.assertFalse(Path(cfg.work_dir).exists())
+        self.assertFalse(Path(cfg.log_dir).exists())
 
     def test_write_scan_summary_redacts_tokens(self) -> None:
         cfg = config()
