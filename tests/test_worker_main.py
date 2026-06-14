@@ -140,6 +140,30 @@ def config() -> WorkerConfig:
     return WorkerConfig(namespace)
 
 
+def agent_configs_payload(
+    *,
+    free_chain: list[str] | None = None,
+    free_opencode_model: str = "opencode/big-pickle",
+    pro_chain: list[str] | None = None,
+    max_chain: list[str] | None = None,
+) -> dict:
+    def plan_config(plan: str, chain: list[str], opencode_model: str = "opencode/big-pickle") -> dict:
+        return {
+            "plan": plan,
+            "providerChain": chain,
+            "codex": {"command": "codex", "model": "gpt-5.5", "reasoningEffort": "medium"},
+            "opencode": {"command": "opencode", "model": opencode_model, "variant": "medium"},
+        }
+
+    return {
+        "agentConfigs": {
+            "free": plan_config("free", free_chain or ["opencode"], free_opencode_model),
+            "pro": plan_config("pro", pro_chain or ["codex"]),
+            "max": plan_config("max", max_chain or ["codex"]),
+        }
+    }
+
+
 def mark_checkout_root_owned(cfg: WorkerConfig) -> None:
     checkout_root = Path(cfg.work_dir)
     checkout_root.mkdir(parents=True, exist_ok=True)
@@ -3928,6 +3952,16 @@ func writeHealth() {}
         self.assertEqual(payload["running_jobs"], 2)
         self.assertEqual(payload["active_job_ids"], ["job_1", "job_2"])
 
+    def test_pullwise_client_fetches_worker_agent_configs(self) -> None:
+        cfg = config()
+        client = PullwiseClient(cfg)
+
+        with patch.object(client, "post", return_value=PullwiseResponse(b'{"agentConfigs": {}}')) as post:
+            payload = client.agent_configs()
+
+        post.assert_called_once_with("/worker/agent-configs", {"worker_id": "wk_1"})
+        self.assertEqual(payload, {"agentConfigs": {}})
+
     def test_pullwise_client_progress_uploads_repository_graph(self) -> None:
         cfg = config()
         client = PullwiseClient(cfg)
@@ -3976,11 +4010,18 @@ func writeHealth() {}
         cfg = config()
 
         with patch("pullwise_worker.main.command_ok", side_effect=[(False, "git missing"), (True, "v22.21.0"), (True, "codex ok")]), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["codex"],
+                pro_chain=["codex"],
+                max_chain=["codex"],
+            )
             checks, codex_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertTrue(by_name["agent_configs"][0])
         self.assertFalse(by_name["git"][0])
         self.assertTrue(by_name["node"][0])
         self.assertTrue(by_name["codex"][0])
@@ -3995,8 +4036,14 @@ func writeHealth() {}
         cfg.server_url = "http://server.test"
 
         with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok")]), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["codex"],
+                pro_chain=["codex"],
+                max_chain=["codex"],
+            )
             checks, _provider_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
@@ -4017,15 +4064,58 @@ func writeHealth() {}
                     (True, "opencode 1.0.0"),
                 ],
             ), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
             patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             checks, provider_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
         self.assertFalse(by_name["codex_ready"][0])
         self.assertTrue(by_name["opencode"][0])
         self.assertTrue(by_name["opencode_ready"][0])
+        self.assertTrue(by_name["provider_ready"][0])
+        self.assertTrue(provider_ready)
+
+    def test_worker_readiness_checks_opencode_provider_from_subscription_plans(self) -> None:
+        cfg = config()
+        cfg.provider_chain = ["codex"]
+        completed = Mock(
+            returncode=0,
+            stdout=(
+                "Credentials ~/.local/share/opencode/auth.json\n"
+                "MiniMax Token Plan (minimaxi.com) api\n"
+                "1 credential\n"
+            ),
+            stderr="",
+        )
+
+        with patch(
+                "pullwise_worker.main.command_ok",
+                side_effect=[
+                    (True, "git ok"),
+                    (True, "v22.21.0"),
+                    (True, "codex ok"),
+                    (True, "opencode 1.0.0"),
+                ],
+            ), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
+            patch("pullwise_worker.main.subprocess.run", return_value=completed), \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["opencode"],
+                free_opencode_model="minimax/MiniMax-M3",
+                pro_chain=["codex"],
+                max_chain=["codex"],
+            )
+            checks, provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertTrue(by_name["agent_configs"][0])
+        self.assertTrue(by_name["opencode_ready"][0])
+        self.assertEqual(by_name["opencode_ready"][1], "authenticated for configured OpenCode providers: minimax")
         self.assertTrue(by_name["provider_ready"][0])
         self.assertTrue(provider_ready)
 
@@ -4713,69 +4803,8 @@ func writeHealth() {}
         self.assertIn("opencode auth login", command)
         self.assertNotIn("--provider", command)
 
-    def test_opencode_auth_check_requires_current_model_provider(self) -> None:
+    def test_opencode_auth_check_uses_subscription_plan_provider_models(self) -> None:
         cfg = config()
-        cfg.opencode_model = "minimax/MiniMax-M3"
-        completed = Mock(returncode=0, stdout="deepseek\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
-
-        self.assertFalse(ok)
-        self.assertEqual(detail, "not authenticated for minimax")
-
-    def test_opencode_auth_check_does_not_treat_provider_catalog_as_login(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="Available providers:\nopencode\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
-
-        self.assertFalse(ok)
-        self.assertEqual(detail, "not authenticated for opencode")
-
-    def test_opencode_auth_check_accepts_provider_list_entry(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="opencode\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for opencode")
-
-    def test_opencode_auth_check_accepts_provider_api_key_entry(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="opencode api-key\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for opencode")
-
-    def test_opencode_auth_check_accepts_current_auth_list_api_entry(self) -> None:
-        cfg = config()
-        cfg.opencode_model = "minimax/MiniMax-M3"
-        completed = Mock(
-            returncode=0,
-            stdout=(
-                "\x1b[90m┌\x1b[39m  Credentials ~/.local/share/opencode/auth.json\n"
-                "\x1b[34m●\x1b[39m  MiniMax Token Plan (minimaxi.com) \x1b[90mapi\n"
-                "\x1b[90m└\x1b[39m  1 credential\n"
-            ),
-            stderr="",
-        )
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for minimax")
-
-    def test_opencode_auth_check_reports_mismatched_authenticated_provider(self) -> None:
-        cfg = config()
-        cfg.opencode_model = "opencode/big-pickle"
         completed = Mock(
             returncode=0,
             stdout=(
@@ -4787,32 +4816,116 @@ func writeHealth() {}
         )
 
         with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
+            ok, detail = worker_main.opencode_auth_check(
+                cfg,
+                agent_configs_payload(free_opencode_model="minimax/MiniMax-M3"),
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax")
+
+    def test_opencode_auth_check_does_not_treat_provider_catalog_as_login(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout="Available providers:\nopencode\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
 
         self.assertFalse(ok)
-        self.assertIn("not authenticated for opencode", detail)
-        self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", detail)
-        self.assertIn("credentials exist for another OpenCode provider", detail)
+        self.assertEqual(detail, "not authenticated for OpenCode providers required by subscription plans: free=opencode")
+
+    def test_opencode_auth_check_accepts_provider_list_entry(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout="opencode\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
+
+    def test_opencode_auth_check_accepts_provider_api_key_entry(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout="opencode api-key\n", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
+
+    def test_opencode_auth_check_accepts_current_auth_list_api_entry(self) -> None:
+        cfg = config()
+        completed = Mock(
+            returncode=0,
+            stdout=(
+                "\x1b[90m┌\x1b[39m  Credentials ~/.local/share/opencode/auth.json\n"
+                "\x1b[34m●\x1b[39m  MiniMax Token Plan (minimaxi.com) \x1b[90mapi\n"
+                "\x1b[90m└\x1b[39m  1 credential\n"
+            ),
+            stderr="",
+        )
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(
+                cfg,
+                agent_configs_payload(free_opencode_model="minimax/MiniMax-M3"),
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax")
+
+    def test_opencode_auth_check_reports_missing_subscription_plan_provider(self) -> None:
+        cfg = config()
+        completed = Mock(
+            returncode=0,
+            stdout=(
+                "Credentials ~/.local/share/opencode/auth.json\n"
+                "MiniMax Token Plan (minimaxi.com) api\n"
+                "1 credential\n"
+            ),
+            stderr="",
+        )
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "not authenticated for OpenCode providers required by subscription plans: free=opencode")
+        self.assertNotIn("PULLWISE_OPENCODE_MODEL", detail)
 
     def test_opencode_auth_check_rejects_explicit_unauthenticated_provider(self) -> None:
         cfg = config()
         completed = Mock(returncode=0, stdout="opencode not authenticated\n", stderr="")
 
         with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
 
         self.assertFalse(ok)
-        self.assertEqual(detail, "not authenticated for opencode")
+        self.assertEqual(detail, "not authenticated for OpenCode providers required by subscription plans: free=opencode")
 
     def test_opencode_auth_check_accepts_explicit_authenticated_provider(self) -> None:
         cfg = config()
         completed = Mock(returncode=0, stdout="opencode authenticated\n", stderr="")
 
         with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg)
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
 
         self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for opencode")
+        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
+
+    def test_opencode_auth_check_skips_when_no_subscription_plan_uses_opencode(self) -> None:
+        cfg = config()
+
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            ok, detail = worker_main.opencode_auth_check(
+                cfg,
+                agent_configs_payload(free_chain=["codex"], pro_chain=["codex"], max_chain=["codex"]),
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "no subscription plan requires opencode")
+        run.assert_not_called()
 
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
