@@ -4760,7 +4760,6 @@ func writeHealth() {}
 
     def test_run_doctor_checks_dependencies_capacity_paths_and_heartbeat(self) -> None:
         cfg = config()
-        configure_instance_provider_commands(cfg)
 
         with patch(
                 "pullwise_worker.main.command_ok",
@@ -4891,7 +4890,6 @@ func writeHealth() {}
 
     def test_run_doctor_prints_device_auth_login_command_when_codex_is_not_ready(self) -> None:
         cfg = config()
-        configure_instance_provider_commands(cfg)
 
         with patch(
                 "pullwise_worker.main.command_ok",
@@ -4914,7 +4912,6 @@ func writeHealth() {}
 
     def test_run_doctor_prints_opencode_auth_command_when_opencode_is_configured_but_missing(self) -> None:
         cfg = config()
-        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["opencode"]
 
         with patch(
@@ -5073,7 +5070,6 @@ func writeHealth() {}
 
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
-        configure_instance_provider_commands(cfg)
 
         with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")]), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
@@ -5093,7 +5089,6 @@ func writeHealth() {}
 
     def test_run_doctor_sends_codex_not_ready_when_opencode_fallback_is_ready(self) -> None:
         cfg = config()
-        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["codex", "opencode"]
 
         with patch(
