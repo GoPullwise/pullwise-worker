@@ -141,7 +141,7 @@ def run_doctor(config: WorkerConfig) -> bool:
         print(f"Codex may require device authorization. Run: {codex_login_command(config)}")
     opencode_check = next((check for check in checks if check[0] == "opencode_ready"), None)
     if "opencode" in config.provider_chain and opencode_check and not opencode_check[1]:
-        print(f"OpenCode may require provider API credentials. Run: {opencode_auth_command(config)}")
+        print(f"OpenCode interactive provider selection. Run: {opencode_auth_command(config)}")
     return first_failed_check(checks) is None
 
 
@@ -157,6 +157,7 @@ def command_ok(command: list[str]) -> tuple[bool, str]:
 
 
 def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
+    output = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", output)
     provider_id = provider.lower()
     provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider_id)}([^a-z0-9_-]|$)")
     catalog_markers = (
@@ -197,6 +198,8 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
         "disabled",
     )
     provider_catalog = any(marker in output.lower() for marker in catalog_markers)
+    credential_listing = "credential" in output.lower()
+    api_credential_pattern = re.compile(r"(^|[^a-z0-9_-])api([^a-z0-9_-]|$)")
     for line in output.splitlines():
         lowered = line.lower()
         if not provider_pattern.search(lowered):
@@ -204,6 +207,8 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
         if any(marker in lowered for marker in missing_markers):
             continue
         if any(marker in lowered for marker in ready_markers):
+            return True
+        if credential_listing and api_credential_pattern.search(lowered):
             return True
         if not provider_catalog and lowered.strip(" \t-*") == provider_id:
             return True

@@ -4699,8 +4699,10 @@ func writeHealth() {}
 
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
         self.assertIn(OPENCODE_AUTH_COMMAND, printed)
+        self.assertIn("OpenCode interactive provider selection. Run:", printed)
         self.assertIn("opencode auth login", printed)
         self.assertNotIn("auth login --provider", printed)
+        self.assertNotIn("OpenCode may require provider API credentials", printed)
 
     def test_opencode_auth_command_uses_interactive_provider_selection(self) -> None:
         cfg = config()
@@ -4751,6 +4753,25 @@ func writeHealth() {}
 
         self.assertTrue(ok)
         self.assertEqual(detail, "authenticated for opencode")
+
+    def test_opencode_auth_check_accepts_current_auth_list_api_entry(self) -> None:
+        cfg = config()
+        cfg.opencode_model = "minimax/MiniMax-M3"
+        completed = Mock(
+            returncode=0,
+            stdout=(
+                "\x1b[90m┌\x1b[39m  Credentials ~/.local/share/opencode/auth.json\n"
+                "\x1b[34m●\x1b[39m  MiniMax Token Plan (minimaxi.com) \x1b[90mapi\n"
+                "\x1b[90m└\x1b[39m  1 credential\n"
+            ),
+            stderr="",
+        )
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(cfg)
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for minimax")
 
     def test_opencode_auth_check_rejects_explicit_unauthenticated_provider(self) -> None:
         cfg = config()
