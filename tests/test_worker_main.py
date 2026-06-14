@@ -4151,9 +4151,9 @@ func writeHealth() {}
         codex_ready.assert_not_called()
         opencode_ready.assert_not_called()
 
-    def test_worker_readiness_rejects_legacy_agent_config_shapes(self) -> None:
+    def test_worker_readiness_rejects_unsupported_agent_config_shapes(self) -> None:
         cfg = config()
-        legacy_payloads = [
+        unsupported_payloads = [
             {
                 "free": {"providerChain": ["opencode"], "opencode": {"model": "minimax/MiniMax-M3", "variant": "medium"}},
                 "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
@@ -4182,7 +4182,7 @@ func writeHealth() {}
             },
         ]
 
-        for payload in legacy_payloads:
+        for payload in unsupported_payloads:
             with self.subTest(payload=payload):
                 with patch("pullwise_worker.main.PullwiseClient") as client_class:
                     client_class.return_value.agent_configs.return_value = payload
