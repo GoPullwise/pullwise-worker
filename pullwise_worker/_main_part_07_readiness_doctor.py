@@ -44,7 +44,7 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
     git_ok, git_detail = command_ok(["git", "--version"])
     checks.append(("git", git_ok, git_detail))
     ready_providers: list[str] = []
-    required_providers = subscription_plan_required_providers(agent_configs) if agent_configs_ok else list(config.provider_chain)
+    required_providers = subscription_plan_required_providers(agent_configs) if agent_configs_ok else []
     if "codex" in required_providers:
         node_ok, node_detail = node_version_check()
         checks.append(("node", node_ok, node_detail))
@@ -67,7 +67,12 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
         if opencode_ok and opencode_auth_ok:
             ready_providers.append("opencode")
     provider_ready = bool(ready_providers)
-    checks.append(("provider_ready", provider_ready, ", ".join(ready_providers) if provider_ready else "no configured provider is ready"))
+    provider_ready_detail = (
+        ", ".join(ready_providers)
+        if provider_ready
+        else "no configured provider is ready" if agent_configs_ok else "subscription plan agent configs unavailable"
+    )
+    checks.append(("provider_ready", provider_ready, provider_ready_detail))
 
     for label, path in (("checkout_root", config.work_dir), ("log_dir", config.log_dir)):
         ok, detail = writable_path_check(path)

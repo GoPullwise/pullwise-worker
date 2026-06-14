@@ -3962,6 +3962,18 @@ func writeHealth() {}
         post.assert_called_once_with("/worker/agent-configs", {"worker_id": "wk_1"})
         self.assertEqual(payload, {"agentConfigs": {}})
 
+    def test_pullwise_client_falls_back_to_public_agent_configs_when_worker_route_is_missing(self) -> None:
+        cfg = config()
+        client = PullwiseClient(cfg)
+
+        with patch.object(client, "post", side_effect=PullwiseHTTPError("HTTP 404: Not Found", 404)) as post, \
+            patch.object(client, "get", return_value=PullwiseResponse(b'{"agentConfigs": {"free": {}}}')) as get:
+            payload = client.agent_configs()
+
+        post.assert_called_once_with("/worker/agent-configs", {"worker_id": "wk_1"})
+        get.assert_called_once_with("/subscription-plans/agent-configs")
+        self.assertEqual(payload, {"agentConfigs": {"free": {}}})
+
     def test_pullwise_client_progress_uploads_repository_graph(self) -> None:
         cfg = config()
         client = PullwiseClient(cfg)
@@ -4118,6 +4130,28 @@ func writeHealth() {}
         self.assertEqual(by_name["opencode_ready"][1], "authenticated for configured OpenCode providers: minimax")
         self.assertTrue(by_name["provider_ready"][0])
         self.assertTrue(provider_ready)
+
+    def test_worker_readiness_does_not_use_local_provider_chain_when_agent_configs_are_unavailable(self) -> None:
+        cfg = config()
+        cfg.provider_chain = ["codex", "opencode"]
+
+        with patch("pullwise_worker.main.command_ok", return_value=(True, "ok")), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")) as codex_ready, \
+            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "ready")) as opencode_ready, \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.side_effect = PullwiseHTTPError("HTTP 404: Not Found", 404)
+            checks, provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["agent_configs"][0])
+        self.assertNotIn("codex_ready", by_name)
+        self.assertNotIn("opencode_ready", by_name)
+        self.assertFalse(by_name["provider_ready"][0])
+        self.assertEqual(by_name["provider_ready"][1], "subscription plan agent configs unavailable")
+        self.assertFalse(provider_ready)
+        codex_ready.assert_not_called()
+        opencode_ready.assert_not_called()
 
     def test_clone_repository_uses_short_lived_token(self) -> None:
         head = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
@@ -4767,6 +4801,11 @@ func writeHealth() {}
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("builtins.print") as print_mock:
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["codex"],
+                pro_chain=["codex"],
+                max_chain=["codex"],
+            )
             client_class.return_value.heartbeat.return_value = None
             run_doctor(cfg)
 
@@ -4784,6 +4823,11 @@ func writeHealth() {}
             ), \
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("builtins.print") as print_mock:
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["opencode"],
+                pro_chain=["opencode"],
+                max_chain=["opencode"],
+            )
             client_class.return_value.heartbeat.return_value = None
             run_doctor(cfg)
 
