@@ -601,9 +601,9 @@ class PullwiseClient:
         message: str = "",
         logs_summary: str = "",
         audit_swarm: dict | None = None,
-        repository_graph: dict | None = None,
-        semantic_graph: dict | None = None,
-        impact_graph: dict | None = None,
+        repositoryGraph: dict | None = None,
+        semanticGraph: dict | None = None,
+        impactGraph: dict | None = None,
         completion_audit: dict | None = None,
         job_trace: dict | None = None,
     ) -> None:
@@ -616,12 +616,12 @@ class PullwiseClient:
         }
         if audit_swarm:
             payload["audit_swarm"] = audit_swarm
-        if repository_graph:
-            payload["repository_graph"] = repository_graph
-        if semantic_graph:
-            payload["semantic_graph"] = semantic_graph
-        if impact_graph:
-            payload["impact_graph"] = impact_graph
+        if repositoryGraph:
+            payload["repositoryGraph"] = repositoryGraph
+        if semanticGraph:
+            payload["semanticGraph"] = semanticGraph
+        if impactGraph:
+            payload["impactGraph"] = impactGraph
         if completion_audit:
             payload["completion_audit"] = completion_audit
             payload["completionAudit"] = completion_audit

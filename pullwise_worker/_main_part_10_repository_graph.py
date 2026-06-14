@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import hashlib
 
-REPOSITORY_GRAPH_LEGACY_PROTOCOL_VERSION = "repository-graph/0.1"
 REPOSITORY_GRAPH_PROTOCOL_VERSION = "repository-graph/0.2"
 REPOSITORY_SEMANTIC_GRAPH_PROTOCOL_VERSION = "semantic-code-graph/0.1"
 REPOSITORY_IMPACT_GRAPH_PROTOCOL_VERSION = "impact-graph/0.1"

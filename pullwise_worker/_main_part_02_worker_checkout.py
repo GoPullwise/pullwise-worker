@@ -496,9 +496,9 @@ class Worker:
                         preflight=preflight,
                         summary="Repository graph is ready.",
                     ),
-                    repository_graph=repository_graph,
-                    semantic_graph=semantic_graph,
-                    impact_graph=impact_graph,
+                    repositoryGraph=repository_graph,
+                    semanticGraph=semantic_graph,
+                    impactGraph=impact_graph,
                     job_trace=current_job_trace(),
                 )
             else:
@@ -727,11 +727,11 @@ class Worker:
                 "jobTrace": job_trace,
             }
             if repository_graph:
-                payload["repository_graph"] = repository_graph
+                payload["repositoryGraph"] = repository_graph
             if semantic_graph:
-                payload["semantic_graph"] = semantic_graph
+                payload["semanticGraph"] = semantic_graph
             if impact_graph:
-                payload["impact_graph"] = impact_graph
+                payload["impactGraph"] = impact_graph
             if ai_usage:
                 payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
