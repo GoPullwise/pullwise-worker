@@ -17,8 +17,6 @@ from unittest.mock import Mock, patch
 import pullwise_worker.main as worker_main
 from pullwise_worker import __version__
 from pullwise_worker.main import (
-    CODEX_LOGIN_COMMAND,
-    OPENCODE_AUTH_COMMAND,
     PullwiseClient,
     PullwiseHTTPError,
     PullwiseRequestError,
@@ -138,6 +136,14 @@ def config() -> WorkerConfig:
         codex_timeout_seconds=60,
     )
     return WorkerConfig(namespace)
+
+
+def configure_instance_provider_commands(cfg: WorkerConfig) -> Path:
+    service_home = Path(tempfile.mkdtemp()) / "worker-home"
+    cfg.service_home = str(service_home)
+    cfg.codex_command = str(service_home / ".codex" / "bin" / "codex")
+    cfg.opencode_command = str(service_home / ".opencode" / "bin" / "opencode")
+    return service_home
 
 
 def agent_configs_payload(
@@ -4890,6 +4896,7 @@ func writeHealth() {}
 
     def test_run_doctor_prints_device_auth_login_command_when_codex_is_not_ready(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
 
         with patch(
                 "pullwise_worker.main.command_ok",
@@ -4907,11 +4914,12 @@ func writeHealth() {}
             run_doctor(cfg)
 
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
-        self.assertIn(CODEX_LOGIN_COMMAND, printed)
+        self.assertIn(worker_main.codex_login_command(cfg), printed)
         self.assertIn("--device-auth", printed)
 
     def test_run_doctor_prints_opencode_auth_command_when_opencode_is_configured_but_missing(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["opencode"]
 
         with patch(
@@ -4929,7 +4937,7 @@ func writeHealth() {}
             run_doctor(cfg)
 
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
-        self.assertIn(OPENCODE_AUTH_COMMAND, printed)
+        self.assertIn(worker_main.opencode_auth_command(cfg), printed)
         self.assertIn("OpenCode interactive provider selection. Run:", printed)
         self.assertIn("opencode auth login", printed)
         self.assertNotIn("auth login --provider", printed)
@@ -5070,6 +5078,7 @@ func writeHealth() {}
 
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
 
         with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")]), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
@@ -5089,6 +5098,7 @@ func writeHealth() {}
 
     def test_run_doctor_sends_codex_not_ready_when_opencode_fallback_is_ready(self) -> None:
         cfg = config()
+        configure_instance_provider_commands(cfg)
         cfg.provider_chain = ["codex", "opencode"]
 
         with patch(
@@ -5114,7 +5124,7 @@ func writeHealth() {}
         self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
         self.assertFalse(heartbeat_kwargs["codex_ready"])
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
-        self.assertIn(CODEX_LOGIN_COMMAND, printed)
+        self.assertIn(worker_main.codex_login_command(cfg), printed)
 
     def test_codex_ready_check_identifies_login_failure(self) -> None:
         cfg = config()

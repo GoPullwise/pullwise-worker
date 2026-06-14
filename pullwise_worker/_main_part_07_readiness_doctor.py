@@ -33,6 +33,24 @@ def write_scan_summary(config: WorkerConfig, job_id: str, status: str, duration_
     trim_file_to_last_bytes(path, config.scan_summary_log_max_bytes)
 
 
+def provider_command_scope_check(command: str, config: WorkerConfig, label: str) -> tuple[bool, str]:
+    raw = str(command or "").strip()
+    if not raw:
+        return False, f"{label} command missing"
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        return False, f"{label} command must be an absolute path inside worker home {config.service_home}: {raw}"
+    try:
+        home = Path(config.service_home).expanduser().resolve(strict=False)
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(home)
+    except ValueError:
+        return False, f"{label} command outside worker home {home}: {raw}"
+    except Exception as exc:
+        return False, str(exc)
+    return True, str(resolved)
+
+
 def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool]:
     checks: list[tuple[str, bool, str]] = []
     checks.append(("server_url", server_url_allowed(config.server_url, allow_insecure=config.allow_insecure_server_url), config.server_url))
@@ -48,14 +66,20 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
     if "codex" in required_providers:
         node_ok, node_detail = node_version_check()
         checks.append(("node", node_ok, node_detail))
-        codex_cli_ok, codex_cli_detail = command_ok([config.codex_command, "--version"])
+        codex_scope_ok, codex_scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
+        codex_cli_ok, codex_cli_detail = (
+            command_ok([config.codex_command, "--version"]) if codex_scope_ok else (False, codex_scope_detail)
+        )
         checks.append(("codex", codex_cli_ok, codex_cli_detail))
         codex_login_ok, codex_login_detail = codex_ready_check(config) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
         checks.append(("codex_ready", codex_login_ok, codex_login_detail))
         if node_ok and codex_cli_ok and codex_login_ok:
             ready_providers.append("codex")
     if "opencode" in required_providers:
-        opencode_ok, opencode_detail = command_ok([config.opencode_command, "--version"])
+        opencode_scope_ok, opencode_scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
+        opencode_ok, opencode_detail = (
+            command_ok([config.opencode_command, "--version"]) if opencode_scope_ok else (False, opencode_scope_detail)
+        )
         checks.append(("opencode", opencode_ok, opencode_detail))
         opencode_auth_ok, opencode_auth_detail = (
             opencode_auth_check(config, agent_configs) if opencode_ok and agent_configs_ok else (
