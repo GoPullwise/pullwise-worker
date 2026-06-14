@@ -135,14 +135,14 @@ def opencode_auth_command(config: WorkerConfig) -> str:
     return service_user_command(config, [config.opencode_command, "auth", "login"])
 
 
-def parse_provider_chain(value: str | None, fallback: str = "codex,opencode") -> list[str]:
+def parse_provider_chain(value: str | None, fallback: str = "") -> list[str]:
     raw = value if value is not None else fallback
     providers: list[str] = []
     for item in str(raw or "").split(","):
         provider = item.strip().lower()
         if provider in SUPPORTED_REVIEW_PROVIDERS and provider not in providers:
             providers.append(provider)
-    return providers or ["codex", "opencode"]
+    return providers
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -364,9 +364,9 @@ class WorkerConfig:
         configured_provider = str(getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "").strip().lower()
         self.provider_chain = parse_provider_chain(
             os.environ.get("PULLWISE_PROVIDER_CHAIN"),
-            configured_provider or "codex,opencode",
+            configured_provider,
         )
-        self.provider = configured_provider or self.provider_chain[0]
+        self.provider = configured_provider or (self.provider_chain[0] if self.provider_chain else "")
         self.max_concurrent_jobs = max(1, int(getattr(args, "max_concurrent_jobs", None) or os.environ.get("PULLWISE_MAX_CONCURRENT_JOBS") or 1))
         self.max_claim_jobs = max(1, int(getattr(args, "max_claim_jobs", None) or os.environ.get("PULLWISE_WORKER_MAX_CLAIM_JOBS") or 2))
         self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))

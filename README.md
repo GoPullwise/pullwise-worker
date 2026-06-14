@@ -25,7 +25,7 @@ Required environment:
 - `PULLWISE_WORKER_TOKEN`
 - `PULLWISE_WORKER_ID` optional, defaults to `{hostname}-{pid}`
 - `PULLWISE_PROVIDER` optional, defaults to `codex`
-- `PULLWISE_PROVIDER_CHAIN` optional, defaults to `codex,opencode` for Codex-first fallback
+- `PULLWISE_PROVIDER_CHAIN` optional local install capability list; review policy comes from server `agentConfig`
 - `PULLWISE_MAX_CONCURRENT_JOBS` optional, defaults to `1`
 - `PULLWISE_WORKER_MAX_CLAIM_JOBS` optional, defaults to `2`
 - `PULLWISE_WORKER_POLL_SECONDS` optional, defaults to `5`
@@ -64,10 +64,10 @@ Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` a
 
 Codex `exec` calls are serialized inside the worker because Codex keeps local login state under the service user's home directory. If Codex reports an authentication or refresh-token failure, the worker cools down further Codex launches for `PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS` and then uses the next configured provider, if any.
 
-Production Codex-first fallback example:
+Production local capability example:
 
 ```bash
-PULLWISE_PROVIDER_CHAIN=codex,opencode
+PULLWISE_PROVIDER_CHAIN=opencode,codex
 PULLWISE_CODEX_MODEL=gpt-5.5
 PULLWISE_CODEX_REASONING_EFFORT=medium
 PULLWISE_OPENCODE_VARIANT=medium
@@ -128,7 +128,7 @@ Codex must be authenticated for the service user before Codex scans can run:
 sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin codex login --device-auth
 ```
 
-When any subscription plan `agentConfig` uses `opencode`, authenticate the matching OpenCode providers for the same service user before relying on fallback:
+When any subscription plan `agentConfig` uses `opencode`, authenticate the matching OpenCode providers for the same service user:
 
 ```bash
 sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth login
