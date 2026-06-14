@@ -202,7 +202,7 @@ class WorkerMainTest(unittest.TestCase):
             worker_config,
             {
                 "agentConfig": {
-                    "providerChain": ["codex", "opencode"],
+                    "providerChain": ["codex"],
                     "codex": {
                         "command": "codex-nightly",
                         "model": "gpt-5.5-codex",
@@ -220,13 +220,13 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertIsNot(job_config, worker_config)
         self.assertEqual(job_config.provider, "codex")
-        self.assertEqual(job_config.provider_chain, ["codex", "opencode"])
+        self.assertEqual(job_config.provider_chain, ["codex"])
         self.assertEqual(job_config.codex_command, "/opt/server-pullwise/ops/codex-node22")
         self.assertEqual(job_config.codex_model, "gpt-5.5-codex")
         self.assertEqual(job_config.codex_reasoning_effort, "xhigh")
         self.assertEqual(job_config.opencode_command, "/opt/server-pullwise/ops/opencode")
-        self.assertEqual(job_config.opencode_model, "openai/gpt-5")
-        self.assertEqual(job_config.opencode_variant, "high")
+        self.assertEqual(job_config.opencode_model, "opencode/env")
+        self.assertEqual(job_config.opencode_variant, "medium")
         self.assertEqual(job_config.max_repo_files, 321)
         self.assertEqual(job_config.max_repo_bytes, 654321)
         self.assertEqual(worker_config.provider_chain, ["codex"])
@@ -236,6 +236,22 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(worker_config.opencode_command, "/opt/server-pullwise/ops/opencode")
         self.assertEqual(worker_config.opencode_model, "opencode/env")
         self.assertEqual(worker_config.opencode_variant, "medium")
+
+    def test_worker_config_for_job_rejects_multiple_review_providers(self) -> None:
+        worker_config = config()
+
+        with self.assertRaisesRegex(RuntimeError, "exactly one provider"):
+            worker_config_for_job(
+                worker_config,
+                {
+                    "agentConfig": {
+                        "providerChain": ["codex", "opencode"],
+                        "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"},
+                        "opencode": {"model": "opencode/big-pickle", "variant": "medium"},
+                    },
+                    "repositoryLimits": {"maxFiles": 1, "maxBytes": 1},
+                },
+            )
 
     def test_worker_config_for_job_requires_canonical_server_payload(self) -> None:
         worker_config = config()
@@ -3898,25 +3914,25 @@ func writeHealth() {}
         self.assertEqual(worker.client.heartbeat.call_args.kwargs["running_jobs"], 1)
         self.assertEqual(worker.client.heartbeat.call_args.kwargs["active_job_ids"], ["job_active"])
 
-    def test_refresh_readiness_reports_codex_specific_state_with_opencode_fallback(self) -> None:
+    def test_refresh_readiness_reports_codex_specific_state_without_opencode_fallback(self) -> None:
         worker = Worker(config())
         checks = [
             ("git", True, "git ok"),
             ("codex_ready", False, "not logged in"),
             ("opencode", True, "opencode 1.0.0"),
-            ("provider_ready", True, "opencode"),
+            ("provider_ready", False, "codex auth failed"),
             ("checkout_root", True, "ok"),
             ("log_dir", True, "ok"),
             ("disk_space", True, "2048 MB free"),
         ]
 
-        with patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, True)):
+        with patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, False)):
             ready = worker.refresh_readiness_if_due()
 
-        self.assertTrue(ready)
-        self.assertEqual(worker._doctor_status, "ok")
+        self.assertFalse(ready)
+        self.assertEqual(worker._doctor_status, "degraded")
         self.assertFalse(worker._codex_ready)
-        self.assertTrue(worker.refresh_readiness_if_due())
+        self.assertFalse(worker.refresh_readiness_if_due())
 
     def test_pullwise_client_posts_json_with_authorization(self) -> None:
         class FakeResponse:
@@ -4060,7 +4076,7 @@ func writeHealth() {}
         self.assertFalse(by_name["server_url"][0])
         self.assertEqual(by_name["server_url"][1], "http://server.test")
 
-    def test_worker_readiness_allows_opencode_fallback_when_codex_login_fails(self) -> None:
+    def test_worker_readiness_does_not_use_opencode_when_codex_login_fails(self) -> None:
         cfg = config()
         cfg.provider_chain = ["codex", "opencode"]
         cfg.opencode_command = "opencode"
@@ -4085,8 +4101,8 @@ func writeHealth() {}
         self.assertFalse(by_name["codex_ready"][0])
         self.assertTrue(by_name["opencode"][0])
         self.assertTrue(by_name["opencode_ready"][0])
-        self.assertTrue(by_name["provider_ready"][0])
-        self.assertTrue(provider_ready)
+        self.assertFalse(by_name["provider_ready"][0])
+        self.assertFalse(provider_ready)
 
     def test_worker_readiness_checks_opencode_provider_from_subscription_plans(self) -> None:
         cfg = config()
@@ -4569,7 +4585,6 @@ func writeHealth() {}
                 "PULLWISE_CODEX_REASONING_EFFORT": "high",
                 "PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS": "120",
                 "PULLWISE_OPENCODE_COMMAND": "opencode-cli",
-                "PULLWISE_OPENCODE_MODEL": "openai/gpt-5",
                 "PULLWISE_OPENCODE_VARIANT": "xhigh",
             },
             clear=False,
@@ -4621,12 +4636,20 @@ func writeHealth() {}
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertIn('model_reasoning_effort="high"', command)
-        self.assertEqual(payload["effectiveAgentConfig"]["provider"], "codex")
-        self.assertEqual(payload["effectiveAgentConfig"]["cli"], "codex")
-        self.assertEqual(payload["effectiveAgentConfig"]["model"], "gpt-5.5")
-        self.assertEqual(payload["effectiveAgentConfig"]["reasoningEffort"], "high")
+        self.assertEqual(
+            payload["effectiveAgentConfig"],
+            {
+                "providerChain": ["codex"],
+                "codex": {
+                    "cli": "codex",
+                    "command": "codex",
+                    "model": "gpt-5.5",
+                    "reasoningEffort": "high",
+                },
+            },
+        )
 
-    def test_run_codex_review_falls_back_to_opencode_after_codex_failure(self) -> None:
+    def test_run_codex_review_does_not_try_next_provider_after_codex_failure(self) -> None:
         cfg = config()
         cfg.provider_chain = ["codex", "opencode"]
         cfg.opencode_command = "opencode"
@@ -4636,22 +4659,11 @@ func writeHealth() {}
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             if command[:2] == ["codex", "exec"]:
                 return Mock(returncode=1, stdout="", stderr="codex failed")
-            self.assertEqual(command[:2], ["opencode", "run"])
-            self.assertEqual(command[command.index("--model") + 1], "openai/gpt-5")
-            self.assertEqual(command[command.index("--variant") + 1], "xhigh")
-            return Mock(returncode=0, stdout=json.dumps(audit_payload([issue_card("Fallback", severity="low")])), stderr="")
+            self.fail("OpenCode should not run after Codex fails")
 
         with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run):
-            payload, summary, logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
-
-        findings = audit_swarm_findings_from_payload(payload) or []
-        self.assertEqual(findings[0]["title"], "Fallback")
-        self.assertEqual(summary["low"], 1)
-        self.assertIn("codex failed", logs)
-        self.assertEqual(payload["effectiveAgentConfig"]["provider"], "opencode")
-        self.assertEqual(payload["effectiveAgentConfig"]["cli"], "opencode")
-        self.assertEqual(payload["effectiveAgentConfig"]["model"], "openai/gpt-5")
-        self.assertEqual(payload["effectiveAgentConfig"]["reasoningEffort"], "xhigh")
+            with self.assertRaisesRegex(RuntimeError, "codex failed"):
+                run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
 
     def test_run_codex_review_surfaces_codex_json_error_detail(self) -> None:
         cfg = config()
@@ -5028,7 +5040,7 @@ func writeHealth() {}
         self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
         self.assertTrue(heartbeat_kwargs["codex_ready"])
 
-    def test_run_doctor_sends_codex_not_ready_when_opencode_fallback_is_ready(self) -> None:
+    def test_run_doctor_reports_degraded_when_codex_is_not_ready(self) -> None:
         cfg = config()
         cfg.provider_chain = ["codex", "opencode"]
 
@@ -5050,9 +5062,9 @@ func writeHealth() {}
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
-        self.assertTrue(ok)
+        self.assertFalse(ok)
         heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
-        self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
+        self.assertEqual(heartbeat_kwargs["doctor_status"], "degraded")
         self.assertFalse(heartbeat_kwargs["codex_ready"])
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
         self.assertIn(CODEX_LOGIN_COMMAND, printed)
