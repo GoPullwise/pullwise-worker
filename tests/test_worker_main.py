@@ -5268,6 +5268,33 @@ func writeHealth() {}
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
 
+    def test_codex_ready_check_uses_worker_instance_auth_env(self) -> None:
+        cfg = config()
+        service_home = configure_instance_provider_commands(cfg)
+        completed = Mock(returncode=0, stdout='{"ok": true}', stderr="")
+
+        with patch.dict(
+            "os.environ",
+            {
+                "HOME": "/root",
+                "USERPROFILE": "/root",
+                "CODEX_HOME": "/root/.codex",
+                "XDG_CONFIG_HOME": "/root/.config",
+                "OPENAI_API_KEY": "global-api-key",
+            },
+            clear=False,
+        ), patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
+            ok, detail = codex_ready_check(cfg)
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "ready")
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["HOME"], str(service_home))
+        self.assertEqual(env["USERPROFILE"], str(service_home))
+        self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
+        self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
+        self.assertNotIn("OPENAI_API_KEY", env)
+
     def test_node_version_check_requires_node_20(self) -> None:
         with patch("pullwise_worker.main.command_ok", return_value=(True, "v12.22.9")):
             ok, detail = node_version_check()
@@ -5445,6 +5472,7 @@ func writeHealth() {}
         doctor_command = next(item for item in printed if item.endswith(" doctor"))
         self.assertEqual(code, 0)
         self.assertIn("runuser -u pullwise-worker -- env HOME=/var/lib/pullwise-worker", doctor_command)
+        self.assertIn("CODEX_HOME=/var/lib/pullwise-worker/.codex", doctor_command)
         self.assertIn("/usr/local/bin/pullwise-worker doctor", doctor_command)
         self.assertLess(printed.index("systemctl restart pullwise-worker"), printed.index(doctor_command))
         run.assert_not_called()
