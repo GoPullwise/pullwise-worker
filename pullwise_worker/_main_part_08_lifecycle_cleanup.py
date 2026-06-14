@@ -13,18 +13,106 @@ def service_action(action: str, *, dry_run: bool = False, no_block: bool = False
     return subprocess.run(command).returncode
 
 
-def execute_lifecycle_command(action: str) -> int:
+def execute_lifecycle_command(action: str, config: WorkerConfig | None = None) -> int:
     if action == "stop":
         # Admin-queued lifecycle commands run inside the unprivileged service
         # process. Exit cleanly and let Restart=on-failure keep it stopped.
         return 0
     if action == "uninstall":
-        print(
-            "Remote uninstall is not supported. Run `pullwise-worker uninstall` locally with root privileges.",
-            file=sys.stderr,
-        )
-        return 2
+        if config is None:
+            print("Remote uninstall requires a worker configuration.", file=sys.stderr)
+            return 2
+        try:
+            cleanup_worker_instance(config)
+        except Exception as exc:
+            print(f"remote uninstall cleanup failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
+            return 1
+        return 0
     return 2
+
+
+def cleanup_worker_instance(config: WorkerConfig) -> None:
+    targets = worker_instance_cleanup_targets(config)
+    for target in targets:
+        safe_worker_instance_rmtree(target)
+
+
+def worker_instance_cleanup_targets(config: WorkerConfig) -> list[Path]:
+    targets: list[Path] = []
+    work_dir = Path(config.work_dir)
+    service_home_text = str(getattr(config, "service_home", "") or "").strip()
+    if service_home_text:
+        service_home = Path(service_home_text)
+        if safe_remote_service_home_target(service_home, work_dir):
+            targets.append(service_home)
+    if not targets:
+        targets.append(work_dir)
+
+    log_dir = Path(config.log_dir)
+    if not any(path_same_or_within(log_dir, target) for target in targets):
+        targets.append(log_dir)
+    return dedupe_cleanup_targets(targets)
+
+
+def safe_remote_service_home_target(service_home: Path, work_dir: Path) -> bool:
+    if not path_same_or_within(work_dir, service_home):
+        return False
+    if path_is_root(service_home):
+        return False
+    if os.environ.get("PULLWISE_SERVICE_HOME", "").strip() == str(service_home):
+        return True
+    return service_home.resolve(strict=False).name not in {"", "pullwise-worker"}
+
+
+def dedupe_cleanup_targets(targets: list[Path]) -> list[Path]:
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for target in targets:
+        resolved = str(target.resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(target)
+    return deduped
+
+
+def path_same_or_within(path: Path, root: Path) -> bool:
+    resolved_path = path.resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError:
+        return False
+    return True
+
+
+def path_is_root(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    return resolved == Path(resolved.anchor)
+
+
+def safe_worker_instance_rmtree(path: Path) -> None:
+    if path_is_root(path):
+        raise ValueError(f"refusing to remove filesystem root: {path}")
+    if path.is_symlink():
+        raise ValueError(f"refusing to remove symlinked directory: {path}")
+    if not path.exists():
+        return
+    if not path.is_dir():
+        raise ValueError(f"refusing to remove non-directory worker path: {path}")
+    chdir_away_from(path)
+    safe_rmtree(path, path)
+
+
+def chdir_away_from(path: Path) -> None:
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        return
+    if not path_same_or_within(cwd, path):
+        return
+    anchor = path.resolve(strict=False).anchor or os.sep
+    os.chdir(anchor)
 
 
 def default_worker_package() -> str:

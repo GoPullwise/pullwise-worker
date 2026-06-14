@@ -275,7 +275,7 @@ class Worker:
         except PullwiseRequestError as exc:
             self.last_error = f"command ack failed: {redact_secrets(str(exc), self.config)}"[:500]
             return False
-        code = execute_lifecycle_command(action)
+        code = execute_lifecycle_command(action, self.config) if action == "uninstall" else execute_lifecycle_command(action)
         if code == 0:
             try:
                 self.client.command_status(command_id, "succeeded")

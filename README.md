@@ -116,6 +116,11 @@ pullwise-worker uninstall
 systemd authorization. Admin-queued stop commands are handled by the running
 worker exiting cleanly; the installed unit uses `Restart=on-failure` so the
 service stays stopped.
+Admin-queued Delete instance commands are handled by the running worker after
+active jobs finish. The worker deletes its own instance home and log
+directories, reports the command result, and exits cleanly. Root-owned systemd
+unit files, wrapper binaries, and `/etc` configuration remain on the host; run
+the local uninstall command as root when full service cleanup is required.
 `pullwise-worker uninstall` first unregisters the worker from the server when
 `PULLWISE_WORKER_TOKEN` is configured, then removes the local service. A stopped
 worker stays in the registry; an uninstalled worker is removed from admin lists.
