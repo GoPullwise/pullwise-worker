@@ -1024,7 +1024,6 @@ func writeHealth() {}
     def test_collect_preflight_metadata_reports_static_repository_environment(self) -> None:
         worker_config = config()
         worker_config.provider_chain = ["codex", "opencode"]
-        worker_config.opencode_command = "opencode"
         with tempfile.TemporaryDirectory() as tmp:
             checkout_dir = Path(tmp)
             (checkout_dir / "package.json").write_text(
@@ -1129,6 +1128,36 @@ func writeHealth() {}
             stderr=subprocess.PIPE,
             timeout=5,
         )
+
+    def test_collect_preflight_metadata_does_not_execute_global_provider_commands(self) -> None:
+        worker_config = config()
+        worker_config.provider_chain = ["codex", "opencode"]
+        worker_config.codex_command = "codex"
+        worker_config.opencode_command = "opencode"
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "pullwise_worker.main.safe_tool_version",
+            side_effect=lambda name, command: {
+                "name": name,
+                "command": worker_main.public_tool_version_command(command),
+                "available": True,
+                "exitCode": 0,
+                "output": f"{name} ok",
+            },
+        ) as safe_version:
+            preflight = collect_preflight_metadata(
+                worker_config,
+                {"repo": "acme/app", "branch": "main", "commit": "abc1234"},
+                Path(tmp),
+            )
+
+        called_tools = [call.args[0] for call in safe_version.call_args_list]
+        self.assertNotIn("codex", called_tools)
+        self.assertNotIn("opencode", called_tools)
+        by_name = {tool["name"]: tool for tool in preflight["toolVersions"]}
+        self.assertFalse(by_name["codex"]["available"])
+        self.assertFalse(by_name["opencode"]["available"])
+        self.assertIn("absolute path inside worker home", by_name["codex"]["output"])
+        self.assertIn("absolute path inside worker home", by_name["opencode"]["output"])
 
     def test_declared_package_manager_stays_first_when_lockfiles_conflict(self) -> None:
         worker_config = config()
@@ -4455,6 +4484,17 @@ func writeHealth() {}
 
         self.assertEqual(run.call_count, 1)
 
+    def test_provider_review_commands_reject_global_cli_names(self) -> None:
+        cfg = config()
+        cfg.codex_command = "codex"
+        with self.assertRaisesRegex(RuntimeError, "absolute path inside worker home"):
+            worker_main.codex_review_command(cfg, "schema.json", "output.json", "prompt")
+
+        cfg = config()
+        cfg.opencode_command = "opencode"
+        with self.assertRaisesRegex(RuntimeError, "absolute path inside worker home"):
+            worker_main.opencode_review_command(cfg, "prompt")
+
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             schema_path = Path(command[command.index("--output-schema") + 1])
@@ -4695,7 +4735,10 @@ func writeHealth() {}
                 "reasoningEffort": "high",
             },
         )
-        self.assertEqual(effective_config["agent"], effective_config["codex"])
+        self.assertEqual(effective_config["agent"]["cli"], "codex")
+        self.assertEqual(effective_config["agent"]["command"], cfg.codex_command)
+        self.assertEqual(effective_config["agent"]["model"], "gpt-5.5")
+        self.assertEqual(effective_config["agent"]["reasoningEffort"], "high")
         self.assertEqual(effective_config["opencode"]["command"], cfg.opencode_command)
 
     def test_run_codex_review_falls_back_to_opencode_after_codex_failure(self) -> None:
@@ -4959,6 +5002,17 @@ func writeHealth() {}
         self.assertIn("auth login", command)
         self.assertNotIn("--provider", command)
 
+    def test_opencode_auth_check_rejects_global_command_without_subprocess(self) -> None:
+        cfg = config()
+        cfg.opencode_command = "opencode"
+
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
+
+        self.assertFalse(ok)
+        self.assertIn("absolute path inside worker home", detail)
+        run.assert_not_called()
+
     def test_opencode_auth_check_uses_subscription_plan_provider_models(self) -> None:
         cfg = config()
         completed = Mock(
@@ -5132,6 +5186,17 @@ func writeHealth() {}
         self.assertFalse(heartbeat_kwargs["codex_ready"])
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
         self.assertIn(worker_main.codex_login_command(cfg), printed)
+
+    def test_codex_ready_check_rejects_global_command_without_subprocess(self) -> None:
+        cfg = config()
+        cfg.codex_command = "codex"
+
+        with patch("pullwise_worker.main.subprocess.run") as run:
+            ok, detail = codex_ready_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertIn("absolute path inside worker home", detail)
+        run.assert_not_called()
 
     def test_codex_ready_check_identifies_login_failure(self) -> None:
         cfg = config()

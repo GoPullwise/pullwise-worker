@@ -273,11 +273,20 @@ def worker_tool_versions(config: WorkerConfig, package_managers: list[str] | Non
     for package_manager in package_managers or []:
         if package_manager in {"npm", "pnpm", "yarn", "bun"}:
             checks.append((package_manager, [package_manager, "--version"]))
+    results = [safe_tool_version(name, command) for name, command in checks]
     if "codex" in config.provider_chain:
-        checks.append(("codex", [config.codex_command, "--version"]))
+        scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
+        if scope_ok:
+            results.append(safe_tool_version("codex", [config.codex_command, "--version"]))
+        else:
+            results.append(scoped_tool_version_failure("codex", [config.codex_command, "--version"], scope_detail))
     if "opencode" in config.provider_chain:
-        checks.append(("opencode", [config.opencode_command, "--version"]))
-    return [safe_tool_version(name, command) for name, command in checks]
+        scope_ok, scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
+        if scope_ok:
+            results.append(safe_tool_version("opencode", [config.opencode_command, "--version"]))
+        else:
+            results.append(scoped_tool_version_failure("opencode", [config.opencode_command, "--version"], scope_detail))
+    return results
 
 
 def public_tool_version_command(command: list[str]) -> str:
@@ -295,6 +304,16 @@ def public_tool_version_command_part(part: str) -> str:
     if windows_path.is_absolute() or text.startswith("\\"):
         return windows_path.name or "[path]"
     return text
+
+
+def scoped_tool_version_failure(name: str, command: list[str], detail: str) -> dict:
+    return {
+        "name": name,
+        "command": public_tool_version_command(command),
+        "available": False,
+        "exitCode": 127,
+        "output": str(detail)[:200],
+    }
 
 
 def safe_tool_version(name: str, command: list[str]) -> dict:
