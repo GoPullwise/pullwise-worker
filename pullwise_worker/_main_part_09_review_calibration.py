@@ -139,7 +139,7 @@ def review_source_reliability_from_counts(source_stats: dict, *, z: float) -> di
         "posterior_mean": alpha / total,
         "posterior_lb": review_beta_lower_bound(alpha, beta, z=z),
         "effective_samples": float(confirmed + rejected),
-        "source": "legacy_source_stats" if confirmed or rejected else "prior",
+        "source": "observed_source_stats" if confirmed or rejected else "prior",
     }
 
 
