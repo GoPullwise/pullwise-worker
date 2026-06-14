@@ -378,7 +378,11 @@ def safe_rmtree(path: Path, allowed_root: Path) -> None:
     allowed = allowed_root.resolve(strict=False)
     if resolved != allowed:
         raise ValueError(f"refusing to remove unexpected directory: {path}")
-    shutil.rmtree(path, ignore_errors=True)
+    if not path.exists():
+        return
+    shutil.rmtree(path)
+    if path.exists():
+        raise OSError(f"failed to remove directory: {path}")
 
 
 def directory_size(path: Path) -> int:
