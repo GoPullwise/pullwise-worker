@@ -457,6 +457,7 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
             try:
                 completed = subprocess.run(
                     command,
+                    env=provider_process_env(config),
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,

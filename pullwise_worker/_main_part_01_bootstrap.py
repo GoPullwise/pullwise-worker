@@ -67,6 +67,20 @@ DEFAULT_PROVIDER_AUTH_PATH = (
     f"{DEFAULT_SERVICE_PATH}:{DEFAULT_SERVICE_HOME}/.local/bin:"
     f"{DEFAULT_SERVICE_HOME}/.codex/bin:{DEFAULT_SERVICE_HOME}/.opencode/bin"
 )
+PROVIDER_ENV_PASSTHROUGH_KEYS = (
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
 AUDIT_SWARM_PROTOCOL_VERSION = "audit-swarm/0.1"
 CONVERGENCE_PROTOCOL_VERSION = "pullwise-convergence/0.1"
 REVIEW_DECISION_EVENT_PROTOCOL_VERSION = "pullwise-review-decision/0.1"
@@ -88,11 +102,19 @@ AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
 }
 CODEX_LOGIN_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
+    f"USERPROFILE={DEFAULT_SERVICE_HOME} "
+    f"CODEX_HOME={DEFAULT_SERVICE_HOME}/.codex "
+    f"XDG_CONFIG_HOME={DEFAULT_SERVICE_HOME}/.config "
+    f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/.cache "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
     f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_CODEX_COMMAND} login --device-auth'"
 )
 OPENCODE_AUTH_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
+    f"USERPROFILE={DEFAULT_SERVICE_HOME} "
+    f"CODEX_HOME={DEFAULT_SERVICE_HOME}/.codex "
+    f"XDG_CONFIG_HOME={DEFAULT_SERVICE_HOME}/.config "
+    f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/.cache "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
     f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_OPENCODE_COMMAND} auth login'"
 )
@@ -112,6 +134,23 @@ _codex_auth_failure_detail = ""
 def service_user_command(config: WorkerConfig | None, command: list[str]) -> str:
     service_user = str(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
     service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    path = provider_tool_path(config)
+    quoted_command = " ".join(shlex.quote(str(part)) for part in command if str(part))
+    shell_command = f'cd "$HOME" && exec {quoted_command}'
+    return (
+        f"sudo -u {shlex.quote(service_user)} env "
+        f"HOME={shlex.quote(service_home)} "
+        f"USERPROFILE={shlex.quote(service_home)} "
+        f"CODEX_HOME={shlex.quote(str(Path(service_home) / '.codex'))} "
+        f"XDG_CONFIG_HOME={shlex.quote(str(Path(service_home) / '.config'))} "
+        f"XDG_CACHE_HOME={shlex.quote(str(Path(service_home) / '.cache'))} "
+        f"PATH={shlex.quote(path)} "
+        f"sh -lc {shlex.quote(shell_command)}"
+    )
+
+
+def provider_tool_path(config: WorkerConfig | None) -> str:
+    service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
     service_path = str(getattr(config, "service_path", None) or DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
     path_parts = [
         service_path,
@@ -119,14 +158,27 @@ def service_user_command(config: WorkerConfig | None, command: list[str]) -> str
         f"{service_home}/.codex/bin",
         f"{service_home}/.opencode/bin",
     ]
-    path = ":".join(dict.fromkeys(part for part in path_parts if part))
-    quoted_command = " ".join(shlex.quote(str(part)) for part in command if str(part))
-    shell_command = f'cd "$HOME" && exec {quoted_command}'
-    return (
-        f"sudo -u {shlex.quote(service_user)} env "
-        f"HOME={shlex.quote(service_home)} PATH={shlex.quote(path)} "
-        f"sh -lc {shlex.quote(shell_command)}"
+    return ":".join(dict.fromkeys(part for part in path_parts if part))
+
+
+def provider_process_env(config: WorkerConfig) -> dict[str, str]:
+    service_home = str(config.service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    env = {
+        key: os.environ[key]
+        for key in PROVIDER_ENV_PASSTHROUGH_KEYS
+        if os.environ.get(key)
+    }
+    env.update(
+        {
+            "HOME": service_home,
+            "USERPROFILE": service_home,
+            "CODEX_HOME": str(Path(service_home) / ".codex"),
+            "XDG_CONFIG_HOME": str(Path(service_home) / ".config"),
+            "XDG_CACHE_HOME": str(Path(service_home) / ".cache"),
+            "PATH": provider_tool_path(config),
+        }
     )
+    return env
 
 
 def codex_login_command(config: WorkerConfig) -> str:

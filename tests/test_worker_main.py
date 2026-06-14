@@ -4501,6 +4501,31 @@ func writeHealth() {}
         with self.assertRaisesRegex(RuntimeError, "absolute path inside worker home"):
             worker_main.opencode_review_command(cfg, "prompt")
 
+    def test_run_opencode_review_uses_worker_instance_auth_env(self) -> None:
+        cfg = config()
+        service_home = configure_instance_provider_commands(cfg)
+        completed = Mock(returncode=0, stdout=json.dumps(audit_payload()), stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {
+                "HOME": "/root",
+                "USERPROFILE": "/root",
+                "CODEX_HOME": "/root/.codex",
+                "XDG_CONFIG_HOME": "/root/.config",
+                "OPENAI_API_KEY": "global-api-key",
+            },
+            clear=False,
+        ), patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
+            run_opencode_provider_review(cfg, {"repo": "acme/api"}, Path(tmp))
+
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["HOME"], str(service_home))
+        self.assertEqual(env["USERPROFILE"], str(service_home))
+        self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
+        self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
+        self.assertNotIn("OPENAI_API_KEY", env)
+
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             schema_path = Path(command[command.index("--output-schema") + 1])

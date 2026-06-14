@@ -91,6 +91,7 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
             completed = subprocess.run(
                 command,
                 cwd=str(checkout_dir),
+                env=provider_process_env(config),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
