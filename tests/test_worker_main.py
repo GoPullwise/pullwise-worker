@@ -4857,6 +4857,16 @@ func writeHealth() {}
         self.assertEqual(detail, "ready")
         run.assert_called_once()
 
+    def test_codex_ready_check_rejects_success_without_probe_confirmation(self) -> None:
+        cfg = config()
+        completed = Mock(returncode=0, stdout="", stderr="")
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = codex_ready_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "codex ready check did not confirm model response")
+
     def test_codex_ready_check_defers_when_codex_invocation_is_running(self) -> None:
         cfg = config()
         self.assertTrue(worker_main._CODEX_EXEC_LOCK.acquire(blocking=False))
@@ -4884,6 +4894,7 @@ func writeHealth() {}
         self.assertIn("--skip-git-repo-check", command)
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--json", command)
+        self.assertIn("--output-last-message", command)
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
