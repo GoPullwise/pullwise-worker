@@ -142,6 +142,7 @@ def service_user_doctor_command(bin_path: Path) -> list[str]:
         f"CODEX_HOME={service_home}/.codex",
         f"XDG_CONFIG_HOME={service_home}/.config",
         f"XDG_CACHE_HOME={service_home}/.cache",
+        f"XDG_DATA_HOME={service_home}/.local/share",
         f"PATH={service_path}",
         "sh",
         "-lc",
@@ -164,6 +165,13 @@ load_worker_env() {{
   done < "$env_file"
 }}
 load_worker_env {env_file}
+SERVICE_HOME="${{PULLWISE_SERVICE_HOME:-/var/lib/pullwise-worker}}"
+export HOME="$SERVICE_HOME"
+export USERPROFILE="$SERVICE_HOME"
+export CODEX_HOME="$SERVICE_HOME/.codex"
+export XDG_CONFIG_HOME="$SERVICE_HOME/.config"
+export XDG_CACHE_HOME="$SERVICE_HOME/.cache"
+export XDG_DATA_HOME="$SERVICE_HOME/.local/share"
 export PATH="${{PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
 PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-python3}}"
 exec "$PYTHON_BIN" -m pullwise_worker.main "$@"

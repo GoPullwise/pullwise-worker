@@ -4541,6 +4541,7 @@ func writeHealth() {}
                 "USERPROFILE": "/root",
                 "CODEX_HOME": "/root/.codex",
                 "XDG_CONFIG_HOME": "/root/.config",
+                "XDG_DATA_HOME": "/root/.local/share",
                 "OPENAI_API_KEY": "global-api-key",
             },
             clear=False,
@@ -4552,6 +4553,7 @@ func writeHealth() {}
         self.assertEqual(env["USERPROFILE"], str(service_home))
         self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
         self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
+        self.assertEqual(env["XDG_DATA_HOME"], str(service_home / ".local" / "share"))
         self.assertNotIn("OPENAI_API_KEY", env)
 
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:

@@ -106,6 +106,7 @@ CODEX_LOGIN_COMMAND = (
     f"CODEX_HOME={DEFAULT_SERVICE_HOME}/.codex "
     f"XDG_CONFIG_HOME={DEFAULT_SERVICE_HOME}/.config "
     f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/.cache "
+    f"XDG_DATA_HOME={DEFAULT_SERVICE_HOME}/.local/share "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
     f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_CODEX_COMMAND} login --device-auth'"
 )
@@ -115,6 +116,7 @@ OPENCODE_AUTH_COMMAND = (
     f"CODEX_HOME={DEFAULT_SERVICE_HOME}/.codex "
     f"XDG_CONFIG_HOME={DEFAULT_SERVICE_HOME}/.config "
     f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/.cache "
+    f"XDG_DATA_HOME={DEFAULT_SERVICE_HOME}/.local/share "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
     f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_OPENCODE_COMMAND} auth login'"
 )
@@ -144,6 +146,7 @@ def service_user_command(config: WorkerConfig | None, command: list[str]) -> str
         f"CODEX_HOME={shlex.quote(str(Path(service_home) / '.codex'))} "
         f"XDG_CONFIG_HOME={shlex.quote(str(Path(service_home) / '.config'))} "
         f"XDG_CACHE_HOME={shlex.quote(str(Path(service_home) / '.cache'))} "
+        f"XDG_DATA_HOME={shlex.quote(str(Path(service_home) / '.local' / 'share'))} "
         f"PATH={shlex.quote(path)} "
         f"sh -lc {shlex.quote(shell_command)}"
     )
@@ -175,6 +178,7 @@ def provider_process_env(config: WorkerConfig) -> dict[str, str]:
             "CODEX_HOME": str(Path(service_home) / ".codex"),
             "XDG_CONFIG_HOME": str(Path(service_home) / ".config"),
             "XDG_CACHE_HOME": str(Path(service_home) / ".cache"),
+            "XDG_DATA_HOME": str(Path(service_home) / ".local" / "share"),
             "PATH": provider_tool_path(config),
         }
     )
