@@ -4151,6 +4151,46 @@ func writeHealth() {}
         codex_ready.assert_not_called()
         opencode_ready.assert_not_called()
 
+    def test_worker_readiness_rejects_legacy_agent_config_shapes(self) -> None:
+        cfg = config()
+        legacy_payloads = [
+            {
+                "free": {"providerChain": ["opencode"], "opencode": {"model": "minimax/MiniMax-M3", "variant": "medium"}},
+                "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+                "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+            },
+            {
+                "agentConfigs": {
+                    "free": {"provider_chain": ["opencode"], "opencode": {"model": "minimax/MiniMax-M3", "variant": "medium"}},
+                    "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+                    "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+                }
+            },
+            {
+                "agentConfigs": {
+                    "free": {"provider": "opencode", "opencode": {"model": "minimax/MiniMax-M3", "variant": "medium"}},
+                    "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+                    "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+                }
+            },
+            {
+                "agentConfigs": {
+                    "free": {"providerChain": ["opencode"], "opencode": {"variant": "medium"}},
+                    "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+                    "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
+                }
+            },
+        ]
+
+        for payload in legacy_payloads:
+            with self.subTest(payload=payload):
+                with patch("pullwise_worker.main.PullwiseClient") as client_class:
+                    client_class.return_value.agent_configs.return_value = payload
+                    ok, detail, _configs = worker_main.worker_agent_configs_check(cfg)
+
+                self.assertFalse(ok)
+                self.assertIn("subscription plan agent configs", detail)
+
     def test_clone_repository_uses_short_lived_token(self) -> None:
         head = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
         with patch("pullwise_worker.main.subprocess.run") as run:

@@ -239,6 +239,9 @@ def worker_agent_configs_check(config: WorkerConfig) -> tuple[bool, str, dict | 
     missing_plans = [plan for plan in ("free", "pro", "max") if plan not in plan_configs]
     if missing_plans:
         return False, f"subscription plan agent configs missing: {', '.join(missing_plans)}", payload
+    validation_error = subscription_plan_agent_configs_validation_error(plan_configs)
+    if validation_error:
+        return False, validation_error, payload
     return True, "loaded free/pro/max subscription plan agent configs", payload
 
 
@@ -247,7 +250,7 @@ def subscription_plan_agent_configs(payload: dict | None) -> dict[str, dict]:
         return {}
     raw_configs = payload.get("agentConfigs")
     if not isinstance(raw_configs, dict):
-        raw_configs = payload
+        return {}
     configs: dict[str, dict] = {}
     for plan in ("free", "pro", "max"):
         plan_config = raw_configs.get(plan)
@@ -256,12 +259,29 @@ def subscription_plan_agent_configs(payload: dict | None) -> dict[str, dict]:
     return configs
 
 
+def subscription_plan_agent_configs_validation_error(plan_configs: dict[str, dict]) -> str:
+    for plan in ("free", "pro", "max"):
+        agent_config = plan_configs.get(plan) or {}
+        provider_chain = agent_config_provider_chain(agent_config)
+        if not provider_chain:
+            return f"subscription plan agent configs invalid: {plan}.providerChain is required"
+        if "codex" in provider_chain:
+            codex_config = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
+            if not normalized_agent_config_text(codex_config.get("model")):
+                return f"subscription plan agent configs invalid: {plan}.codex.model is required"
+            if not normalized_agent_reasoning_level(codex_config.get("reasoningEffort")):
+                return f"subscription plan agent configs invalid: {plan}.codex.reasoningEffort is required"
+        if "opencode" in provider_chain:
+            opencode_config = agent_config.get("opencode") if isinstance(agent_config.get("opencode"), dict) else {}
+            if not normalized_agent_config_text(opencode_config.get("model")):
+                return f"subscription plan agent configs invalid: {plan}.opencode.model is required"
+            if not normalized_agent_reasoning_level(opencode_config.get("variant")):
+                return f"subscription plan agent configs invalid: {plan}.opencode.variant is required"
+    return ""
+
+
 def agent_config_provider_chain(agent_config: dict) -> list[str]:
     raw_chain = agent_config.get("providerChain") if isinstance(agent_config, dict) else None
-    if raw_chain is None and isinstance(agent_config, dict):
-        raw_chain = agent_config.get("provider_chain")
-    if isinstance(raw_chain, str):
-        return parse_provider_chain(raw_chain)
     if isinstance(raw_chain, list):
         providers: list[str] = []
         for item in raw_chain:
@@ -269,8 +289,7 @@ def agent_config_provider_chain(agent_config: dict) -> list[str]:
             if provider in SUPPORTED_REVIEW_PROVIDERS and provider not in providers:
                 providers.append(provider)
         return providers
-    provider = str(agent_config.get("provider") if isinstance(agent_config, dict) else "").strip().lower()
-    return [provider] if provider in SUPPORTED_REVIEW_PROVIDERS else []
+    return []
 
 
 def subscription_plan_required_providers(payload: dict | None) -> list[str]:
@@ -282,10 +301,10 @@ def subscription_plan_required_providers(payload: dict | None) -> list[str]:
     return required
 
 
-def provider_id_from_model(model: str | None, fallback: str = "opencode") -> str:
+def provider_id_from_model(model: str | None) -> str:
     raw_model = str(model or "").strip()
     provider = raw_model.split("/", 1)[0].strip().lower() if raw_model else ""
-    return provider or fallback
+    return provider
 
 
 def opencode_required_provider_specs(agent_configs: dict | None) -> list[tuple[str, str, str]]:
@@ -294,7 +313,7 @@ def opencode_required_provider_specs(agent_configs: dict | None) -> list[tuple[s
         if "opencode" not in agent_config_provider_chain(agent_config):
             continue
         opencode_config = agent_config.get("opencode") if isinstance(agent_config.get("opencode"), dict) else {}
-        model = str(opencode_config.get("model") or DEFAULT_OPENCODE_MODEL).strip() or DEFAULT_OPENCODE_MODEL
+        model = str(opencode_config.get("model") or "").strip()
         requirements.append((plan, provider_id_from_model(model), model))
     return requirements
 
