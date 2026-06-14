@@ -1212,6 +1212,7 @@ def build_repository_agent_semantic_graph(
         completed = subprocess.run(
             command,
             cwd=str(checkout_dir),
+            env=provider_process_env(config),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1228,6 +1229,9 @@ def repository_semantic_agent_command(config: WorkerConfig, prompt: str) -> list
     provider_chain = list(getattr(config, "provider_chain", []) or [getattr(config, "provider", "codex")])
     provider = provider_chain[0] if provider_chain else "codex"
     if provider == "opencode":
+        scope_ok, _scope_detail = provider_command_scope_check(getattr(config, "opencode_command", ""), config, "OpenCode")
+        if not scope_ok:
+            return []
         command = [getattr(config, "opencode_command", "opencode"), "run"]
         opencode_model = getattr(config, "opencode_model", "")
         opencode_variant = getattr(config, "opencode_variant", "")
@@ -1237,6 +1241,9 @@ def repository_semantic_agent_command(config: WorkerConfig, prompt: str) -> list
             command.extend(["--variant", opencode_variant])
         command.append(prompt)
         return command
+    scope_ok, _scope_detail = provider_command_scope_check(getattr(config, "codex_command", ""), config, "Codex")
+    if not scope_ok:
+        return []
     command = [getattr(config, "codex_command", "codex"), "exec"]
     if _CODEX_SKIP_GIT_REPO_CHECK_ARG:
         command.append(_CODEX_SKIP_GIT_REPO_CHECK_ARG)

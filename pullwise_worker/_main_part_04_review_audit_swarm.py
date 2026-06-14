@@ -193,6 +193,7 @@ def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: 
     completed = subprocess.run(
         command,
         cwd=str(checkout_dir),
+        env=provider_process_env(config),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

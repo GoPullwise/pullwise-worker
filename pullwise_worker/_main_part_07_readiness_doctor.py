@@ -367,6 +367,7 @@ def opencode_auth_check(config: WorkerConfig, agent_configs: dict | None = None)
     try:
         completed = subprocess.run(
             [config.opencode_command, "auth", "list"],
+            env=provider_process_env(config),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

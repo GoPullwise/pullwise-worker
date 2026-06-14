@@ -50,6 +50,7 @@ from pullwise_worker.main import (
     run_deterministic_repository_checks,
     run_doctor,
     run_git_command,
+    run_opencode_provider_review,
     run_verifier_commands,
     safe_job_id,
     safe_rmtree,
@@ -488,6 +489,7 @@ func writeHealth() {}
 
     def test_build_repository_graph_can_use_agent_semantic_fallback(self) -> None:
         cfg = config()
+        service_home = configure_instance_provider_commands(cfg)
         cfg.semantic_graph_agent_fallback = True
         cfg.semantic_graph_agent_min_symbols = 8
         cfg.semantic_graph_agent_timeout_seconds = 30
@@ -511,16 +513,42 @@ func writeHealth() {}
         with tempfile.TemporaryDirectory() as tmp:
             checkout_dir = Path(tmp)
             (checkout_dir / "index.html").write_text("<x-widget></x-widget>\n", encoding="utf-8")
-            with patch(
+            with patch.dict(
+                "os.environ",
+                {
+                    "HOME": "/root",
+                    "USERPROFILE": "/root",
+                    "CODEX_HOME": "/root/.codex",
+                    "XDG_CONFIG_HOME": "/root/.config",
+                    "OPENAI_API_KEY": "global-api-key",
+                },
+                clear=False,
+            ), patch(
                 "pullwise_worker.main.subprocess.run",
                 return_value=Mock(returncode=0, stdout=json.dumps(agent_payload), stderr=""),
             ) as run:
                 _graph, semantic_graph = build_repository_graph_bundle(cfg, {"repo": "octocat/templates"}, checkout_dir, {})
 
         run.assert_called_once()
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["HOME"], str(service_home))
+        self.assertEqual(env["USERPROFILE"], str(service_home))
+        self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
+        self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
+        self.assertNotIn("OPENAI_API_KEY", env)
         self.assertEqual(semantic_graph["stats"]["source"], "agent_fallback")
         self.assertEqual(semantic_graph["nodes"][0]["label"], "Widget")
         self.assertIn("Agent fallback covered template semantics.", semantic_graph["reviewHints"])
+
+    def test_repository_semantic_agent_command_rejects_global_provider_command(self) -> None:
+        cfg = config()
+        cfg.codex_command = "codex"
+        self.assertEqual(worker_main.repository_semantic_agent_command(cfg, "prompt"), [])
+
+        cfg = config()
+        cfg.provider_chain = ["opencode"]
+        cfg.opencode_command = "opencode"
+        self.assertEqual(worker_main.repository_semantic_agent_command(cfg, "prompt"), [])
 
     def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
         payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
@@ -5064,6 +5092,33 @@ func writeHealth() {}
 
         self.assertTrue(ok)
         self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax")
+
+    def test_opencode_auth_check_uses_worker_instance_auth_env(self) -> None:
+        cfg = config()
+        service_home = configure_instance_provider_commands(cfg)
+        completed = Mock(returncode=0, stdout="opencode api-key\n", stderr="")
+
+        with patch.dict(
+            "os.environ",
+            {
+                "HOME": "/root",
+                "USERPROFILE": "/root",
+                "CODEX_HOME": "/root/.codex",
+                "XDG_CONFIG_HOME": "/root/.config",
+                "OPENAI_API_KEY": "global-api-key",
+            },
+            clear=False,
+        ), patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
+            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["HOME"], str(service_home))
+        self.assertEqual(env["USERPROFILE"], str(service_home))
+        self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
+        self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
+        self.assertNotIn("OPENAI_API_KEY", env)
 
     def test_opencode_auth_check_does_not_treat_provider_catalog_as_login(self) -> None:
         cfg = config()
