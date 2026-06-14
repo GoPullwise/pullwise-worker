@@ -390,7 +390,7 @@ class WorkerConfig:
             or DEFAULT_CODEX_REASONING_EFFORT
         )
         self.opencode_command = os.environ.get("PULLWISE_OPENCODE_COMMAND", "opencode").strip() or "opencode"
-        self.opencode_model = os.environ.get("PULLWISE_OPENCODE_MODEL", DEFAULT_OPENCODE_MODEL).strip() or DEFAULT_OPENCODE_MODEL
+        self.opencode_model = DEFAULT_OPENCODE_MODEL
         self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", DEFAULT_OPENCODE_VARIANT).strip() or DEFAULT_OPENCODE_VARIANT
         self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
         self.service_home = os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
@@ -562,6 +562,10 @@ class PullwiseClient:
         if isinstance(machine_metrics, dict):
             payload["machine_metrics"] = machine_metrics
         response = self.post("/worker/heartbeat", payload)
+        return response.json()
+
+    def agent_configs(self) -> dict:
+        response = self.post("/worker/agent-configs", {"worker_id": self.config.worker_id})
         return response.json()
 
     def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:

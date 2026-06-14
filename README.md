@@ -38,7 +38,6 @@ Required environment:
 - `PULLWISE_CODEX_MODEL` optional, defaults to `gpt-5.5`
 - `PULLWISE_CODEX_REASONING_EFFORT` optional, defaults to `medium`
 - `PULLWISE_OPENCODE_COMMAND` optional, defaults to `opencode`
-- `PULLWISE_OPENCODE_MODEL` optional, defaults to `opencode/big-pickle`
 - `PULLWISE_OPENCODE_VARIANT` optional, defaults to `medium`; use this for OpenCode provider-specific reasoning effort
 - `PULLWISE_CODEX_TIMEOUT_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
@@ -61,8 +60,7 @@ Required environment:
 
 Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old verifier logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
-Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. The default provider chain is Codex first, then OpenCode fallback; OpenCode defaults to `opencode/big-pickle` with variant `medium`.
-When the server includes per-job `agentConfig`, the worker applies that review's provider chain plus per-provider model and reasoning settings without changing the process-wide defaults. Executable command paths such as `PULLWISE_CODEX_COMMAND` and `PULLWISE_OPENCODE_COMMAND` remain local worker configuration and are not overridden by job policy. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
+Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. Review provider/model policy comes from the server-side subscription plan `agentConfig`; executable command paths such as `PULLWISE_CODEX_COMMAND` and `PULLWISE_OPENCODE_COMMAND` remain local worker configuration and are not overridden by job policy. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
 
 Codex `exec` calls are serialized inside the worker because Codex keeps local login state under the service user's home directory. If Codex reports an authentication or refresh-token failure, the worker cools down further Codex launches for `PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS` and then uses the next configured provider, if any.
 
@@ -72,7 +70,6 @@ Production Codex-first fallback example:
 PULLWISE_PROVIDER_CHAIN=codex,opencode
 PULLWISE_CODEX_MODEL=gpt-5.5
 PULLWISE_CODEX_REASONING_EFFORT=medium
-PULLWISE_OPENCODE_MODEL=opencode/big-pickle
 PULLWISE_OPENCODE_VARIANT=medium
 ```
 
@@ -131,7 +128,7 @@ Codex must be authenticated for the service user before Codex scans can run:
 sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin codex login --device-auth
 ```
 
-When `PULLWISE_PROVIDER_CHAIN` includes `opencode`, authenticate OpenCode for the same service user before relying on fallback:
+When any subscription plan `agentConfig` uses `opencode`, authenticate the matching OpenCode providers for the same service user before relying on fallback:
 
 ```bash
 sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/var/lib/pullwise-worker/.opencode/bin opencode auth login

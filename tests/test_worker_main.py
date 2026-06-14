@@ -4509,7 +4509,7 @@ func writeHealth() {}
         self.assertEqual(cfg.codex_reasoning_effort, "high")
         self.assertEqual(cfg.codex_auth_failure_cooldown_seconds, 120)
         self.assertEqual(cfg.opencode_command, "opencode-cli")
-        self.assertEqual(cfg.opencode_model, "openai/gpt-5")
+        self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
         self.assertEqual(cfg.opencode_variant, "xhigh")
 
     def test_worker_config_defaults_provider_to_first_provider_chain_entry(self) -> None:
@@ -4933,6 +4933,11 @@ func writeHealth() {}
         with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")]), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class:
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["codex"],
+                pro_chain=["codex"],
+                max_chain=["codex"],
+            )
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
@@ -4959,6 +4964,7 @@ func writeHealth() {}
             patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("builtins.print") as print_mock:
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
@@ -5401,8 +5407,8 @@ func writeHealth() {}
         self.assertIn("PULLWISE_PROVIDER_CHAIN=codex,opencode", env_template)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
-        self.assertIn("PULLWISE_OPENCODE_MODEL=opencode/big-pickle", env_template)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
+        self.assertNotIn("PULLWISE_OPENCODE_MODEL", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODE=shadow", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODEL=relative_factor", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS=45", env_template)
@@ -5417,7 +5423,6 @@ func writeHealth() {}
             "PULLWISE_CODEX_MODEL",
             "PULLWISE_CODEX_REASONING_EFFORT",
             "PULLWISE_OPENCODE_COMMAND",
-            "PULLWISE_OPENCODE_MODEL",
             "PULLWISE_OPENCODE_VARIANT",
             "PULLWISE_REVIEW_CALIBRATION_MODE",
             "PULLWISE_REVIEW_CALIBRATION_MODEL",

@@ -37,12 +37,15 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
     checks: list[tuple[str, bool, str]] = []
     checks.append(("server_url", server_url_allowed(config.server_url, allow_insecure=config.allow_insecure_server_url), config.server_url))
     checks.append(("worker_token", bool(config.worker_token), "configured" if config.worker_token else "missing"))
+    agent_configs_ok, agent_configs_detail, agent_configs = worker_agent_configs_check(config)
+    checks.append(("agent_configs", agent_configs_ok, agent_configs_detail))
     checks.append(("max_concurrent_jobs", config.max_concurrent_jobs > 0, str(config.max_concurrent_jobs)))
 
     git_ok, git_detail = command_ok(["git", "--version"])
     checks.append(("git", git_ok, git_detail))
     ready_providers: list[str] = []
-    if "codex" in config.provider_chain:
+    required_providers = subscription_plan_required_providers(agent_configs) if agent_configs_ok else list(config.provider_chain)
+    if "codex" in required_providers:
         node_ok, node_detail = node_version_check()
         checks.append(("node", node_ok, node_detail))
         codex_cli_ok, codex_cli_detail = command_ok([config.codex_command, "--version"])
@@ -51,11 +54,14 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
         checks.append(("codex_ready", codex_login_ok, codex_login_detail))
         if node_ok and codex_cli_ok and codex_login_ok:
             ready_providers.append("codex")
-    if "opencode" in config.provider_chain:
+    if "opencode" in required_providers:
         opencode_ok, opencode_detail = command_ok([config.opencode_command, "--version"])
         checks.append(("opencode", opencode_ok, opencode_detail))
         opencode_auth_ok, opencode_auth_detail = (
-            opencode_auth_check(config) if opencode_ok else (False, "skipped until opencode CLI passes --version")
+            opencode_auth_check(config, agent_configs) if opencode_ok and agent_configs_ok else (
+                False,
+                "skipped until opencode CLI passes --version" if not opencode_ok else agent_configs_detail,
+            )
         )
         checks.append(("opencode_ready", opencode_auth_ok, opencode_auth_detail))
         if opencode_ok and opencode_auth_ok:
@@ -137,10 +143,10 @@ def run_doctor(config: WorkerConfig) -> bool:
     for name, ok, detail in checks:
         print(f"{'ok' if ok else 'fail'} {name}: {detail}")
     codex_login_check = next((check for check in checks if check[0] == "codex_ready"), None)
-    if "codex" in config.provider_chain and codex_login_check and not codex_login_check[1]:
+    if codex_login_check and not codex_login_check[1]:
         print(f"Codex may require device authorization. Run: {codex_login_command(config)}")
     opencode_check = next((check for check in checks if check[0] == "opencode_ready"), None)
-    if "opencode" in config.provider_chain and opencode_check and not opencode_check[1]:
+    if opencode_check and not opencode_check[1]:
         print(f"OpenCode interactive provider selection. Run: {opencode_auth_command(config)}")
     return first_failed_check(checks) is None
 
@@ -248,8 +254,83 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
     return False
 
 
-def opencode_auth_check(config: WorkerConfig) -> tuple[bool, str]:
-    provider = opencode_provider_id(config)
+def worker_agent_configs_check(config: WorkerConfig) -> tuple[bool, str, dict | None]:
+    try:
+        payload = PullwiseClient(config).agent_configs()
+    except Exception as exc:
+        return False, f"unable to load subscription plan agent configs: {redact_secrets(str(exc), config)}", None
+    plan_configs = subscription_plan_agent_configs(payload)
+    missing_plans = [plan for plan in ("free", "pro", "max") if plan not in plan_configs]
+    if missing_plans:
+        return False, f"subscription plan agent configs missing: {', '.join(missing_plans)}", payload
+    return True, "loaded free/pro/max subscription plan agent configs", payload
+
+
+def subscription_plan_agent_configs(payload: dict | None) -> dict[str, dict]:
+    if not isinstance(payload, dict):
+        return {}
+    raw_configs = payload.get("agentConfigs")
+    if not isinstance(raw_configs, dict):
+        raw_configs = payload
+    configs: dict[str, dict] = {}
+    for plan in ("free", "pro", "max"):
+        plan_config = raw_configs.get(plan)
+        if isinstance(plan_config, dict):
+            configs[plan] = plan_config
+    return configs
+
+
+def agent_config_provider_chain(agent_config: dict) -> list[str]:
+    raw_chain = agent_config.get("providerChain") if isinstance(agent_config, dict) else None
+    if raw_chain is None and isinstance(agent_config, dict):
+        raw_chain = agent_config.get("provider_chain")
+    if isinstance(raw_chain, str):
+        return parse_provider_chain(raw_chain)
+    if isinstance(raw_chain, list):
+        providers: list[str] = []
+        for item in raw_chain:
+            provider = str(item or "").strip().lower()
+            if provider in SUPPORTED_REVIEW_PROVIDERS and provider not in providers:
+                providers.append(provider)
+        return providers
+    provider = str(agent_config.get("provider") if isinstance(agent_config, dict) else "").strip().lower()
+    return [provider] if provider in SUPPORTED_REVIEW_PROVIDERS else []
+
+
+def subscription_plan_required_providers(payload: dict | None) -> list[str]:
+    required: list[str] = []
+    for agent_config in subscription_plan_agent_configs(payload).values():
+        for provider in agent_config_provider_chain(agent_config):
+            if provider not in required:
+                required.append(provider)
+    return required
+
+
+def provider_id_from_model(model: str | None, fallback: str = "opencode") -> str:
+    raw_model = str(model or "").strip()
+    provider = raw_model.split("/", 1)[0].strip().lower() if raw_model else ""
+    return provider or fallback
+
+
+def opencode_required_provider_specs(agent_configs: dict | None) -> list[tuple[str, str, str]]:
+    requirements: list[tuple[str, str, str]] = []
+    for plan, agent_config in subscription_plan_agent_configs(agent_configs).items():
+        if "opencode" not in agent_config_provider_chain(agent_config):
+            continue
+        opencode_config = agent_config.get("opencode") if isinstance(agent_config.get("opencode"), dict) else {}
+        model = str(opencode_config.get("model") or DEFAULT_OPENCODE_MODEL).strip() or DEFAULT_OPENCODE_MODEL
+        requirements.append((plan, provider_id_from_model(model), model))
+    return requirements
+
+
+def opencode_auth_check(config: WorkerConfig, agent_configs: dict | None = None) -> tuple[bool, str]:
+    if agent_configs is None:
+        agent_configs_ok, agent_configs_detail, agent_configs = worker_agent_configs_check(config)
+        if not agent_configs_ok:
+            return False, agent_configs_detail
+    requirements = opencode_required_provider_specs(agent_configs)
+    if not requirements:
+        return True, "no subscription plan requires opencode"
     try:
         completed = subprocess.run(
             [config.opencode_command, "auth", "list"],
@@ -267,16 +348,18 @@ def opencode_auth_check(config: WorkerConfig) -> tuple[bool, str]:
     detail = output.splitlines()[0] if output else f"exit {completed.returncode}"
     if completed.returncode != 0:
         return False, detail
-    if opencode_auth_output_has_ready_provider(output, provider):
-        return True, f"authenticated for {provider}"
-    if opencode_auth_output_has_ready_credential(output):
-        model = str(getattr(config, "opencode_model", "") or "").strip() or DEFAULT_OPENCODE_MODEL
-        return (
-            False,
-            f"not authenticated for {provider}; PULLWISE_OPENCODE_MODEL={model}; "
-            "credentials exist for another OpenCode provider",
-        )
-    return False, f"not authenticated for {provider}"
+    authenticated_providers = []
+    missing_requirements = []
+    for plan, provider, _model in requirements:
+        if opencode_auth_output_has_ready_provider(output, provider):
+            if provider not in authenticated_providers:
+                authenticated_providers.append(provider)
+            continue
+        missing_requirements.append((plan, provider))
+    if not missing_requirements:
+        return True, f"authenticated for configured OpenCode providers: {', '.join(authenticated_providers)}"
+    missing_detail = ", ".join(f"{plan}={provider}" for plan, provider in missing_requirements)
+    return False, f"not authenticated for OpenCode providers required by subscription plans: {missing_detail}"
 
 
 def node_version_check() -> tuple[bool, str]:
