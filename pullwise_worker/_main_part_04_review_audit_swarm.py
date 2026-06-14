@@ -292,7 +292,7 @@ def review_prompt(job: dict) -> str:
         "subagents according to repository shape and task scope to reduce context pressure; aggregate "
         "their results yourself and preserve the required final JSON output structure exactly. "
         "Return only JSON with top-level "
-        "`audit_protocol`, `issue_cards`, and `verification_results`. Do not return Pullwise legacy "
+        "`audit_protocol`, `issue_cards`, and `verification_results`. Do not return deprecated Pullwise "
         "`findings`. Each issue card is a hypothesis and must include a concrete title, severity "
         "(P0/P1/P2/P3/P4 or critical/high/medium/low/info), one or more repository-relative locations, "
         "a claim, evidence, reproduction_idea, suggested_test, and false_positive_checks. "
