@@ -4679,18 +4679,22 @@ func writeHealth() {}
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
         self.assertIn('model_reasoning_effort="high"', command)
+        effective_config = payload["effectiveAgentConfig"]
+        self.assertEqual(effective_config["provider"], "codex")
+        self.assertEqual(effective_config["providerChain"], ["codex"])
+        self.assertEqual(effective_config["model"], "gpt-5.5")
+        self.assertEqual(effective_config["reasoningEffort"], "high")
         self.assertEqual(
-            payload["effectiveAgentConfig"],
+            effective_config["codex"],
             {
-                "providerChain": ["codex"],
-                "codex": {
-                    "cli": "codex",
-                    "command": "codex",
-                    "model": "gpt-5.5",
-                    "reasoningEffort": "high",
-                },
+                "cli": "codex",
+                "command": "codex",
+                "model": "gpt-5.5",
+                "reasoningEffort": "high",
             },
         )
+        self.assertEqual(effective_config["agent"], effective_config["codex"])
+        self.assertEqual(effective_config["opencode"]["command"], "opencode")
 
     def test_run_codex_review_falls_back_to_opencode_after_codex_failure(self) -> None:
         cfg = config()
