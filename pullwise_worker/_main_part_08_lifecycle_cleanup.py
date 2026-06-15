@@ -2,11 +2,18 @@ from __future__ import annotations
 
 # Loaded by main.py; keep definitions in that module's globals for compatibility.
 
-def service_action(action: str, *, dry_run: bool = False, no_block: bool = False) -> int:
+def service_action(
+    action: str,
+    *,
+    dry_run: bool = False,
+    no_block: bool = False,
+    config: WorkerConfig | None = None,
+) -> int:
+    service_name = str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
     command = ["systemctl"]
     if no_block:
         command.append("--no-block")
-    command.extend([action, "pullwise-worker"])
+    command.extend([action, service_name])
     if dry_run:
         print(" ".join(command))
         return 0

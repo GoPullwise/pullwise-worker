@@ -62,7 +62,7 @@ def provider_command_scope_check(command: str, config: WorkerConfig, label: str)
     return True, str(resolved)
 
 
-def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool]:
+def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool, list[str]]:
     checks: list[tuple[str, bool, str]] = []
     checks.append(("server_url", server_url_allowed(config.server_url, allow_insecure=config.allow_insecure_server_url), config.server_url))
     checks.append(("worker_token", bool(config.worker_token), "configured" if config.worker_token else "missing"))
@@ -70,26 +70,42 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
     checks.append(("agent_configs", agent_configs_ok, agent_configs_detail))
     checks.append(("max_concurrent_jobs", config.max_concurrent_jobs > 0, str(config.max_concurrent_jobs)))
 
+    provider_env = provider_process_env(config)
     git_ok, git_detail = command_ok(["git", "--version"])
     checks.append(("git", git_ok, git_detail))
     ready_providers: list[str] = []
     required_providers = subscription_plan_required_providers(agent_configs) if agent_configs_ok else []
-    if "codex" in required_providers:
-        node_ok, node_detail = node_version_check()
+    local_provider_chain = parse_provider_chain(",".join(config.provider_chain))
+    providers_to_check = [
+        provider
+        for provider in required_providers
+        if not local_provider_chain or provider in local_provider_chain
+    ]
+    skipped_required = [provider for provider in required_providers if provider not in providers_to_check]
+    if skipped_required:
+        checks.append(
+            (
+                "provider_capability",
+                True,
+                f"skipped providers outside PULLWISE_PROVIDER_CHAIN: {', '.join(skipped_required)}",
+            )
+        )
+    if "codex" in providers_to_check:
+        node_ok, node_detail = node_version_check(env=provider_env)
         checks.append(("node", node_ok, node_detail))
         codex_scope_ok, codex_scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
         codex_cli_ok, codex_cli_detail = (
-            command_ok([config.codex_command, "--version"]) if codex_scope_ok else (False, codex_scope_detail)
+            command_ok([config.codex_command, "--version"], env=provider_env) if codex_scope_ok else (False, codex_scope_detail)
         )
         checks.append(("codex", codex_cli_ok, codex_cli_detail))
         codex_login_ok, codex_login_detail = codex_ready_check(config) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
         checks.append(("codex_ready", codex_login_ok, codex_login_detail))
         if node_ok and codex_cli_ok and codex_login_ok:
             ready_providers.append("codex")
-    if "opencode" in required_providers:
+    if "opencode" in providers_to_check:
         opencode_scope_ok, opencode_scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
         opencode_ok, opencode_detail = (
-            command_ok([config.opencode_command, "--version"]) if opencode_scope_ok else (False, opencode_scope_detail)
+            command_ok([config.opencode_command, "--version"], env=provider_env) if opencode_scope_ok else (False, opencode_scope_detail)
         )
         checks.append(("opencode", opencode_ok, opencode_detail))
         opencode_auth_ok, opencode_auth_detail = (
@@ -105,6 +121,8 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
     provider_ready_detail = (
         ", ".join(ready_providers)
         if provider_ready
+        else "no locally configured provider matches subscription plan agent configs"
+        if agent_configs_ok and required_providers and not providers_to_check
         else "no configured provider is ready" if agent_configs_ok else "subscription plan agent configs unavailable"
     )
     checks.append(("provider_ready", provider_ready, provider_ready_detail))
@@ -113,6 +131,11 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
         ok, detail = writable_path_check(path)
         checks.append((label, ok, detail))
     checks.append(("disk_space", *disk_space_check(config.work_dir)))
+    return checks, provider_ready, ready_providers
+
+
+def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool]:
+    checks, provider_ready, _ready_providers = worker_readiness_state(config)
     return checks, provider_ready
 
 
@@ -161,9 +184,10 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 
 def run_doctor(config: WorkerConfig) -> bool:
-    checks, _provider_ready = worker_readiness_checks(config)
+    checks, _provider_ready, ready_providers = worker_readiness_state(config)
     codex_ready = readiness_check_ok(checks, "codex_ready")
-    systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", "pullwise-worker"])
+    opencode_ready = readiness_check_ok(checks, "opencode_ready")
+    systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", config.service_name])
     checks.append(("systemd", systemd_ok, systemd_detail))
     heartbeat_ok = True
     heartbeat_detail = "ok"
@@ -173,6 +197,8 @@ def run_doctor(config: WorkerConfig) -> bool:
             last_error=None,
             doctor_status="ok" if doctor_required_ok else "degraded",
             codex_ready=codex_ready,
+            opencode_ready=opencode_ready,
+            ready_providers=ready_providers,
             systemd_active=systemd_ok,
             doctor_checked_at=int(time.time()),
         )
@@ -191,9 +217,16 @@ def run_doctor(config: WorkerConfig) -> bool:
     return first_failed_check(checks) is None
 
 
-def command_ok(command: list[str]) -> tuple[bool, str]:
+def command_ok(command: list[str], *, env: dict[str, str] | None = None) -> tuple[bool, str]:
     try:
-        completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        completed = subprocess.run(
+            command,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+        )
         detail = (completed.stdout or completed.stderr).strip().splitlines()
         return completed.returncode == 0, detail[0] if detail else f"exit {completed.returncode}"
     except FileNotFoundError:
@@ -396,8 +429,8 @@ def opencode_auth_check(config: WorkerConfig, agent_configs: dict | None = None)
     return False, f"not authenticated for OpenCode providers required by subscription plans: {missing_detail}"
 
 
-def node_version_check() -> tuple[bool, str]:
-    ok, detail = command_ok(["node", "--version"])
+def node_version_check(*, env: dict[str, str] | None = None) -> tuple[bool, str]:
+    ok, detail = command_ok(["node", "--version"], env=env)
     if not ok:
         return False, detail
     match = re.search(r"v?(\d+)", detail.strip())

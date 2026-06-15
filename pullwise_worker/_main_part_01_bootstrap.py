@@ -58,14 +58,15 @@ DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
 DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
 DEFAULT_OPENCODE_VARIANT = "medium"
+DEFAULT_SERVICE_NAME = "pullwise-worker"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
 DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/.codex/bin/codex"
 DEFAULT_OPENCODE_COMMAND = f"{DEFAULT_SERVICE_HOME}/.opencode/bin/opencode"
 DEFAULT_PROVIDER_AUTH_PATH = (
-    f"{DEFAULT_SERVICE_PATH}:{DEFAULT_SERVICE_HOME}/.local/bin:"
-    f"{DEFAULT_SERVICE_HOME}/.codex/bin:{DEFAULT_SERVICE_HOME}/.opencode/bin"
+    f"{DEFAULT_SERVICE_HOME}/.local/bin:{DEFAULT_SERVICE_HOME}/.codex/bin:"
+    f"{DEFAULT_SERVICE_HOME}/.opencode/bin:{DEFAULT_SERVICE_PATH}"
 )
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "LANG",
@@ -443,6 +444,27 @@ class WorkerConfig:
         self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
         self.service_home = os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
         self.service_path = os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
+        self.service_name = os.environ.get("PULLWISE_SERVICE_NAME", DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
+        self.service_file = (
+            os.environ.get("PULLWISE_SERVICE_FILE", f"/etc/systemd/system/{self.service_name}.service").strip()
+            or f"/etc/systemd/system/{self.service_name}.service"
+        )
+        self.worker_env_file = (
+            os.environ.get("PULLWISE_WORKER_ENV_FILE", "/etc/pullwise-worker/worker.env").strip()
+            or "/etc/pullwise-worker/worker.env"
+        )
+        self.worker_env_backup_file = (
+            os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", f"{self.worker_env_file}.bak").strip()
+            or f"{self.worker_env_file}.bak"
+        )
+        self.worker_bin_path = (
+            os.environ.get("PULLWISE_WORKER_BIN_PATH", "/usr/local/bin/pullwise-worker").strip()
+            or "/usr/local/bin/pullwise-worker"
+        )
+        self.logrotate_file = (
+            os.environ.get("PULLWISE_LOGROTATE_FILE", f"/etc/logrotate.d/{self.service_name}").strip()
+            or f"/etc/logrotate.d/{self.service_name}"
+        )
         default_codex_command = default_provider_command(self.service_home, "codex")
         default_opencode_command = default_provider_command(self.service_home, "opencode")
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or default_codex_command
@@ -598,6 +620,8 @@ class PullwiseClient:
         last_error: str | None = None,
         doctor_status: str | None = None,
         codex_ready: bool | None = None,
+        opencode_ready: bool | None = None,
+        ready_providers: list[str] | None = None,
         systemd_active: bool | None = None,
         doctor_checked_at: int | None = None,
         machine_metrics: dict | None = None,
@@ -606,6 +630,7 @@ class PullwiseClient:
             "worker_id": self.config.worker_id,
             "version": __version__,
             "provider": self.config.provider,
+            "providerChain": list(self.config.provider_chain),
             "max_concurrent_jobs": self.config.max_concurrent_jobs,
             "running_jobs": running_jobs,
             "free_slots": max(0, self.config.max_concurrent_jobs - running_jobs),
@@ -613,9 +638,12 @@ class PullwiseClient:
             "last_error": last_error,
             "doctor_status": doctor_status,
             "codex_ready": codex_ready,
+            "opencode_ready": opencode_ready,
             "systemd_active": systemd_active,
             "doctor_checked_at": doctor_checked_at,
         }
+        if ready_providers is not None:
+            payload["readyProviders"] = [str(provider) for provider in ready_providers if str(provider or "").strip()]
         if active_job_ids is not None:
             payload["active_job_ids"] = [str(job_id) for job_id in active_job_ids if str(job_id or "").strip()]
         if isinstance(machine_metrics, dict):
@@ -703,17 +731,21 @@ def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False
 
 
 def uninstall_worker_command(args: argparse.Namespace) -> int:
+    config = WorkerConfig(args, require_worker_token=False, validate_server_url=False)
     try:
-        config = WorkerConfig(args, require_worker_token=False)
-    except ValueError as exc:
-        print(f"server registry unregister skipped: {exc}", file=sys.stderr)
-    else:
         try:
             unregister_worker_from_server(config, dry_run=args.dry_run)
         except PullwiseRequestError as exc:
             print(f"server registry unregister failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
             return 1
-    return uninstall_worker(remove_config=args.remove_config, remove_logs=args.remove_logs, dry_run=args.dry_run)
+    except ValueError as exc:
+        print(f"server registry unregister skipped: {exc}", file=sys.stderr)
+    return uninstall_worker(
+        config,
+        remove_config=args.remove_config,
+        remove_logs=args.remove_logs,
+        dry_run=args.dry_run,
+    )
 
 
 def main() -> None:
@@ -742,7 +774,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command in {"start", "stop", "status", "restart"}:
-        raise SystemExit(service_action(args.command, dry_run=args.dry_run))
+        try:
+            config = WorkerConfig(args, require_worker_token=False, validate_server_url=False)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from exc
+        raise SystemExit(service_action(args.command, dry_run=args.dry_run, config=config))
     if args.command == "uninstall":
         raise SystemExit(uninstall_worker_command(args))
     require_worker_token = args.command in {"run", "doctor"}

@@ -154,6 +154,8 @@ class Worker:
         self._readiness_checked_at = 0.0
         self._doctor_status = "not_ready"
         self._codex_ready = False
+        self._opencode_ready = False
+        self._ready_providers: list[str] = []
         self._empty_poll_count = 0
         self._error_poll_count = 0
         self._last_cleanup_at = 0.0
@@ -196,6 +198,8 @@ class Worker:
                         last_error=self.last_error,
                         doctor_status=self._doctor_status,
                         codex_ready=self._codex_ready,
+                        opencode_ready=self._opencode_ready,
+                        ready_providers=self._ready_providers,
                         doctor_checked_at=int(self._readiness_checked_at) if self._readiness_checked_at else None,
                         machine_metrics=machine_metrics,
                     )
@@ -317,9 +321,11 @@ class Worker:
         current = time.time()
         if current - self._readiness_checked_at < self.config.readiness_check_seconds:
             return self._doctor_status == "ok"
-        checks, _provider_ready = worker_readiness_checks(self.config)
+        checks, _provider_ready, ready_providers = worker_readiness_state(self.config)
         failed_check = first_failed_check(checks)
         self._codex_ready = readiness_check_ok(checks, "codex_ready")
+        self._opencode_ready = readiness_check_ok(checks, "opencode_ready")
+        self._ready_providers = ready_providers
         self._doctor_status = "degraded" if failed_check else "ok"
         self._readiness_checked_at = current
         self.last_error = None if failed_check is None else readiness_error_message(failed_check, self.config)
