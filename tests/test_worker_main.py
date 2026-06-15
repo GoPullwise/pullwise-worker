@@ -3937,7 +3937,7 @@ func writeHealth() {}
             return {}
 
         def run_job(_job: dict) -> None:
-            release_job.wait(2)
+            release_job.wait()
 
         worker.client.heartbeat.side_effect = heartbeat
 
