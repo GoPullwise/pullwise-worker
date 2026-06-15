@@ -117,6 +117,79 @@ def opencode_ai_usage(_raw_output: str, config: WorkerConfig) -> dict:
     return ai_usage_payload(config.opencode_model)
 
 
+def opencode_parse_failure_detail(raw_output: str, config: WorkerConfig) -> str:
+    event_types: list[str] = []
+    error_details: list[str] = []
+    text_samples: list[str] = []
+    for parsed in audit_swarm_json_documents(raw_output):
+        collect_opencode_parse_failure_detail(parsed, event_types, error_details, text_samples)
+
+    parts: list[str] = []
+    if error_details:
+        parts.append(f"OpenCode error event: {'; '.join(dedupe_text(error_details)[:3])}")
+    if event_types:
+        parts.append(f"OpenCode event types: {', '.join(dedupe_text(event_types)[:8])}")
+    if text_samples:
+        parts.append(f"OpenCode text preview: {' | '.join(dedupe_text(text_samples)[:2])}")
+    if not parts:
+        preview = protocol_multiline_text(raw_output)[-300:]
+        if preview:
+            parts.append(f"OpenCode output preview: {preview}")
+    return redact_secrets(protocol_multiline_text("; ".join(parts))[:800], config)
+
+
+def collect_opencode_parse_failure_detail(
+    value: object,
+    event_types: list[str],
+    error_details: list[str],
+    text_samples: list[str],
+) -> None:
+    if isinstance(value, list):
+        for item in value:
+            collect_opencode_parse_failure_detail(item, event_types, error_details, text_samples)
+        return
+    if not isinstance(value, dict):
+        return
+
+    event_type = clean_protocol_text(value.get("type") or value.get("event"))
+    if event_type:
+        event_types.append(event_type)
+
+    for text in audit_swarm_document_text_candidates(value):
+        preview = protocol_multiline_text(text)
+        if preview:
+            text_samples.append(preview[:240])
+
+    properties = value.get("properties") if isinstance(value.get("properties"), dict) else {}
+    error_detail = opencode_error_detail(value.get("error")) or opencode_error_detail(properties.get("error"))
+    if not error_detail and "error" in event_type.lower():
+        error_detail = opencode_error_detail(value)
+    if error_detail:
+        error_details.append(error_detail)
+
+
+def opencode_error_detail(value: object) -> str:
+    if isinstance(value, str):
+        return protocol_multiline_text(value)[:300]
+    if not isinstance(value, dict):
+        return ""
+
+    candidates: list[str] = []
+    data = value.get("data") if isinstance(value.get("data"), dict) else {}
+    for item in (
+        value.get("code"),
+        value.get("name"),
+        value.get("type"),
+        value.get("message"),
+        data.get("code"),
+        data.get("message"),
+    ):
+        text = protocol_multiline_text(item)
+        if text:
+            candidates.append(text[:240])
+    return ": ".join(dedupe_text(candidates))[:300]
+
+
 def ai_usage_payload(model: object) -> dict:
     clean_model = clean_protocol_text(model)
     return {"model": clean_model} if clean_model else {}
@@ -203,7 +276,13 @@ def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: 
     logs_summary = redact_secrets(raw_logs[-1000:], config)
     if completed.returncode != 0:
         raise RuntimeError(f"opencode run failed with exit code {completed.returncode}: {logs_summary[:300]}")
-    audit_payload, output_source = parse_opencode_audit_payload(raw_logs, checkout_dir)
+    try:
+        audit_payload, output_source = parse_opencode_audit_payload(raw_logs, checkout_dir)
+    except RuntimeError as exc:
+        detail = opencode_parse_failure_detail(raw_logs, config)
+        if detail:
+            raise RuntimeError(f"{exc}: {detail}") from exc
+        raise
     if output_source:
         logs_summary = redact_secrets("\n".join([logs_summary, output_source])[-1000:], config)
     return (
@@ -434,6 +513,13 @@ def audit_swarm_document_text_candidates(parsed: dict) -> list[str]:
     part = parsed.get("part")
     if isinstance(part, dict) and isinstance(part.get("text"), str):
         candidates.append(part["text"])
+    properties = parsed.get("properties")
+    if isinstance(properties, dict):
+        properties_part = properties.get("part")
+        if isinstance(properties_part, dict) and isinstance(properties_part.get("text"), str):
+            candidates.append(properties_part["text"])
+        if isinstance(properties.get("text"), str):
+            candidates.append(properties["text"])
     if isinstance(parsed.get("text"), str):
         candidates.append(parsed["text"])
     return candidates
