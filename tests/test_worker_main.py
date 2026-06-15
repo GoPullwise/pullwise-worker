@@ -597,6 +597,17 @@ func writeHealth() {}
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Event bug")
 
+    def test_parse_audit_swarm_normalizes_object_protocol(self) -> None:
+        payload = audit_payload([issue_card("Object protocol bug", severity="P1")])
+        payload["audit_protocol"] = {
+            "protocol_name": "Audit Swarm v1",
+            "analysis_strategy": "OpenCode wrote metadata here instead of the protocol id.",
+        }
+
+        parsed = parse_audit_swarm_payload(json.dumps(payload))
+
+        self.assertEqual(parsed["audit_protocol"], worker_main.AUDIT_SWARM_PROTOCOL_VERSION)
+
     def test_audit_swarm_confirmed_verdict_without_evidence_is_not_static_proof(self) -> None:
         payload = audit_payload(
             [issue_card("Unsupported verifier confirmation", issue_id="issue-unsupported")],
@@ -4630,13 +4641,16 @@ func writeHealth() {}
             checkout = Path(tmp)
             output_dir = checkout / ".sisyphus"
             output_dir.mkdir()
+            output_payload = audit_payload([issue_card("File bug", severity="P1")])
+            output_payload["audit_protocol"] = {"protocol_name": "Audit Swarm v1"}
             (output_dir / "audit-swarm-output.json").write_text(
-                json.dumps(audit_payload([issue_card("File bug", severity="P1")])),
+                json.dumps(output_payload),
                 encoding="utf-8",
             )
             payload, summary, logs, _usage = run_opencode_provider_review(cfg, {"repo": "acme/api"}, checkout)
 
         findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(payload["audit_protocol"], worker_main.AUDIT_SWARM_PROTOCOL_VERSION)
         self.assertEqual(findings[0]["title"], "File bug")
         self.assertEqual(summary["high"], 1)
         self.assertIn(".sisyphus/audit-swarm-output.json", logs)
