@@ -153,7 +153,7 @@ def review_calibration_context_for_job(job: dict) -> dict:
 def review_provider_model_keys(config: WorkerConfig) -> tuple[str, str]:
     provider_chain = list(getattr(config, "provider_chain", []) or [])
     provider = provider_chain[0] if provider_chain else getattr(config, "provider", "")
-    model = getattr(config, "codex_model", "") if provider == "codex" else getattr(config, "opencode_model", "")
+    model = getattr(config, "codex_model", "")
     return normalized_source_key(provider), normalized_source_key(model)
 
 
@@ -638,7 +638,7 @@ def review_decision_event(
     )
     provider_chain = list(getattr(config, "provider_chain", []) or [])
     provider = provider_chain[0] if provider_chain else getattr(config, "provider", "")
-    model = getattr(config, "codex_model", "") if provider == "codex" else getattr(config, "opencode_model", "")
+    model = getattr(config, "codex_model", "")
     provider_chain_text = ",".join(review_text(item, 40) for item in provider_chain if review_text(item, 40))
     return {
         "protocol": REVIEW_DECISION_EVENT_PROTOCOL_VERSION,

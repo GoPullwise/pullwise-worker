@@ -1228,19 +1228,8 @@ def build_repository_agent_semantic_graph(
 def repository_semantic_agent_command(config: WorkerConfig, prompt: str) -> list[str]:
     provider_chain = list(getattr(config, "provider_chain", []) or [getattr(config, "provider", "codex")])
     provider = provider_chain[0] if provider_chain else "codex"
-    if provider == "opencode":
-        scope_ok, _scope_detail = provider_command_scope_check(getattr(config, "opencode_command", ""), config, "OpenCode")
-        if not scope_ok:
-            return []
-        command = [getattr(config, "opencode_command", "opencode"), "run"]
-        opencode_model = getattr(config, "opencode_model", "")
-        opencode_variant = getattr(config, "opencode_variant", "")
-        if opencode_model:
-            command.extend(["--model", opencode_model])
-        if opencode_variant:
-            command.extend(["--variant", opencode_variant])
-        command.append(prompt)
-        return command
+    if provider != "codex":
+        return []
     scope_ok, _scope_detail = provider_command_scope_check(getattr(config, "codex_command", ""), config, "Codex")
     if not scope_ok:
         return []
