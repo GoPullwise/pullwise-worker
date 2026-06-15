@@ -50,7 +50,6 @@ from pullwise_worker.main import (
     run_deterministic_repository_checks,
     run_doctor,
     run_git_command,
-    run_opencode_provider_review,
     run_verifier_commands,
     safe_job_id,
     safe_rmtree,
@@ -143,28 +142,25 @@ def configure_instance_provider_commands(cfg: WorkerConfig) -> Path:
     service_home = Path(tempfile.mkdtemp()) / "worker-home"
     cfg.service_home = str(service_home)
     cfg.codex_command = str(service_home / ".codex" / "bin" / "codex")
-    cfg.opencode_command = str(service_home / ".opencode" / "bin" / "opencode")
     return service_home
 
 
 def agent_configs_payload(
     *,
     free_chain: list[str] | None = None,
-    free_opencode_model: str = "opencode/big-pickle",
     pro_chain: list[str] | None = None,
     max_chain: list[str] | None = None,
 ) -> dict:
-    def plan_config(plan: str, chain: list[str], opencode_model: str = "opencode/big-pickle") -> dict:
+    def plan_config(plan: str, chain: list[str]) -> dict:
         return {
             "plan": plan,
             "providerChain": chain,
             "codex": {"command": "codex", "model": "gpt-5.5", "reasoningEffort": "medium"},
-            "opencode": {"command": "opencode", "model": opencode_model, "variant": "medium"},
         }
 
     return {
         "agentConfigs": {
-            "free": plan_config("free", free_chain or ["opencode"], free_opencode_model),
+            "free": plan_config("free", free_chain or ["codex"]),
             "pro": plan_config("pro", pro_chain or ["codex"]),
             "max": plan_config("max", max_chain or ["codex"]),
         }
@@ -201,24 +197,16 @@ class WorkerMainTest(unittest.TestCase):
         worker_config.codex_command = "/opt/server-pullwise/ops/codex-node22"
         worker_config.codex_model = "gpt-env"
         worker_config.codex_reasoning_effort = "medium"
-        worker_config.opencode_command = "/opt/server-pullwise/ops/opencode"
-        worker_config.opencode_model = "opencode/env"
-        worker_config.opencode_variant = "medium"
 
         job_config = worker_config_for_job(
             worker_config,
             {
                 "agentConfig": {
-                    "providerChain": ["codex", "opencode"],
+                    "providerChain": ["codex"],
                     "codex": {
                         "command": "codex-nightly",
                         "model": "gpt-5.5-codex",
                         "reasoningEffort": "xhigh",
-                    },
-                    "opencode": {
-                        "command": "opencode-cli",
-                        "model": "openai/gpt-5",
-                        "variant": "high",
                     },
                 },
                 "repositoryLimits": {"maxFiles": 321, "maxBytes": 654321},
@@ -227,22 +215,16 @@ class WorkerMainTest(unittest.TestCase):
 
         self.assertIsNot(job_config, worker_config)
         self.assertEqual(job_config.provider, "codex")
-        self.assertEqual(job_config.provider_chain, ["codex", "opencode"])
+        self.assertEqual(job_config.provider_chain, ["codex"])
         self.assertEqual(job_config.codex_command, "/opt/server-pullwise/ops/codex-node22")
         self.assertEqual(job_config.codex_model, "gpt-5.5-codex")
         self.assertEqual(job_config.codex_reasoning_effort, "xhigh")
-        self.assertEqual(job_config.opencode_command, "/opt/server-pullwise/ops/opencode")
-        self.assertEqual(job_config.opencode_model, "openai/gpt-5")
-        self.assertEqual(job_config.opencode_variant, "high")
         self.assertEqual(job_config.max_repo_files, 321)
         self.assertEqual(job_config.max_repo_bytes, 654321)
         self.assertEqual(worker_config.provider_chain, ["codex"])
         self.assertEqual(worker_config.codex_command, "/opt/server-pullwise/ops/codex-node22")
         self.assertEqual(worker_config.codex_model, "gpt-env")
         self.assertEqual(worker_config.codex_reasoning_effort, "medium")
-        self.assertEqual(worker_config.opencode_command, "/opt/server-pullwise/ops/opencode")
-        self.assertEqual(worker_config.opencode_model, "opencode/env")
-        self.assertEqual(worker_config.opencode_variant, "medium")
 
     def test_worker_config_for_job_requires_canonical_server_payload(self) -> None:
         worker_config = config()
@@ -265,11 +247,6 @@ class WorkerMainTest(unittest.TestCase):
                             "command": "codex --unsafe",
                             "model": "gpt-5.5\nbad",
                             "reasoningEffort": 'xhigh" --unsafe',
-                        },
-                        "opencode": {
-                            "command": "opencode --flag",
-                            "model": "openai/gpt-5\rbad",
-                            "variant": "turbo",
                         },
                     },
                     "repositoryLimits": {"maxFiles": 1, "maxBytes": 1},
@@ -545,11 +522,6 @@ func writeHealth() {}
         cfg.codex_command = "codex"
         self.assertEqual(worker_main.repository_semantic_agent_command(cfg, "prompt"), [])
 
-        cfg = config()
-        cfg.provider_chain = ["opencode"]
-        cfg.opencode_command = "opencode"
-        self.assertEqual(worker_main.repository_semantic_agent_command(cfg, "prompt"), [])
-
     def test_parse_audit_swarm_accepts_protocol_payload(self) -> None:
         payload = parse_audit_swarm_payload(json.dumps(audit_payload([issue_card("Bug", severity="P1")])))
 
@@ -570,7 +542,7 @@ func writeHealth() {}
     def test_parse_audit_swarm_accepts_pretty_payload_after_event_stream(self) -> None:
         payload = parse_audit_swarm_payload(
             '{"event":"review_progress","issue_cards":[]}\n'
-            "OpenCode result:\n"
+            "Provider result:\n"
             "```json\n"
             + json.dumps(audit_payload([issue_card("Pretty bug", severity="P1")]), indent=2)
             + "\n```"
@@ -579,7 +551,7 @@ func writeHealth() {}
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Pretty bug")
 
-    def test_parse_audit_swarm_accepts_opencode_json_text_event(self) -> None:
+    def test_parse_audit_swarm_accepts_json_text_event(self) -> None:
         payload = parse_audit_swarm_payload(
             json.dumps(
                 {
@@ -601,7 +573,7 @@ func writeHealth() {}
         payload = audit_payload([issue_card("Object protocol bug", severity="P1")])
         payload["audit_protocol"] = {
             "protocol_name": "Audit Swarm v1",
-            "analysis_strategy": "OpenCode wrote metadata here instead of the protocol id.",
+            "analysis_strategy": "The agent wrote metadata here instead of the protocol id.",
         }
 
         parsed = parse_audit_swarm_payload(json.dumps(payload))
@@ -1090,85 +1062,6 @@ func writeHealth() {}
         self.assertIn("excludes common docs", finding["whyNotFalsePositive"][2])
         self.assertIn("rotate", finding["fixRisks"])
 
-    def test_collect_preflight_metadata_reports_static_repository_environment(self) -> None:
-        worker_config = config()
-        worker_config.provider_chain = ["codex", "opencode"]
-        with tempfile.TemporaryDirectory() as tmp:
-            checkout_dir = Path(tmp)
-            (checkout_dir / "package.json").write_text(
-                json.dumps(
-                    {
-                        "packageManager": "pnpm@9.1.0",
-                        "scripts": {
-                            "build": "vite build",
-                            "test": "vitest run",
-                            "lint": "eslint .",
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (checkout_dir / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
-            (checkout_dir / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
-            (checkout_dir / "Dockerfile").write_text("FROM node:22\n", encoding="utf-8")
-            (checkout_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-            workflow_dir = checkout_dir / ".github" / "workflows"
-            workflow_dir.mkdir(parents=True)
-            (workflow_dir / "ci.yml").write_text("name: CI\n", encoding="utf-8")
-            devcontainer_dir = checkout_dir / ".devcontainer"
-            devcontainer_dir.mkdir()
-            (devcontainer_dir / "devcontainer.json").write_text('{"name":"demo"}\n', encoding="utf-8")
-
-            with patch(
-                "pullwise_worker.main.safe_tool_version",
-                side_effect=lambda name, command: {
-                    "name": name,
-                    "command": worker_main.public_tool_version_command(command),
-                    "available": True,
-                    "exitCode": 0,
-                    "output": f"{name} ok",
-                },
-            ):
-                preflight = collect_preflight_metadata(
-                    worker_config,
-                    {"repo": "acme/app", "branch": "main", "commit": "abc1234"},
-                    checkout_dir,
-                )
-
-        self.assertEqual(preflight["mode"], "static")
-        self.assertEqual(preflight["execution"], "no_project_scripts")
-        self.assertIn("pnpm", preflight["packageManagers"])
-        self.assertIn("JavaScript/TypeScript", preflight["languages"])
-        self.assertIn("Python", preflight["languages"])
-        self.assertEqual(preflight["availableScripts"], ["build", "lint", "test"])
-        self.assertIn({"file": "package.json", "type": "node"}, preflight["manifests"])
-        self.assertIn({"file": "pnpm-lock.yaml", "type": "pnpm-lock"}, preflight["manifests"])
-        self.assertIn({"file": "Dockerfile", "type": "dockerfile"}, preflight["manifests"])
-        self.assertIn({"file": "docker-compose.yml", "type": "docker-compose"}, preflight["manifests"])
-        self.assertIn({"file": ".github/workflows/ci.yml", "type": "github-actions-workflow"}, preflight["manifests"])
-        self.assertIn({"file": ".devcontainer/devcontainer.json", "type": "devcontainer"}, preflight["manifests"])
-        self.assertEqual(
-            len([item for item in preflight["manifests"] if item == {"file": "Dockerfile", "type": "dockerfile"}]),
-            1,
-        )
-        self.assertEqual(
-            [tool["name"] for tool in preflight["toolVersions"]],
-            ["git", "node", "python", "pnpm", "codex", "opencode"],
-        )
-        self.assertIn("environment", preflight)
-        self.assertIn("pythonVersion", preflight["environment"])
-        self.assertEqual(preflight["environment"]["checkoutRoot"], "repository-root")
-        self.assertEqual(preflight["environment"]["pythonExecutable"], Path(sys.executable).name)
-        serialized_preflight = json.dumps(preflight)
-        self.assertNotIn(str(checkout_dir), serialized_preflight)
-        self.assertNotIn(sys.executable, serialized_preflight)
-        self.assertGreaterEqual(preflight["repositoryStats"]["fileCount"], 7)
-        self.assertGreater(preflight["repositoryStats"]["totalBytes"], 0)
-        self.assertEqual(preflight["repositoryLimits"]["maxFiles"], worker_config.max_repo_files)
-        self.assertEqual(preflight["repositoryLimits"]["maxBytes"], worker_config.max_repo_bytes)
-        self.assertIn("worker environment", preflight["summary"])
-        self.assertIn("no project scripts were executed", preflight["summary"])
-
     def test_collect_preflight_metadata_redacts_tool_version_executable_paths(self) -> None:
         worker_config = config()
         worker_config.provider_chain = []
@@ -1197,36 +1090,6 @@ func writeHealth() {}
             stderr=subprocess.PIPE,
             timeout=5,
         )
-
-    def test_collect_preflight_metadata_does_not_execute_global_provider_commands(self) -> None:
-        worker_config = config()
-        worker_config.provider_chain = ["codex", "opencode"]
-        worker_config.codex_command = "codex"
-        worker_config.opencode_command = "opencode"
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "pullwise_worker.main.safe_tool_version",
-            side_effect=lambda name, command: {
-                "name": name,
-                "command": worker_main.public_tool_version_command(command),
-                "available": True,
-                "exitCode": 0,
-                "output": f"{name} ok",
-            },
-        ) as safe_version:
-            preflight = collect_preflight_metadata(
-                worker_config,
-                {"repo": "acme/app", "branch": "main", "commit": "abc1234"},
-                Path(tmp),
-            )
-
-        called_tools = [call.args[0] for call in safe_version.call_args_list]
-        self.assertNotIn("codex", called_tools)
-        self.assertNotIn("opencode", called_tools)
-        by_name = {tool["name"]: tool for tool in preflight["toolVersions"]}
-        self.assertFalse(by_name["codex"]["available"])
-        self.assertFalse(by_name["opencode"]["available"])
-        self.assertIn("absolute path inside worker home", by_name["codex"]["output"])
-        self.assertIn("absolute path inside worker home", by_name["opencode"]["output"])
 
     def test_declared_package_manager_stays_first_when_lockfiles_conflict(self) -> None:
         worker_config = config()
@@ -4005,26 +3868,6 @@ func writeHealth() {}
         self.assertEqual(worker.client.heartbeat.call_args.kwargs["running_jobs"], 1)
         self.assertEqual(worker.client.heartbeat.call_args.kwargs["active_job_ids"], ["job_active"])
 
-    def test_refresh_readiness_reports_codex_specific_state_without_opencode_fallback(self) -> None:
-        worker = Worker(config())
-        checks = [
-            ("git", True, "git ok"),
-            ("codex_ready", False, "not logged in"),
-            ("opencode", True, "opencode 1.0.0"),
-            ("provider_ready", False, "codex auth failed"),
-            ("checkout_root", True, "ok"),
-            ("log_dir", True, "ok"),
-            ("disk_space", True, "2048 MB free"),
-        ]
-
-        with patch("pullwise_worker.main.worker_readiness_state", return_value=(checks, False, [])):
-            ready = worker.refresh_readiness_if_due()
-
-        self.assertFalse(ready)
-        self.assertEqual(worker._doctor_status, "degraded")
-        self.assertFalse(worker._codex_ready)
-        self.assertFalse(worker.refresh_readiness_if_due())
-
     def test_pullwise_client_posts_json_with_authorization(self) -> None:
         class FakeResponse:
             def __enter__(self) -> "FakeResponse":
@@ -4196,164 +4039,6 @@ func writeHealth() {}
         self.assertEqual(by_name["codex_ready"][1], "skipped until codex CLI passes --version")
         self.assertFalse(provider_ready)
         self.assertNotIn([cfg.codex_command, "--version"], [call.args[0] for call in command.call_args_list])
-
-    def test_worker_readiness_rejects_opencode_command_outside_service_home(self) -> None:
-        cfg = config()
-        service_home = configure_instance_provider_commands(cfg)
-        cfg.provider_chain = ["opencode"]
-        cfg.opencode_command = str(Path(tempfile.mkdtemp()) / "opencode")
-
-        with patch("pullwise_worker.main.command_ok", return_value=(True, "ok")) as command, \
-            patch("pullwise_worker.main.PullwiseClient") as client_class, \
-            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated")), \
-            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["opencode"],
-                pro_chain=["opencode"],
-                max_chain=["opencode"],
-            )
-            checks, provider_ready = worker_readiness_checks(cfg)
-
-        by_name = {name: (ok, detail) for name, ok, detail in checks}
-        self.assertFalse(by_name["opencode"][0])
-        self.assertIn("outside worker home", by_name["opencode"][1])
-        self.assertIn(str(service_home), by_name["opencode"][1])
-        self.assertFalse(by_name["opencode_ready"][0])
-        self.assertEqual(by_name["opencode_ready"][1], "skipped until opencode CLI passes --version")
-        self.assertFalse(provider_ready)
-        self.assertNotIn([cfg.opencode_command, "--version"], [call.args[0] for call in command.call_args_list])
-
-    def test_worker_readiness_allows_opencode_fallback_when_codex_login_fails(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-        cfg.provider_chain = ["codex", "opencode"]
-
-        with patch(
-                "pullwise_worker.main.command_ok",
-                side_effect=[
-                    (True, "git ok"),
-                    (True, "v22.21.0"),
-                    (True, "codex ok"),
-                    (True, "opencode 1.0.0"),
-                ],
-            ), \
-            patch("pullwise_worker.main.PullwiseClient") as client_class, \
-            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
-            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
-            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.return_value = agent_configs_payload()
-            checks, provider_ready = worker_readiness_checks(cfg)
-
-        by_name = {name: (ok, detail) for name, ok, detail in checks}
-        self.assertFalse(by_name["codex_ready"][0])
-        self.assertTrue(by_name["opencode"][0])
-        self.assertTrue(by_name["opencode_ready"][0])
-        self.assertTrue(by_name["provider_ready"][0])
-        self.assertTrue(provider_ready)
-
-    def test_worker_readiness_checks_opencode_provider_from_subscription_plans(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-        cfg.provider_chain = ["codex", "opencode"]
-        completed = Mock(
-            returncode=0,
-            stdout=(
-                "Credentials ~/.local/share/opencode/auth.json\n"
-                "MiniMax Token Plan (minimaxi.com) api\n"
-                "1 credential\n"
-            ),
-            stderr="",
-        )
-
-        with patch(
-                "pullwise_worker.main.command_ok",
-                side_effect=[
-                    (True, "git ok"),
-                    (True, "v22.21.0"),
-                    (True, "codex ok"),
-                    (True, "opencode 1.0.0"),
-                ],
-            ), \
-            patch("pullwise_worker.main.PullwiseClient") as client_class, \
-            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
-            patch("pullwise_worker.main.subprocess.run", return_value=completed), \
-            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["opencode"],
-                free_opencode_model="minimax/MiniMax-M3",
-                pro_chain=["codex"],
-                max_chain=["codex"],
-            )
-            checks, provider_ready = worker_readiness_checks(cfg)
-
-        by_name = {name: (ok, detail) for name, ok, detail in checks}
-        self.assertTrue(by_name["agent_configs"][0])
-        self.assertTrue(by_name["opencode_ready"][0])
-        self.assertEqual(by_name["opencode_ready"][1], "authenticated for configured OpenCode providers: minimax")
-        self.assertTrue(by_name["provider_ready"][0])
-        self.assertTrue(provider_ready)
-
-    def test_worker_readiness_does_not_use_local_provider_chain_when_agent_configs_are_unavailable(self) -> None:
-        cfg = config()
-        cfg.provider_chain = ["codex", "opencode"]
-
-        with patch("pullwise_worker.main.command_ok", return_value=(True, "ok")), \
-            patch("pullwise_worker.main.PullwiseClient") as client_class, \
-            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")) as codex_ready, \
-            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "ready")) as opencode_ready, \
-            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.side_effect = PullwiseHTTPError("HTTP 404: Not Found", 404)
-            checks, provider_ready = worker_readiness_checks(cfg)
-
-        by_name = {name: (ok, detail) for name, ok, detail in checks}
-        self.assertFalse(by_name["agent_configs"][0])
-        self.assertNotIn("codex_ready", by_name)
-        self.assertNotIn("opencode_ready", by_name)
-        self.assertFalse(by_name["provider_ready"][0])
-        self.assertEqual(by_name["provider_ready"][1], "subscription plan agent configs unavailable")
-        self.assertFalse(provider_ready)
-        codex_ready.assert_not_called()
-        opencode_ready.assert_not_called()
-
-    def test_worker_readiness_rejects_unsupported_agent_config_shapes(self) -> None:
-        cfg = config()
-        unsupported_payloads = [
-            {
-                "free": {"providerChain": ["opencode"], "opencode": {"model": "minimax/MiniMax-M3", "variant": "medium"}},
-                "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-                "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-            },
-            {
-                "agentConfigs": {
-                    "free": {"provider_chain": ["opencode"], "opencode": {"model": "minimax/MiniMax-M3", "variant": "medium"}},
-                    "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-                    "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-                }
-            },
-            {
-                "agentConfigs": {
-                    "free": {"provider": "opencode", "opencode": {"model": "minimax/MiniMax-M3", "variant": "medium"}},
-                    "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-                    "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-                }
-            },
-            {
-                "agentConfigs": {
-                    "free": {"providerChain": ["opencode"], "opencode": {"variant": "medium"}},
-                    "pro": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-                    "max": {"providerChain": ["codex"], "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}},
-                }
-            },
-        ]
-
-        for payload in unsupported_payloads:
-            with self.subTest(payload=payload):
-                with patch("pullwise_worker.main.PullwiseClient") as client_class:
-                    client_class.return_value.agent_configs.return_value = payload
-                    ok, detail, _configs = worker_main.worker_agent_configs_check(cfg)
-
-                self.assertFalse(ok)
-                self.assertIn("subscription plan agent configs", detail)
 
     def test_clone_repository_uses_short_lived_token(self) -> None:
         head = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
@@ -4560,102 +4245,6 @@ func writeHealth() {}
 
         self.assertEqual(run.call_count, 1)
 
-    def test_provider_review_commands_reject_global_cli_names(self) -> None:
-        cfg = config()
-        cfg.codex_command = "codex"
-        with self.assertRaisesRegex(RuntimeError, "absolute path inside worker home"):
-            worker_main.codex_review_command(cfg, "schema.json", "output.json", "prompt")
-
-        cfg = config()
-        cfg.opencode_command = "opencode"
-        with self.assertRaisesRegex(RuntimeError, "absolute path inside worker home"):
-            worker_main.opencode_review_command(cfg, "prompt")
-
-    def test_opencode_review_command_requests_json_events(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-
-        command = worker_main.opencode_review_command(cfg, "prompt")
-
-        self.assertIn("--format", command)
-        self.assertEqual(command[command.index("--format") + 1], "json")
-
-    def test_run_opencode_review_uses_worker_instance_auth_env(self) -> None:
-        cfg = config()
-        service_home = configure_instance_provider_commands(cfg)
-        completed = Mock(returncode=0, stdout=json.dumps(audit_payload()), stderr="")
-
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            "os.environ",
-            {
-                "HOME": "/root",
-                "USERPROFILE": "/root",
-                "CODEX_HOME": "/root/.codex",
-                "XDG_CONFIG_HOME": "/root/.config",
-                "XDG_DATA_HOME": "/root/.local/share",
-                "OPENAI_API_KEY": "global-api-key",
-            },
-            clear=False,
-        ), patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
-            run_opencode_provider_review(cfg, {"repo": "acme/api"}, Path(tmp))
-
-        env = run.call_args.kwargs["env"]
-        self.assertEqual(env["HOME"], str(service_home))
-        self.assertEqual(env["USERPROFILE"], str(service_home))
-        self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
-        self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
-        self.assertEqual(env["XDG_DATA_HOME"], str(service_home / ".local" / "share"))
-        self.assertNotIn("OPENAI_API_KEY", env)
-
-    def test_run_opencode_review_parses_audit_payload_from_stderr(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-        completed = Mock(
-            returncode=0,
-            stdout="",
-            stderr=(
-                "OpenCode result:\n"
-                "```json\n"
-                + json.dumps(audit_payload([issue_card("Stderr bug", severity="P1")]), indent=2)
-                + "\n```"
-            ),
-        )
-
-        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            payload, summary, logs, _usage = run_opencode_provider_review(cfg, {"repo": "acme/api"}, Path(tmp))
-
-        findings = audit_swarm_findings_from_payload(payload) or []
-        self.assertEqual(findings[0]["title"], "Stderr bug")
-        self.assertEqual(summary["high"], 1)
-        self.assertIn("OpenCode result", logs)
-
-    def test_run_opencode_review_parses_sisyphus_output_file(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-        completed = Mock(
-            returncode=0,
-            stdout="Audit Swarm complete. The JSON output has been written to `.sisyphus/audit-swarm-output.json`.",
-            stderr="",
-        )
-
-        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            checkout = Path(tmp)
-            output_dir = checkout / ".sisyphus"
-            output_dir.mkdir()
-            output_payload = audit_payload([issue_card("File bug", severity="P1")])
-            output_payload["audit_protocol"] = {"protocol_name": "Audit Swarm v1"}
-            (output_dir / "audit-swarm-output.json").write_text(
-                json.dumps(output_payload),
-                encoding="utf-8",
-            )
-            payload, summary, logs, _usage = run_opencode_provider_review(cfg, {"repo": "acme/api"}, checkout)
-
-        findings = audit_swarm_findings_from_payload(payload) or []
-        self.assertEqual(payload["audit_protocol"], worker_main.AUDIT_SWARM_PROTOCOL_VERSION)
-        self.assertEqual(findings[0]["title"], "File bug")
-        self.assertEqual(summary["high"], 1)
-        self.assertIn(".sisyphus/audit-swarm-output.json", logs)
-
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
             schema_path = Path(command[command.index("--output-schema") + 1])
@@ -4722,33 +4311,6 @@ func writeHealth() {}
         self.assertEqual(set(location_schema["required"]) - set(location), set())
         self.assertEqual(location["lines"], "7")
 
-    def test_worker_config_has_no_local_provider_chain_default(self) -> None:
-        namespace = Namespace(
-            server_url="https://server.test",
-            worker_token="worker-token",
-            worker_id="wk_1",
-            max_concurrent_jobs=2,
-            poll_seconds=1,
-            work_dir=tempfile.mkdtemp(),
-            checkout_root=None,
-            log_dir=tempfile.mkdtemp(),
-            provider=None,
-            codex_command=None,
-            codex_timeout_seconds=60,
-        )
-        with patch.dict(os.environ, {}, clear=True):
-            cfg = WorkerConfig(namespace)
-
-        self.assertEqual(cfg.provider_chain, [])
-        self.assertEqual(cfg.provider, "")
-        self.assertEqual(cfg.codex_command, worker_main.DEFAULT_CODEX_COMMAND)
-        self.assertEqual(cfg.codex_model, "gpt-5.5")
-        self.assertEqual(cfg.codex_reasoning_effort, "medium")
-        self.assertEqual(cfg.codex_auth_failure_cooldown_seconds, 3600)
-        self.assertEqual(cfg.opencode_command, worker_main.DEFAULT_OPENCODE_COMMAND)
-        self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
-        self.assertEqual(cfg.opencode_variant, "medium")
-
     def test_worker_config_rejects_remote_http_server_url_by_default(self) -> None:
         namespace = Namespace(
             server_url="http://server.test",
@@ -4808,125 +4370,6 @@ func writeHealth() {}
 
         self.assertEqual(cfg.server_url, "http://server.test")
 
-    def test_worker_config_reads_provider_chain_and_model_settings(self) -> None:
-        namespace = Namespace(
-            server_url="https://server.test",
-            worker_token="worker-token",
-            worker_id="wk_1",
-            max_concurrent_jobs=2,
-            poll_seconds=1,
-            work_dir=tempfile.mkdtemp(),
-            checkout_root=None,
-            log_dir=tempfile.mkdtemp(),
-            provider=None,
-            codex_command=None,
-            codex_timeout_seconds=60,
-        )
-
-        with patch.dict(
-            "os.environ",
-            {
-                "PULLWISE_PROVIDER_CHAIN": "codex, opencode",
-                "PULLWISE_CODEX_MODEL": "gpt-5.5",
-                "PULLWISE_CODEX_REASONING_EFFORT": "high",
-                "PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS": "120",
-                "PULLWISE_OPENCODE_COMMAND": "opencode-cli",
-                "PULLWISE_OPENCODE_VARIANT": "xhigh",
-            },
-            clear=False,
-        ):
-            cfg = WorkerConfig(namespace)
-
-        self.assertEqual(cfg.provider_chain, ["codex", "opencode"])
-        self.assertEqual(cfg.codex_model, "gpt-5.5")
-        self.assertEqual(cfg.codex_reasoning_effort, "high")
-        self.assertEqual(cfg.codex_auth_failure_cooldown_seconds, 120)
-        self.assertEqual(cfg.opencode_command, "opencode-cli")
-        self.assertEqual(cfg.opencode_model, "opencode/big-pickle")
-        self.assertEqual(cfg.opencode_variant, "xhigh")
-
-    def test_worker_config_defaults_provider_to_first_provider_chain_entry(self) -> None:
-        namespace = Namespace(
-            server_url="https://server.test",
-            worker_token="worker-token",
-            worker_id="wk_1",
-            max_concurrent_jobs=2,
-            poll_seconds=1,
-            work_dir=tempfile.mkdtemp(),
-            checkout_root=None,
-            log_dir=tempfile.mkdtemp(),
-            provider=None,
-            codex_command=None,
-            codex_timeout_seconds=60,
-        )
-
-        with patch.dict("os.environ", {"PULLWISE_PROVIDER_CHAIN": "opencode,codex"}, clear=True):
-            cfg = WorkerConfig(namespace)
-
-        self.assertEqual(cfg.provider_chain, ["opencode", "codex"])
-        self.assertEqual(cfg.provider, "opencode")
-
-    def test_run_codex_review_uses_configured_codex_model_and_effort(self) -> None:
-        cfg = config()
-        cfg.codex_model = "gpt-5.5"
-        cfg.codex_reasoning_effort = "high"
-
-        def fake_run(command: list[str], **_kwargs: object) -> Mock:
-            output_path = Path(command[command.index("--output-last-message") + 1])
-            output_path.write_text(json.dumps(audit_payload()), encoding="utf-8")
-            return Mock(returncode=0, stdout="", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run) as run:
-            payload, _summary, _logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
-
-        command = run.call_args.args[0]
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
-        self.assertIn('model_reasoning_effort="high"', command)
-        effective_config = payload["effectiveAgentConfig"]
-        self.assertEqual(effective_config["provider"], "codex")
-        self.assertEqual(effective_config["providerChain"], ["codex"])
-        self.assertEqual(effective_config["model"], "gpt-5.5")
-        self.assertEqual(effective_config["reasoningEffort"], "high")
-        self.assertEqual(
-            effective_config["codex"],
-            {
-                "cli": cfg.codex_command,
-                "command": cfg.codex_command,
-                "model": "gpt-5.5",
-                "reasoningEffort": "high",
-            },
-        )
-        self.assertEqual(effective_config["agent"]["cli"], "codex")
-        self.assertEqual(effective_config["agent"]["command"], cfg.codex_command)
-        self.assertEqual(effective_config["agent"]["model"], "gpt-5.5")
-        self.assertEqual(effective_config["agent"]["reasoningEffort"], "high")
-        self.assertEqual(effective_config["opencode"]["command"], cfg.opencode_command)
-
-    def test_run_codex_review_falls_back_to_opencode_after_codex_failure(self) -> None:
-        cfg = config()
-        cfg.provider_chain = ["codex", "opencode"]
-        cfg.opencode_model = "openai/gpt-5"
-        cfg.opencode_variant = "xhigh"
-
-        def fake_run(command: list[str], **_kwargs: object) -> Mock:
-            if command[:2] == [cfg.codex_command, "exec"]:
-                return Mock(returncode=1, stdout="", stderr="codex failed")
-            self.assertEqual(command[:2], [cfg.opencode_command, "run"])
-            self.assertEqual(command[command.index("--model") + 1], "openai/gpt-5")
-            self.assertEqual(command[command.index("--variant") + 1], "xhigh")
-            return Mock(returncode=0, stdout=json.dumps(audit_payload([issue_card("Fallback", severity="low")])), stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", side_effect=fake_run):
-            payload, summary, logs = run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
-
-        findings = audit_swarm_findings_from_payload(payload) or []
-        self.assertEqual(findings[0]["title"], "Fallback")
-        self.assertEqual(summary["low"], 1)
-        self.assertIn("codex failed", logs)
-        self.assertEqual(payload["effectiveAgentConfig"]["providerChain"], ["codex", "opencode"])
-        self.assertEqual(payload["effectiveAgentConfig"]["opencode"]["model"], "openai/gpt-5")
-        self.assertEqual(payload["effectiveAgentConfig"]["opencode"]["variant"], "xhigh")
-
     def test_run_codex_review_surfaces_codex_json_error_detail(self) -> None:
         cfg = config()
         codex_stderr = "\n".join(
@@ -4972,26 +4415,6 @@ func writeHealth() {}
         self.assertNotIn("short-token", redacted)
         self.assertIn("[redacted]", redacted)
         self.assertIn("x-access-token:[redacted]@github.com", redacted)
-
-    def test_run_doctor_checks_dependencies_capacity_paths_and_heartbeat(self) -> None:
-        cfg = config()
-
-        with patch(
-                "pullwise_worker.main.command_ok",
-                side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")],
-            ), \
-            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
-            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
-            patch("pullwise_worker.main.PullwiseClient") as client_class:
-            client_class.return_value.heartbeat.return_value = None
-            ok = run_doctor(cfg)
-
-        self.assertFalse(ok)
-        client_class.return_value.heartbeat.assert_called_once()
-        heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
-        self.assertEqual(heartbeat_kwargs["doctor_status"], "degraded")
-        self.assertFalse(heartbeat_kwargs["codex_ready"])
-        self.assertTrue(heartbeat_kwargs["systemd_active"])
 
     def test_main_service_commands_do_not_require_worker_token(self) -> None:
         for action in ("start", "stop", "status", "restart"):
@@ -5136,241 +4559,6 @@ func writeHealth() {}
         self.assertIn(worker_main.codex_login_command(cfg), printed)
         self.assertIn("--device-auth", printed)
 
-    def test_run_doctor_prints_opencode_auth_command_when_opencode_is_configured_but_missing(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-        cfg.provider_chain = ["opencode"]
-
-        with patch(
-                "pullwise_worker.main.command_ok",
-                side_effect=[(True, "git ok"), (False, "not found"), (True, "active")],
-            ), \
-            patch("pullwise_worker.main.PullwiseClient") as client_class, \
-            patch("builtins.print") as print_mock:
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["opencode"],
-                pro_chain=["opencode"],
-                max_chain=["opencode"],
-            )
-            client_class.return_value.heartbeat.return_value = None
-            run_doctor(cfg)
-
-        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
-        self.assertIn(worker_main.opencode_auth_command(cfg), printed)
-        self.assertIn("OpenCode interactive provider selection. Run:", printed)
-        self.assertIn(cfg.opencode_command, printed)
-        self.assertIn("auth login", printed)
-        self.assertNotIn("auth login --provider", printed)
-        self.assertNotIn("OpenCode may require provider API credentials", printed)
-
-    def test_opencode_auth_command_uses_interactive_provider_selection(self) -> None:
-        cfg = config()
-        cfg.opencode_model = "deepseek/deepseek-v4-pro"
-
-        command = worker_main.opencode_auth_command(cfg)
-
-        self.assertIn(cfg.opencode_command, command)
-        self.assertIn("auth login", command)
-        self.assertNotIn("--provider", command)
-
-    def test_provider_process_env_prefers_worker_instance_cli_dirs(self) -> None:
-        cfg = config()
-        cfg.service_home = "/var/lib/pullwise-worker/wk_instance"
-        cfg.service_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-        path = worker_main.provider_process_env(cfg)["PATH"]
-
-        self.assertTrue(
-            path.startswith(
-                "/var/lib/pullwise-worker/wk_instance/.local/bin:"
-                "/var/lib/pullwise-worker/wk_instance/.codex/bin:"
-                "/var/lib/pullwise-worker/wk_instance/.opencode/bin:"
-            )
-        )
-
-    def test_opencode_auth_check_rejects_global_command_without_subprocess(self) -> None:
-        cfg = config()
-        cfg.opencode_command = "opencode"
-
-        with patch("pullwise_worker.main.subprocess.run") as run:
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertFalse(ok)
-        self.assertIn("absolute path inside worker home", detail)
-        run.assert_not_called()
-
-    def test_opencode_auth_check_uses_subscription_plan_provider_models(self) -> None:
-        cfg = config()
-        completed = Mock(
-            returncode=0,
-            stdout=(
-                "Credentials ~/.local/share/opencode/auth.json\n"
-                "MiniMax Token Plan (minimaxi.com) api\n"
-                "1 credential\n"
-            ),
-            stderr="",
-        )
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(
-                cfg,
-                agent_configs_payload(free_opencode_model="minimax/MiniMax-M3"),
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax")
-
-    def test_opencode_auth_check_accepts_minimax_coding_plan_alias(self) -> None:
-        cfg = config()
-        completed = Mock(
-            returncode=0,
-            stdout=(
-                "Credentials ~/.local/share/opencode/auth.json\n"
-                "MiniMax Token Plan (minimaxi.com) api\n"
-                "1 credential\n"
-            ),
-            stderr="",
-        )
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(
-                cfg,
-                agent_configs_payload(free_opencode_model="minimax-cn-coding-plan/MiniMax-M3"),
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax-cn-coding-plan")
-
-    def test_opencode_auth_check_uses_worker_instance_auth_env(self) -> None:
-        cfg = config()
-        service_home = configure_instance_provider_commands(cfg)
-        completed = Mock(returncode=0, stdout="opencode api-key\n", stderr="")
-
-        with patch.dict(
-            "os.environ",
-            {
-                "HOME": "/root",
-                "USERPROFILE": "/root",
-                "CODEX_HOME": "/root/.codex",
-                "XDG_CONFIG_HOME": "/root/.config",
-                "OPENAI_API_KEY": "global-api-key",
-            },
-            clear=False,
-        ), patch("pullwise_worker.main.subprocess.run", return_value=completed) as run:
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
-        env = run.call_args.kwargs["env"]
-        self.assertEqual(env["HOME"], str(service_home))
-        self.assertEqual(env["USERPROFILE"], str(service_home))
-        self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
-        self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
-        self.assertNotIn("OPENAI_API_KEY", env)
-
-    def test_opencode_auth_check_does_not_treat_provider_catalog_as_login(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="Available providers:\nopencode\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertFalse(ok)
-        self.assertEqual(detail, "not authenticated for OpenCode providers required by subscription plans: free=opencode")
-
-    def test_opencode_auth_check_accepts_provider_list_entry(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="opencode\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
-
-    def test_opencode_auth_check_accepts_provider_api_key_entry(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="opencode api-key\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
-
-    def test_opencode_auth_check_accepts_current_auth_list_api_entry(self) -> None:
-        cfg = config()
-        completed = Mock(
-            returncode=0,
-            stdout=(
-                "\x1b[90m┌\x1b[39m  Credentials ~/.local/share/opencode/auth.json\n"
-                "\x1b[34m●\x1b[39m  MiniMax Token Plan (minimaxi.com) \x1b[90mapi\n"
-                "\x1b[90m└\x1b[39m  1 credential\n"
-            ),
-            stderr="",
-        )
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(
-                cfg,
-                agent_configs_payload(free_opencode_model="minimax/MiniMax-M3"),
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax")
-
-    def test_opencode_auth_check_reports_missing_subscription_plan_provider(self) -> None:
-        cfg = config()
-        completed = Mock(
-            returncode=0,
-            stdout=(
-                "Credentials ~/.local/share/opencode/auth.json\n"
-                "MiniMax Token Plan (minimaxi.com) api\n"
-                "1 credential\n"
-            ),
-            stderr="",
-        )
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertFalse(ok)
-        self.assertEqual(detail, "not authenticated for OpenCode providers required by subscription plans: free=opencode")
-        self.assertNotIn("PULLWISE_OPENCODE_MODEL", detail)
-
-    def test_opencode_auth_check_rejects_explicit_unauthenticated_provider(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="opencode not authenticated\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertFalse(ok)
-        self.assertEqual(detail, "not authenticated for OpenCode providers required by subscription plans: free=opencode")
-
-    def test_opencode_auth_check_accepts_explicit_authenticated_provider(self) -> None:
-        cfg = config()
-        completed = Mock(returncode=0, stdout="opencode authenticated\n", stderr="")
-
-        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            ok, detail = worker_main.opencode_auth_check(cfg, agent_configs_payload())
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "authenticated for configured OpenCode providers: opencode")
-
-    def test_opencode_auth_check_skips_when_no_subscription_plan_uses_opencode(self) -> None:
-        cfg = config()
-
-        with patch("pullwise_worker.main.subprocess.run") as run:
-            ok, detail = worker_main.opencode_auth_check(
-                cfg,
-                agent_configs_payload(free_chain=["codex"], pro_chain=["codex"], max_chain=["codex"]),
-            )
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "no subscription plan requires opencode")
-        run.assert_not_called()
-
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
         configure_instance_provider_commands(cfg)
@@ -5390,36 +4578,6 @@ func writeHealth() {}
         heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
         self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
         self.assertTrue(heartbeat_kwargs["codex_ready"])
-
-    def test_run_doctor_sends_codex_not_ready_when_opencode_fallback_is_ready(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-        cfg.provider_chain = ["codex", "opencode"]
-
-        with patch(
-                "pullwise_worker.main.command_ok",
-                side_effect=[
-                    (True, "git ok"),
-                    (True, "v22.21.0"),
-                    (True, "codex ok"),
-                    (True, "opencode 1.0.0"),
-                    (True, "active"),
-                ],
-            ), \
-            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
-            patch("pullwise_worker.main.opencode_auth_check", return_value=(True, "authenticated for opencode")), \
-            patch("pullwise_worker.main.PullwiseClient") as client_class, \
-            patch("builtins.print") as print_mock:
-            client_class.return_value.agent_configs.return_value = agent_configs_payload()
-            client_class.return_value.heartbeat.return_value = None
-            ok = run_doctor(cfg)
-
-        self.assertTrue(ok)
-        heartbeat_kwargs = client_class.return_value.heartbeat.call_args.kwargs
-        self.assertEqual(heartbeat_kwargs["doctor_status"], "ok")
-        self.assertFalse(heartbeat_kwargs["codex_ready"])
-        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
-        self.assertIn(worker_main.codex_login_command(cfg), printed)
 
     def test_codex_ready_check_rejects_global_command_without_subprocess(self) -> None:
         cfg = config()
@@ -5890,91 +5048,3 @@ func writeHealth() {}
         self.assertNotIn("filelock>=3.20.3", workflow)
         self.assertNotIn("requests", pyproject)
 
-    def test_deploy_assets_cover_service_env_logrotate_and_lifecycle(self) -> None:
-        deploy_root = Path(__file__).resolve().parents[1] / "deploy"
-        expected = [
-            "worker.env.template",
-            "pullwise-worker.service",
-            "logrotate.conf",
-            "cleanup-checkouts.sh",
-            "update-worker.sh",
-            "restart-worker.sh",
-            "uninstall-worker.sh",
-        ]
-
-        for name in expected:
-            self.assertTrue((deploy_root / name).exists(), name)
-        self.assertFalse(
-            (deploy_root / "install-worker.sh").exists(),
-            "server /install-worker.sh is the only supported worker installer",
-        )
-        env_template = (deploy_root / "worker.env.template").read_text(encoding="utf-8")
-        service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
-        logrotate = (deploy_root / "logrotate.conf").read_text(encoding="utf-8")
-        self.assertNotIn("PULLWISE_PROVIDER_CHAIN=", env_template)
-        self.assertIn("PULLWISE_SERVICE_NAME=pullwise-worker-wk_replace_me", env_template)
-        self.assertIn("PULLWISE_SERVICE_HOME=/var/lib/pullwise-worker/wk_replace_me", env_template)
-        self.assertIn("PULLWISE_WORKER_ENV_FILE=/etc/pullwise-worker/wk_replace_me/worker.env", env_template)
-        self.assertIn("PULLWISE_WORKER_BIN_PATH=/usr/local/bin/pullwise-worker-wk_replace_me", env_template)
-        self.assertIn("PULLWISE_CHECKOUT_ROOT=/var/lib/pullwise-worker/wk_replace_me/checkouts", env_template)
-        self.assertIn("PULLWISE_LOG_DIR=/var/log/pullwise-worker/wk_replace_me", env_template)
-        self.assertIn("PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/wk_replace_me/.codex/bin/codex", env_template)
-        self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
-        self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
-        self.assertIn("PULLWISE_OPENCODE_COMMAND=/var/lib/pullwise-worker/wk_replace_me/.opencode/bin/opencode", env_template)
-        self.assertNotIn("PULLWISE_OPENCODE_COMMAND=opencode", env_template)
-        self.assertNotIn("PULLWISE_CHECKOUT_ROOT=/var/lib/pullwise-worker/checkouts", env_template)
-        self.assertNotIn("PULLWISE_LOG_DIR=/var/log/pullwise-worker\n", env_template)
-        self.assertNotIn("PULLWISE_OPENCODE_COMMAND=/var/lib/pullwise-worker/.opencode/bin/opencode", env_template)
-        self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
-        self.assertNotIn("PULLWISE_OPENCODE_MODEL", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODE=shadow", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODEL=relative_factor", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS=45", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES=20", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS=false", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY=false", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT=false", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE=0.02", env_template)
-        self.assertIn("PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW=0.03", env_template)
-        for key in (
-            "PULLWISE_CODEX_MODEL",
-            "PULLWISE_CODEX_REASONING_EFFORT",
-            "PULLWISE_OPENCODE_COMMAND",
-            "PULLWISE_OPENCODE_VARIANT",
-            "PULLWISE_REVIEW_CALIBRATION_MODE",
-            "PULLWISE_REVIEW_CALIBRATION_MODEL",
-            "PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS",
-            "PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES",
-            "PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS",
-            "PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY",
-            "PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT",
-            "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE",
-            "PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW",
-        ):
-            self.assertIn(key, env_template)
-        self.assertIn("EnvironmentFile=__PULLWISE_WORKER_ENV_FILE__", service)
-        self.assertIn("ExecStart=__PULLWISE_WORKER_BIN_PATH__ run", service)
-        self.assertIn(
-            "Environment=PATH=__PULLWISE_SERVICE_HOME__/.local/bin:__PULLWISE_SERVICE_HOME__/.codex/bin:__PULLWISE_SERVICE_HOME__/.opencode/bin:",
-            service,
-        )
-        self.assertIn("Restart=on-failure", service)
-        self.assertNotIn("Restart=always", service)
-        self.assertIn("ReadWritePaths=__PULLWISE_SERVICE_HOME__ __PULLWISE_LOG_DIR__", service)
-        self.assertNotIn("EnvironmentFile=/etc/pullwise-worker/worker.env", service)
-        self.assertNotIn("ExecStart=/usr/local/bin/pullwise-worker run", service)
-        self.assertNotIn("ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker", service)
-        self.assertIn("__PULLWISE_LOG_DIR__/*.log", logrotate)
-        self.assertIn("create 0640 __PULLWISE_SERVICE_USER__ __PULLWISE_SERVICE_USER__", logrotate)
-        self.assertNotIn("/var/log/pullwise-worker/*.log", logrotate)
-        for script_name in ("cleanup-checkouts.sh", "update-worker.sh", "restart-worker.sh", "uninstall-worker.sh"):
-            script = (deploy_root / script_name).read_text(encoding="utf-8")
-            self.assertIn("PULLWISE_WORKER_ENV_FILE", script)
-            self.assertIn("PULLWISE_WORKER_BIN_PATH", script)
-            self.assertIn('exec "$PULLWISE_WORKER_BIN_PATH"', script)
-            self.assertNotIn("/usr/local/bin/pullwise-worker ", script)
-
-
-if __name__ == "__main__":
-    unittest.main()

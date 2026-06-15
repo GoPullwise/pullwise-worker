@@ -10,15 +10,14 @@ Windows worker installer behavior.
 
 ## Worker Provider Isolation
 
-Each worker instance owns its own Codex and OpenCode runtime state. Do not let a
-worker use global Codex/OpenCode binaries, global auth, root auth, or another
+Each worker instance owns its own Codex runtime state. Do not let a
+worker use global Codex binaries, global auth, root auth, or another
 worker instance's config.
 
 - Provider commands must resolve to absolute paths inside the current worker
   `service_home`, for example:
   - `$service_home/.local/bin/codex`
   - `$service_home/.codex/bin/codex`
-  - `$service_home/.opencode/bin/opencode`
 - Provider subprocesses must run with instance-scoped environment values:
   - `HOME=$service_home`
   - `USERPROFILE=$service_home`
@@ -27,8 +26,7 @@ worker instance's config.
   - `XDG_CACHE_HOME=$service_home/.cache`
   - `XDG_DATA_HOME=$service_home/.local/share`
   - `PATH` with this worker's `$service_home/.local/bin`,
-    `$service_home/.codex/bin`, and `$service_home/.opencode/bin` before the
-    base service path
+    `$service_home/.codex/bin` before the base service path
 - Do not inherit global provider credentials such as root `HOME`,
   root `CODEX_HOME`, or global API-key based readiness when checking or running
   provider work.
@@ -40,7 +38,7 @@ worker instance's config.
   install, or another worker.
 
 Multiple workers on the same server are supported only if each worker uses its
-own `service_home` for Codex/OpenCode binaries, config, cache, and auth state.
+own `service_home` for Codex binaries, config, cache, and auth state.
 
 ## Server-Controlled Agent Policy
 
@@ -54,8 +52,7 @@ server-provided subscription plan agent configs and per-job `agentConfig`.
 - A claimed job must include `agentConfig` and `repositoryLimits`; reject jobs
   that omit them instead of using local defaults.
 - When a job includes Codex in `agentConfig.providerChain`, require Codex model
-  and reasoning effort. When it includes OpenCode, require OpenCode model and
-  variant.
+  and reasoning effort.
 - Repository size limits used by worker preflight come from the job's
   `repositoryLimits`, not from local plan assumptions.
 
@@ -65,12 +62,8 @@ Provider readiness is plan-aware and provider-specific.
 
 - `provider_ready` means at least one provider required by the loaded plan
   configs is ready.
-- `codex_ready` is only the Codex login/readiness state. It can be false while
-  `provider_ready` is true if OpenCode is the usable fallback.
+- `codex_ready` is the Codex login/readiness state required for accepting jobs.
 - Only check providers required by the loaded plan configs.
-- OpenCode readiness must validate the model provider IDs required by plan
-  configs, for example `minimax` for `minimax/MiniMax-M3`; any unrelated
-  OpenCode auth entry is not enough.
 - Login/auth instructions printed by `doctor` must use the same instance-scoped
   command environment documented above.
 
