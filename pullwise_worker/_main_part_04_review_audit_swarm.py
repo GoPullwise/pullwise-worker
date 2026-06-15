@@ -203,7 +203,9 @@ def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: 
     logs_summary = redact_secrets(raw_logs[-1000:], config)
     if completed.returncode != 0:
         raise RuntimeError(f"opencode run failed with exit code {completed.returncode}: {logs_summary[:300]}")
-    audit_payload = parse_audit_swarm_payload(raw_logs)
+    audit_payload, output_source = parse_opencode_audit_payload(raw_logs, checkout_dir)
+    if output_source:
+        logs_summary = redact_secrets("\n".join([logs_summary, output_source])[-1000:], config)
     return (
         audit_payload,
         summarize(audit_swarm_findings_from_payload(audit_payload) or []),
@@ -216,7 +218,7 @@ def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
     scope_ok, scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
     if not scope_ok:
         raise RuntimeError(scope_detail)
-    command = [config.opencode_command, "run"]
+    command = [config.opencode_command, "run", "--format", "json"]
     if config.opencode_model:
         command.extend(["--model", config.opencode_model])
     if config.opencode_variant:
@@ -326,6 +328,34 @@ def parse_audit_swarm_payload(output: str) -> dict:
     raise RuntimeError("review provider did not return an Audit Swarm payload")
 
 
+def parse_opencode_audit_payload(output: str, checkout_dir: Path) -> tuple[dict, str]:
+    parse_error: RuntimeError | None = None
+    try:
+        return parse_audit_swarm_payload(output), ""
+    except RuntimeError as exc:
+        parse_error = exc
+
+    for relative_path in opencode_audit_output_paths():
+        path = checkout_dir / relative_path
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            payload = parse_audit_swarm_payload(text)
+        except RuntimeError:
+            continue
+        return payload, f"OpenCode Audit Swarm payload loaded from {relative_path.as_posix()}"
+    raise parse_error
+
+
+def opencode_audit_output_paths() -> tuple[Path, ...]:
+    return (
+        Path(".sisyphus") / "audit-swarm-output.json",
+        Path("audit-swarm-output.json"),
+    )
+
+
 def audit_swarm_json_documents(output: object) -> list[object]:
     decoder = json.JSONDecoder()
     text = str(output or "").strip()
@@ -379,7 +409,14 @@ def audit_swarm_payload_from_document(parsed: object) -> dict | None:
             if payload is not None:
                 matched = payload
         return matched
-    if not isinstance(parsed, dict) or "event" in parsed:
+    if not isinstance(parsed, dict):
+        return None
+    for text in audit_swarm_document_text_candidates(parsed):
+        try:
+            return parse_audit_swarm_payload(text)
+        except RuntimeError:
+            continue
+    if "event" in parsed:
         return None
     cards = first_list(parsed, "issue_cards", "issueCards")
     if cards is None:
@@ -393,6 +430,16 @@ def audit_swarm_payload_from_document(parsed: object) -> dict | None:
         "issue_cards": [item for item in cards if isinstance(item, dict)],
         "verification_results": [item for item in results if isinstance(item, dict)],
     }
+
+
+def audit_swarm_document_text_candidates(parsed: dict) -> list[str]:
+    candidates: list[str] = []
+    part = parsed.get("part")
+    if isinstance(part, dict) and isinstance(part.get("text"), str):
+        candidates.append(part["text"])
+    if isinstance(parsed.get("text"), str):
+        candidates.append(parsed["text"])
+    return candidates
 
 
 def empty_audit_swarm_payload() -> dict:

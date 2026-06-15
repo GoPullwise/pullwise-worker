@@ -1,0 +1,226 @@
+{
+  "audit_protocol": {
+    "protocol_name": "Audit Swarm v1",
+    "repository": "pullwise-worker",
+    "analyzed_at": "2026-06-15T08:00:00Z",
+    "analysis_strategy": "Full source read of all 10 exec-loaded part files (01–10), grep of subprocess.run calls and exception patterns, codegraph structural analysis",
+    "files_indexed": 177,
+    "parts_loaded": 10,
+    "coverage_scope": "pullwise_worker/*.py — all exec-loaded part files, main.py entry point, no test-only files",
+    "limitations": [
+      "Background subagent delegation failed due to insufficient billing balance — all analysis performed via direct file reads",
+      "No dynamic/runtime analysis performed",
+      "Test suite coverage not deeply assessed"
+    ]
+  },
+  "issue_cards": [
+    {
+      "issue_id": "PW-ENV-001",
+      "title": "Host environment variables passed unsanitized to git subprocess via os.environ.copy()",
+      "severity": "high",
+      "locations": [
+        "pullwise_worker/_main_part_02_worker_checkout.py:1050",
+        "pullwise_worker/_main_part_02_worker_checkout.py:942-949"
+      ],
+      "claim": "git_auth_env() copies the full host process environment (os.environ.copy()) into every git subprocess environment. If the host contains secrets in environment variables — such as GITHUB_TOKEN, AWS_* credentials, DATABASE_URL, or other env vars inherited from the systemd unit or parent process — those are forwarded verbatim to git clone/fetch/checkout operations. Git stores environment state and some env values may leak into git error output, git trace logs, or subprocess stderr captured by the worker.",
+      "evidence": "At line 1050: `env = os.environ.copy()` — this captures all host environment variables. The returned dict is passed as `env=` to subprocess.run at line 949 via `run_git_command()`. No filtering or allowlist of safe keys is applied. By contrast, the verifier environment (line 1071-1078) uses an explicit allowlist (`_VERIFIER_ENV_PASSTHROUGH_KEYS`), demonstrating the author knows this pattern exists but does not apply it to git subprocesses.",
+      "reproduction_idea": "1. Set a test env var (e.g., `LEAK_TEST=visible`) in the shell that launches the worker. 2. Set `PULLWISE_GIT_TRACE=1` or enable git tracing. 3. Trigger a job that performs a git clone. 4. Observe whether `LEAK_TEST` appears in the subprocess environment (visible via /proc or debug tracing).",
+      "suggested_test": "Create a test that calls git_auth_env() and asserts that only expected keys (GIT_TERMINAL_PROMPT, GIT_CONFIG_*, http.*.extraHeader) are present, and that keys not in an allowlist are stripped. Alternatively, mock os.environ with a known set and assert the returned env does not contain unexpected entries.",
+      "false_positive_checks": [
+        "The host may have no secrets in env vars beyond what the worker itself sets (mitigated by environment hardening)",
+        "On a dedicated worker VM with no cross-tenant workloads, the blast radius of env leak is limited to the worker's own config vars",
+        "The `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=os.devnull` settings prevent git from reading system/global config, but do not prevent environment-based secret propagation"
+      ]
+    },
+    {
+      "issue_id": "PW-SEC-002",
+      "title": "Secret redaction pattern is too narrow to catch all token/cache exposures in error messages",
+      "severity": "medium",
+      "locations": [
+        "pullwise_worker/_main_part_07_readiness_doctor.py:12-17"
+      ],
+      "claim": "redact_secrets() only redacts two patterns: (1) an exact match of the worker_token string, and (2) x-access-token:<value>@ in URLs. Clone tokens passed in job payloads, API response tokens, serialized token caches, or base64-encoded Authorization header values are not redacted if they appear in error/log output in any other serialization form. Error messages that include partial tokens, token IDs, or user identifiers are not sanitized.",
+      "evidence": "Lines 12-17 show the complete implementation: `redacted = redacted.replace(config.worker_token, '[redacted]')` and `re.sub(r'x-access-token:[^@\\s]+@', 'x-access-token:[redacted]@', redacted)`. The first pattern only matches the literal worker_token string (base64-encoded or otherwise formatted differently would not match). The second only matches the specific `x-access-token:` prefix in URL contexts. Any other format — JSON serialized tokens, tokens in HTTP response bodies, error messages from Codex CLI containing auth material — passes through unredacted. The function is called in `codex_failure_detail` (part_04:134), `write_scan_summary` (part_07:29), and error formatting paths throughout parts 02–04.",
+      "reproduction_idea": "1. Configure a worker with a known worker_token. 2. Simulate a Codex CLI failure whose stderr contains the token in a non-URL format (e.g., JSON). 3. Examine the logs_summary or doctor output — the token should appear unredacted.",
+      "suggested_test": "Unit test: `assert 'my-secret-token' not in redact_secrets('{\"token\": \"my-secret-token\"}', config_with_token)`. This should fail with the current implementation. Add pattern-based token detection that catches common serialization formats (JSON, base64, query params).",
+      "false_positive_checks": [
+        "The worker_token is only set by the installer and is not routinely embedded in error messages from external tools",
+        "Error messages from git and Codex typically contain path/exit-code information, not credential material",
+        "Clone tokens are scoped to single jobs and have short lifetimes (minutes), reducing the window of exposure"
+      ]
+    },
+    {
+      "issue_id": "PW-ARC-003",
+      "title": "ThreadPoolExecutor shutdown may hang indefinitely on stuck job futures",
+      "severity": "medium",
+      "locations": [
+        "pullwise_worker/_main_part_02_worker_checkout.py:165",
+        "pullwise_worker/_main_part_02_worker_checkout.py:230-237"
+      ],
+      "claim": "The ThreadPoolExecutor is used as a context manager (`with ... as executor:`) which calls `shutdown(wait=True)` on exit. The main loop exits only via `return` inside `if not running and not loop_error and self.handle_lifecycle_command(command): return` (line 214) or `once` mode (lines 233, 237). When executor.__exit__ runs, it waits for ALL submitted futures to complete with no timeout. If a job hangs (e.g., Codex CLI deadlock, network partition, infinite git credential prompt), the worker process never terminates, preventing clean update/uninstall.",
+      "evidence": "Line 165: `with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_concurrent_jobs) as executor:`. The while True loop at line 176 never breaks except through the documented return paths. When a lifecycle command triggers a return, executor.__exit__ fires and calls `executor.shutdown(wait=True)`. Per Python docs, this blocks until all running futures complete. There is no `timeout` argument and no `cancel_futures=True`. If one job's run_job call is stuck, the shutdown hangs. The `once` mode (lines 230-237) uses `concurrent.futures.wait(running)` without timeout before returning, compounding the issue.",
+      "reproduction_idea": "1. Start the worker with max_concurrent_jobs=2. 2. Submit two jobs where one never completes (e.g., set CODEX_TIMEOUT to a very high value, simulate a stuck subprocess). 3. Issue a stop command via heartbeat. 4. Observe that the worker process does not exit within a reasonable timeout.",
+      "suggested_test": "Integration test: mock run_job to block indefinitely (using a threading.Event). Submit the job, then trigger a stop command. Assert that the worker exits within a configurable grace period rather than hanging forever. To fix, use `shutdown(wait=True, timeout=30)` followed by `shutdown(cancel_futures=True)` in a finalizer, or wrap the executor in a try/finally with explicit timeout.",
+      "false_positive_checks": [
+        "On well-behaved jobs, the subprocess timeout (codex_timeout_seconds, PULLWISE_GIT_TIMEOUT_SECONDS) should prevent indefinite hangs",
+        "The handle_lifecycle_command path checks `if not running` before returning, so it only exits when no jobs are active — under normal conditions this is safe",
+        "Systemd's Restart=on-failure and the worker's own polling loop provide operational recovery outside the process"
+      ]
+    },
+    {
+      "issue_id": "PW-ARC-004",
+      "title": "Global Codex lock serializes reviews and readiness checks, creating a single contention point",
+      "severity": "low",
+      "locations": [
+        "pullwise_worker/_main_part_01_bootstrap.py:130",
+        "pullwise_worker/_main_part_04_review_audit_swarm.py:87",
+        "pullwise_worker/_main_part_07_readiness_doctor.py:434-493"
+      ],
+      "claim": "A single threading.Lock (_CODEX_EXEC_LOCK) serializes all Codex CLI operations — both code reviews and readiness checks. While codex_ready_check uses acquire(blocking=False) to defer when the lock is held, this means readiness state is never updated while a review runs. A long Codex review (up to 30 minutes per codex_timeout_seconds) leaves the worker with stale readiness for the entire duration. For concurrent job execution (max_concurrent_jobs > 1), jobs cannot run Codex reviews in parallel, effectively capping throughput to one Codex review at a time regardless of executor thread count.",
+      "evidence": "Line 130 of part_01: `_CODEX_EXEC_LOCK = Lock()`. Line 87 of part_04: `with _CODEX_EXEC_LOCK:` guards the entire Codex subprocess.run call in run_codex_provider_review. Lines 434-493 of part_07: codex_ready_check uses `_CODEX_EXEC_LOCK.acquire(blocking=False)` and releases in a finally block. The README confirms: 'Codex exec calls are serialized inside the worker because Codex keeps local login state under the service user's home directory.' This is an acknowledged design constraint, but it means concurrent Codex jobs are impossible and doctor readiness is inaccurate during long reviews.",
+      "reproduction_idea": "1. Set max_concurrent_jobs=2. 2. Submit two jobs that both require Codex provider. 3. Observe that only one Codex review runs at a time — the second blocks on _CODEX_EXEC_LOCK until the first completes. 4. During the review, call the doctor endpoint — it reports stale readiness because codex_ready_check defers.",
+      "suggested_test": "Unit test: acquire _CODEX_EXEC_LOCK in a background thread, then call codex_ready_check and verify it returns the deferred status ('ready check deferred while codex is running'). Integration: submit two jobs and measure wall-clock time — concurrency should be serialized for Codex reviews.",
+      "false_positive_checks": [
+        "The serialization is intentional and documented — Codex stores auth state under the service user's home and concurrent execs would race on token refresh",
+        "OpenCode provider reviews are NOT serialized by this lock and can run in parallel",
+        "The acquire(blocking=False) pattern means readiness checks are never blocked, only deferred",
+        "For single-job workers (max_concurrent_jobs=1, the default), this lock has no throughput impact"
+      ]
+    },
+    {
+      "issue_id": "PW-RACE-005",
+      "title": "TOCTOU race in checkout_dir_for_job: path validation vs. actual clone usage",
+      "severity": "low",
+      "locations": [
+        "pullwise_worker/_main_part_02_worker_checkout.py:857-868",
+        "pullwise_worker/_main_part_02_worker_checkout.py:899-913"
+      ],
+      "claim": "checkout_dir_for_job() validates that the checkout directory is inside work_dir using path resolution at call time. Between validation and the actual clone (which calls shutil.rmtree and git clone on the same path), a race window exists. If an attacker-controlled process can replace directories or create symlinks in work_dir between these two calls, the final checkout could land outside the intended directory tree. Additionally, safe_job_id() is called separately in run_job (line 348) and checkout_dir_for_job (which calls it at line 860), but neither holds a lock over the validation+use sequence.",
+      "evidence": "Line 348-352: `job_id = safe_job_id(job.get('job_id'))` then later `checkout_dir = checkout_dir_for_job(self.config.work_dir, job_id)`. Lines 857-868: checkout_dir_for_job resolves `root` and `checkout_dir`, computes `os.path.commonpath`, and checks the result — but returns the Path object, not a lock. Lines 899-913: clone_repository then calls `shutil.rmtree(checkout_dir, ignore_errors=True)` and `checkout_dir.parent.mkdir(...)` and passes it to git clone. Between the check at line 863 and the rmtree at line 899, a race window exists. While this requires local filesystem access (already a compromised host scenario), it violates the principle of least surprise for a boundary validation function.",
+      "reproduction_idea": "Difficult to reproduce without local attacker access. In theory: run a script that watches work_dir and replaces the validated checkout subdirectory with a symlink pointing outside work_dir between the path check and the rmtree call.",
+      "suggested_test": "Add a test that calls checkout_dir_for_job then immediately uses the returned path, verifying `os.path.commonpath` still matches after re-resolution. A stronger fix would re-resolve the path immediately before use in clone_repository rather than relying on a prior validation call.",
+      "false_positive_checks": [
+        "The attacker needs local write access to work_dir — which implies they already control the worker host",
+        "shutil.rmtree with ignore_errors=True does not follow symlinks outside the tree by default",
+        "Git clone will fail or refuse if the target path is a symlink pointing outside (git checks this)",
+        "The work_dir path is typically only writable by the service user, not by other tenants"
+      ]
+    },
+    {
+      "issue_id": "PW-QUAL-006",
+      "title": "Upload retry uses exponential backoff without jitter, risking thundering herd",
+      "severity": "low",
+      "locations": [
+        "pullwise_worker/_main_part_02_worker_checkout.py:328-345"
+      ],
+      "claim": "upload_result_with_retry() implements exponential backoff (`min(30, 2 ** (attempt - 1))`) without adding jitter. If multiple workers lose connectivity to the server simultaneously (e.g., server restart, network partition recovery), they all retry at the same pre-computed intervals (1s, 2s, 4s, 8s, 16s, then 30s). This creates synchronized thundering-herd load on the server during reconnection.",
+      "evidence": "Lines 342-343: `if attempt < self.config.result_upload_attempts: time.sleep(min(30, 2 ** (attempt - 1)))`. There is no `random.uniform()` added to the sleep duration. The retry window is deterministic: for attempt 1 (after first failure): 1s, attempt 2: 2s, attempt 3: 4s, attempt 4: 8s, attempt 5: 16s, attempt 6+: 30s. All workers recovering from the same outage will hit the server at the same millisecond within each retry slot.",
+      "reproduction_idea": "1. Configure two workers with identical server URL. 2. Block network access to the server (firewall rule). 3. Submit jobs to both workers. 4. Restore network access. 5. Observe that both workers' upload retries arrive at the server at nearly the same instant.",
+      "suggested_test": "Assert that retry sleep values include a jitter component: `sleep = min(30, 2 ** (attempt - 1)) + random.uniform(0, 1)` or similar. Unit test: mock time.sleep, call upload_result_with_retry with a failing HTTP response, and verify that successive sleep calls are not deterministic.",
+      "false_positive_checks": [
+        "The default `result_upload_attempts` is likely 3-5, limiting the total number of retries",
+        "Unlike job claims or heartbeats, uploads are single-worker operations (each worker uploads its own results), so synchronization only happens during shared infrastructure outages",
+        "The server likely has its own request coalescing and rate limiting"
+      ]
+    },
+    {
+      "issue_id": "PW-QUAL-007",
+      "title": "trim_file_to_last_bytes has a TOCTOU race window between stat, seek, and write",
+      "severity": "low",
+      "locations": [
+        "pullwise_worker/_main_part_08_lifecycle_cleanup.py:362-377"
+      ],
+      "claim": "trim_file_to_last_bytes() checks file size via stat(), then seeks from end, reads, finds a newline boundary, and rewrites the file. Between the stat() call and the write, the file may be concurrently appended to (by write_scan_summary or other writers). This can cause: (1) data loss — the trim truncates data appended after the stat but before the open('wb'); (2) partial writes — if a concurrent writer has the file open while trim truncates it, the writer may write to a stale file offset or get an error. While scan-summary.log is the primary use case and total data loss risk is low, it violates O_APPEND atomicity expectations.",
+      "evidence": "Lines 362-377: `size = path.stat().st_size` at line 364 establishes the pre-trim size. Then the file is opened with `path.open('rb')`, seek-read is performed, and finally `path.open('wb')` truncates and writes. Between line 364 (stat) and line 376 (open for write), a concurrent write_scan_summary call (line 30: `with path.open('a', encoding='utf-8')`) may append a new line to the file. The trim operation would then discard that appended data. The newline boundary logic at lines 373-375 is a best-effort approach that avoids cutting in the middle of a JSON line, but it does not protect against interleaved writes.",
+      "reproduction_idea": "1. Create a small scan-summary.log. 2. In one thread, repeatedly call write_scan_summary. 3. In another thread, repeatedly call trim_file_to_last_bytes with a max_bytes just above the average line length. 4. After many iterations, check if any appended lines are missing from the tail of the file.",
+      "suggested_test": "Stress test: use concurrent.futures to run 100 concurrent write+trim iterations. Verify that all appended lines either appear in the final file or that the file ends on a valid JSON line boundary. A fix would use an exclusive file lock (e.g., `portalocker` or fcntl.flock) around both the append and trim operations.",
+      "false_positive_checks": [
+        "scan-summary.log is the only file trimmed by this function and it is append-only (O_APPEND semantics)",
+        "The trim threshold is 10 MiB by default — very large relative to each appended line (~200 bytes), so trims are rare",
+        "Losing a single scan-summary line is not a security or correctness issue — the data is still in individual job audit payloads",
+        "Python's print/json.dumps writes are not atomic at the filesystem level, so some loss is expected under concurrent access regardless"
+      ]
+    },
+    {
+      "issue_id": "PW-SEC-008",
+      "title": "Git error messages may leak absolute checkout paths and repository metadata",
+      "severity": "info",
+      "locations": [
+        "pullwise_worker/_main_part_02_worker_checkout.py:957-963",
+        "pullwise_worker/_main_part_02_worker_checkout.py:933"
+      ],
+      "claim": "git_error_message() captures raw stderr/stdout from git subprocesses and includes the first 400 characters in the error message. Git error output frequently includes absolute file paths (e.g., `/var/lib/pullwise-worker/checkouts/<job_id>/.git/index.lock`), repository remote URLs, and ref names. These error messages propagate to the worker's `last_error` field, which is sent to the server in heartbeat payloads and may be logged server-side. While this is internal to the Pullwise infrastructure, it leaks the worker's directory layout and job IDs if error logs are exposed.",
+      "evidence": "Lines 957-963: `output = '\\n'.join(part for part in (exc.stderr, exc.stdout) if part)` then `summary = ' '.join(lines[:3])[:400]`. The first 400 characters of raw git output are preserved verbatim. Standard git error messages such as 'fatal: could not create work tree dir '/var/lib/pullwise-worker/checkouts/abc123/.git/index.lock'' reveal absolute paths. Line 933 in resolve_git_head: `raise RuntimeError(git_error_message('rev-parse', exc))`. The error message from line 954: `raise RuntimeError(git_error_message(phase, exc))` surfaces these paths up the call stack. run_job catches exceptions and formats them into `logs_summary` and `job_error` which are uploaded to the server.",
+      "reproduction_idea": "1. Configure a worker with a known checkout_dir. 2. Trigger a git error (e.g., clone a non-existent branch). 3. Observe the error message in `last_error` or `logs_summary` — it contains the absolute checkout_dir path.",
+      "suggested_test": "Unit test: mock subprocess.CalledProcessError with stderr containing an absolute path like '/tmp/pullwise-checkouts/job123/.git/index.lock'. Call git_error_message and assert the output does not contain the absolute path. Fix: apply path sanitization in git_error_message to replace the configured work_dir prefix with '[checkout]'.",
+      "false_positive_checks": [
+        "Paths are only exposed to the Pullwise server, not to end users or repository maintainers",
+        "The work_dir is configurable and on production systems defaults to a fixed path under /var/lib/pullwise-worker/ which is already predictable",
+        "Job IDs in paths are already sent to the server in API calls (they are not secret)",
+        "400-character truncation limits the total exposure in a single error message"
+      ]
+    }
+  ],
+  "verification_results": [
+    {
+      "issue_id": "PW-ENV-001",
+      "verdict": "confirmed",
+      "rationale": "os.environ.copy() at line 1050 is confirmed by source code inspection. No allowlist or exclude list is applied to the copied environment before passing it to subprocess.run. The codebase's own _VERIFIER_ENV_PASSTHROUGH_KEYS tuple (lines 1071-1078) demonstrates the author is aware of env passthrough controls, but does not apply them to git subprocesses.",
+      "commands_run": [
+        "grep -n 'os.environ.copy' pullwise_worker/_main_part_02_worker_checkout.py"
+      ]
+    },
+    {
+      "issue_id": "PW-SEC-002",
+      "verdict": "confirmed",
+      "rationale": "Source inspection of redact_secrets() at lines 12-17 confirms only two patterns are implemented: exact string match for worker_token and regex for x-access-token:<value>@ URL format. No generic secret detection (e.g., detection of JWT-like patterns, base64-encoded credentials, or JSON-stringified tokens) is present.",
+      "commands_run": [
+        "sed -n '12,17p' pullwise_worker/_main_part_07_readiness_doctor.py"
+      ]
+    },
+    {
+      "issue_id": "PW-ARC-003",
+      "verdict": "confirmed",
+      "rationale": "Code inspection confirms ThreadPoolExecutor is used as a context manager without shutdown timeout or cancel_futures. The while True loop only exits via return paths that trigger executor.__exit__ with implicit shutdown(wait=True). No timeout parameter is present.",
+      "commands_run": [
+        "grep -n 'ThreadPoolExecutor\\|shutdown\\|executor' pullwise_worker/_main_part_02_worker_checkout.py | head -15"
+      ]
+    },
+    {
+      "issue_id": "PW-ARC-004",
+      "verdict": "confirmed",
+      "rationale": "Source confirms a single threading.Lock at part_01 line 130, used as context manager around Codex subprocess calls in part_04 line 87, and with acquire(blocking=False) in part_07 line 434. The README explicitly documents this as intentional design.",
+      "commands_run": [
+        "grep -n '_CODEX_EXEC_LOCK' pullwise_worker/_main_part_01_bootstrap.py pullwise_worker/_main_part_04_review_audit_swarm.py pullwise_worker/_main_part_07_readiness_doctor.py"
+      ]
+    },
+    {
+      "issue_id": "PW-RACE-005",
+      "verdict": "inconclusive",
+      "rationale": "The TOCTOU window between checkout_dir_for_job() at line 857 and clone_repository() at line 898 exists by code inspection, but exploitation requires local filesystem write access to work_dir. No test demonstrating actual exploitation was run. The safe_job_id() validation (line 850) and path resolution in checkout_dir_for_job are robust for single-threaded use. The issue is design-valid but risk depends on deployment environment.",
+      "commands_run": []
+    },
+    {
+      "issue_id": "PW-QUAL-006",
+      "verdict": "confirmed",
+      "rationale": "Source code confirms upload_result_with_retry uses deterministic exponential backoff without jitter at line 343: `time.sleep(min(30, 2 ** (attempt - 1)))`. No random component is added.",
+      "commands_run": [
+        "sed -n '328,345p' pullwise_worker/_main_part_02_worker_checkout.py"
+      ]
+    },
+    {
+      "issue_id": "PW-QUAL-007",
+      "verdict": "inconclusive",
+      "rationale": "The TOCTOU window in trim_file_to_last_bytes is confirmed by code inspection (stat at line 364, then separate open('wb') at line 376). However, concurrent access testing was not performed. The practical impact is limited by the append-only write pattern and the large trim threshold (10 MiB default). Verdict is inconclusive because the race exists but manifests only under specific concurrent access patterns that were not reproduced.",
+      "commands_run": []
+    },
+    {
+      "issue_id": "PW-SEC-008",
+      "verdict": "confirmed",
+      "rationale": "git_error_message() at line 957 captures up to 400 chars of raw git stderr/stdout verbatim. git commonly emits absolute paths in error messages (e.g., index.lock, directory creation failures). These messages propagate via RuntimeError to run_job's error handling and are included in payloads sent to the server.",
+      "commands_run": [
+        "sed -n '957,963p' pullwise_worker/_main_part_02_worker_checkout.py"
+      ]
+    }
+  ]
+}
