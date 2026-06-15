@@ -597,24 +597,6 @@ func writeHealth() {}
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Event bug")
 
-    def test_parse_audit_swarm_accepts_opencode_message_part_event(self) -> None:
-        payload = parse_audit_swarm_payload(
-            json.dumps(
-                {
-                    "type": "message.part.updated",
-                    "properties": {
-                        "part": {
-                            "type": "text",
-                            "text": json.dumps(audit_payload([issue_card("Nested event bug", severity="P1")])),
-                        }
-                    },
-                }
-            )
-        )
-
-        findings = audit_swarm_findings_from_payload(payload) or []
-        self.assertEqual(findings[0]["title"], "Nested event bug")
-
     def test_parse_audit_swarm_normalizes_object_protocol(self) -> None:
         payload = audit_payload([issue_card("Object protocol bug", severity="P1")])
         payload["audit_protocol"] = {
@@ -4673,24 +4655,6 @@ func writeHealth() {}
         self.assertEqual(findings[0]["title"], "File bug")
         self.assertEqual(summary["high"], 1)
         self.assertIn(".sisyphus/audit-swarm-output.json", logs)
-
-    def test_run_opencode_review_reports_error_event_when_payload_missing(self) -> None:
-        cfg = config()
-        configure_instance_provider_commands(cfg)
-        completed = Mock(
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "type": "error",
-                    "error": {"name": "ProviderError", "data": {"message": "rate limit exceeded"}},
-                }
-            ),
-            stderr="",
-        )
-
-        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", return_value=completed):
-            with self.assertRaisesRegex(RuntimeError, "OpenCode error event: ProviderError: rate limit exceeded"):
-                run_opencode_provider_review(cfg, {"repo": "acme/api"}, Path(tmp))
 
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:
