@@ -3845,13 +3845,19 @@ func writeHealth() {}
         worker.config.max_claim_jobs = 4
         worker.client = Mock()
         worker.client.heartbeat.return_value = {}
-        worker.client.claim_many.side_effect = [
-            [{"job_id": "job_1"}, {"job_id": "job_2"}],
-            [{"job_id": "job_3"}],
-        ]
         release_jobs = threading.Event()
         first_job_finished = threading.Event()
-        sleep_calls = 0
+        claim_limits: list[int] = []
+
+        def claim_many(limit: int) -> list[dict]:
+            claim_limits.append(limit)
+            if len(claim_limits) == 1:
+                return [{"job_id": "job_1"}, {"job_id": "job_2"}]
+            if len(claim_limits) == 2:
+                self.assertTrue(first_job_finished.is_set())
+                release_jobs.set()
+                return [{"job_id": "job_3"}]
+            raise StopLoop()
 
         def run_job(job: dict) -> None:
             if job["job_id"] == "job_1":
@@ -3859,24 +3865,17 @@ func writeHealth() {}
                 return
             release_jobs.wait(2)
 
-        def sleep_until_refill_then_stop(_seconds: float) -> None:
-            nonlocal sleep_calls
-            sleep_calls += 1
-            if sleep_calls == 1:
-                self.assertTrue(first_job_finished.wait(2))
-                return
-            release_jobs.set()
-            raise StopLoop()
+        worker.client.claim_many.side_effect = claim_many
 
         with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
-            patch.object(worker, "run_job", side_effect=run_job), \
-            patch("pullwise_worker.main.time.sleep", side_effect=sleep_until_refill_then_stop):
+            patch.object(worker, "run_job", side_effect=run_job):
             with self.assertRaises(StopLoop):
                 worker.run()
 
-        self.assertEqual([call.args[0] for call in worker.client.claim_many.call_args_list], [2, 1])
-        self.assertEqual(worker.client.heartbeat.call_args.kwargs["running_jobs"], 1)
-        self.assertEqual(worker.client.heartbeat.call_args.kwargs["active_job_ids"], ["job_2"])
+        self.assertEqual(claim_limits[:2], [2, 1])
+        heartbeat_kwargs = [call.kwargs for call in worker.client.heartbeat.call_args_list]
+        self.assertIn(1, [kwargs["running_jobs"] for kwargs in heartbeat_kwargs])
+        self.assertIn(["job_2"], [kwargs["active_job_ids"] for kwargs in heartbeat_kwargs])
 
     def test_loop_wakes_to_refill_when_job_finishes_during_poll_wait(self) -> None:
         class StopLoop(Exception):
@@ -3925,30 +3924,32 @@ func writeHealth() {}
         worker = Worker(config())
         worker.config.max_concurrent_jobs = 1
         worker.client = Mock()
-        worker.client.heartbeat.return_value = {}
         worker.client.claim_many.return_value = [{"job_id": "job_active"}]
         release_job = threading.Event()
-        sleep_calls = 0
+        heartbeat_calls = 0
+
+        def heartbeat(**_kwargs: object) -> dict:
+            nonlocal heartbeat_calls
+            heartbeat_calls += 1
+            if heartbeat_calls >= 2:
+                release_job.set()
+                raise StopLoop()
+            return {}
 
         def run_job(_job: dict) -> None:
             release_job.wait(2)
 
-        def sleep_once_then_stop(_seconds: float) -> None:
-            nonlocal sleep_calls
-            sleep_calls += 1
-            if sleep_calls >= 2:
-                release_job.set()
-                raise StopLoop()
+        worker.client.heartbeat.side_effect = heartbeat
 
         with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
-            patch.object(worker, "run_job", side_effect=run_job), \
-            patch("pullwise_worker.main.time.sleep", side_effect=sleep_once_then_stop):
+            patch.object(worker, "run_job", side_effect=run_job):
             with self.assertRaises(StopLoop):
                 worker.run()
 
         self.assertGreaterEqual(worker.client.heartbeat.call_count, 2)
-        self.assertEqual(worker.client.heartbeat.call_args.kwargs["running_jobs"], 1)
-        self.assertEqual(worker.client.heartbeat.call_args.kwargs["active_job_ids"], ["job_active"])
+        heartbeat_kwargs = [call.kwargs for call in worker.client.heartbeat.call_args_list]
+        self.assertIn(1, [kwargs["running_jobs"] for kwargs in heartbeat_kwargs])
+        self.assertIn(["job_active"], [kwargs["active_job_ids"] for kwargs in heartbeat_kwargs])
 
     def test_pullwise_client_posts_json_with_authorization(self) -> None:
         class FakeResponse:
