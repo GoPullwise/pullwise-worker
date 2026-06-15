@@ -5220,6 +5220,27 @@ func writeHealth() {}
         self.assertTrue(ok)
         self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax")
 
+    def test_opencode_auth_check_accepts_minimax_coding_plan_alias(self) -> None:
+        cfg = config()
+        completed = Mock(
+            returncode=0,
+            stdout=(
+                "Credentials ~/.local/share/opencode/auth.json\n"
+                "MiniMax Token Plan (minimaxi.com) api\n"
+                "1 credential\n"
+            ),
+            stderr="",
+        )
+
+        with patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            ok, detail = worker_main.opencode_auth_check(
+                cfg,
+                agent_configs_payload(free_opencode_model="minimax-cn-coding-plan/MiniMax-M3"),
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "authenticated for configured OpenCode providers: minimax-cn-coding-plan")
+
     def test_opencode_auth_check_uses_worker_instance_auth_env(self) -> None:
         cfg = config()
         service_home = configure_instance_provider_commands(cfg)

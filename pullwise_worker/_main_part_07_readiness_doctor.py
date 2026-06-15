@@ -239,10 +239,25 @@ def opencode_auth_output_plain(output: str) -> str:
     return re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", str(output or ""))
 
 
+OPENCODE_AUTH_PROVIDER_ALIASES = {
+    "minimax": ("minimax", "minimax-cn-coding-plan"),
+    "minimax-cn-coding-plan": ("minimax-cn-coding-plan", "minimax"),
+}
+
+
+def opencode_auth_provider_aliases(provider: str) -> tuple[str, ...]:
+    provider_id = str(provider or "").strip().lower()
+    if not provider_id:
+        return ()
+    return OPENCODE_AUTH_PROVIDER_ALIASES.get(provider_id, (provider_id,))
+
+
 def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
     output = opencode_auth_output_plain(output)
-    provider_id = provider.lower()
-    provider_pattern = re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider_id)}([^a-z0-9_-]|$)")
+    provider_patterns = [
+        re.compile(rf"(^|[^a-z0-9_-]){re.escape(provider_id)}([^a-z0-9_-]|$)")
+        for provider_id in opencode_auth_provider_aliases(provider)
+    ]
     catalog_markers = (
         "available providers",
         "supported providers",
@@ -285,7 +300,7 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
     api_credential_pattern = re.compile(r"(^|[^a-z0-9_-])api([^a-z0-9_-]|$)")
     for line in output.splitlines():
         lowered = line.lower()
-        if not provider_pattern.search(lowered):
+        if not any(pattern.search(lowered) for pattern in provider_patterns):
             continue
         if any(marker in lowered for marker in missing_markers):
             continue
@@ -293,7 +308,7 @@ def opencode_auth_output_has_ready_provider(output: str, provider: str) -> bool:
             return True
         if credential_listing and api_credential_pattern.search(lowered):
             return True
-        if not provider_catalog and lowered.strip(" \t-*") == provider_id:
+        if not provider_catalog and lowered.strip(" \t-*") in opencode_auth_provider_aliases(provider):
             return True
     return False
 
