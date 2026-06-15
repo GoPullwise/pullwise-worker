@@ -731,15 +731,16 @@ def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False
 
 
 def uninstall_worker_command(args: argparse.Namespace) -> int:
-    config = WorkerConfig(args, require_worker_token=False, validate_server_url=False)
     try:
-        try:
-            unregister_worker_from_server(config, dry_run=args.dry_run)
-        except PullwiseRequestError as exc:
-            print(f"server registry unregister failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
-            return 1
+        config = WorkerConfig(args, require_worker_token=False, validate_server_url=False)
     except ValueError as exc:
-        print(f"server registry unregister skipped: {exc}", file=sys.stderr)
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        unregister_worker_from_server(config, dry_run=args.dry_run)
+    except PullwiseRequestError as exc:
+        print(f"server registry unregister failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
+        return 1
     return uninstall_worker(
         config,
         remove_config=args.remove_config,

@@ -129,13 +129,10 @@ def default_worker_package() -> str:
     return f"{DEFAULT_WORKER_PACKAGE_BASE_URL}/v{__version__}/pullwise_worker-{__version__}-py3-none-any.whl"
 
 
-def service_user_doctor_command(bin_path: Path) -> list[str]:
-    service_user = os.environ.get("PULLWISE_SERVICE_USER", "").strip() or "pullwise-worker"
-    service_home = os.environ.get("PULLWISE_SERVICE_HOME", "").strip() or "/var/lib/pullwise-worker"
-    service_path = (
-        os.environ.get("PULLWISE_SERVICE_PATH", "").strip()
-        or "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    )
+def service_user_doctor_command(config: WorkerConfig, bin_path: Path) -> list[str]:
+    service_user = str(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
+    service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    service_path = provider_tool_path(config)
     service_bin = str(bin_path).replace("\\", "/")
     doctor_command = f'cd "$HOME" && exec {shlex.quote(service_bin)} doctor'
     return [
@@ -179,7 +176,8 @@ export CODEX_HOME="$SERVICE_HOME/.codex"
 export XDG_CONFIG_HOME="$SERVICE_HOME/.config"
 export XDG_CACHE_HOME="$SERVICE_HOME/.cache"
 export XDG_DATA_HOME="$SERVICE_HOME/.local/share"
-export PATH="${{PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
+SERVICE_PATH="${{PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
+export PATH="$SERVICE_HOME/.local/bin:$SERVICE_HOME/.codex/bin:$SERVICE_HOME/.opencode/bin:$SERVICE_PATH"
 PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-python3}}"
 exec "$PYTHON_BIN" -m pullwise_worker.main "$@"
 """
@@ -194,9 +192,10 @@ def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     package = default_worker_package()
     python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3"
-    env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE") or "/etc/pullwise-worker/worker.env")
-    backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE") or "/etc/pullwise-worker/worker.env.bak")
-    bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH") or "/usr/local/bin/pullwise-worker")
+    env_path = Path(config.worker_env_file)
+    backup_path = Path(config.worker_env_backup_file)
+    bin_path = Path(config.worker_bin_path)
+    service_name = config.service_name
     install_command = [
         python_bin,
         "-m",
@@ -208,10 +207,10 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         package,
     ]
     commands = [
-        ["systemctl", "stop", "pullwise-worker"],
+        ["systemctl", "stop", service_name],
         install_command,
-        ["systemctl", "restart", "pullwise-worker"],
-        service_user_doctor_command(bin_path),
+        ["systemctl", "restart", service_name],
+        service_user_doctor_command(config, bin_path),
     ]
     if dry_run:
         print(f"backup {env_path} to {backup_path}")
@@ -232,7 +231,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         if completed.returncode != 0:
             if backup_path.exists():
                 shutil.copy2(backup_path, env_path)
-            subprocess.run(["systemctl", "restart", "pullwise-worker"])
+            subprocess.run(["systemctl", "restart", service_name])
             return completed.returncode
         if command is install_command:
             try:
@@ -241,20 +240,25 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
                 print(f"failed to write worker wrapper: {exc}", file=sys.stderr)
                 if backup_path.exists():
                     shutil.copy2(backup_path, env_path)
-                subprocess.run(["systemctl", "restart", "pullwise-worker"])
+                subprocess.run(["systemctl", "restart", service_name])
                 return 1
     return 0
 
 
 def uninstall_worker(
+    config: WorkerConfig,
     *,
     remove_config: bool = False,
     remove_logs: bool = False,
     dry_run: bool = False,
 ) -> int:
+    service_name = config.service_name
+    service_file = Path(config.service_file)
+    config_dir = Path(config.worker_env_file).parent
+    log_dir = Path(config.log_dir)
     commands = [
-        ["systemctl", "stop", "pullwise-worker"],
-        ["systemctl", "disable", "pullwise-worker"],
+        ["systemctl", "stop", service_name],
+        ["systemctl", "disable", service_name],
     ]
     for command in commands:
         if dry_run:
@@ -264,18 +268,18 @@ def uninstall_worker(
         if completed.returncode != 0:
             return completed.returncode
     if dry_run:
-        print("remove /etc/systemd/system/pullwise-worker.service")
+        print(f"remove {service_file}")
         if remove_config:
-            print("remove /etc/pullwise-worker")
+            print(f"remove {config_dir}")
         if remove_logs:
-            print("remove /var/log/pullwise-worker")
+            print(f"remove {log_dir}")
         print("systemctl daemon-reload")
     else:
-        safe_unlink(Path("/etc/systemd/system/pullwise-worker.service"))
+        safe_unlink(service_file, service_name=service_name)
         if remove_config:
-            safe_rmtree(Path("/etc/pullwise-worker"), Path("/etc/pullwise-worker"))
+            safe_rmtree(config_dir, config_dir)
         if remove_logs:
-            safe_rmtree(Path("/var/log/pullwise-worker"), Path("/var/log/pullwise-worker"))
+            safe_rmtree(log_dir, log_dir)
         completed = subprocess.run(["systemctl", "daemon-reload"])
         if completed.returncode != 0:
             return completed.returncode
@@ -384,8 +388,10 @@ def trim_file_to_last_bytes(path: Path, max_bytes: int) -> None:
         handle.write(data)
 
 
-def safe_unlink(path: Path) -> None:
-    if str(path) != "/etc/systemd/system/pullwise-worker.service":
+def safe_unlink(path: Path, *, service_name: str = DEFAULT_SERVICE_NAME) -> None:
+    safe_service_name = str(service_name or "").strip()
+    expected = Path("/etc/systemd/system") / f"{safe_service_name}.service"
+    if not safe_service_name.startswith(DEFAULT_SERVICE_NAME) or path.resolve(strict=False) != expected.resolve(strict=False):
         raise ValueError(f"refusing to remove unexpected file: {path}")
     path.unlink(missing_ok=True)
 
