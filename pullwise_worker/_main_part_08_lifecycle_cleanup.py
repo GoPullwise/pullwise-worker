@@ -192,10 +192,10 @@ def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     package = default_worker_package()
     python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3"
-    env_path = Path(config.worker_env_file)
-    backup_path = Path(config.worker_env_backup_file)
-    bin_path = Path(config.worker_bin_path)
-    service_name = config.service_name
+    env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE", "").strip() or config.worker_env_file)
+    backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", "").strip() or config.worker_env_backup_file)
+    bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH", "").strip() or config.worker_bin_path)
+    service_name = os.environ.get("PULLWISE_SERVICE_NAME", "").strip() or config.service_name
     install_command = [
         python_bin,
         "-m",
@@ -246,12 +246,14 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
 
 
 def uninstall_worker(
-    config: WorkerConfig,
+    config: WorkerConfig | None = None,
     *,
     remove_config: bool = False,
     remove_logs: bool = False,
     dry_run: bool = False,
 ) -> int:
+    if config is None:
+        config = WorkerConfig(argparse.Namespace(), require_worker_token=False, validate_server_url=False)
     service_name = config.service_name
     service_file = Path(config.service_file)
     config_dir = Path(config.worker_env_file).parent

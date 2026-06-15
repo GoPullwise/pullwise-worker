@@ -3911,7 +3911,7 @@ func writeHealth() {}
             ("codex_ready", True, "ready"),
         ]
 
-        with patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, True)), \
+        with patch("pullwise_worker.main.worker_readiness_state", return_value=(checks, True, ["codex"])), \
             patch("pullwise_worker.main.time.sleep") as sleep:
             worker.run(once=True)
 
@@ -4017,7 +4017,7 @@ func writeHealth() {}
             ("disk_space", True, "2048 MB free"),
         ]
 
-        with patch("pullwise_worker.main.worker_readiness_checks", return_value=(checks, False)):
+        with patch("pullwise_worker.main.worker_readiness_state", return_value=(checks, False, [])):
             ready = worker.refresh_readiness_if_due()
 
         self.assertFalse(ready)
@@ -4200,6 +4200,7 @@ func writeHealth() {}
     def test_worker_readiness_rejects_opencode_command_outside_service_home(self) -> None:
         cfg = config()
         service_home = configure_instance_provider_commands(cfg)
+        cfg.provider_chain = ["opencode"]
         cfg.opencode_command = str(Path(tempfile.mkdtemp()) / "opencode")
 
         with patch("pullwise_worker.main.command_ok", return_value=(True, "ok")) as command, \
@@ -4253,7 +4254,7 @@ func writeHealth() {}
     def test_worker_readiness_checks_opencode_provider_from_subscription_plans(self) -> None:
         cfg = config()
         configure_instance_provider_commands(cfg)
-        cfg.provider_chain = ["codex"]
+        cfg.provider_chain = ["codex", "opencode"]
         completed = Mock(
             returncode=0,
             stdout=(
@@ -5002,7 +5003,10 @@ func writeHealth() {}
                         worker_main.main()
 
                 self.assertEqual(raised.exception.code, 0)
-                service.assert_called_once_with(action, dry_run=True)
+                service.assert_called_once()
+                self.assertEqual(service.call_args.args[0], action)
+                self.assertTrue(service.call_args.kwargs["dry_run"])
+                self.assertEqual(service.call_args.kwargs["config"].worker_token, "")
 
     def test_main_update_cleanup_and_uninstall_do_not_require_worker_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5032,7 +5036,12 @@ func writeHealth() {}
                     worker_main.main()
 
             self.assertEqual(raised.exception.code, 0)
-            uninstall.assert_called_once_with(remove_config=True, remove_logs=False, dry_run=True)
+            uninstall.assert_called_once()
+            self.assertEqual(uninstall.call_args.args[0].worker_token, "")
+            self.assertEqual(
+                uninstall.call_args.kwargs,
+                {"remove_config": True, "remove_logs": False, "dry_run": True},
+            )
 
     def test_main_update_and_cleanup_do_not_require_valid_server_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5059,8 +5068,8 @@ func writeHealth() {}
         client = Mock()
         client.delete.side_effect = lambda path: events.append(("delete", path))
 
-        def local_uninstall(**kwargs):
-            events.append(("uninstall", kwargs))
+        def local_uninstall(config_arg, **kwargs):
+            events.append(("uninstall", config_arg, kwargs))
             return 0
 
         with patch.dict(
@@ -5079,7 +5088,9 @@ func writeHealth() {}
 
         self.assertEqual(raised.exception.code, 0)
         self.assertEqual(events[0], ("delete", "/worker/registry"))
-        self.assertEqual(events[1], ("uninstall", {"remove_config": True, "remove_logs": False, "dry_run": False}))
+        self.assertEqual(events[1][0], "uninstall")
+        self.assertEqual(events[1][1].worker_id, "wk_1")
+        self.assertEqual(events[1][2], {"remove_config": True, "remove_logs": False, "dry_run": False})
 
     def test_main_uninstall_aborts_local_cleanup_when_registry_unregister_fails(self) -> None:
         client = Mock()
