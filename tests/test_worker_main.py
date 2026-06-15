@@ -567,6 +567,18 @@ func writeHealth() {}
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Bug")
 
+    def test_parse_audit_swarm_accepts_pretty_payload_after_event_stream(self) -> None:
+        payload = parse_audit_swarm_payload(
+            '{"event":"review_progress","issue_cards":[]}\n'
+            "OpenCode result:\n"
+            "```json\n"
+            + json.dumps(audit_payload([issue_card("Pretty bug", severity="P1")]), indent=2)
+            + "\n```"
+        )
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(findings[0]["title"], "Pretty bug")
+
     def test_audit_swarm_confirmed_verdict_without_evidence_is_not_static_proof(self) -> None:
         payload = audit_payload(
             [issue_card("Unsupported verifier confirmation", issue_id="issue-unsupported")],
@@ -4555,6 +4567,28 @@ func writeHealth() {}
         self.assertEqual(env["XDG_CONFIG_HOME"], str(service_home / ".config"))
         self.assertEqual(env["XDG_DATA_HOME"], str(service_home / ".local" / "share"))
         self.assertNotIn("OPENAI_API_KEY", env)
+
+    def test_run_opencode_review_parses_audit_payload_from_stderr(self) -> None:
+        cfg = config()
+        configure_instance_provider_commands(cfg)
+        completed = Mock(
+            returncode=0,
+            stdout="",
+            stderr=(
+                "OpenCode result:\n"
+                "```json\n"
+                + json.dumps(audit_payload([issue_card("Stderr bug", severity="P1")]), indent=2)
+                + "\n```"
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            payload, summary, logs, _usage = run_opencode_provider_review(cfg, {"repo": "acme/api"}, Path(tmp))
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(findings[0]["title"], "Stderr bug")
+        self.assertEqual(summary["high"], 1)
+        self.assertIn("OpenCode result", logs)
 
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:

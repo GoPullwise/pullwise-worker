@@ -199,11 +199,11 @@ def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: 
         stderr=subprocess.PIPE,
         timeout=config.codex_timeout_seconds,
     )
-    raw_logs = completed.stderr or completed.stdout
+    raw_logs = "\n".join([completed.stdout or "", completed.stderr or ""])
     logs_summary = redact_secrets(raw_logs[-1000:], config)
     if completed.returncode != 0:
         raise RuntimeError(f"opencode run failed with exit code {completed.returncode}: {logs_summary[:300]}")
-    audit_payload = parse_audit_swarm_payload(completed.stdout)
+    audit_payload = parse_audit_swarm_payload(raw_logs)
     return (
         audit_payload,
         summarize(audit_swarm_findings_from_payload(audit_payload) or []),
@@ -316,20 +316,8 @@ def review_prompt(job: dict) -> str:
 
 
 def parse_audit_swarm_payload(output: str) -> dict:
-    decoder = json.JSONDecoder()
-    text = output.strip()
-    candidates = [text]
-    first = text.find("{")
-    last = text.rfind("}")
-    if first >= 0 and last > first:
-        candidates.append(text[first : last + 1])
-    candidates.extend(line.strip() for line in text.splitlines() if line.strip().startswith(("{", "[")))
     matched: dict | None = None
-    for candidate in candidates:
-        try:
-            parsed = decoder.decode(candidate)
-        except json.JSONDecodeError:
-            continue
+    for parsed in audit_swarm_json_documents(output):
         payload = audit_swarm_payload_from_document(parsed)
         if payload is not None:
             matched = payload
@@ -338,7 +326,59 @@ def parse_audit_swarm_payload(output: str) -> dict:
     raise RuntimeError("review provider did not return an Audit Swarm payload")
 
 
+def audit_swarm_json_documents(output: object) -> list[object]:
+    decoder = json.JSONDecoder()
+    text = str(output or "").strip()
+    if not text:
+        return []
+    candidates = [text]
+    candidates.extend(match.group(1).strip() for match in re.finditer(r"```(?:json|JSON)?\s*(.*?)```", text, re.DOTALL))
+    first = text.find("{")
+    last = text.rfind("}")
+    if first >= 0 and last > first:
+        candidates.append(text[first : last + 1])
+    candidates.extend(line.strip() for line in text.splitlines() if line.strip().startswith(("{", "[")))
+    documents: list[object] = []
+    seen_candidates: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
+        try:
+            documents.append(decoder.decode(candidate))
+        except json.JSONDecodeError:
+            continue
+
+    index = 0
+    seen_spans: set[tuple[int, int]] = set()
+    while index < len(text):
+        object_start = text.find("{", index)
+        array_start = text.find("[", index)
+        starts = [pos for pos in (object_start, array_start) if pos >= 0]
+        if not starts:
+            break
+        start = min(starts)
+        try:
+            parsed, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        span = (start, start + end)
+        if span not in seen_spans:
+            seen_spans.add(span)
+            documents.append(parsed)
+        index = start + max(end, 1)
+    return documents
+
+
 def audit_swarm_payload_from_document(parsed: object) -> dict | None:
+    if isinstance(parsed, list):
+        matched: dict | None = None
+        for item in parsed:
+            payload = audit_swarm_payload_from_document(item)
+            if payload is not None:
+                matched = payload
+        return matched
     if not isinstance(parsed, dict) or "event" in parsed:
         return None
     cards = first_list(parsed, "issue_cards", "issueCards")

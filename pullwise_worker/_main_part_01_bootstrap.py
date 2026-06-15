@@ -156,10 +156,10 @@ def provider_tool_path(config: WorkerConfig | None) -> str:
     service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
     service_path = str(getattr(config, "service_path", None) or DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
     path_parts = [
-        service_path,
         f"{service_home}/.local/bin",
         f"{service_home}/.codex/bin",
         f"{service_home}/.opencode/bin",
+        service_path,
     ]
     return ":".join(dict.fromkeys(part for part in path_parts if part))
 
