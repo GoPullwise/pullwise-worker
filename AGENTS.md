@@ -1,5 +1,13 @@
 # Pullwise Worker Agent Notes
 
+## Worker Host Platform
+
+Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,
+update, restart, uninstall, and cleanup changes may assume Linux/systemd
+behavior available on Ubuntu 22.04, including `useradd`, `chown`, `chmod`,
+`sudo`/`runuser`, logrotate, and systemd unit management. Do not add macOS or
+Windows worker installer behavior.
+
 ## Worker Provider Isolation
 
 Each worker instance owns its own Codex and OpenCode runtime state. Do not let a
