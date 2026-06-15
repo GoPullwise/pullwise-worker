@@ -423,10 +423,7 @@ def audit_swarm_payload_from_document(parsed: object) -> dict | None:
         return None
     results = first_list(parsed, "verification_results", "verificationResults") or []
     return {
-        "audit_protocol": clean_protocol_text(
-            parsed.get("audit_protocol") or parsed.get("auditProtocol") or AUDIT_SWARM_PROTOCOL_VERSION
-        )
-        or AUDIT_SWARM_PROTOCOL_VERSION,
+        "audit_protocol": audit_swarm_protocol_text(parsed.get("audit_protocol") or parsed.get("auditProtocol")),
         "issue_cards": [item for item in cards if isinstance(item, dict)],
         "verification_results": [item for item in results if isinstance(item, dict)],
     }
@@ -450,12 +447,23 @@ def empty_audit_swarm_payload() -> dict:
     }
 
 
+def audit_swarm_protocol_text(value: object) -> str:
+    if isinstance(value, str):
+        return clean_protocol_text(value) or AUDIT_SWARM_PROTOCOL_VERSION
+    if isinstance(value, dict):
+        for key in ("audit_protocol", "auditProtocol", "protocol", "version", "id"):
+            text = clean_protocol_text(value.get(key)) if isinstance(value.get(key), str) else ""
+            if text.startswith("audit-swarm/"):
+                return text
+    return AUDIT_SWARM_PROTOCOL_VERSION
+
+
 def merge_audit_swarm_payloads(*payloads: dict) -> dict:
     merged = empty_audit_swarm_payload()
     for payload in payloads:
         if not isinstance(payload, dict):
             continue
-        protocol = clean_protocol_text(payload.get("audit_protocol") or payload.get("auditProtocol"))
+        protocol = audit_swarm_protocol_text(payload.get("audit_protocol") or payload.get("auditProtocol"))
         if protocol:
             merged["audit_protocol"] = protocol
         cards = first_list(payload, "issue_cards", "issueCards") or []

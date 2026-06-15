@@ -579,6 +579,24 @@ func writeHealth() {}
         findings = audit_swarm_findings_from_payload(payload) or []
         self.assertEqual(findings[0]["title"], "Pretty bug")
 
+    def test_parse_audit_swarm_accepts_opencode_json_text_event(self) -> None:
+        payload = parse_audit_swarm_payload(
+            json.dumps(
+                {
+                    "type": "text",
+                    "part": {
+                        "type": "text",
+                        "text": "```json\n"
+                        + json.dumps(audit_payload([issue_card("Event bug", severity="P1")]), indent=2)
+                        + "\n```",
+                    },
+                }
+            )
+        )
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(findings[0]["title"], "Event bug")
+
     def test_audit_swarm_confirmed_verdict_without_evidence_is_not_static_proof(self) -> None:
         payload = audit_payload(
             [issue_card("Unsupported verifier confirmation", issue_id="issue-unsupported")],
@@ -4541,6 +4559,15 @@ func writeHealth() {}
         with self.assertRaisesRegex(RuntimeError, "absolute path inside worker home"):
             worker_main.opencode_review_command(cfg, "prompt")
 
+    def test_opencode_review_command_requests_json_events(self) -> None:
+        cfg = config()
+        configure_instance_provider_commands(cfg)
+
+        command = worker_main.opencode_review_command(cfg, "prompt")
+
+        self.assertIn("--format", command)
+        self.assertEqual(command[command.index("--format") + 1], "json")
+
     def test_run_opencode_review_uses_worker_instance_auth_env(self) -> None:
         cfg = config()
         service_home = configure_instance_provider_commands(cfg)
@@ -4589,6 +4616,30 @@ func writeHealth() {}
         self.assertEqual(findings[0]["title"], "Stderr bug")
         self.assertEqual(summary["high"], 1)
         self.assertIn("OpenCode result", logs)
+
+    def test_run_opencode_review_parses_sisyphus_output_file(self) -> None:
+        cfg = config()
+        configure_instance_provider_commands(cfg)
+        completed = Mock(
+            returncode=0,
+            stdout="Audit Swarm complete. The JSON output has been written to `.sisyphus/audit-swarm-output.json`.",
+            stderr="",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", return_value=completed):
+            checkout = Path(tmp)
+            output_dir = checkout / ".sisyphus"
+            output_dir.mkdir()
+            (output_dir / "audit-swarm-output.json").write_text(
+                json.dumps(audit_payload([issue_card("File bug", severity="P1")])),
+                encoding="utf-8",
+            )
+            payload, summary, logs, _usage = run_opencode_provider_review(cfg, {"repo": "acme/api"}, checkout)
+
+        findings = audit_swarm_findings_from_payload(payload) or []
+        self.assertEqual(findings[0]["title"], "File bug")
+        self.assertEqual(summary["high"], 1)
+        self.assertIn(".sisyphus/audit-swarm-output.json", logs)
 
     def test_run_codex_review_invokes_codex_exec_and_parses_audit_swarm_payload(self) -> None:
         def fake_run(command: list[str], **_kwargs: object) -> Mock:

@@ -38,6 +38,7 @@ Required environment:
 - `PULLWISE_CODEX_MODEL` optional, defaults to `gpt-5.5`
 - `PULLWISE_CODEX_REASONING_EFFORT` optional, defaults to `medium`
 - `PULLWISE_OPENCODE_COMMAND` optional, defaults to `/var/lib/pullwise-worker/.opencode/bin/opencode`
+- `PULLWISE_OPENCODE_VERSION` optional during install, defaults to `1.15.10`
 - `PULLWISE_OPENCODE_VARIANT` optional, defaults to `medium`; use this for OpenCode provider-specific reasoning effort
 - `PULLWISE_CODEX_TIMEOUT_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
@@ -69,6 +70,7 @@ Production local capability example:
 ```bash
 PULLWISE_PROVIDER_CHAIN=opencode,codex
 PULLWISE_OPENCODE_COMMAND=/var/lib/pullwise-worker/.opencode/bin/opencode
+PULLWISE_OPENCODE_VERSION=1.15.10
 PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/.codex/bin/codex
 PULLWISE_CODEX_MODEL=gpt-5.5
 PULLWISE_CODEX_REASONING_EFFORT=medium
