@@ -216,7 +216,19 @@ class Worker:
                     concurrent.futures.wait(running)
                     collect_finished_jobs([future for future in running if future.done()])
                     return
-                time.sleep(self.next_poll_sleep(claimed_jobs=claimed_jobs, loop_error=loop_error, free_slots=free_slots))
+                sleep_seconds = self.next_poll_sleep(
+                    claimed_jobs=claimed_jobs,
+                    loop_error=loop_error,
+                    free_slots=free_slots,
+                )
+                if running:
+                    concurrent.futures.wait(
+                        list(running),
+                        timeout=sleep_seconds,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                else:
+                    time.sleep(sleep_seconds)
 
     def machine_metrics_if_due(self) -> dict | None:
         current = time.time()

@@ -3878,6 +3878,46 @@ func writeHealth() {}
         self.assertEqual(worker.client.heartbeat.call_args.kwargs["running_jobs"], 1)
         self.assertEqual(worker.client.heartbeat.call_args.kwargs["active_job_ids"], ["job_2"])
 
+    def test_loop_wakes_to_refill_when_job_finishes_during_poll_wait(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        worker = Worker(config())
+        worker.config.max_concurrent_jobs = 2
+        worker.config.max_claim_jobs = 4
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        release_jobs = threading.Event()
+        claim_limits: list[int] = []
+
+        def claim_many(limit: int) -> list[dict]:
+            claim_limits.append(limit)
+            if len(claim_limits) == 1:
+                return [{"job_id": "job_1"}, {"job_id": "job_2"}]
+            if len(claim_limits) == 2:
+                release_jobs.set()
+                return [{"job_id": "job_3"}]
+            raise StopLoop()
+
+        def run_job(job: dict) -> None:
+            if job["job_id"] == "job_1":
+                return
+            release_jobs.wait(2)
+
+        def sleep_should_not_block_running_jobs(_seconds: float) -> None:
+            release_jobs.set()
+            raise StopLoop()
+
+        worker.client.claim_many.side_effect = claim_many
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch.object(worker, "run_job", side_effect=run_job), \
+            patch("pullwise_worker.main.time.sleep", side_effect=sleep_should_not_block_running_jobs):
+            with self.assertRaises(StopLoop):
+                worker.run()
+
+        self.assertEqual(claim_limits[:2], [2, 1])
+
     def test_loop_reports_active_job_ids_on_heartbeat(self) -> None:
         class StopLoop(Exception):
             pass
