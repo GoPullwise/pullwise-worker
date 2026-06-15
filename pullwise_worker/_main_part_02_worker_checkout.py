@@ -69,15 +69,10 @@ def effective_agent_config_payload(config: WorkerConfig, provider: object = None
         or normalized_agent_provider(getattr(config, "provider", ""))
         or "codex"
     )
-    if selected_provider == "opencode":
-        cli = effective_agent_config_value(getattr(config, "opencode_command", ""))
-        model = effective_agent_config_value(getattr(config, "opencode_model", ""))
-        reasoning_effort = normalized_agent_reasoning_level(getattr(config, "opencode_variant", ""))
-    else:
-        selected_provider = "codex"
-        cli = effective_agent_config_value(getattr(config, "codex_command", ""))
-        model = effective_agent_config_value(getattr(config, "codex_model", ""))
-        reasoning_effort = normalized_agent_reasoning_level(getattr(config, "codex_reasoning_effort", ""))
+    selected_provider = "codex"
+    cli = effective_agent_config_value(getattr(config, "codex_command", ""))
+    model = effective_agent_config_value(getattr(config, "codex_model", ""))
+    reasoning_effort = normalized_agent_reasoning_level(getattr(config, "codex_reasoning_effort", ""))
     return {
         "provider": selected_provider,
         "providerChain": provider_chain or [selected_provider],
@@ -96,13 +91,6 @@ def effective_agent_config_payload(config: WorkerConfig, provider: object = None
             "model": effective_agent_config_value(getattr(config, "codex_model", "")),
             "reasoningEffort": normalized_agent_reasoning_level(getattr(config, "codex_reasoning_effort", "")),
         },
-        "opencode": {
-            "cli": effective_agent_config_value(getattr(config, "opencode_command", "")),
-            "command": effective_agent_config_value(getattr(config, "opencode_command", "")),
-            "model": effective_agent_config_value(getattr(config, "opencode_model", "")),
-            "variant": normalized_agent_reasoning_level(getattr(config, "opencode_variant", "")),
-            "reasoningEffort": normalized_agent_reasoning_level(getattr(config, "opencode_variant", "")),
-        },
     }
 
 
@@ -114,20 +102,15 @@ def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
     if not isinstance(repository_limits, dict):
         raise RuntimeError("Worker job is missing server repositoryLimits.")
     codex = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
-    opencode = agent_config.get("opencode") if isinstance(agent_config.get("opencode"), dict) else {}
     max_repo_files = normalized_positive_int(repository_limits.get("maxFiles"))
     max_repo_bytes = normalized_positive_int(repository_limits.get("maxBytes"))
     provider_chain = normalized_agent_provider_chain(agent_config.get("providerChain"))
     codex_model = normalized_agent_config_text(codex.get("model"))
     codex_reasoning_effort = normalized_agent_reasoning_level(codex.get("reasoningEffort"))
-    opencode_model = normalized_agent_config_text(opencode.get("model"))
-    opencode_variant = normalized_agent_reasoning_level(opencode.get("variant"))
     if not provider_chain:
         raise RuntimeError("Worker job agentConfig.providerChain is required.")
     if "codex" in provider_chain and not (codex_model and codex_reasoning_effort):
         raise RuntimeError("Worker job agentConfig.codex model and reasoningEffort are required.")
-    if "opencode" in provider_chain and not (opencode_model and opencode_variant):
-        raise RuntimeError("Worker job agentConfig.opencode model and variant are required.")
     if not max_repo_files or not max_repo_bytes:
         raise RuntimeError("Worker job repositoryLimits.maxFiles and maxBytes are required.")
     config = copy.copy(base_config)
@@ -137,10 +120,6 @@ def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
         config.codex_model = codex_model
     if codex_reasoning_effort:
         config.codex_reasoning_effort = codex_reasoning_effort
-    if opencode_model:
-        config.opencode_model = opencode_model
-    if opencode_variant:
-        config.opencode_variant = opencode_variant
     config.max_repo_files = max_repo_files
     config.max_repo_bytes = max_repo_bytes
     return config
@@ -154,7 +133,6 @@ class Worker:
         self._readiness_checked_at = 0.0
         self._doctor_status = "not_ready"
         self._codex_ready = False
-        self._opencode_ready = False
         self._ready_providers: list[str] = []
         self._empty_poll_count = 0
         self._error_poll_count = 0
@@ -198,7 +176,6 @@ class Worker:
                         last_error=self.last_error,
                         doctor_status=self._doctor_status,
                         codex_ready=self._codex_ready,
-                        opencode_ready=self._opencode_ready,
                         ready_providers=self._ready_providers,
                         doctor_checked_at=int(self._readiness_checked_at) if self._readiness_checked_at else None,
                         machine_metrics=machine_metrics,
@@ -324,7 +301,6 @@ class Worker:
         checks, _provider_ready, ready_providers = worker_readiness_state(self.config)
         failed_check = first_failed_check(checks)
         self._codex_ready = readiness_check_ok(checks, "codex_ready")
-        self._opencode_ready = readiness_check_ok(checks, "opencode_ready")
         self._ready_providers = ready_providers
         self._doctor_status = "degraded" if failed_check else "ok"
         self._readiness_checked_at = current

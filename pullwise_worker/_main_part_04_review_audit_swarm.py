@@ -12,12 +12,11 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
     except Exception as exc:
         deterministic_payload = empty_audit_swarm_payload()
         errors.append(f"deterministic: {redact_secrets(str(exc), config)}"[:500])
-    for provider in config.provider_chain:
+    provider_chain = config.provider_chain or ["codex"]
+    for provider in provider_chain:
         try:
             if provider == "codex":
                 provider_result = run_codex_provider_review(config, job, checkout_dir)
-            elif provider == "opencode":
-                provider_result = run_opencode_provider_review(config, job, checkout_dir)
             else:
                 raise RuntimeError(f"unsupported review provider: {provider}")
             audit_payload, _summary, logs_summary = provider_result[:3]
@@ -113,10 +112,6 @@ def codex_ai_usage(_raw_output: str, config: WorkerConfig) -> dict:
     return ai_usage_payload(config.codex_model)
 
 
-def opencode_ai_usage(_raw_output: str, config: WorkerConfig) -> dict:
-    return ai_usage_payload(config.opencode_model)
-
-
 def ai_usage_payload(model: object) -> dict:
     clean_model = clean_protocol_text(model)
     return {"model": clean_model} if clean_model else {}
@@ -183,46 +178,6 @@ def codex_review_command(config: WorkerConfig, schema_path: str, output_path: st
     ]
     if config.codex_model:
         command.extend(["--model", config.codex_model])
-    command.append(prompt)
-    return command
-
-
-def run_opencode_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str, dict]:
-    prompt = review_prompt(job)
-    command = opencode_review_command(config, prompt)
-    completed = subprocess.run(
-        command,
-        cwd=str(checkout_dir),
-        env=provider_process_env(config),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=config.codex_timeout_seconds,
-    )
-    raw_logs = "\n".join([completed.stdout or "", completed.stderr or ""])
-    logs_summary = redact_secrets(raw_logs[-1000:], config)
-    if completed.returncode != 0:
-        raise RuntimeError(f"opencode run failed with exit code {completed.returncode}: {logs_summary[:300]}")
-    audit_payload, output_source = parse_opencode_audit_payload(raw_logs, checkout_dir)
-    if output_source:
-        logs_summary = redact_secrets("\n".join([logs_summary, output_source])[-1000:], config)
-    return (
-        audit_payload,
-        summarize(audit_swarm_findings_from_payload(audit_payload) or []),
-        logs_summary,
-        opencode_ai_usage("\n".join([completed.stdout or "", completed.stderr or ""]), config),
-    )
-
-
-def opencode_review_command(config: WorkerConfig, prompt: str) -> list[str]:
-    scope_ok, scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
-    if not scope_ok:
-        raise RuntimeError(scope_detail)
-    command = [config.opencode_command, "run", "--format", "json"]
-    if config.opencode_model:
-        command.extend(["--model", config.opencode_model])
-    if config.opencode_variant:
-        command.extend(["--variant", config.opencode_variant])
     command.append(prompt)
     return command
 
@@ -326,34 +281,6 @@ def parse_audit_swarm_payload(output: str) -> dict:
     if matched is not None:
         return matched
     raise RuntimeError("review provider did not return an Audit Swarm payload")
-
-
-def parse_opencode_audit_payload(output: str, checkout_dir: Path) -> tuple[dict, str]:
-    parse_error: RuntimeError | None = None
-    try:
-        return parse_audit_swarm_payload(output), ""
-    except RuntimeError as exc:
-        parse_error = exc
-
-    for relative_path in opencode_audit_output_paths():
-        path = checkout_dir / relative_path
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        try:
-            payload = parse_audit_swarm_payload(text)
-        except RuntimeError:
-            continue
-        return payload, f"OpenCode Audit Swarm payload loaded from {relative_path.as_posix()}"
-    raise parse_error
-
-
-def opencode_audit_output_paths() -> tuple[Path, ...]:
-    return (
-        Path(".sisyphus") / "audit-swarm-output.json",
-        Path("audit-swarm-output.json"),
-    )
 
 
 def audit_swarm_json_documents(output: object) -> list[object]:

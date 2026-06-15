@@ -53,20 +53,16 @@ _CHECKOUT_RUNTIME_DIR_NAMES = {_VERIFIER_HOME_DIR_NAME, _VERIFIER_TMP_DIR_NAME}
 _PROC_MEMINFO_PATH = "/proc/meminfo"
 DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
-SUPPORTED_REVIEW_PROVIDERS = {"codex", "opencode"}
+SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
-DEFAULT_OPENCODE_MODEL = "opencode/big-pickle"
-DEFAULT_OPENCODE_VARIANT = "medium"
 DEFAULT_SERVICE_NAME = "pullwise-worker"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
 DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/.codex/bin/codex"
-DEFAULT_OPENCODE_COMMAND = f"{DEFAULT_SERVICE_HOME}/.opencode/bin/opencode"
 DEFAULT_PROVIDER_AUTH_PATH = (
-    f"{DEFAULT_SERVICE_HOME}/.local/bin:{DEFAULT_SERVICE_HOME}/.codex/bin:"
-    f"{DEFAULT_SERVICE_HOME}/.opencode/bin:{DEFAULT_SERVICE_PATH}"
+    f"{DEFAULT_SERVICE_HOME}/.local/bin:{DEFAULT_SERVICE_HOME}/.codex/bin:{DEFAULT_SERVICE_PATH}"
 )
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "LANG",
@@ -111,16 +107,6 @@ CODEX_LOGIN_COMMAND = (
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
     f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_CODEX_COMMAND} login --device-auth'"
 )
-OPENCODE_AUTH_COMMAND = (
-    f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
-    f"USERPROFILE={DEFAULT_SERVICE_HOME} "
-    f"CODEX_HOME={DEFAULT_SERVICE_HOME}/.codex "
-    f"XDG_CONFIG_HOME={DEFAULT_SERVICE_HOME}/.config "
-    f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/.cache "
-    f"XDG_DATA_HOME={DEFAULT_SERVICE_HOME}/.local/share "
-    f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
-    f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_OPENCODE_COMMAND} auth login'"
-)
 _CODEX_AUTH_FAILURE_MARKERS = (
     "401 Unauthorized",
     "Failed to refresh token",
@@ -159,7 +145,6 @@ def provider_tool_path(config: WorkerConfig | None) -> str:
     path_parts = [
         f"{service_home}/.local/bin",
         f"{service_home}/.codex/bin",
-        f"{service_home}/.opencode/bin",
         service_path,
     ]
     return ":".join(dict.fromkeys(part for part in path_parts if part))
@@ -188,10 +173,6 @@ def provider_process_env(config: WorkerConfig) -> dict[str, str]:
 
 def codex_login_command(config: WorkerConfig) -> str:
     return service_user_command(config, [config.codex_command, "login", "--device-auth"])
-
-
-def opencode_auth_command(config: WorkerConfig) -> str:
-    return service_user_command(config, [config.opencode_command, "auth", "login"])
 
 
 def default_provider_command(service_home: str, provider: str) -> str:
@@ -466,16 +447,12 @@ class WorkerConfig:
             or f"/etc/logrotate.d/{self.service_name}"
         )
         default_codex_command = default_provider_command(self.service_home, "codex")
-        default_opencode_command = default_provider_command(self.service_home, "opencode")
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or default_codex_command
         self.codex_model = os.environ.get("PULLWISE_CODEX_MODEL", DEFAULT_CODEX_MODEL).strip() or DEFAULT_CODEX_MODEL
         self.codex_reasoning_effort = (
             os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", DEFAULT_CODEX_REASONING_EFFORT).strip()
             or DEFAULT_CODEX_REASONING_EFFORT
         )
-        self.opencode_command = os.environ.get("PULLWISE_OPENCODE_COMMAND", default_opencode_command).strip() or default_opencode_command
-        self.opencode_model = DEFAULT_OPENCODE_MODEL
-        self.opencode_variant = os.environ.get("PULLWISE_OPENCODE_VARIANT", DEFAULT_OPENCODE_VARIANT).strip() or DEFAULT_OPENCODE_VARIANT
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
         self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
         self.codex_auth_failure_cooldown_seconds = max(0, int(os.environ.get("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS") or 3600))
@@ -620,7 +597,6 @@ class PullwiseClient:
         last_error: str | None = None,
         doctor_status: str | None = None,
         codex_ready: bool | None = None,
-        opencode_ready: bool | None = None,
         ready_providers: list[str] | None = None,
         systemd_active: bool | None = None,
         doctor_checked_at: int | None = None,
@@ -638,7 +614,6 @@ class PullwiseClient:
             "last_error": last_error,
             "doctor_status": doctor_status,
             "codex_ready": codex_ready,
-            "opencode_ready": opencode_ready,
             "systemd_active": systemd_active,
             "doctor_checked_at": doctor_checked_at,
         }

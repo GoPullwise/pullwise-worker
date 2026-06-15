@@ -280,12 +280,6 @@ def worker_tool_versions(config: WorkerConfig, package_managers: list[str] | Non
             results.append(safe_tool_version("codex", [config.codex_command, "--version"]))
         else:
             results.append(scoped_tool_version_failure("codex", [config.codex_command, "--version"], scope_detail))
-    if "opencode" in config.provider_chain:
-        scope_ok, scope_detail = provider_command_scope_check(config.opencode_command, config, "OpenCode")
-        if scope_ok:
-            results.append(safe_tool_version("opencode", [config.opencode_command, "--version"]))
-        else:
-            results.append(scoped_tool_version_failure("opencode", [config.opencode_command, "--version"], scope_detail))
     return results
 
 
