@@ -3836,6 +3836,48 @@ func writeHealth() {}
 
         worker.client.claim_many.assert_called_once_with(2)
 
+    def test_loop_refills_single_free_slot_after_job_finishes(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        worker = Worker(config())
+        worker.config.max_concurrent_jobs = 2
+        worker.config.max_claim_jobs = 4
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.side_effect = [
+            [{"job_id": "job_1"}, {"job_id": "job_2"}],
+            [{"job_id": "job_3"}],
+        ]
+        release_jobs = threading.Event()
+        first_job_finished = threading.Event()
+        sleep_calls = 0
+
+        def run_job(job: dict) -> None:
+            if job["job_id"] == "job_1":
+                first_job_finished.set()
+                return
+            release_jobs.wait(2)
+
+        def sleep_until_refill_then_stop(_seconds: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 1:
+                self.assertTrue(first_job_finished.wait(2))
+                return
+            release_jobs.set()
+            raise StopLoop()
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch.object(worker, "run_job", side_effect=run_job), \
+            patch("pullwise_worker.main.time.sleep", side_effect=sleep_until_refill_then_stop):
+            with self.assertRaises(StopLoop):
+                worker.run()
+
+        self.assertEqual([call.args[0] for call in worker.client.claim_many.call_args_list], [2, 1])
+        self.assertEqual(worker.client.heartbeat.call_args.kwargs["running_jobs"], 1)
+        self.assertEqual(worker.client.heartbeat.call_args.kwargs["active_job_ids"], ["job_2"])
+
     def test_loop_reports_active_job_ids_on_heartbeat(self) -> None:
         class StopLoop(Exception):
             pass
