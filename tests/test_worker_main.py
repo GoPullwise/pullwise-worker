@@ -5097,6 +5097,35 @@ func writeHealth() {}
         self.assertIn("auth login", command)
         self.assertNotIn("--provider", command)
 
+    def test_provider_auth_commands_fall_back_to_worker_instance_cli_paths(self) -> None:
+        cfg = config()
+        cfg.service_home = "/var/lib/pullwise-worker/wk_instance"
+        cfg.codex_command = "codex"
+        cfg.opencode_command = "opencode"
+
+        codex_command = worker_main.codex_login_command(cfg)
+        opencode_command = worker_main.opencode_auth_command(cfg)
+
+        self.assertIn("/var/lib/pullwise-worker/wk_instance/.codex/bin/codex", codex_command)
+        self.assertIn("/var/lib/pullwise-worker/wk_instance/.opencode/bin/opencode", opencode_command)
+        self.assertNotIn("exec codex login", codex_command)
+        self.assertNotIn("exec opencode auth", opencode_command)
+
+    def test_provider_process_env_prefers_worker_instance_cli_dirs(self) -> None:
+        cfg = config()
+        cfg.service_home = "/var/lib/pullwise-worker/wk_instance"
+        cfg.service_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+        path = worker_main.provider_process_env(cfg)["PATH"]
+
+        self.assertTrue(
+            path.startswith(
+                "/var/lib/pullwise-worker/wk_instance/.local/bin:"
+                "/var/lib/pullwise-worker/wk_instance/.codex/bin:"
+                "/var/lib/pullwise-worker/wk_instance/.opencode/bin:"
+            )
+        )
+
     def test_opencode_auth_check_rejects_global_command_without_subprocess(self) -> None:
         cfg = config()
         cfg.opencode_command = "opencode"
@@ -5801,6 +5830,8 @@ func writeHealth() {}
         self.assertNotIn("PULLWISE_PROVIDER_CHAIN=", env_template)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
+        self.assertIn("PULLWISE_OPENCODE_COMMAND=/var/lib/pullwise-worker/.opencode/bin/opencode", env_template)
+        self.assertNotIn("PULLWISE_OPENCODE_COMMAND=opencode", env_template)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
         self.assertNotIn("PULLWISE_OPENCODE_MODEL", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODE=shadow", env_template)
