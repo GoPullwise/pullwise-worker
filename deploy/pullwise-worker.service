@@ -1,20 +1,31 @@
+# Render this template per worker instance before installing it as
+# /etc/systemd/system/$PULLWISE_SERVICE_NAME.service.
 [Unit]
-Description=Pullwise Worker
+Description=Pullwise Worker __PULLWISE_WORKER_ID__
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=pullwise-worker
-Group=pullwise-worker
-EnvironmentFile=/etc/pullwise-worker/worker.env
-ExecStart=/usr/local/bin/pullwise-worker run
+User=__PULLWISE_SERVICE_USER__
+Group=__PULLWISE_SERVICE_USER__
+SupplementaryGroups=pullwise-worker
+WorkingDirectory=__PULLWISE_SERVICE_HOME__
+EnvironmentFile=__PULLWISE_WORKER_ENV_FILE__
+Environment=PATH=__PULLWISE_SERVICE_HOME__/.local/bin:__PULLWISE_SERVICE_HOME__/.codex/bin:__PULLWISE_SERVICE_HOME__/.opencode/bin:__PULLWISE_SERVICE_PATH__
+Environment=HOME=__PULLWISE_SERVICE_HOME__
+Environment=USERPROFILE=__PULLWISE_SERVICE_HOME__
+Environment=CODEX_HOME=__PULLWISE_SERVICE_HOME__/.codex
+Environment=XDG_CONFIG_HOME=__PULLWISE_SERVICE_HOME__/.config
+Environment=XDG_CACHE_HOME=__PULLWISE_SERVICE_HOME__/.cache
+Environment=XDG_DATA_HOME=__PULLWISE_SERVICE_HOME__/.local/share
+ExecStart=__PULLWISE_WORKER_BIN_PATH__ run
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker
+ReadWritePaths=__PULLWISE_SERVICE_HOME__ __PULLWISE_LOG_DIR__
 
 [Install]
 WantedBy=multi-user.target

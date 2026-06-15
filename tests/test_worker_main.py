@@ -5889,11 +5889,22 @@ func writeHealth() {}
         )
         env_template = (deploy_root / "worker.env.template").read_text(encoding="utf-8")
         service = (deploy_root / "pullwise-worker.service").read_text(encoding="utf-8")
+        logrotate = (deploy_root / "logrotate.conf").read_text(encoding="utf-8")
         self.assertNotIn("PULLWISE_PROVIDER_CHAIN=", env_template)
+        self.assertIn("PULLWISE_SERVICE_NAME=pullwise-worker-wk_replace_me", env_template)
+        self.assertIn("PULLWISE_SERVICE_HOME=/var/lib/pullwise-worker/wk_replace_me", env_template)
+        self.assertIn("PULLWISE_WORKER_ENV_FILE=/etc/pullwise-worker/wk_replace_me/worker.env", env_template)
+        self.assertIn("PULLWISE_WORKER_BIN_PATH=/usr/local/bin/pullwise-worker-wk_replace_me", env_template)
+        self.assertIn("PULLWISE_CHECKOUT_ROOT=/var/lib/pullwise-worker/wk_replace_me/checkouts", env_template)
+        self.assertIn("PULLWISE_LOG_DIR=/var/log/pullwise-worker/wk_replace_me", env_template)
+        self.assertIn("PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/wk_replace_me/.codex/bin/codex", env_template)
         self.assertIn("PULLWISE_CODEX_MODEL=gpt-5.5", env_template)
         self.assertIn("PULLWISE_CODEX_REASONING_EFFORT=medium", env_template)
-        self.assertIn("PULLWISE_OPENCODE_COMMAND=/var/lib/pullwise-worker/.opencode/bin/opencode", env_template)
+        self.assertIn("PULLWISE_OPENCODE_COMMAND=/var/lib/pullwise-worker/wk_replace_me/.opencode/bin/opencode", env_template)
         self.assertNotIn("PULLWISE_OPENCODE_COMMAND=opencode", env_template)
+        self.assertNotIn("PULLWISE_CHECKOUT_ROOT=/var/lib/pullwise-worker/checkouts", env_template)
+        self.assertNotIn("PULLWISE_LOG_DIR=/var/log/pullwise-worker\n", env_template)
+        self.assertNotIn("PULLWISE_OPENCODE_COMMAND=/var/lib/pullwise-worker/.opencode/bin/opencode", env_template)
         self.assertIn("PULLWISE_OPENCODE_VARIANT=medium", env_template)
         self.assertNotIn("PULLWISE_OPENCODE_MODEL", env_template)
         self.assertIn("PULLWISE_REVIEW_CALIBRATION_MODE=shadow", env_template)
@@ -5921,9 +5932,27 @@ func writeHealth() {}
             "PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW",
         ):
             self.assertIn(key, env_template)
+        self.assertIn("EnvironmentFile=__PULLWISE_WORKER_ENV_FILE__", service)
+        self.assertIn("ExecStart=__PULLWISE_WORKER_BIN_PATH__ run", service)
+        self.assertIn(
+            "Environment=PATH=__PULLWISE_SERVICE_HOME__/.local/bin:__PULLWISE_SERVICE_HOME__/.codex/bin:__PULLWISE_SERVICE_HOME__/.opencode/bin:",
+            service,
+        )
         self.assertIn("Restart=on-failure", service)
         self.assertNotIn("Restart=always", service)
-        self.assertIn("ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker", service)
+        self.assertIn("ReadWritePaths=__PULLWISE_SERVICE_HOME__ __PULLWISE_LOG_DIR__", service)
+        self.assertNotIn("EnvironmentFile=/etc/pullwise-worker/worker.env", service)
+        self.assertNotIn("ExecStart=/usr/local/bin/pullwise-worker run", service)
+        self.assertNotIn("ReadWritePaths=/var/lib/pullwise-worker /var/log/pullwise-worker", service)
+        self.assertIn("__PULLWISE_LOG_DIR__/*.log", logrotate)
+        self.assertIn("create 0640 __PULLWISE_SERVICE_USER__ __PULLWISE_SERVICE_USER__", logrotate)
+        self.assertNotIn("/var/log/pullwise-worker/*.log", logrotate)
+        for script_name in ("cleanup-checkouts.sh", "update-worker.sh", "restart-worker.sh", "uninstall-worker.sh"):
+            script = (deploy_root / script_name).read_text(encoding="utf-8")
+            self.assertIn("PULLWISE_WORKER_ENV_FILE", script)
+            self.assertIn("PULLWISE_WORKER_BIN_PATH", script)
+            self.assertIn('exec "$PULLWISE_WORKER_BIN_PATH"', script)
+            self.assertNotIn("/usr/local/bin/pullwise-worker ", script)
 
 
 if __name__ == "__main__":
