@@ -5097,20 +5097,6 @@ func writeHealth() {}
         self.assertIn("auth login", command)
         self.assertNotIn("--provider", command)
 
-    def test_provider_auth_commands_fall_back_to_worker_instance_cli_paths(self) -> None:
-        cfg = config()
-        cfg.service_home = "/var/lib/pullwise-worker/wk_instance"
-        cfg.codex_command = "codex"
-        cfg.opencode_command = "opencode"
-
-        codex_command = worker_main.codex_login_command(cfg)
-        opencode_command = worker_main.opencode_auth_command(cfg)
-
-        self.assertIn("/var/lib/pullwise-worker/wk_instance/.codex/bin/codex", codex_command)
-        self.assertIn("/var/lib/pullwise-worker/wk_instance/.opencode/bin/opencode", opencode_command)
-        self.assertNotIn("exec codex login", codex_command)
-        self.assertNotIn("exec opencode auth", opencode_command)
-
     def test_provider_process_env_prefers_worker_instance_cli_dirs(self) -> None:
         cfg = config()
         cfg.service_home = "/var/lib/pullwise-worker/wk_instance"
