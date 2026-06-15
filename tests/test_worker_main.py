@@ -4386,6 +4386,26 @@ func writeHealth() {}
             with self.assertRaisesRegex(RuntimeError, "sandbox_unavailable.*Sandbox helper failed"):
                 run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
 
+    def test_run_codex_review_surfaces_final_stderr_line_when_prompt_is_long(self) -> None:
+        cfg = config()
+        prompt_context = "\n".join(
+            [
+                "Impact context:",
+                *[
+                    f"- src/file_{index}.jsx -> tests: none detected; docs: README.md; config: package.json."
+                    for index in range(30)
+                ],
+            ]
+        )
+        codex_stderr = f"{prompt_context}\nthread 'main' panicked at codex-runner: schema output was not produced"
+
+        with patch(
+            "pullwise_worker.main.subprocess.run",
+            return_value=Mock(returncode=1, stdout="", stderr=codex_stderr),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "schema output was not produced"):
+                run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
+
     def test_job_checkout_dir_refuses_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp) / "work"

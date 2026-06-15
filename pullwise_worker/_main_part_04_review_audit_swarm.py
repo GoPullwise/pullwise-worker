@@ -32,7 +32,7 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
                 logs_summary = "\n".join([*errors, logs_summary])[-1000:]
             return audit_payload, summary, logs_summary
         except Exception as exc:
-            errors.append(f"{provider}: {redact_secrets(str(exc), config)}"[:500])
+            errors.append(compact_review_provider_error(provider, exc, config))
     raise RuntimeError(f"all review providers failed: {'; '.join(errors)}")
 
 
@@ -99,7 +99,9 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
         raw_logs = "\n".join([completed.stdout or "", completed.stderr or ""])
         logs_summary = redact_secrets(raw_logs[-1000:], config)
         if completed.returncode != 0:
-            detail = codex_failure_detail(completed.stderr or completed.stdout, config)
+            failure_output = completed.stderr or completed.stdout
+            failure_stream = "stderr" if completed.stderr else "stdout"
+            detail = codex_failure_detail(failure_output, config, stream_name=failure_stream)
             if looks_like_codex_auth_failure(detail):
                 mark_codex_auth_failure(config, detail)
             raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {detail[:700]}")
@@ -123,10 +125,34 @@ def normalize_ai_usage(value: object) -> dict:
     return ai_usage_payload(value.get("model"))
 
 
-def codex_failure_detail(raw_output: str, config: WorkerConfig) -> str:
+def codex_failure_detail(raw_output: str, config: WorkerConfig, *, stream_name: str = "") -> str:
     structured = extract_codex_error_detail(raw_output)
-    raw_detail = structured or (raw_output or "").strip()[-1000:] or "no stderr/stdout"
+    raw_detail = structured or compact_codex_failure_output(raw_output, stream_name=stream_name) or "no stderr/stdout"
     return redact_secrets(raw_detail, config)
+
+
+def compact_review_provider_error(provider: str, exc: Exception, config: WorkerConfig, limit: int = 500) -> str:
+    prefix = f"{provider}: "
+    detail = redact_secrets(str(exc), config)
+    body_limit = max(1, limit - len(prefix))
+    if len(detail) > body_limit:
+        detail = detail[-body_limit:].lstrip()
+    return f"{prefix}{detail}"
+
+
+def compact_codex_failure_output(raw_output: str, *, stream_name: str = "", limit: int = 700) -> str:
+    text = (raw_output or "").strip()
+    if not text:
+        return ""
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    prefix = f"{stream_name}: " if stream_name else ""
+    body_limit = max(1, limit - len(prefix))
+    detail = "\n".join(lines[-8:])
+    if len(detail) > body_limit:
+        detail = detail[-body_limit:].lstrip()
+    return f"{prefix}{detail}"
 
 
 def extract_codex_error_detail(raw_output: str) -> str | None:
