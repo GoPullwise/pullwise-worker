@@ -65,7 +65,6 @@ Codex `exec` calls are serialized inside the worker because Codex keeps local lo
 Production local capability example:
 
 ```bash
-PULLWISE_PROVIDER_CHAIN=opencode,codex
 PULLWISE_PROVIDER_CHAIN=codex
 PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/.codex/bin/codex
 PULLWISE_CODEX_MODEL=gpt-5.5
