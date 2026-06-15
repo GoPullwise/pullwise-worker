@@ -12,7 +12,7 @@ Group=__PULLWISE_SERVICE_USER__
 SupplementaryGroups=pullwise-worker
 WorkingDirectory=__PULLWISE_SERVICE_HOME__
 EnvironmentFile=__PULLWISE_WORKER_ENV_FILE__
-Environment=PATH=__PULLWISE_SERVICE_HOME__/.local/bin:__PULLWISE_SERVICE_HOME__/.codex/bin:__PULLWISE_SERVICE_HOME__/.opencode/bin:__PULLWISE_SERVICE_PATH__
+Environment=PATH=__PULLWISE_SERVICE_HOME__/.local/bin:__PULLWISE_SERVICE_HOME__/.codex/bin:__PULLWISE_SERVICE_PATH__
 Environment=HOME=__PULLWISE_SERVICE_HOME__
 Environment=USERPROFILE=__PULLWISE_SERVICE_HOME__
 Environment=CODEX_HOME=__PULLWISE_SERVICE_HOME__/.codex
