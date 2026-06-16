@@ -1740,6 +1740,28 @@ func writeHealth() {}
         self.assertEqual(rejected_reasons, {"missing_false_positive_check": 1})
         self.assertEqual(rejected_samples[0]["title"], "Self verified vacuous output candidate")
 
+    def test_reportability_filter_rejects_verified_runtime_result_without_location(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Verified result without location",
+                    "evidence": [
+                        {
+                            "summary": "The focused command exits non-zero.",
+                            "command": "pytest tests/test_checkout.py",
+                            "exitCode": 1,
+                            "output": "FAILED tests/test_checkout.py::test_checkout",
+                        }
+                    ],
+                    "verificationStatus": "verified",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_location": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Verified result without location")
+
     def test_reportability_filter_rejects_verified_reproduction_command_without_false_positive_check(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [
