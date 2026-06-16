@@ -522,7 +522,7 @@ func writeHealth() {}
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--ignore-rules", command)
         self.assertIn("--ephemeral", command)
-        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
         self.assertEqual(command[command.index("--cd") + 1], ".")
         env = run.call_args.kwargs["env"]
         self.assertEqual(env["HOME"], str(service_home))
@@ -1765,6 +1765,60 @@ func writeHealth() {}
         self.assertEqual(findings, [])
         self.assertEqual(rejected_reasons, {"missing_evidence": 1})
         self.assertEqual(rejected_samples[0]["title"], "Bare reproduction command")
+
+    def test_reportability_filter_rejects_agent_reproduction_without_runtime_result(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Agent command without result",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "evidence": [
+                        {
+                            "summary": "The focused checkout regression command reproduces the bug.",
+                            "command": "pytest tests/test_checkout.py",
+                            "file": "src/app.py",
+                            "startLine": 12,
+                        }
+                    ],
+                    "reproduction": {"commands": ["pytest tests/test_checkout.py"]},
+                    "whyNotFalsePositive": ["The focused command should reproduce the failure."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_runtime_evidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Agent command without result")
+
+    def test_reportability_filter_accepts_agent_reproduction_with_runtime_result(self) -> None:
+        findings, rejected_reasons, _rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Agent reproduced checkout bug",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "evidence": [
+                        {
+                            "summary": "The focused checkout regression command exits non-zero.",
+                            "command": "pytest tests/test_checkout.py",
+                            "exitCode": 1,
+                            "outputRedacted": True,
+                            "logPath": "agent-reproduction/job-1/checkout.log",
+                            "file": "src/app.py",
+                            "startLine": 12,
+                        }
+                    ],
+                    "reproduction": {"commands": ["pytest tests/test_checkout.py"]},
+                    "whyNotFalsePositive": ["The focused command was executed and failed in the job workspace."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual([finding["title"] for finding in findings], ["Agent reproduced checkout bug"])
+        self.assertEqual(rejected_reasons, {})
 
     def test_reportability_filter_rejects_version_reproduction_command(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
@@ -4625,8 +4679,9 @@ func writeHealth() {}
         self.assertIn("--ephemeral", command)
         self.assertEqual(command[command.index("--config") + 1], 'model_reasoning_effort="medium"')
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.5")
-        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
         self.assertEqual(command[command.index("--cd") + 1], ".")
+        self.assertEqual(run.call_args.kwargs["cwd"], "checkout")
         self.assertIn("--output-schema", command)
         self.assertIn("--output-last-message", command)
         findings = audit_swarm_findings_from_payload(payload) or []
