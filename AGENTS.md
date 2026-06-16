@@ -76,3 +76,18 @@ Do not share mutable runtime files between worker instances.
 - Cleanup/update/doctor helpers must operate inside the configured worker roots.
 - Avoid fixed global paths for checkouts, logs, provider state, or auth files
   unless they are only base directories containing per-worker subdirectories.
+
+## Delete Instance Cleanup
+
+Admin Delete instance must remove the worker-host resources owned by that worker
+instance, not merely let the server hide the worker from admin lists. Cleanup
+must cover the instance service unit, wrapper, logrotate entry, `/etc` config,
+service user when safe, `service_home` under `/var/lib/pullwise-worker`, `log_dir`
+under `/var/log/pullwise-worker`, and other instance-scoped runtime files.
+
+Do not assume Pullwise Server is installed on the same host as the worker. The
+worker host needs a local lifecycle manager, watcher, supervisor, or finalizer to
+own destructive cleanup and status reporting. A worker process can participate
+by acknowledging an uninstall command, but durable deletion should not rely only
+on the process that is deleting itself; stopped or degraded workers still need a
+host-local owner that can remove resources and report failure/success.
