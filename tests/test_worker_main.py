@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import concurrent.futures
 import json
@@ -146,7 +146,6 @@ def configure_instance_provider_commands(cfg: WorkerConfig) -> Path:
     return service_home
 
 
-def agent_configs_payload(
     *,
     free_provider: str = "codex",
     pro_provider: str = "codex",
@@ -4089,11 +4088,7 @@ func writeHealth() {}
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["codex"],
-                pro_chain=["codex"],
-                max_chain=["codex"],
-            )
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             checks, codex_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
@@ -4116,11 +4111,7 @@ func writeHealth() {}
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["codex"],
-                pro_chain=["codex"],
-                max_chain=["codex"],
-            )
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             checks, _provider_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
@@ -4136,11 +4127,7 @@ func writeHealth() {}
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["codex"],
-                pro_chain=["codex"],
-                max_chain=["codex"],
-            )
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             checks, provider_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
@@ -4160,11 +4147,7 @@ func writeHealth() {}
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "ready check deferred while codex is running")), \
             patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["codex"],
-                pro_chain=["codex"],
-                max_chain=["codex"],
-            )
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             checks, provider_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
@@ -4725,11 +4708,7 @@ func writeHealth() {}
             patch("pullwise_worker.main.codex_ready_check", return_value=(False, "not logged in")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class, \
             patch("builtins.print") as print_mock:
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["codex"],
-                pro_chain=["codex"],
-                max_chain=["codex"],
-            )
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             client_class.return_value.heartbeat.return_value = None
             run_doctor(cfg)
 
@@ -4756,11 +4735,7 @@ func writeHealth() {}
         with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")]), \
             patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
             patch("pullwise_worker.main.PullwiseClient") as client_class:
-            client_class.return_value.agent_configs.return_value = agent_configs_payload(
-                free_chain=["codex"],
-                pro_chain=["codex"],
-                max_chain=["codex"],
-            )
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
             client_class.return_value.heartbeat.return_value = None
             ok = run_doctor(cfg)
 
