@@ -849,6 +849,8 @@ def readme_missing_package_script_findings(job: dict, checkout_dir: Path) -> lis
             if script in defined_scripts or script in seen:
                 continue
             seen.add(script)
+            replacement_script = package_script_fix_replacement(script, defined_scripts)
+            replacement_line = package_script_replacement_line(line, match, replacement_script)
             findings.append(
                 missing_package_script_finding(
                     job=job,
@@ -858,6 +860,9 @@ def readme_missing_package_script_findings(job: dict, checkout_dir: Path) -> lis
                     readme_line=line_number,
                     package_file=package_rel,
                     package_line=scripts_line,
+                    replacement_script=replacement_script,
+                    source_line=line,
+                    replacement_line=replacement_line,
                 )
             )
     return findings
@@ -897,6 +902,8 @@ def workflow_missing_package_script_findings(job: dict, checkout_dir: Path) -> l
                 if key in seen:
                     continue
                 seen.add(key)
+                replacement_script = package_script_fix_replacement(script, defined_scripts)
+                replacement_line = package_script_replacement_line(line, match, replacement_script)
                 findings.append(
                     missing_workflow_package_script_finding(
                         job=job,
@@ -906,6 +913,9 @@ def workflow_missing_package_script_findings(job: dict, checkout_dir: Path) -> l
                         workflow_line=line_number,
                         package_file=package_rel,
                         package_line=scripts_line,
+                        replacement_script=replacement_script,
+                        source_line=line,
+                        replacement_line=replacement_line,
                     )
                 )
                 if len(findings) >= 10:
@@ -1068,6 +1078,47 @@ def first_matching_line(text: str, pattern: str) -> int:
         if compiled.search(line):
             return line_number
     return 1
+
+
+_PACKAGE_SCRIPT_FIX_PREFERENCES = {
+    "ci": ["test", "check", "lint", "build"],
+    "dev": ["start", "build"],
+    "serve": ["start", "dev", "preview", "build"],
+    "start": ["dev", "build"],
+    "test": ["check", "build"],
+    "lint": ["check"],
+    "type-check": ["typecheck", "check"],
+    "typecheck": ["check"],
+    "check": ["test", "lint", "typecheck", "build"],
+    "build": ["check"],
+}
+
+
+def package_script_fix_replacement(missing_script: str, defined_scripts: set[str]) -> str:
+    available = sorted(
+        script
+        for script in defined_scripts
+        if isinstance(script, str)
+        and script != missing_script
+        and re.fullmatch(r"[A-Za-z0-9:_-]+", script)
+    )
+    if not available:
+        return ""
+    if len(available) == 1:
+        return available[0]
+    for candidate in _PACKAGE_SCRIPT_FIX_PREFERENCES.get(missing_script, []):
+        if candidate in available:
+            return candidate
+    return ""
+
+
+def package_script_replacement_line(line: str, match: object, replacement_script: str) -> str:
+    if not replacement_script:
+        return ""
+    try:
+        return f"{line[:match.start(2)]}{replacement_script}{line[match.end(2):]}"
+    except (AttributeError, IndexError):
+        return ""
 
 
 def committed_secret_findings(job: dict, checkout_dir: Path) -> list[dict]:
