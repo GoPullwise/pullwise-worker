@@ -47,7 +47,7 @@ def finding_structured_evidence(finding: dict) -> bool:
             continue
         has_summary = evidence_summary_is_substantive(item.get("summary"))
         has_command = reproduction_command_looks_executable(item.get("command"))
-        has_log = evidence_log_path_is_structured(item.get("logPath") or item.get("log_path"))
+        has_log = evidence_log_path_is_structured(item.get("logPath") or item.get("log_path")) and evidence_has_verifier_result(item)
         has_file_line = safe_repo_relative_file(item.get("file")) and positive_int(item.get("startLine") or item.get("line"))
         if has_summary and (has_command or has_log or has_file_line):
             return True
@@ -103,6 +103,14 @@ def evidence_output_is_substantive(value: object) -> bool:
         "n/a",
         "na",
     }
+
+
+def evidence_has_verifier_result(item: dict) -> bool:
+    if evidence_output_is_substantive(item.get("output")):
+        return True
+    if item.get("outputRedacted") is True or item.get("output_redacted") is True:
+        return True
+    return positive_int(item.get("exitCode") or item.get("exit_code")) > 0
 
 
 def evidence_log_path_is_structured(value: object) -> bool:
@@ -225,10 +233,10 @@ def finding_has_independent_verification_support(finding: dict) -> bool:
         if not isinstance(item, dict):
             continue
         has_summary = evidence_summary_is_substantive(item.get("summary"))
-        has_output = evidence_output_is_substantive(item.get("output"))
-        if reproduction_command_looks_executable(item.get("command")) and has_output:
+        has_result = evidence_has_verifier_result(item)
+        if reproduction_command_looks_executable(item.get("command")) and has_result:
             return True
-        if evidence_log_path_is_structured(item.get("logPath") or item.get("log_path")) and (has_summary or has_output):
+        if evidence_log_path_is_structured(item.get("logPath") or item.get("log_path")) and has_summary and has_result:
             return True
     return False
 
@@ -557,13 +565,15 @@ def changed_line_ranges_between_heads(
 def finding_line_within_changed_ranges(finding: dict, changed_line_ranges: dict[str, list[tuple[int, int]]] | None) -> bool:
     file_path, line = finding_primary_line_location(finding)
     if changed_line_ranges is None:
-        return not line
+        return finding_has_verification_proof(finding) or not line
     if not file_path:
         return True
     if not line:
         return False
     ranges = changed_line_ranges.get(file_path)
-    return bool(ranges and any(start <= line <= end for start, end in ranges))
+    if ranges and any(start <= line <= end for start, end in ranges):
+        return True
+    return bool(ranges and finding_has_verification_proof(finding))
 
 
 def source_stat_count(stats: dict, key: str) -> int:

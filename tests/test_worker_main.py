@@ -3491,7 +3491,18 @@ func writeHealth() {}
                                 "issue_id": "bad-card",
                                 "title": "Incomplete provider finding",
                                 "severity": "high",
+                                "confidence": 0.95,
+                                "locations": [{"file": "src/app.py", "startLine": 12, "endLine": 12}],
                                 "claim": "The provider omitted the evidence contract.",
+                                "evidence": [
+                                    {
+                                        "summary": "The focused source line exposes the incomplete contract.",
+                                        "file": "src/app.py",
+                                        "startLine": 12,
+                                    }
+                                ],
+                                "reproduction_idea": "Inspect src/app.py line 12.",
+                                "false_positive_checks": ["The finding points at the exact source line."],
                             }
                         ]
                     ),
@@ -3663,7 +3674,9 @@ func writeHealth() {}
                     "type": "runtime_log",
                     "summary": "npm run test failed with exit code 1.",
                     "command": "npm run test",
+                    "exitCode": 1,
                     "logPath": "verification/job/test.log",
+                    "outputRedacted": True,
                 }
             ],
             "reproduction": {"commands": ["npm run test"]},

@@ -663,6 +663,23 @@ class Worker:
                 candidate_count=candidate_count,
                 rejected_reasons=rejected_reasons,
             )
+            result_status = "failed" if completion_audit.get("status") == "failed" else "done"
+            completion_error = protocol_multiline_text(completion_audit.get("summary"))
+            completion_blockers = completion_audit.get("blockers") if isinstance(completion_audit.get("blockers"), list) else []
+            completion_blocker_text = "; ".join(protocol_multiline_text(item) for item in completion_blockers if protocol_multiline_text(item))
+            if completion_blocker_text:
+                completion_error = completion_blocker_text
+            result_issue_cards = audit_payload.get("issue_cards") if isinstance(audit_payload.get("issue_cards"), list) else []
+            result_verification_results = (
+                audit_payload.get("verification_results")
+                if isinstance(audit_payload.get("verification_results"), list)
+                else []
+            )
+            result_summary = summary
+            if result_status == "failed":
+                result_issue_cards = []
+                result_verification_results = []
+                result_summary = summarize([])
             job_trace_checkpoints.append(
                 job_trace_checkpoint(
                     "report",
@@ -679,7 +696,7 @@ class Worker:
                 )
             )
             job_trace = job_trace_payload(
-                result_status="done",
+                result_status=result_status,
                 checkpoints=job_trace_checkpoints,
                 candidate_count_before_filter=candidate_count,
                 rejected_reasons=rejected_reasons,
@@ -695,17 +712,13 @@ class Worker:
                 logs_summary=logs_summary,
             )
             payload = {
-                "status": "done",
+                "status": result_status,
                 "commit": resolved_commit,
                 "resolved_commit": resolved_commit,
                 "audit_protocol": audit_payload.get("audit_protocol") or AUDIT_SWARM_PROTOCOL_VERSION,
-                "issue_cards": audit_payload.get("issue_cards") if isinstance(audit_payload.get("issue_cards"), list) else [],
-                "verification_results": (
-                    audit_payload.get("verification_results")
-                    if isinstance(audit_payload.get("verification_results"), list)
-                    else []
-                ),
-                "summary": summary,
+                "issue_cards": result_issue_cards,
+                "verification_results": result_verification_results,
+                "summary": result_summary,
                 "duration_ms": duration_ms,
                 "attempt_id": attempt_id,
                 "preflight": preflight,
@@ -719,6 +732,10 @@ class Worker:
                 "job_trace": job_trace,
                 "jobTrace": job_trace,
             }
+            if result_status == "failed":
+                payload["error"] = completion_error or "Worker completion audit failed."
+                payload["error_code"] = "COMPLETION_AUDIT_FAILED"
+                payload["errorCode"] = "COMPLETION_AUDIT_FAILED"
             if repository_graph:
                 payload["repositoryGraph"] = repository_graph
             if semantic_graph:
@@ -745,8 +762,13 @@ class Worker:
                 job_error = self.last_error
                 write_scan_summary(job_config, job_id, "upload_failed", duration_ms, self.last_error)
                 return
-            write_scan_summary(job_config, job_id, "done", duration_ms, "")
-            self.last_error = None
+            if result_status == "failed":
+                job_error = payload["error"]
+                self.last_error = payload["error"]
+                write_scan_summary(job_config, job_id, "failed", duration_ms, payload["error"])
+            else:
+                write_scan_summary(job_config, job_id, "done", duration_ms, "")
+                self.last_error = None
         except Exception as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             error = redact_secrets(str(exc)[:500], job_config)

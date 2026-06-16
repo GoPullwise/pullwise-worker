@@ -524,6 +524,11 @@ def public_calibration_card_payload(value: object) -> dict:
 
 def issue_card_from_finding(finding: dict, index: int) -> dict:
     issue_id = clean_protocol_text(finding.get("id")) or audit_swarm_generated_id(finding, index)
+    reproduction = finding.get("reproduction") if isinstance(finding.get("reproduction"), dict) else {}
+    reproduction_commands = protocol_text_list(reproduction.get("commands"))
+    reproduction_idea = protocol_multiline_text(finding.get("reproductionPath"))
+    if not reproduction_idea and reproduction_commands:
+        reproduction_idea = f"Run `{reproduction_commands[0]}` from the repository root."
     locations = []
     raw_locations = finding.get("affectedLocations") if isinstance(finding.get("affectedLocations"), list) else []
     for item in raw_locations:
@@ -553,7 +558,7 @@ def issue_card_from_finding(finding: dict, index: int) -> dict:
             item if isinstance(item, dict) else protocol_multiline_text(item)
             for item in (finding.get("evidence") if isinstance(finding.get("evidence"), list) else [])
         ],
-        "reproduction_idea": protocol_multiline_text(finding.get("reproductionPath")),
+        "reproduction_idea": reproduction_idea,
         "suggested_test": audit_swarm_suggested_test_from_finding(finding),
         "false_positive_checks": protocol_text_list(finding.get("whyNotFalsePositive")),
         "limitations": protocol_text_list(finding.get("limitations")),
