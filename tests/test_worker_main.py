@@ -1131,7 +1131,7 @@ func writeHealth() {}
 
             with patch(
                 "pullwise_worker.main.safe_tool_version",
-                side_effect=lambda name, command: {
+                side_effect=lambda name, command, **_kwargs: {
                     "name": name,
                     "command": " ".join(command),
                     "available": True,
@@ -4142,6 +4142,49 @@ func writeHealth() {}
         self.assertFalse(provider_ready)
         self.assertNotIn([cfg.codex_command, "--version"], [call.args[0] for call in command.call_args_list])
 
+    def test_worker_readiness_does_not_count_deferred_codex_probe_as_ready(self) -> None:
+        cfg = config()
+        configure_instance_provider_commands(cfg)
+
+        with patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok")]), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(False, "ready check deferred while codex is running")), \
+            patch("pullwise_worker.main.shutil.disk_usage", return_value=Mock(free=2 * 1024 * 1024 * 1024)):
+            client_class.return_value.agent_configs.return_value = agent_configs_payload(
+                free_chain=["codex"],
+                pro_chain=["codex"],
+                max_chain=["codex"],
+            )
+            checks, provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["codex_ready"][0])
+        self.assertIn("deferred", by_name["codex_ready"][1])
+        self.assertFalse(provider_ready)
+
+    def test_worker_tool_versions_uses_instance_env_for_codex_probe(self) -> None:
+        cfg = config()
+        service_home = configure_instance_provider_commands(cfg)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "HOME": "/root",
+                "USERPROFILE": "/root",
+                "CODEX_HOME": "/root/.codex",
+                "OPENAI_API_KEY": "global-api-key",
+            },
+            clear=False,
+        ), patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0, stdout="ok\n", stderr="")) as run:
+            worker_main.worker_tool_versions(cfg)
+
+        codex_call = next(call for call in run.call_args_list if call.args[0] == [cfg.codex_command, "--version"])
+        env = codex_call.kwargs["env"]
+        self.assertEqual(env["HOME"], str(service_home))
+        self.assertEqual(env["USERPROFILE"], str(service_home))
+        self.assertEqual(env["CODEX_HOME"], str(service_home / ".codex"))
+        self.assertNotIn("OPENAI_API_KEY", env)
+
     def test_clone_repository_uses_short_lived_token(self) -> None:
         head = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
         with patch("pullwise_worker.main.subprocess.run") as run:
@@ -4681,6 +4724,18 @@ func writeHealth() {}
         self.assertIn(worker_main.codex_login_command(cfg), printed)
         self.assertIn("--device-auth", printed)
 
+    def test_readme_codex_login_example_uses_instance_isolated_env(self) -> None:
+        readme = Path("README.md").read_text(encoding="utf-8")
+        self.assertIn("CODEX_HOME=/var/lib/pullwise-worker/.codex", readme)
+        self.assertIn("XDG_CONFIG_HOME=/var/lib/pullwise-worker/.config", readme)
+        self.assertIn("XDG_CACHE_HOME=/var/lib/pullwise-worker/.cache", readme)
+        self.assertIn("XDG_DATA_HOME=/var/lib/pullwise-worker/.local/share", readme)
+        self.assertIn(
+            "PATH=/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/usr/local/sbin",
+            readme,
+        )
+        self.assertIn("exec /var/lib/pullwise-worker/.codex/bin/codex login --device-auth", readme)
+
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()
         configure_instance_provider_commands(cfg)
@@ -4753,7 +4808,7 @@ func writeHealth() {}
         finally:
             worker_main._CODEX_EXEC_LOCK.release()
 
-        self.assertTrue(ok)
+        self.assertFalse(ok)
         self.assertIn("deferred", detail)
         run.assert_not_called()
 
@@ -4823,11 +4878,31 @@ func writeHealth() {}
         )
 
         with patch("pullwise_worker.main.subprocess.run", return_value=completed), \
-            patch("pullwise_worker.main.node_version_check", return_value=(False, "Node.js 20+ required, found v12.22.9")):
+            patch("pullwise_worker.main.node_version_check", return_value=(False, "Node.js 20+ required, found v12.22.9")) as node:
             ok, detail = codex_ready_check(cfg)
 
         self.assertFalse(ok)
         self.assertEqual(detail, "Node.js 20+ required, found v12.22.9")
+        env = node.call_args.kwargs["env"]
+        self.assertEqual(env["HOME"], cfg.service_home)
+        self.assertEqual(env["CODEX_HOME"], f"{cfg.service_home}/.codex")
+
+    def test_committed_secret_scan_does_not_follow_checkout_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkout_dir = root / "checkout"
+            checkout_dir.mkdir()
+            outside = root / "outside.env"
+            outside.write_text("GITHUB_TOKEN=ghp_123456789012345678901234567890123456\n", encoding="utf-8")
+            link = checkout_dir / ".env"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            findings = worker_main.committed_secret_findings(worker_job(), checkout_dir)
+
+        self.assertEqual(findings, [])
 
     def test_cleanup_checkouts_removes_expired_failed_retention(self) -> None:
         cfg = config()
@@ -4925,6 +5000,22 @@ func writeHealth() {}
             code = uninstall_worker(remove_config=True, remove_logs=True, dry_run=True)
 
         self.assertEqual(code, 0)
+        run.assert_not_called()
+
+    def test_lifecycle_uninstall_skips_config_and_logs_outside_instance_roots(self) -> None:
+        cfg = config()
+        cfg.service_home = "/var/lib/pullwise-worker/wk_1"
+        cfg.work_dir = Path(cfg.service_home) / "checkouts"
+        cfg.worker_env_file = "/etc/ssh/worker.env"
+        cfg.log_dir = Path("/var/log/shared-worker")
+
+        with patch("pullwise_worker.main.subprocess.run") as run, patch("builtins.print") as print_mock:
+            code = uninstall_worker(cfg, remove_config=True, remove_logs=True, dry_run=True)
+
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertEqual(code, 0)
+        self.assertNotIn("remove /etc/ssh", printed)
+        self.assertNotIn("remove /var/log/shared-worker", printed)
         run.assert_not_called()
 
     def test_update_dry_run_backs_up_env_and_does_not_run_commands(self) -> None:
@@ -5118,6 +5209,21 @@ func writeHealth() {}
             self.assertTrue(log_dir.exists())
             cleanup.assert_not_called()
 
+    def test_lifecycle_remote_uninstall_does_not_select_shared_worker_base(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            shared_base = Path(tmp) / "pullwise-worker"
+            cfg.service_home = str(shared_base)
+            cfg.work_dir = shared_base / "checkouts"
+            cfg.log_dir = shared_base / "logs" / "wk_1"
+
+            with patch.dict("os.environ", {"PULLWISE_SERVICE_HOME": str(shared_base)}, clear=False):
+                targets = worker_main.worker_instance_cleanup_targets(cfg)
+
+        resolved_targets = {target.resolve(strict=False) for target in targets}
+        self.assertNotIn(shared_base.resolve(strict=False), resolved_targets)
+        self.assertIn(Path(cfg.work_dir).resolve(strict=False), resolved_targets)
+
     def test_finalize_worker_uninstall_removes_service_owned_instance_paths(self) -> None:
         cfg = config()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5160,8 +5266,13 @@ func writeHealth() {}
 
     def test_remote_lifecycle_uninstall_reports_succeeded_after_cleanup(self) -> None:
         cfg = config()
+        instance_home = Path(cfg.work_dir).parent / "wk_1"
+        cfg.service_home = str(instance_home)
+        cfg.work_dir = instance_home / "checkouts"
+        cfg.log_dir = instance_home.parent / "logs" / "wk_1"
         Path(cfg.work_dir, "job_1").mkdir(parents=True)
         Path(cfg.work_dir, "job_1", "repo.txt").write_text("checkout", encoding="utf-8")
+        Path(cfg.log_dir).mkdir(parents=True)
         Path(cfg.log_dir, "worker.log").write_text("log", encoding="utf-8")
         worker = Worker(cfg)
         worker.client = Mock()

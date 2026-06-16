@@ -312,6 +312,9 @@ def scoped_tool_version_failure(name: str, command: list[str], detail: str) -> d
 
 def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | None = None) -> dict:
     command_text = public_tool_version_command(command)
+    run_kwargs = {}
+    if env is not None:
+        run_kwargs["env"] = env
     try:
         completed = subprocess.run(
             command,
@@ -320,7 +323,7 @@ def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | No
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=5,
-            env=env,
+            **run_kwargs,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {

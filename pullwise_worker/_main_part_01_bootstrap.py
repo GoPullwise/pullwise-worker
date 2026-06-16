@@ -151,6 +151,13 @@ def provider_tool_path(config: WorkerConfig | None) -> str:
     return ":".join(dict.fromkeys(part for part in path_parts if part))
 
 
+def provider_home_path(service_home: str, *parts: str) -> str:
+    home = str(service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    if home.startswith("/"):
+        return "/".join([home.rstrip("/"), *(part.strip("/") for part in parts if part)])
+    return str(Path(home).joinpath(*parts))
+
+
 def provider_process_env(config: WorkerConfig) -> dict[str, str]:
     service_home = str(config.service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
     env = {
@@ -162,10 +169,10 @@ def provider_process_env(config: WorkerConfig) -> dict[str, str]:
         {
             "HOME": service_home,
             "USERPROFILE": service_home,
-            "CODEX_HOME": str(Path(service_home) / ".codex"),
-            "XDG_CONFIG_HOME": str(Path(service_home) / ".config"),
-            "XDG_CACHE_HOME": str(Path(service_home) / ".cache"),
-            "XDG_DATA_HOME": str(Path(service_home) / ".local" / "share"),
+            "CODEX_HOME": provider_home_path(service_home, ".codex"),
+            "XDG_CONFIG_HOME": provider_home_path(service_home, ".config"),
+            "XDG_CACHE_HOME": provider_home_path(service_home, ".cache"),
+            "XDG_DATA_HOME": provider_home_path(service_home, ".local", "share"),
             "PATH": provider_tool_path(config),
         }
     )

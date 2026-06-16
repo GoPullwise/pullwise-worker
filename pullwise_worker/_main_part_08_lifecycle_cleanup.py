@@ -104,7 +104,7 @@ def worker_instance_cleanup_targets(config: WorkerConfig) -> list[Path]:
         targets.append(work_dir)
 
     log_dir = Path(config.log_dir)
-    if safe_worker_instance_log_target(log_dir) and not any(path_same_or_within(log_dir, target) for target in targets):
+    if safe_worker_instance_log_target(log_dir, config) and not any(path_same_or_within(log_dir, target) for target in targets):
         targets.append(log_dir)
     return dedupe_cleanup_targets(targets)
 
@@ -114,21 +114,33 @@ def safe_remote_service_home_target(service_home: Path, work_dir: Path) -> bool:
         return False
     if path_is_root(service_home):
         return False
-    if os.environ.get("PULLWISE_SERVICE_HOME", "").strip() == str(service_home):
-        return True
     return service_home.resolve(strict=False).name not in {"", "pullwise-worker"}
 
 
-def safe_worker_instance_log_target(log_dir: Path) -> bool:
+def safe_worker_instance_log_target(log_dir: Path, config: WorkerConfig | None = None) -> bool:
     if path_is_root(log_dir):
         return False
-    return log_dir.resolve(strict=False).name not in {"", "pullwise-worker"}
+    resolved_name = log_dir.resolve(strict=False).name
+    if resolved_name in {"", "pullwise-worker"}:
+        return False
+    return config is None or worker_instance_owned_path(log_dir, config)
 
 
-def safe_worker_instance_config_target(config_dir: Path) -> bool:
+def safe_worker_instance_config_target(config_dir: Path, config: WorkerConfig | None = None) -> bool:
     if path_is_root(config_dir):
         return False
-    return config_dir.resolve(strict=False).name not in {"", "pullwise-worker"}
+    resolved_name = config_dir.resolve(strict=False).name
+    if resolved_name in {"", "pullwise-worker"}:
+        return False
+    return config is None or worker_instance_owned_path(config_dir, config)
+
+
+def worker_instance_owned_path(path: Path, config: WorkerConfig) -> bool:
+    service_home = Path(str(getattr(config, "service_home", "") or ""))
+    if str(service_home) and path_same_or_within(path, service_home):
+        return True
+    worker_id = str(getattr(config, "worker_id", "") or "").strip()
+    return bool(worker_id) and path.resolve(strict=False).name == worker_id
 
 
 def dedupe_cleanup_targets(targets: list[Path]) -> list[Path]:
@@ -345,9 +357,9 @@ def uninstall_worker(
             print(f"remove {logrotate}")
         if remove_service_home:
             print(f"remove {service_home}")
-        if remove_config and safe_worker_instance_config_target(config_dir):
+        if remove_config and safe_worker_instance_config_target(config_dir, config):
             print(f"remove {config_dir}")
-        if remove_logs and safe_worker_instance_log_target(log_dir):
+        if remove_logs and safe_worker_instance_log_target(log_dir, config):
             print(f"remove {log_dir}")
         if remove_service_user and removable_service_user(config.service_user):
             print(f"userdel {config.service_user}")
@@ -360,9 +372,9 @@ def uninstall_worker(
             safe_worker_file_unlink(logrotate, Path("/etc/logrotate.d"), service_name)
         if remove_service_home and safe_remote_service_home_target(service_home, Path(config.work_dir)):
             safe_worker_instance_rmtree(service_home)
-        if remove_config and safe_worker_instance_config_target(config_dir):
+        if remove_config and safe_worker_instance_config_target(config_dir, config):
             safe_rmtree(config_dir, config_dir)
-        if remove_logs and safe_worker_instance_log_target(log_dir):
+        if remove_logs and safe_worker_instance_log_target(log_dir, config):
             safe_worker_instance_rmtree(log_dir)
         if remove_service_user and removable_service_user(config.service_user):
             completed = subprocess.run(["userdel", config.service_user])
