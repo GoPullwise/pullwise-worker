@@ -125,6 +125,12 @@ def safe_worker_instance_log_target(log_dir: Path) -> bool:
     return log_dir.resolve(strict=False).name not in {"", "pullwise-worker"}
 
 
+def safe_worker_instance_config_target(config_dir: Path) -> bool:
+    if path_is_root(config_dir):
+        return False
+    return config_dir.resolve(strict=False).name not in {"", "pullwise-worker"}
+
+
 def dedupe_cleanup_targets(targets: list[Path]) -> list[Path]:
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -339,9 +345,9 @@ def uninstall_worker(
             print(f"remove {logrotate}")
         if remove_service_home:
             print(f"remove {service_home}")
-        if remove_config:
+        if remove_config and safe_worker_instance_config_target(config_dir):
             print(f"remove {config_dir}")
-        if remove_logs:
+        if remove_logs and safe_worker_instance_log_target(log_dir):
             print(f"remove {log_dir}")
         if remove_service_user and removable_service_user(config.service_user):
             print(f"userdel {config.service_user}")
@@ -354,9 +360,9 @@ def uninstall_worker(
             safe_worker_file_unlink(logrotate, Path("/etc/logrotate.d"), service_name)
         if remove_service_home and safe_remote_service_home_target(service_home, Path(config.work_dir)):
             safe_worker_instance_rmtree(service_home)
-        if remove_config:
+        if remove_config and safe_worker_instance_config_target(config_dir):
             safe_rmtree(config_dir, config_dir)
-        if remove_logs:
+        if remove_logs and safe_worker_instance_log_target(log_dir):
             safe_worker_instance_rmtree(log_dir)
         if remove_service_user and removable_service_user(config.service_user):
             completed = subprocess.run(["userdel", config.service_user])

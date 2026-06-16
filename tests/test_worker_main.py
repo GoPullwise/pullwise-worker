@@ -5096,6 +5096,68 @@ func writeHealth() {}
             uninstall.assert_not_called()
             service.assert_not_called()
 
+    def test_lifecycle_remote_uninstall_with_finalizer_writes_marker_and_defers_cleanup(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            instance_home = Path(tmp) / "wk_1"
+            log_dir = Path(tmp) / "logs" / "wk_1"
+            marker = Path(tmp) / "run" / "pullwise-worker-wk_1" / "uninstall-requested"
+            cfg.service_home = str(instance_home)
+            cfg.work_dir = instance_home / "checkouts"
+            cfg.log_dir = log_dir
+            cfg.remote_uninstall_finalizer = True
+            cfg.uninstall_marker_file = str(marker)
+            (cfg.work_dir / "job_1").mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+
+            with patch("pullwise_worker.main.cleanup_worker_instance") as cleanup:
+                self.assertEqual(execute_lifecycle_command("uninstall", cfg), 0)
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "wk_1\n")
+            self.assertTrue(instance_home.exists())
+            self.assertTrue(log_dir.exists())
+            cleanup.assert_not_called()
+
+    def test_finalize_worker_uninstall_removes_service_owned_instance_paths(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            instance_home = Path(tmp) / "wk_1"
+            log_dir = Path(tmp) / "logs" / "wk_1"
+            config_dir = Path(tmp) / "etc" / "wk_1"
+            marker = Path(tmp) / "run" / "pullwise-worker-wk_1" / "uninstall-requested"
+            cfg.service_name = "pullwise-worker-wk_1"
+            cfg.service_user = "pw-worker-wk-1"
+            cfg.service_home = str(instance_home)
+            cfg.work_dir = instance_home / "checkouts"
+            cfg.log_dir = log_dir
+            cfg.worker_env_file = str(config_dir / "worker.env")
+            cfg.worker_bin_path = "/usr/local/bin/pullwise-worker-wk_1"
+            cfg.logrotate_file = "/etc/logrotate.d/pullwise-worker-wk_1"
+            cfg.service_file = "/etc/systemd/system/pullwise-worker-wk_1.service"
+            cfg.uninstall_marker_file = str(marker)
+            (cfg.work_dir / "job_1").mkdir(parents=True)
+            (instance_home / ".codex").mkdir()
+            log_dir.mkdir(parents=True)
+            config_dir.mkdir(parents=True)
+            marker.parent.mkdir(parents=True)
+            marker.write_text("wk_1\n", encoding="utf-8")
+
+            with patch("pullwise_worker.main.safe_unlink") as safe_unlink_mock, \
+                patch("pullwise_worker.main.safe_worker_file_unlink") as file_unlink_mock, \
+                patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)) as run:
+                code = finalize_worker_uninstall(cfg)
+
+            self.assertEqual(code, 0)
+            self.assertFalse(instance_home.exists())
+            self.assertFalse(log_dir.exists())
+            self.assertFalse(config_dir.exists())
+            self.assertFalse(marker.exists())
+            safe_unlink_mock.assert_called_once()
+            self.assertEqual(file_unlink_mock.call_count, 2)
+            self.assertIn((["systemctl", "disable", "pullwise-worker-wk_1"],), [call.args for call in run.call_args_list])
+            self.assertIn((["userdel", "pw-worker-wk-1"],), [call.args for call in run.call_args_list])
+            self.assertIn((["systemctl", "daemon-reload"],), [call.args for call in run.call_args_list])
+
     def test_remote_lifecycle_uninstall_reports_succeeded_after_cleanup(self) -> None:
         cfg = config()
         Path(cfg.work_dir, "job_1").mkdir(parents=True)
