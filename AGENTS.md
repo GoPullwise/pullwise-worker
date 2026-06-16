@@ -91,3 +91,10 @@ own destructive cleanup and status reporting. A worker process can participate
 by acknowledging an uninstall command, but durable deletion should not rely only
 on the process that is deleting itself; stopped or degraded workers still need a
 host-local owner that can remove resources and report failure/success.
+
+A single host may run multiple Pullwise worker instances. Each worker instance
+must have its own watcher/supervisor and must not reuse another instance's
+worker process, watcher process, systemd unit, service user, env file, config
+directory, `service_home`, `log_dir`, runtime directory, uninstall marker, or
+provider state. Instance-specific names and paths must be derived from the safe
+worker id.

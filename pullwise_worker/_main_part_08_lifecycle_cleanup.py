@@ -47,6 +47,86 @@ def execute_lifecycle_command(action: str, config: WorkerConfig | None = None) -
     return 2
 
 
+def execute_watcher_lifecycle_command(action: str, config: WorkerConfig) -> int:
+    if action == "stop":
+        return service_action("stop", config=config)
+    if action == "uninstall":
+        stop_code = service_action("stop", config=config)
+        if stop_code != 0:
+            return stop_code
+        try:
+            write_remote_uninstall_marker(config)
+        except Exception as exc:
+            print(f"watcher uninstall marker failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
+            return 1
+        return finalize_worker_uninstall(config)
+    return 2
+
+
+def command_worker_has_active_jobs(worker_state: dict | None) -> bool:
+    if not isinstance(worker_state, dict):
+        return False
+    try:
+        return int(worker_state.get("running_jobs") or worker_state.get("runningJobs") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+class WorkerLifecycleWatcher:
+    def __init__(self, config: WorkerConfig) -> None:
+        self.config = config
+        self.client = PullwiseClient(config)
+        self.last_error: str | None = None
+
+    def run(self, *, once: bool = False) -> int:
+        while True:
+            handled_uninstall = False
+            try:
+                payload = self.client.command_poll()
+            except PullwiseRequestError as exc:
+                self.last_error = f"command poll failed: {redact_secrets(str(exc), self.config)}"[:500]
+                payload = {}
+            command = payload.get("command") if isinstance(payload.get("command"), dict) else None
+            worker_state = payload.get("worker") if isinstance(payload.get("worker"), dict) else None
+            if command and self.handle_lifecycle_command(command, worker_state=worker_state):
+                handled_uninstall = str(command.get("command") or "").strip().lower() == "uninstall"
+            if handled_uninstall:
+                return 0
+            if once:
+                return 0
+            time.sleep(max(1, int(getattr(self.config, "watcher_poll_seconds", 1) or 1)))
+
+    def handle_lifecycle_command(self, command: dict, *, worker_state: dict | None = None) -> bool:
+        command_id = str(command.get("id") or "").strip()
+        action = str(command.get("command") or "").strip().lower()
+        if not command_id or action not in {"stop", "uninstall"}:
+            return False
+        if action == "uninstall" and command_worker_has_active_jobs(worker_state):
+            return False
+        try:
+            self.client.command_status(command_id, "running")
+        except PullwiseRequestError as exc:
+            self.last_error = f"command ack failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return False
+        code = execute_watcher_lifecycle_command(action, self.config)
+        if code == 0:
+            try:
+                self.client.command_status(command_id, "succeeded")
+            except PullwiseRequestError as exc:
+                self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return True
+        error = f"{action} command exited {code}"
+        try:
+            self.client.command_status(command_id, "failed", error=error)
+        except PullwiseRequestError as exc:
+            self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
+        return False
+
+
+def run_lifecycle_watcher(config: WorkerConfig, *, once: bool = False) -> int:
+    return WorkerLifecycleWatcher(config).run(once=once)
+
+
 def cleanup_worker_instance(config: WorkerConfig) -> None:
     targets = worker_instance_cleanup_targets(config)
     for target in targets:
@@ -338,10 +418,19 @@ def uninstall_worker(
     service_home = Path(config.service_home)
     wrapper = Path(config.worker_bin_path)
     logrotate = Path(config.logrotate_file)
+    watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
+    watcher_service_file = Path(str(getattr(config, "watcher_service_file", "") or ""))
     commands = []
     if stop_service:
         commands.append(["systemctl", "stop", service_name])
     commands.append(["systemctl", "disable", service_name])
+    if (
+        watcher_service_name
+        and watcher_service_name != service_name
+        and not path_is_root(watcher_service_file)
+        and (dry_run or watcher_service_file.exists())
+    ):
+        commands.append(["systemctl", "disable", watcher_service_name])
     for command in commands:
         if dry_run:
             print(" ".join(command))
@@ -355,6 +444,8 @@ def uninstall_worker(
             print(f"remove {wrapper}")
         if remove_logrotate:
             print(f"remove {logrotate}")
+        if watcher_service_name and watcher_service_name != service_name:
+            print(f"remove {watcher_service_file}")
         if remove_service_home:
             print(f"remove {service_home}")
         if remove_config and safe_worker_instance_config_target(config_dir, config):
@@ -370,6 +461,8 @@ def uninstall_worker(
             safe_worker_file_unlink(wrapper, Path("/usr/local/bin"), service_name)
         if remove_logrotate:
             safe_worker_file_unlink(logrotate, Path("/etc/logrotate.d"), service_name)
+        if watcher_service_name and watcher_service_name != service_name and watcher_service_file.exists():
+            safe_unlink(watcher_service_file, service_name=watcher_service_name)
         if remove_service_home and safe_remote_service_home_target(service_home, Path(config.work_dir)):
             safe_worker_instance_rmtree(service_home)
         if remove_config and safe_worker_instance_config_target(config_dir, config):

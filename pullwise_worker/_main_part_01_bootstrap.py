@@ -454,6 +454,16 @@ class WorkerConfig:
             os.environ.get("PULLWISE_LOGROTATE_FILE", f"/etc/logrotate.d/{self.service_name}").strip()
             or f"/etc/logrotate.d/{self.service_name}"
         )
+        self.lifecycle_watcher_enabled = env_bool("PULLWISE_LIFECYCLE_WATCHER_ENABLED", False)
+        self.watcher_poll_seconds = max(1, int(os.environ.get("PULLWISE_WATCHER_POLL_SECONDS") or self.poll_seconds))
+        self.watcher_service_name = (
+            os.environ.get("PULLWISE_WATCHER_SERVICE_NAME", f"{self.service_name}-watcher").strip()
+            or f"{self.service_name}-watcher"
+        )
+        self.watcher_service_file = (
+            os.environ.get("PULLWISE_WATCHER_SERVICE_FILE", f"/etc/systemd/system/{self.watcher_service_name}.service").strip()
+            or f"/etc/systemd/system/{self.watcher_service_name}.service"
+        )
         self.remote_uninstall_finalizer = env_bool("PULLWISE_REMOTE_UNINSTALL_FINALIZER", False)
         self.uninstall_marker_file = (
             os.environ.get("PULLWISE_UNINSTALL_MARKER_FILE", f"/run/{self.service_name}/uninstall-requested").strip()
@@ -649,6 +659,10 @@ class PullwiseClient:
             payload["error"] = error
         self.post(f"/worker/commands/{command_id}/status", payload)
 
+    def command_poll(self) -> dict:
+        response = self.post("/worker/commands/poll", {"worker_id": self.config.worker_id})
+        return response.json()
+
     def claim(self) -> dict | None:
         response = self.post(
             "/worker/jobs/claim",
@@ -743,7 +757,19 @@ def main() -> None:
         "command",
         nargs="?",
         default="run",
-        choices=["run", "doctor", "start", "stop", "status", "restart", "update", "uninstall", "finalize-uninstall", "cleanup"],
+        choices=[
+            "run",
+            "doctor",
+            "start",
+            "stop",
+            "status",
+            "restart",
+            "update",
+            "uninstall",
+            "finalize-uninstall",
+            "watch",
+            "cleanup",
+        ],
     )
     parser.add_argument("--server-url")
     parser.add_argument("--worker-id")
@@ -778,6 +804,13 @@ def main() -> None:
             print(str(exc), file=sys.stderr)
             raise SystemExit(2) from exc
         raise SystemExit(finalize_worker_uninstall(config, dry_run=args.dry_run))
+    if args.command == "watch":
+        try:
+            config = WorkerConfig(args, require_worker_token=True, validate_server_url=True)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from exc
+        raise SystemExit(run_lifecycle_watcher(config, once=args.once))
     require_worker_token = args.command in {"run", "doctor"}
     try:
         config = WorkerConfig(

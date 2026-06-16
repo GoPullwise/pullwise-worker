@@ -260,6 +260,8 @@ class Worker:
         action = str(command.get("command") or "").strip().lower()
         if not command_id or action not in {"stop", "uninstall"}:
             return False
+        if getattr(self.config, "lifecycle_watcher_enabled", False):
+            return False
         try:
             self.client.command_status(command_id, "running")
         except PullwiseRequestError as exc:
