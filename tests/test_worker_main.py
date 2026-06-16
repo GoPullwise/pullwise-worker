@@ -81,7 +81,7 @@ def worker_job(**overrides: object) -> dict:
         "repo": "acme/api",
         "commit": "pending",
         "agentConfig": {
-            "providerChain": ["codex"],
+            "provider": "codex",
             "codex": {
                 "command": "codex",
                 "model": "gpt-5.5",
@@ -148,22 +148,22 @@ def configure_instance_provider_commands(cfg: WorkerConfig) -> Path:
 
 def agent_configs_payload(
     *,
-    free_chain: list[str] | None = None,
-    pro_chain: list[str] | None = None,
-    max_chain: list[str] | None = None,
+    free_provider: str = "codex",
+    pro_provider: str = "codex",
+    max_provider: str = "codex",
 ) -> dict:
-    def plan_config(plan: str, chain: list[str]) -> dict:
+    def plan_config(plan: str, provider: str) -> dict:
         return {
             "plan": plan,
-            "providerChain": chain,
+            "provider": provider,
             "codex": {"command": "codex", "model": "gpt-5.5", "reasoningEffort": "medium"},
         }
 
     return {
         "agentConfigs": {
-            "free": plan_config("free", free_chain or ["codex"]),
-            "pro": plan_config("pro", pro_chain or ["codex"]),
-            "max": plan_config("max", max_chain or ["codex"]),
+            "free": plan_config("free", free_provider),
+            "pro": plan_config("pro", pro_provider),
+            "max": plan_config("max", max_provider),
         }
     }
 
@@ -203,7 +203,7 @@ class WorkerMainTest(unittest.TestCase):
             worker_config,
             {
                 "agentConfig": {
-                    "providerChain": ["codex"],
+                    "provider": "codex",
                     "codex": {
                         "command": "codex-nightly",
                         "model": "gpt-5.5-codex",
@@ -231,19 +231,19 @@ class WorkerMainTest(unittest.TestCase):
         worker_config = config()
 
         with self.assertRaisesRegex(RuntimeError, "agentConfig"):
-            worker_config_for_job(worker_config, {"agent_config": {"providerChain": ["codex"]}})
+            worker_config_for_job(worker_config, {"agent_config": {"provider": "codex"}})
         with self.assertRaisesRegex(RuntimeError, "repositoryLimits"):
-            worker_config_for_job(worker_config, {"agentConfig": {"providerChain": ["codex"]}})
+            worker_config_for_job(worker_config, {"agentConfig": {"provider": "codex"}})
 
     def test_worker_config_for_job_rejects_unknown_agent_policy(self) -> None:
         worker_config = config()
 
-        with self.assertRaisesRegex(RuntimeError, "providerChain"):
+        with self.assertRaisesRegex(RuntimeError, "provider"):
             worker_config_for_job(
                 worker_config,
                 {
                     "agentConfig": {
-                        "providerChain": ["codex --unsafe"],
+                        "provider": "codex --unsafe",
                         "codex": {
                             "command": "codex --unsafe",
                             "model": "gpt-5.5\nbad",
@@ -2812,7 +2812,7 @@ func writeHealth() {}
         self.assertEqual(event["score_factors"]["workerVersion"], worker_main.__version__)
         self.assertEqual(event["score_factors"]["auditProtocol"], worker_main.AUDIT_SWARM_PROTOCOL_VERSION)
         self.assertEqual(event["score_factors"]["promptVersion"], "pullwise-review-prompt/0.1")
-        self.assertEqual(event["score_factors"]["providerChain"], "codex")
+        self.assertEqual(event["score_factors"]["provider"], "codex")
         self.assertIn("decisionScore", event["score_factors"])
 
     def test_review_calibration_audit_only_moves_unverified_out_of_formal_reporting(self) -> None:

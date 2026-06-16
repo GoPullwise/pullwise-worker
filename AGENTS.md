@@ -51,7 +51,7 @@ server-provided subscription plan agent configs and per-job `agentConfig`.
   be loaded or validated, do not silently fall back to the local provider chain.
 - A claimed job must include `agentConfig` and `repositoryLimits`; reject jobs
   that omit them instead of using local defaults.
-- When a job includes Codex in `agentConfig.providerChain`, require Codex model
+- When a job uses Codex in `agentConfig.provider`, require Codex model
   and reasoning effort.
 - Repository size limits used by worker preflight come from the job's
   `repositoryLimits`, not from local plan assumptions.
