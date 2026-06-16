@@ -5347,15 +5347,15 @@ func writeHealth() {}
         pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
         audit_requirements = (root / "requirements-audit.txt").read_text(encoding="utf-8")
 
-        self.assertIn('python-version: ["3.10"]', workflow)
+        self.assertIn('python-version: ["3.9", "3.10"]', workflow)
         self.assertIn('"pip>=26.1.2,<27"', workflow)
         self.assertIn('"pip-audit>=2.10.1,<2.11"', workflow)
         self.assertIn('"filelock>=3.20.3,<4"', workflow)
         self.assertIn('python -m unittest discover -s tests -p "test_*.py"', workflow)
         self.assertNotIn("deploy/install-worker.sh", workflow)
-        self.assertIn('requires-python = ">=3.10"', pyproject)
+        self.assertIn('requires-python = ">=3.9"', pyproject)
         self.assertIn("dependencies = []", pyproject)
         self.assertIn("no third-party runtime dependencies", audit_requirements)
-        self.assertNotIn('"3.9"', workflow)
+        self.assertIn('"3.9"', workflow)
         self.assertNotIn("requests", pyproject)
 
