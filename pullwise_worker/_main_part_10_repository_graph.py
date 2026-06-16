@@ -1233,15 +1233,31 @@ def repository_semantic_agent_command(config: WorkerConfig, prompt: str) -> list
     scope_ok, _scope_detail = provider_command_scope_check(getattr(config, "codex_command", ""), config, "Codex")
     if not scope_ok:
         return []
-    command = [getattr(config, "codex_command", "codex"), "exec"]
+    command = [
+        getattr(config, "codex_command", "codex"),
+        "--ask-for-approval",
+        "never",
+        "exec",
+    ]
     if _CODEX_SKIP_GIT_REPO_CHECK_ARG:
         command.append(_CODEX_SKIP_GIT_REPO_CHECK_ARG)
+    command.extend(
+        [
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+            "--cd",
+            ".",
+        ]
+    )
     codex_model = getattr(config, "codex_model", "")
     codex_reasoning_effort = getattr(config, "codex_reasoning_effort", "")
     if codex_model:
         command.extend(["--model", codex_model])
     if codex_reasoning_effort:
-        command.extend(["--reasoning-effort", codex_reasoning_effort])
+        command.extend(["--config", f'model_reasoning_effort="{codex_reasoning_effort}"'])
     command.append(prompt)
     return command
 

@@ -327,9 +327,13 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
             output_path = Path(tmpdir) / "codex-ready.json"
             command = [
                 config.codex_command,
+                "--ask-for-approval",
+                "never",
                 "exec",
                 _CODEX_SKIP_GIT_REPO_CHECK_ARG,
                 "--ignore-user-config",
+                "--ignore-rules",
+                "--ephemeral",
                 "--json",
                 "--output-last-message",
                 str(output_path),
