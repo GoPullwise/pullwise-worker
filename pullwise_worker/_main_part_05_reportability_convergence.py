@@ -113,6 +113,42 @@ def evidence_has_verifier_result(item: dict) -> bool:
     return positive_int(item.get("exitCode") or item.get("exit_code")) > 0
 
 
+def evidence_exit_code_present(item: dict) -> bool:
+    for key in ("exitCode", "exit_code"):
+        if key not in item or isinstance(item.get(key), bool):
+            continue
+        try:
+            int(item.get(key))
+        except (OverflowError, TypeError, ValueError):
+            continue
+        return True
+    return False
+
+
+def evidence_has_runtime_output_or_log(item: dict) -> bool:
+    if evidence_output_is_substantive(item.get("output")):
+        return True
+    if item.get("outputRedacted") is True or item.get("output_redacted") is True:
+        return True
+    return evidence_log_path_is_structured(item.get("logPath") or item.get("log_path"))
+
+
+def finding_runtime_reproduction_evidence(finding: dict) -> bool:
+    if not finding_precise_location(finding):
+        return False
+    raw_evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+    for item in raw_evidence:
+        if not isinstance(item, dict):
+            continue
+        if not reproduction_command_looks_executable(item.get("command")):
+            continue
+        if not evidence_exit_code_present(item):
+            continue
+        if evidence_has_runtime_output_or_log(item):
+            return True
+    return False
+
+
 def evidence_log_path_is_structured(value: object) -> bool:
     path = safe_repo_relative_file(value)
     if not path or re.search(r"\s", path):
@@ -223,6 +259,8 @@ def reportability_rejection_reason(finding: object) -> str:
     if structured_evidence or reproduction_evidence:
         if not finding_has_false_positive_check(finding):
             return "missing_false_positive_check"
+        if not finding_runtime_reproduction_evidence(finding):
+            return "missing_runtime_evidence"
         return ""
     return "missing_evidence"
 

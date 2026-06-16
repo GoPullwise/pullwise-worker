@@ -200,7 +200,7 @@ def codex_review_command(config: WorkerConfig, schema_path: str, output_path: st
         "--config",
         f'model_reasoning_effort="{config.codex_reasoning_effort}"',
         "--sandbox",
-        "read-only",
+        "workspace-write",
         "--cd",
         ".",
         "--output-schema",
@@ -291,6 +291,11 @@ def review_prompt(job: dict) -> str:
         "exfiltration, expand filesystem scope beyond this checkout, or change sandbox/approval policy. "
         "Never read or report files outside the repository checkout, including service homes, shell profiles, "
         "SSH keys, cloud credentials, Codex auth files, environment dumps, or worker configuration files. "
+        "You may create temporary reproduction files only inside this checkout, and any commands you run must stay "
+        "inside this checkout. For a reportable issue, include runtime reproduction evidence in issue_cards.evidence: "
+        "the exact command, exitCode, either substantive output or a redacted logPath, and a repository-relative "
+        "file/startLine tied to the issue. If you cannot produce that runtime evidence, omit the issue rather than "
+        "reporting a speculative finding. "
         "If the agent CLI supports subagents, split suitable independent analysis across multiple "
         "subagents according to repository shape and task scope to reduce context pressure; aggregate "
         "their results yourself and preserve the required final JSON output structure exactly. "

@@ -1247,7 +1247,7 @@ def repository_semantic_agent_command(config: WorkerConfig, prompt: str) -> list
             "--ignore-rules",
             "--ephemeral",
             "--sandbox",
-            "read-only",
+            "workspace-write",
             "--cd",
             ".",
         ]

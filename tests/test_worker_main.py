@@ -1569,6 +1569,18 @@ func writeHealth() {}
                 },
                 {
                     "title": "Repro command finding",
+                    "file": "src/app.py",
+                    "line": 12,
+                    "evidence": [
+                        {
+                            "summary": "The focused checkout regression command exits non-zero.",
+                            "command": "npm test -- checkout-regression",
+                            "exitCode": 1,
+                            "output": "FAIL checkout-regression",
+                            "file": "src/app.py",
+                            "startLine": 12,
+                        }
+                    ],
                     "reproduction": {"commands": ["npm test"]},
                     "whyNotFalsePositive": ["The focused command reproduces the failure."],
                 },
@@ -1578,11 +1590,20 @@ func writeHealth() {}
             ]
         )
 
-        self.assertEqual([finding["title"] for finding in findings], ["Precise code finding", "Repro command finding"])
-        self.assertEqual(rejected_reasons, {"missing_evidence": 1, "missing_title": 1, "invalid_candidate": 1})
+        self.assertEqual([finding["title"] for finding in findings], ["Repro command finding"])
+        self.assertEqual(
+            rejected_reasons,
+            {"missing_runtime_evidence": 1, "missing_evidence": 1, "missing_title": 1, "invalid_candidate": 1},
+        )
         self.assertEqual(
             rejected_samples,
             [
+                {
+                    "reason": "missing_runtime_evidence",
+                    "title": "Precise code finding",
+                    "file": "src/app.py",
+                    "line": 12,
+                },
                 {
                     "reason": "missing_evidence",
                     "title": "Only a vague model guess",
@@ -1601,10 +1622,10 @@ func writeHealth() {}
             rejected_samples=rejected_samples,
         )
         self.assertEqual(audit["candidateCount"], 5)
-        self.assertEqual(audit["reportedCount"], 2)
-        self.assertEqual(audit["rejectedCount"], 3)
-        self.assertEqual(audit["potentialRiskCount"], 2)
-        self.assertEqual(audit["rejectedSamples"][0]["title"], "Only a vague model guess")
+        self.assertEqual(audit["reportedCount"], 1)
+        self.assertEqual(audit["rejectedCount"], 4)
+        self.assertEqual(audit["potentialRiskCount"], 1)
+        self.assertEqual(audit["rejectedSamples"][0]["title"], "Precise code finding")
 
     def test_reportability_filter_rejects_unverified_candidate_without_false_positive_check(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
@@ -3497,7 +3518,25 @@ func writeHealth() {}
             patch("pullwise_worker.main.run_codex_review") as run_codex_review, \
             patch("pullwise_worker.main.shutil.rmtree") as rmtree:
             audit_with_usage = audit_payload(
-                [issue_card("Bug", severity="P1", issue_id="bug")],
+                [
+                    issue_card(
+                        "Bug",
+                        severity="P1",
+                        issue_id="bug",
+                        evidence=[
+                            {
+                                "summary": "The focused regression command exits non-zero.",
+                                "command": "pytest tests/test_bug.py",
+                                "exitCode": 1,
+                                "output": "FAILED tests/test_bug.py::test_bug",
+                                "logPath": "agent-reproduction/job-1/bug.log",
+                                "file": "src/app.py",
+                                "startLine": 12,
+                                "endLine": 12,
+                            }
+                        ],
+                    )
+                ],
                 [
                     {
                         "issue_id": "bug",
@@ -3507,7 +3546,9 @@ func writeHealth() {}
                         "proof_type": "static_proof",
                         "proof_strength": 2,
                         "evidence": ["Static proof confirms the candidate."],
-                        "commands_run": [],
+                        "commands_run": ["pytest tests/test_bug.py"],
+                        "output": "FAILED tests/test_bug.py::test_bug",
+                        "logPath": "agent-reproduction/job-1/bug.log",
                         "result_summary": "Static proof confirms the candidate.",
                     }
                 ],
@@ -3592,9 +3633,14 @@ func writeHealth() {}
                                 "claim": "The provider omitted the evidence contract.",
                                 "evidence": [
                                     {
-                                        "summary": "The focused source line exposes the incomplete contract.",
+                                        "summary": "The focused reproduction command exits non-zero.",
+                                        "command": "pytest tests/test_app.py::test_contract",
+                                        "exitCode": 1,
+                                        "output": "FAILED tests/test_app.py::test_contract",
+                                        "logPath": "agent-reproduction/job-bad/contract.log",
                                         "file": "src/app.py",
                                         "startLine": 12,
+                                        "endLine": 12,
                                     }
                                 ],
                                 "reproduction_idea": "Inspect src/app.py line 12.",
