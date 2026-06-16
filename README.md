@@ -73,7 +73,7 @@ PULLWISE_CODEX_REASONING_EFFORT=medium
 
 ## Deploy
 
-The worker supports Python 3.9 or newer.
+The worker supports Python 3.10 or newer.
 
 Admin worker creation returns a one-time token plus an install command:
 
