@@ -4308,10 +4308,11 @@ func writeHealth() {}
                 {"clone_url": origin.as_uri(), "branch": "main", "commit": "pending"},
                 checkout,
             )
+            checkout_text = (checkout / "file.txt").read_text(encoding="utf-8")
 
         self.assertNotEqual(first, second.lower())
         self.assertEqual(resolved, second.lower())
-        self.assertEqual((checkout / "file.txt").read_text(encoding="utf-8"), "second\n")
+        self.assertEqual(checkout_text, "second\n")
 
     def test_clone_repository_reports_git_stderr_on_failure(self) -> None:
         error = subprocess.CalledProcessError(

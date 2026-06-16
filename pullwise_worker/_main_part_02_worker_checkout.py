@@ -888,8 +888,26 @@ def checkout_root_is_owned(work_dir: Path) -> bool:
     return True
 
 
+def remove_checkout_dir(checkout_dir: Path) -> None:
+    if checkout_dir.is_symlink():
+        raise RuntimeError(f"Refusing to remove symlinked checkout directory: {checkout_dir}")
+    if not checkout_dir.exists():
+        return
+
+    def retry_readonly_remove(function, path, _exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        except OSError:
+            pass
+        function(path)
+
+    shutil.rmtree(checkout_dir, onerror=retry_readonly_remove)
+    if checkout_dir.exists():
+        raise RuntimeError(f"Failed to remove previous checkout directory: {checkout_dir}")
+
+
 def clone_repository(job: dict, checkout_dir: Path) -> str:
-    shutil.rmtree(checkout_dir, ignore_errors=True)
+    remove_checkout_dir(checkout_dir)
     checkout_dir.parent.mkdir(parents=True, exist_ok=True)
     clone_token = job.get("clone_token")
     clone_url = str(job.get("clone_url") or "")
