@@ -5341,14 +5341,15 @@ func writeHealth() {}
                     safe_rmtree(allowed, allowed)
             self.assertTrue(allowed.exists())
 
-    def test_ci_dependency_bounds_match_python_310_runtime(self) -> None:
+    def test_ci_dependency_bounds_match_supported_python_runtimes(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
         audit_requirements = (root / "requirements-audit.txt").read_text(encoding="utf-8")
 
         self.assertIn('python-version: ["3.9", "3.10"]', workflow)
-        self.assertIn('"pip>=26.1.2,<27"', workflow)
+        self.assertIn("\"pip>=26.0.1,<26.1; python_version < '3.10'\"", workflow)
+        self.assertIn("\"pip>=26.1.2,<27; python_version >= '3.10'\"", workflow)
         self.assertIn('"pip-audit>=2.10.1,<2.11"', workflow)
         self.assertIn('"filelock>=3.20.3,<4"', workflow)
         self.assertIn('python -m unittest discover -s tests -p "test_*.py"', workflow)
