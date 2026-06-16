@@ -111,13 +111,15 @@ pullwise-worker uninstall
 systemd authorization. Admin-queued stop commands are handled by the running
 worker exiting cleanly; the installed unit uses `Restart=on-failure` so the
 service stays stopped.
-Admin-queued Delete instance commands are handled by the running worker after
-active jobs finish. Current systemd units write an uninstall marker, report the
-command result, exit cleanly, and then run a root `ExecStopPost` finalizer that
-removes the service unit, wrapper binary, logrotate file, `/etc` configuration
-directory, instance home, and instance log directory. Older units without the
-finalizer still delete the worker-owned instance home and log directories before
-exiting.
+Admin-queued Delete instance commands are handled by the worker host's
+instance-scoped watcher after active jobs finish. Current installs create one
+watcher service per worker instance; the watcher polls lifecycle commands,
+stops the paired worker service, writes an uninstall marker, reports command
+status, and removes the service unit, watcher unit, wrapper binary, logrotate
+file, `/etc` configuration directory, instance home, and instance log directory.
+Older units without the watcher may rely on the running worker or the legacy
+finalizer path, which is less reliable when the worker is already stopped or
+degraded.
 `pullwise-worker uninstall` first unregisters the worker from the server when
 `PULLWISE_WORKER_TOKEN` is configured, then removes the local service. A stopped
 worker stays in the registry; an uninstalled worker is removed from admin lists.

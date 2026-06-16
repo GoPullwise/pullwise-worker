@@ -23,6 +23,7 @@ from pullwise_worker.main import (
     PullwiseResponse,
     Worker,
     WorkerConfig,
+    WorkerLifecycleWatcher,
     audit_swarm_findings_from_payload,
     audit_swarm_output_schema,
     audit_swarm_payload_from_findings,
@@ -37,6 +38,7 @@ from pullwise_worker.main import (
     codex_ready_check,
     default_worker_package,
     execute_lifecycle_command,
+    execute_watcher_lifecycle_command,
     finalize_worker_uninstall,
     filter_audit_swarm_payload_by_findings,
     filter_reportable_findings,
@@ -5153,6 +5155,48 @@ func writeHealth() {}
 
         service.assert_not_called()
 
+    def test_worker_process_defers_lifecycle_commands_to_instance_watcher(self) -> None:
+        cfg = config()
+        cfg.lifecycle_watcher_enabled = True
+        worker = Worker(cfg)
+        worker.client = Mock()
+
+        with patch("pullwise_worker.main.execute_lifecycle_command") as execute:
+            handled = worker.handle_lifecycle_command({"id": "cmd_uninstall", "command": "uninstall"})
+
+        self.assertFalse(handled)
+        worker.client.command_status.assert_not_called()
+        execute.assert_not_called()
+
+    def test_lifecycle_watcher_reports_stop_command_status(self) -> None:
+        cfg = config()
+        watcher = WorkerLifecycleWatcher(cfg)
+        watcher.client = Mock()
+        watcher.client.command_poll.return_value = {
+            "worker": {"worker_id": "wk_1", "running_jobs": 0},
+            "command": {"id": "cmd_stop", "command": "stop", "status": "pending"},
+        }
+
+        with patch("pullwise_worker.main.execute_watcher_lifecycle_command", return_value=0) as execute:
+            self.assertEqual(watcher.run(once=True), 0)
+
+        execute.assert_called_once_with("stop", cfg)
+        watcher.client.command_status.assert_any_call("cmd_stop", "running")
+        watcher.client.command_status.assert_any_call("cmd_stop", "succeeded")
+
+    def test_lifecycle_watcher_defers_uninstall_while_jobs_are_running(self) -> None:
+        cfg = config()
+        watcher = WorkerLifecycleWatcher(cfg)
+        watcher.client = Mock()
+
+        handled = watcher.handle_lifecycle_command(
+            {"id": "cmd_uninstall", "command": "uninstall"},
+            worker_state={"running_jobs": 1},
+        )
+
+        self.assertFalse(handled)
+        watcher.client.command_status.assert_not_called()
+
     def test_lifecycle_remote_uninstall_cleans_instance_home_and_logs_without_systemd_authorization(self) -> None:
         cfg = config()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5253,6 +5297,54 @@ func writeHealth() {}
             self.assertIn((["systemctl", "disable", "pullwise-worker-wk_1"],), [call.args for call in run.call_args_list])
             self.assertIn((["userdel", "pw-worker-wk-1"],), [call.args for call in run.call_args_list])
             self.assertIn((["systemctl", "daemon-reload"],), [call.args for call in run.call_args_list])
+
+    def test_watcher_uninstall_stops_worker_and_removes_instance_resources(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance_home = root / "lib" / "wk_1"
+            log_dir = root / "log" / "wk_1"
+            config_dir = root / "etc" / "wk_1"
+            service_dir = root / "systemd"
+            marker = root / "run" / "pullwise-worker-wk_1" / "uninstall-requested"
+            cfg.service_name = "pullwise-worker-wk_1"
+            cfg.watcher_service_name = "pullwise-worker-wk_1-watcher"
+            cfg.service_user = "pw-worker-wk-1"
+            cfg.service_home = str(instance_home)
+            cfg.work_dir = instance_home / "checkouts"
+            cfg.log_dir = log_dir
+            cfg.worker_env_file = str(config_dir / "worker.env")
+            cfg.worker_bin_path = "/usr/local/bin/pullwise-worker-wk_1"
+            cfg.logrotate_file = "/etc/logrotate.d/pullwise-worker-wk_1"
+            cfg.service_file = "/etc/systemd/system/pullwise-worker-wk_1.service"
+            cfg.watcher_service_file = str(service_dir / "pullwise-worker-wk_1-watcher.service")
+            cfg.uninstall_marker_file = str(marker)
+            (cfg.work_dir / "job_1").mkdir(parents=True)
+            (cfg.work_dir / "job_1" / "repo.txt").write_text("checkout", encoding="utf-8")
+            log_dir.mkdir(parents=True)
+            (log_dir / "worker.log").write_text("log", encoding="utf-8")
+            config_dir.mkdir(parents=True)
+            (config_dir / "worker.env").write_text("PULLWISE_WORKER_ID=wk_1\n", encoding="utf-8")
+            service_dir.mkdir(parents=True)
+            Path(cfg.watcher_service_file).write_text("[Service]\n", encoding="utf-8")
+
+            with patch("pullwise_worker.main.safe_unlink") as safe_unlink_mock, \
+                patch("pullwise_worker.main.safe_worker_file_unlink") as file_unlink_mock, \
+                patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)) as run:
+                code = execute_watcher_lifecycle_command("uninstall", cfg)
+
+            self.assertEqual(code, 0)
+            self.assertFalse(instance_home.exists())
+            self.assertFalse(log_dir.exists())
+            self.assertFalse(config_dir.exists())
+            self.assertFalse(marker.exists())
+            self.assertEqual(safe_unlink_mock.call_count, 2)
+            self.assertEqual(file_unlink_mock.call_count, 2)
+            command_args = [call.args for call in run.call_args_list]
+            self.assertIn((["systemctl", "stop", "pullwise-worker-wk_1"],), command_args)
+            self.assertIn((["systemctl", "disable", "pullwise-worker-wk_1"],), command_args)
+            self.assertIn((["systemctl", "disable", "pullwise-worker-wk_1-watcher"],), command_args)
+            self.assertIn((["systemctl", "daemon-reload"],), command_args)
 
     def test_remote_lifecycle_uninstall_reports_succeeded_after_cleanup(self) -> None:
         cfg = config()
