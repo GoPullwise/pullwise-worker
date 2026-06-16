@@ -5093,6 +5093,41 @@ func writeHealth() {}
             self.assertIn("load_worker_env", wrapper)
             self.assertIn(str(env_file), wrapper)
 
+    def test_update_installs_instance_lifecycle_watcher_for_existing_workers(self) -> None:
+        cfg = config()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_file = root / "etc" / "wk_1" / "worker.env"
+            backup_file = root / "etc" / "wk_1" / "worker.env.bak"
+            bin_path = root / "bin" / "pullwise-worker-wk_1"
+            watcher_file = root / "systemd" / "pullwise-worker-wk_1-watcher.service"
+            env_file.parent.mkdir(parents=True)
+            env_file.write_text("PULLWISE_WORKER_TOKEN=worker-token\n", encoding="utf-8")
+            cfg.worker_env_file = str(env_file)
+            cfg.worker_env_backup_file = str(backup_file)
+            cfg.worker_bin_path = str(bin_path)
+            cfg.service_name = "pullwise-worker-wk_1"
+            cfg.watcher_service_name = "pullwise-worker-wk_1-watcher"
+            cfg.watcher_service_file = str(watcher_file)
+            cfg.watcher_poll_seconds = 5
+
+            with patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)) as run:
+                code = update_worker(cfg)
+
+            self.assertEqual(code, 0)
+            env_text = env_file.read_text(encoding="utf-8")
+            self.assertIn("PULLWISE_LIFECYCLE_WATCHER_ENABLED=1\n", env_text)
+            self.assertIn("PULLWISE_WATCHER_SERVICE_NAME=pullwise-worker-wk_1-watcher\n", env_text)
+            self.assertIn(f"PULLWISE_WATCHER_SERVICE_FILE={watcher_file}\n", env_text)
+            self.assertIn("PULLWISE_WATCHER_POLL_SECONDS=5\n", env_text)
+            service_text = watcher_file.read_text(encoding="utf-8")
+            self.assertIn(f"EnvironmentFile={env_file}", service_text)
+            self.assertIn(f"ExecStart={bin_path} watch", service_text)
+            command_args = [call.args for call in run.call_args_list]
+            self.assertIn((["systemctl", "daemon-reload"],), command_args)
+            self.assertIn((["systemctl", "enable", "pullwise-worker-wk_1-watcher"],), command_args)
+            self.assertIn((["systemctl", "restart", "pullwise-worker-wk_1-watcher"],), command_args)
+
     def test_worker_wrapper_exports_provider_home_environment(self) -> None:
         wrapper = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk_1/worker.env"))
 
@@ -5308,6 +5343,7 @@ func writeHealth() {}
             service_dir = root / "systemd"
             marker = root / "run" / "pullwise-worker-wk_1" / "uninstall-requested"
             cfg.service_name = "pullwise-worker-wk_1"
+            cfg.lifecycle_watcher_enabled = True
             cfg.watcher_service_name = "pullwise-worker-wk_1-watcher"
             cfg.service_user = "pw-worker-wk-1"
             cfg.service_home = str(instance_home)

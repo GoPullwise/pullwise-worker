@@ -341,6 +341,103 @@ def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
     bin_path.chmod(0o755)
 
 
+def watcher_service_unit(config: WorkerConfig, *, env_path: Path | None = None, bin_path: Path | None = None) -> str:
+    service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
+    if not service_name:
+        raise ValueError("PULLWISE_WATCHER_SERVICE_NAME is required")
+    worker_name = str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
+    env_file = str(env_path or getattr(config, "worker_env_file", "") or "").strip()
+    worker_bin = str(bin_path or getattr(config, "worker_bin_path", "") or "").strip()
+    if not env_file or not worker_bin:
+        raise ValueError("worker env file and bin path are required")
+    return f"""[Unit]
+Description=Pullwise Worker Watcher {worker_name}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/
+EnvironmentFile={env_file}
+ExecStart={worker_bin} watch
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=false
+RuntimeDirectory={service_name}
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def append_missing_env_values(env_path: Path, values: dict[str, str], *, dry_run: bool = False) -> None:
+    existing_keys: set[str] = set()
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            key, sep, _value = line.partition("=")
+            if sep and key:
+                existing_keys.add(key)
+    missing = [(key, value) for key, value in values.items() if key not in existing_keys]
+    if dry_run:
+        for key, value in missing:
+            print(f"append env {key}={value}")
+        return
+    if not missing:
+        return
+    with env_path.open("a", encoding="utf-8") as handle:
+        for key, value in missing:
+            if "\n" in value or "\r" in value:
+                raise ValueError(f"environment value for {key} must be single-line")
+            handle.write(f"{key}={value}\n")
+
+
+def ensure_lifecycle_watcher(
+    config: WorkerConfig,
+    *,
+    env_path: Path | None = None,
+    bin_path: Path | None = None,
+    dry_run: bool = False,
+) -> int:
+    env_file = Path(env_path or config.worker_env_file)
+    worker_bin = Path(bin_path or config.worker_bin_path)
+    watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
+    watcher_service_file = Path(str(getattr(config, "watcher_service_file", "") or ""))
+    if not watcher_service_name or path_is_root(watcher_service_file):
+        print("watcher service name/file is not configured safely", file=sys.stderr)
+        return 2
+    env_values = {
+        "PULLWISE_LIFECYCLE_WATCHER_ENABLED": "1",
+        "PULLWISE_WATCHER_SERVICE_NAME": watcher_service_name,
+        "PULLWISE_WATCHER_SERVICE_FILE": str(watcher_service_file),
+        "PULLWISE_WATCHER_POLL_SECONDS": str(max(1, int(getattr(config, "watcher_poll_seconds", 5) or 5))),
+    }
+    if dry_run:
+        append_missing_env_values(env_file, env_values, dry_run=True)
+        print(f"write watcher service {watcher_service_file}")
+        print("systemctl daemon-reload")
+        print(f"systemctl enable {watcher_service_name}")
+        print(f"systemctl restart {watcher_service_name}")
+        return 0
+    try:
+        append_missing_env_values(env_file, env_values)
+        watcher_service_file.parent.mkdir(parents=True, exist_ok=True)
+        watcher_service_file.write_text(watcher_service_unit(config, env_path=env_file, bin_path=worker_bin), encoding="utf-8")
+        watcher_service_file.chmod(0o644)
+    except (OSError, ValueError) as exc:
+        print(f"failed to write watcher service: {exc}", file=sys.stderr)
+        return 1
+    for command in (
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "enable", watcher_service_name],
+        ["systemctl", "restart", watcher_service_name],
+    ):
+        completed = subprocess.run(command)
+        if completed.returncode != 0:
+            return completed.returncode
+    return 0
+
+
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     package = default_worker_package()
     python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3"
@@ -378,6 +475,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
             print(" ".join(command))
             if command is install_command:
                 print(f"write env-loading wrapper {bin_path}")
+                ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=True)
             continue
         completed = subprocess.run(command)
         if completed.returncode != 0:
@@ -388,6 +486,12 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         if command is install_command:
             try:
                 write_worker_wrapper(bin_path, env_path)
+                watcher_code = ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=False)
+                if watcher_code != 0:
+                    if backup_path.exists():
+                        shutil.copy2(backup_path, env_path)
+                    subprocess.run(["systemctl", "restart", service_name])
+                    return watcher_code
             except OSError as exc:
                 print(f"failed to write worker wrapper: {exc}", file=sys.stderr)
                 if backup_path.exists():
@@ -418,6 +522,7 @@ def uninstall_worker(
     service_home = Path(config.service_home)
     wrapper = Path(config.worker_bin_path)
     logrotate = Path(config.logrotate_file)
+    watcher_enabled = bool(getattr(config, "lifecycle_watcher_enabled", False))
     watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
     watcher_service_file = Path(str(getattr(config, "watcher_service_file", "") or ""))
     commands = []
@@ -425,6 +530,8 @@ def uninstall_worker(
         commands.append(["systemctl", "stop", service_name])
     commands.append(["systemctl", "disable", service_name])
     if (
+        watcher_enabled
+        and
         watcher_service_name
         and watcher_service_name != service_name
         and not path_is_root(watcher_service_file)
@@ -444,7 +551,7 @@ def uninstall_worker(
             print(f"remove {wrapper}")
         if remove_logrotate:
             print(f"remove {logrotate}")
-        if watcher_service_name and watcher_service_name != service_name:
+        if watcher_enabled and watcher_service_name and watcher_service_name != service_name:
             print(f"remove {watcher_service_file}")
         if remove_service_home:
             print(f"remove {service_home}")
@@ -461,7 +568,7 @@ def uninstall_worker(
             safe_worker_file_unlink(wrapper, Path("/usr/local/bin"), service_name)
         if remove_logrotate:
             safe_worker_file_unlink(logrotate, Path("/etc/logrotate.d"), service_name)
-        if watcher_service_name and watcher_service_name != service_name and watcher_service_file.exists():
+        if watcher_enabled and watcher_service_name and watcher_service_name != service_name and watcher_service_file.exists():
             safe_unlink(watcher_service_file, service_name=watcher_service_name)
         if remove_service_home and safe_remote_service_home_target(service_home, Path(config.work_dir)):
             safe_worker_instance_rmtree(service_home)
