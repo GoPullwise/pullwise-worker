@@ -5215,20 +5215,21 @@ func writeHealth() {}
                     safe_rmtree(allowed, allowed)
             self.assertTrue(allowed.exists())
 
-    def test_ci_dependency_bounds_keep_python_39_support(self) -> None:
+    def test_ci_dependency_bounds_match_python_310_runtime(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
         audit_requirements = (root / "requirements-audit.txt").read_text(encoding="utf-8")
 
-        self.assertIn('"pip>=25.3,<26.1"', workflow)
-        self.assertIn('"pip-audit>=2.9,<2.10"', workflow)
-        self.assertIn('"filelock>=3.19.1,<3.20"', workflow)
+        self.assertIn('python-version: ["3.10"]', workflow)
+        self.assertIn('"pip>=26.1.2,<27"', workflow)
+        self.assertIn('"pip-audit>=2.10.1,<2.11"', workflow)
+        self.assertIn('"filelock>=3.20.3,<4"', workflow)
         self.assertIn('python -m unittest discover -s tests -p "test_*.py"', workflow)
         self.assertNotIn("deploy/install-worker.sh", workflow)
+        self.assertIn('requires-python = ">=3.10"', pyproject)
         self.assertIn("dependencies = []", pyproject)
         self.assertIn("no third-party runtime dependencies", audit_requirements)
-        self.assertNotIn("pip>=26.1", workflow)
-        self.assertNotIn("filelock>=3.20.3", workflow)
+        self.assertNotIn('"3.9"', workflow)
         self.assertNotIn("requests", pyproject)
 
