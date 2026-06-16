@@ -4271,6 +4271,48 @@ func writeHealth() {}
 
         self.assertEqual(resolved, first.lower())
 
+    @unittest.skipIf(shutil.which("git") is None, "git is required for clone integration coverage")
+    def test_clone_repository_reclones_latest_branch_tip_for_pending_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = Path(tmp) / "origin"
+            checkout = Path(tmp) / "checkout"
+            subprocess.run(
+                ["git", "init", "--initial-branch", "main", str(origin)],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(["git", "-C", str(origin), "config", "user.email", "ci@example.com"], check=True)
+            subprocess.run(["git", "-C", str(origin), "config", "user.name", "CI"], check=True)
+            (origin / "file.txt").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(origin), "add", "file.txt"], check=True)
+            subprocess.run(["git", "-C", str(origin), "commit", "-m", "first"], check=True, stdout=subprocess.PIPE)
+            first = clone_repository(
+                {"clone_url": origin.as_uri(), "branch": "main", "commit": "pending"},
+                checkout,
+            )
+            self.assertEqual((checkout / "file.txt").read_text(encoding="utf-8"), "first\n")
+
+            (origin / "file.txt").write_text("second\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(origin), "commit", "-am", "second"], check=True, stdout=subprocess.PIPE)
+            second = subprocess.run(
+                ["git", "-C", str(origin), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+            resolved = clone_repository(
+                {"clone_url": origin.as_uri(), "branch": "main", "commit": "pending"},
+                checkout,
+            )
+
+        self.assertNotEqual(first, second.lower())
+        self.assertEqual(resolved, second.lower())
+        self.assertEqual((checkout / "file.txt").read_text(encoding="utf-8"), "second\n")
+
     def test_clone_repository_reports_git_stderr_on_failure(self) -> None:
         error = subprocess.CalledProcessError(
             128,
