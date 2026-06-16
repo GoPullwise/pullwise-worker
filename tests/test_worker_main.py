@@ -145,7 +145,7 @@ def configure_instance_provider_commands(cfg: WorkerConfig) -> Path:
     cfg.codex_command = str(service_home / ".codex" / "bin" / "codex")
     return service_home
 
-
+def agent_configs_payload(
     *,
     free_provider: str = "codex",
     pro_provider: str = "codex",
