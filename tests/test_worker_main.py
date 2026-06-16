@@ -1819,6 +1819,27 @@ func writeHealth() {}
         self.assertEqual(rejected_reasons, {"missing_evidence": 1})
         self.assertEqual(rejected_samples[0]["title"], "Source file evidence log path")
 
+    def test_reportability_filter_rejects_log_path_without_verifier_proof(self) -> None:
+        findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+            [
+                {
+                    "title": "Log path only evidence",
+                    "evidence": [
+                        {
+                            "summary": "The checkout regression is reproduced by the focused test.",
+                            "logPath": "verification/job/test.log",
+                        }
+                    ],
+                    "whyNotFalsePositive": ["The focused checkout flow was inspected."],
+                    "verificationStatus": "potential_risk",
+                }
+            ]
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(rejected_reasons, {"missing_evidence": 1})
+        self.assertEqual(rejected_samples[0]["title"], "Log path only evidence")
+
     def test_reportability_filter_rejects_generic_evidence_summary(self) -> None:
         findings, rejected_reasons, rejected_samples = filter_reportable_findings(
             [
@@ -2122,6 +2143,41 @@ func writeHealth() {}
         self.assertEqual(rejected_reasons, {"not_introduced_by_current_delta": 1})
         self.assertEqual(rejected_samples[0]["title"], "Same file latent bug")
         self.assertEqual(state["open_findings"], [])
+
+    def test_convergence_gate_allows_verified_finding_on_changed_file_when_line_drifts(self) -> None:
+        checkout_dir = Path(tempfile.mkdtemp())
+        (checkout_dir / "src").mkdir(parents=True)
+        (checkout_dir / "src" / "app.py").write_text("".join(f"line {index}\n" for index in range(1, 30)), encoding="utf-8")
+        finding = (audit_swarm_findings_from_payload(audit_payload([issue_card("Verified moved bug", line=20)])) or [])[0]
+        finding["confidence"] = 0.95
+        finding["verificationStatus"] = "static_proof"
+        job = {
+            "repo": "acme/api",
+            "branch": "main",
+            "commit": "b" * 40,
+            "convergence_context": {
+                "protocol": "pullwise-convergence/0.1",
+                "scope_key": "repo:acme/api|branch:main",
+                "previous_head_sha": "a" * 40,
+                "open_findings": [],
+                "source_stats": {
+                    "correctness-reviewer": {"reported": 4, "confirmed": 4, "resolved": 0, "rejected": 0}
+                },
+            },
+        }
+
+        with patch("pullwise_worker.main.changed_files_between_heads", return_value={"src/app.py"}), \
+            patch("pullwise_worker.main.changed_line_ranges_between_heads", return_value={"src/app.py": [(1, 3)]}):
+            reported, rejected_reasons, rejected_samples, state = worker_main.apply_convergence_gate(
+                job,
+                checkout_dir,
+                [finding],
+            )
+
+        self.assertEqual([item["title"] for item in reported], ["Verified moved bug"])
+        self.assertEqual(rejected_reasons, {})
+        self.assertEqual(rejected_samples, [])
+        self.assertEqual(state["open_findings"][0]["title"], "Verified moved bug")
 
     def test_convergence_gate_rejects_when_primary_location_is_outside_changed_hunks(self) -> None:
         checkout_dir = Path(tempfile.mkdtemp())
@@ -3415,6 +3471,44 @@ func writeHealth() {}
         self.assertEqual(final_progress["completion_audit"], result_payload["completion_audit"])
         self.assertEqual(final_progress["job_trace"], result_payload["job_trace"])
         rmtree.assert_called_with(checkout_dir, ignore_errors=True)
+
+    def test_run_job_marks_result_failed_when_completion_audit_has_blockers(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
+            patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}), \
+            patch(
+                "pullwise_worker.main.run_verifier_commands",
+                return_value=({"enabled": False, "runs": []}, [], "verifier disabled"),
+            ), \
+            patch(
+                "pullwise_worker.main.run_codex_review",
+                return_value=(
+                    audit_payload(
+                        [
+                            {
+                                "issue_id": "bad-card",
+                                "title": "Incomplete provider finding",
+                                "severity": "high",
+                                "claim": "The provider omitted the evidence contract.",
+                            }
+                        ]
+                    ),
+                    {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+                    "review ok",
+                ),
+            ), \
+            patch("pullwise_worker.main.shutil.rmtree"):
+            worker.run_job(worker_job(job_id="job_bad_completion", attempt=1, repo="acme/api"))
+
+        result_payload = worker.client.result.call_args.args[1]
+        self.assertEqual(result_payload["status"], "failed")
+        self.assertEqual(result_payload["error_code"], "COMPLETION_AUDIT_FAILED")
+        self.assertEqual(result_payload["issue_cards"], [])
+        self.assertEqual(result_payload["verification_results"], [])
+        self.assertEqual(result_payload["completion_audit"]["status"], "failed")
+        self.assertIn("missing", result_payload["error"].lower())
 
     def test_run_job_uploads_repository_graph_progress_and_result(self) -> None:
         worker = Worker(config())
