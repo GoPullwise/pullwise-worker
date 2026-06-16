@@ -941,6 +941,15 @@ func writeHealth() {}
         self.assertEqual([item["type"] for item in finding["evidence"]], ["documentation", "code"])
         self.assertIn("does not define `dev`", finding["evidence"][1]["summary"])
         self.assertIn("no project scripts were executed", finding["verificationSummary"])
+        self.assertIs(finding["autoFix"], True)
+        self.assertEqual(
+            finding["badCode"],
+            [{"ln": 3, "code": "Run `npm run dev` to start local development.", "t": "del"}],
+        )
+        self.assertEqual(
+            finding["goodCode"],
+            [{"ln": 3, "code": "Run `npm run build` to start local development.", "t": "add"}],
+        )
 
     def test_deterministic_checks_report_ci_workflow_missing_package_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -986,6 +995,15 @@ func writeHealth() {}
         self.assertIn("does not define `ci`", finding["evidence"][1]["summary"])
         self.assertIn("workflow was not executed", finding["verificationSummary"])
         self.assertIn("working-directory", finding["limitations"][0])
+        self.assertIs(finding["autoFix"], True)
+        self.assertEqual(
+            finding["badCode"],
+            [{"ln": 7, "code": "      - run: npm run ci", "t": "del"}],
+        )
+        self.assertEqual(
+            finding["goodCode"],
+            [{"ln": 7, "code": "      - run: npm run build", "t": "add"}],
+        )
 
     def test_deterministic_checks_report_dockerfile_missing_copy_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

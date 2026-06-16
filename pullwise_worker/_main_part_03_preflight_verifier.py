@@ -1314,8 +1314,15 @@ def missing_package_script_finding(
     readme_line: int,
     package_file: str,
     package_line: int,
+    replacement_script: str,
+    source_line: str,
+    replacement_line: str,
 ) -> dict:
     command = f"{manager} run {script}"
+    replacement_command = f"{manager} run {replacement_script}" if replacement_script else ""
+    auto_fix = bool(source_line and replacement_line and source_line != replacement_line)
+    bad_code = [{"ln": readme_line, "code": source_line, "t": "del"}] if auto_fix else []
+    good_code = [{"ln": readme_line, "code": replacement_line, "t": "add"}] if auto_fix else []
     severity = "medium" if script in _HIGH_SIGNAL_PACKAGE_SCRIPTS else "low"
     digest_input = f"{readme_file}:{readme_line}:{package_file}:{script}".encode("utf-8")
     finding_id = f"static_missing_script_{hashlib.sha1(digest_input).hexdigest()[:10]}"
@@ -1399,7 +1406,7 @@ def missing_package_script_finding(
             "High-confidence static comparison of README command text and root package.json scripts; production "
             "impact depends on whether users rely on this documented root command."
         ),
-        "autoFix": False,
+        "autoFix": auto_fix,
         "effort": "5 min",
         "fixBenefits": "Keeps documented setup and verification commands aligned with package.json.",
         "fixRisks": "Low; either add the missing script or update the README to the command the project actually supports.",
@@ -1407,9 +1414,14 @@ def missing_package_script_finding(
         "steps": [
             f"Decide whether `{command}` should be supported at the repository root.",
             f"Add a `{script}` entry to `{package_file}` or change `{readme_file}` to an existing script.",
+            *(
+                [f"Preview the generated patch that changes `{command}` to `{replacement_command}` in `{readme_file}`."]
+                if auto_fix
+                else []
+            ),
         ],
-        "badCode": [],
-        "goodCode": [],
+        "badCode": bad_code,
+        "goodCode": good_code,
         "references": [],
     }
 
@@ -1423,8 +1435,15 @@ def missing_workflow_package_script_finding(
     workflow_line: int,
     package_file: str,
     package_line: int,
+    replacement_script: str,
+    source_line: str,
+    replacement_line: str,
 ) -> dict:
     command = f"{manager} run {script}"
+    replacement_command = f"{manager} run {replacement_script}" if replacement_script else ""
+    auto_fix = bool(source_line and replacement_line and source_line != replacement_line)
+    bad_code = [{"ln": workflow_line, "code": source_line, "t": "del"}] if auto_fix else []
+    good_code = [{"ln": workflow_line, "code": replacement_line, "t": "add"}] if auto_fix else []
     severity = "medium" if script in _HIGH_SIGNAL_PACKAGE_SCRIPTS else "low"
     digest_input = f"{workflow_file}:{workflow_line}:{package_file}:{script}".encode("utf-8")
     finding_id = f"static_ci_missing_script_{hashlib.sha1(digest_input).hexdigest()[:10]}"
@@ -1505,7 +1524,7 @@ def missing_workflow_package_script_finding(
         "confidenceRationale": (
             "High-confidence static comparison of GitHub Actions command text and root package.json scripts; impact depends on workflow working-directory configuration."
         ),
-        "autoFix": False,
+        "autoFix": auto_fix,
         "effort": "5 min",
         "fixBenefits": "Keeps CI verification commands aligned with package.json so users and automation can reproduce checks.",
         "fixRisks": "Low; either add the missing script or update the workflow to an existing script or explicit working directory.",
@@ -1513,9 +1532,14 @@ def missing_workflow_package_script_finding(
         "steps": [
             f"Decide whether `{command}` should run at the repository root.",
             f"Add a `{script}` entry to `{package_file}`, update `{workflow_file}`, or set the correct workflow working-directory.",
+            *(
+                [f"Preview the generated patch that changes `{command}` to `{replacement_command}` in `{workflow_file}`."]
+                if auto_fix
+                else []
+            ),
         ],
-        "badCode": [],
-        "goodCode": [],
+        "badCode": bad_code,
+        "goodCode": good_code,
         "references": [],
     }
 
