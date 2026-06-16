@@ -40,6 +40,29 @@ worker instance's config.
 Multiple workers on the same server are supported only if each worker uses its
 own `service_home` for Codex binaries, config, cache, and auth state.
 
+## Worker Scan Reproduction Sandbox
+
+Worker scan agents should maximize reproducible evidence without expanding host
+scope.
+
+- Each scan job must run provider agents inside that job's isolated checkout or
+  work directory.
+- Codex review and semantic fallback agent executions may use
+  `--sandbox workspace-write`, but their subprocess `cwd` must stay scoped to
+  the job checkout. Do not point provider agent execution at `service_home`,
+  global temp roots, or any directory shared by multiple jobs.
+- Agents may create temporary reproduction files, focused tests, or scripts only
+  inside the job checkout. Scan completion should clean the job checkout unless
+  the worker intentionally retains a failed checkout according to configured
+  retention policy.
+- A formally reportable finding must carry reproducible runtime evidence:
+  an actual command, an explicit exit code, substantive output or a redacted
+  structured log path, and a repository-relative file/line tied to the issue.
+- Agent/provider findings that lack runtime reproduction evidence must be kept
+  audit-only or filtered before reporting. Do not treat speculative model claims,
+  source-only observations, or natural-language reproduction notes as trusted
+  findings.
+
 ## Server-Controlled Agent Policy
 
 The worker can advertise local provider capability, but review policy comes from
