@@ -248,10 +248,10 @@ def subscription_plan_agent_configs(payload: dict | None) -> dict[str, dict]:
 def subscription_plan_agent_configs_validation_error(plan_configs: dict[str, dict]) -> str:
     for plan in ("free", "pro", "max"):
         agent_config = plan_configs.get(plan) or {}
-        provider_chain = agent_config_provider_chain(agent_config)
-        if not provider_chain:
-            return f"subscription plan agent configs invalid: {plan}.providerChain is required"
-        if "codex" in provider_chain:
+        provider = agent_config_provider(agent_config)
+        if not provider:
+            return f"subscription plan agent configs invalid: {plan}.provider is required"
+        if provider == "codex":
             codex_config = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
             if not normalized_agent_config_text(codex_config.get("model")):
                 return f"subscription plan agent configs invalid: {plan}.codex.model is required"
@@ -260,24 +260,17 @@ def subscription_plan_agent_configs_validation_error(plan_configs: dict[str, dic
     return ""
 
 
-def agent_config_provider_chain(agent_config: dict) -> list[str]:
-    raw_chain = agent_config.get("providerChain") if isinstance(agent_config, dict) else None
-    if isinstance(raw_chain, list):
-        providers: list[str] = []
-        for item in raw_chain:
-            provider = str(item or "").strip().lower()
-            if provider in SUPPORTED_REVIEW_PROVIDERS and provider not in providers:
-                providers.append(provider)
-        return providers
-    return []
+def agent_config_provider(agent_config: dict) -> str:
+    provider = str(agent_config.get("provider") if isinstance(agent_config, dict) else "").strip().lower()
+    return provider if provider in SUPPORTED_REVIEW_PROVIDERS else ""
 
 
 def subscription_plan_required_providers(payload: dict | None) -> list[str]:
     required: list[str] = []
     for agent_config in subscription_plan_agent_configs(payload).values():
-        for provider in agent_config_provider_chain(agent_config):
-            if provider not in required:
-                required.append(provider)
+        provider = agent_config_provider(agent_config)
+        if provider and provider not in required:
+            required.append(provider)
     return required
 
 

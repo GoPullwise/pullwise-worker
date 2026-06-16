@@ -62,10 +62,8 @@ def effective_agent_config_value(value: object) -> str:
 
 
 def effective_agent_config_payload(config: WorkerConfig, provider: object = None) -> dict:
-    provider_chain = normalized_agent_provider_chain(getattr(config, "provider_chain", []))
     selected_provider = (
         normalized_agent_provider(provider)
-        or (provider_chain[0] if provider_chain else "")
         or normalized_agent_provider(getattr(config, "provider", ""))
         or "codex"
     )
@@ -75,7 +73,6 @@ def effective_agent_config_payload(config: WorkerConfig, provider: object = None
     reasoning_effort = normalized_agent_reasoning_level(getattr(config, "codex_reasoning_effort", ""))
     return {
         "provider": selected_provider,
-        "providerChain": provider_chain or [selected_provider],
         "agent": {
             "cli": selected_provider,
             "command": cli,
@@ -104,18 +101,18 @@ def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
     codex = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
     max_repo_files = normalized_positive_int(repository_limits.get("maxFiles"))
     max_repo_bytes = normalized_positive_int(repository_limits.get("maxBytes"))
-    provider_chain = normalized_agent_provider_chain(agent_config.get("providerChain"))
+    provider = normalized_agent_provider(agent_config.get("provider"))
     codex_model = normalized_agent_config_text(codex.get("model"))
     codex_reasoning_effort = normalized_agent_reasoning_level(codex.get("reasoningEffort"))
-    if not provider_chain:
-        raise RuntimeError("Worker job agentConfig.providerChain is required.")
-    if "codex" in provider_chain and not (codex_model and codex_reasoning_effort):
+    if not provider:
+        raise RuntimeError("Worker job agentConfig.provider is required.")
+    if provider == "codex" and not (codex_model and codex_reasoning_effort):
         raise RuntimeError("Worker job agentConfig.codex model and reasoningEffort are required.")
     if not max_repo_files or not max_repo_bytes:
         raise RuntimeError("Worker job repositoryLimits.maxFiles and maxBytes are required.")
     config = copy.copy(base_config)
-    config.provider_chain = provider_chain
-    config.provider = provider_chain[0]
+    config.provider_chain = [provider]
+    config.provider = provider
     if codex_model:
         config.codex_model = codex_model
     if codex_reasoning_effort:
@@ -577,7 +574,7 @@ class Worker:
                         "candidateCount": candidate_count,
                     },
                     details={
-                        "providerChain": getattr(job_config, "provider_chain", []),
+                        "provider": getattr(job_config, "provider", ""),
                         "model": ai_usage.get("model"),
                     },
                     logs_summary=logs_summary,

@@ -636,10 +636,8 @@ def review_decision_event(
         actual_decision,
         score.get("scoring_protocol"),
     )
-    provider_chain = list(getattr(config, "provider_chain", []) or [])
-    provider = provider_chain[0] if provider_chain else getattr(config, "provider", "")
+    provider = getattr(config, "provider", "")
     model = getattr(config, "codex_model", "")
-    provider_chain_text = ",".join(review_text(item, 40) for item in provider_chain if review_text(item, 40))
     return {
         "protocol": REVIEW_DECISION_EVENT_PROTOCOL_VERSION,
         "event_id": event_id,
@@ -701,7 +699,7 @@ def review_decision_event(
             "categoryAdjustment": score.get("category_adjustment"),
             "truthProbability": score.get("truth_probability"),
             "decisionScore": score.get("decision_score"),
-            "providerChain": provider_chain_text,
+            "provider": provider,
             "workerVersion": __version__,
             "auditProtocol": AUDIT_SWARM_PROTOCOL_VERSION,
             "promptVersion": _REVIEW_PROMPT_VERSION,

@@ -434,7 +434,7 @@ def audit_swarm_scan_artifacts(
         for item in (first_list(audit_payload, "verification_results", "verificationResults") or [])
         if isinstance(item, dict)
     ]
-    provider_chain = list(getattr(config, "provider_chain", []) or [])
+    provider = clean_protocol_text(getattr(config, "provider", ""))
     roles = dedupe_text(
         [
             *[
@@ -476,8 +476,8 @@ def audit_swarm_scan_artifacts(
         "protocol": clean_protocol_text(audit_payload.get("audit_protocol") or audit_payload.get("auditProtocol"))
         or AUDIT_SWARM_PROTOCOL_VERSION,
         "stage": clean_protocol_text(stage),
-        "adapter": provider_chain[0] if provider_chain else clean_protocol_text(getattr(config, "provider", "")),
-        "providerChain": provider_chain,
+        "adapter": provider,
+        "provider": provider,
         "summary": protocol_multiline_text(summary) or protocol_multiline_text(verification_audit.get("summary")),
         "logsSummary": protocol_multiline_text(logs_summary)[:1000],
         "counts": {key: value for key, value in counts.items() if value},
