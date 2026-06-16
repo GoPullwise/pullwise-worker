@@ -185,14 +185,16 @@ def completion_audit_payload(
                 }
             )
         else:
-            evidence_status = "passed" if len(negative_evidence_sources) >= 2 else "warning"
+            evidence_status = "passed" if len(negative_evidence_sources) >= 2 else "failed"
             evidence_summary = (
                 f"Empty result is backed by negative evidence from {', '.join(negative_evidence_sources)}."
                 if evidence_status == "passed"
                 else "Empty result has limited negative evidence from preflight/verifier/logs."
             )
-            if evidence_status == "warning":
-                warnings.append(evidence_summary)
+            if evidence_status == "failed":
+                blockers.append(evidence_summary)
+                retry_recommended = True
+                retry_reason = evidence_summary
             checks.append(
                 {
                     "id": "empty_result_negative_evidence",
@@ -278,9 +280,11 @@ def completion_audit_negative_evidence_sources(preflight: dict, logs_summary: st
     if preflight:
         sources.append("preflight")
     verifier = preflight.get("verifier") if isinstance(preflight.get("verifier"), dict) else {}
-    if verifier or protocol_multiline_text(logs_summary):
+    verifier_runs = verifier.get("runs") if isinstance(verifier.get("runs"), list) else []
+    verifier_executed = verifier.get("enabled") is True and bool(verifier_runs)
+    if verifier_executed:
         sources.append("verifier")
-    if protocol_multiline_text(logs_summary):
+    if verifier_executed and protocol_multiline_text(logs_summary):
         sources.append("logs")
     return dedupe_text(sources)
 

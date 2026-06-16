@@ -76,6 +76,14 @@ def audit_payload(issue_cards: list[dict] | None = None, verification_results: l
     }
 
 
+def passed_verifier_result() -> tuple[dict, list[dict], str]:
+    return (
+        {"enabled": True, "runs": [{"script": "test", "status": "passed", "exitCode": 0}]},
+        [],
+        "verifier ran 1 command and found no failures",
+    )
+
+
 def worker_job(**overrides: object) -> dict:
     payload = {
         "job_id": "job_1",
@@ -701,6 +709,40 @@ func writeHealth() {}
         self.assertEqual(checks["issue_card_reproduction_ideas"]["status"], "failed")
         self.assertEqual(checks["issue_card_suggested_tests"]["status"], "failed")
         self.assertEqual(checks["verification_issue_references"]["status"], "failed")
+
+    def test_completion_audit_fails_empty_result_without_executed_verifier_evidence(self) -> None:
+        audit = completion_audit_payload(
+            result_status="done",
+            audit_payload=audit_payload(),
+            preflight={"mode": "static", "verifier": {"enabled": False, "runs": []}},
+            verification_audit={"candidateCount": 0, "reportedCount": 0},
+            logs_summary="verifier disabled\nreview ok",
+            candidate_count=0,
+            rejected_reasons={},
+        )
+
+        checks = {check["id"]: check for check in audit["checks"]}
+        self.assertEqual(audit["status"], "failed")
+        self.assertTrue(audit["retryRecommended"])
+        self.assertEqual(checks["empty_result_negative_evidence"]["status"], "failed")
+        self.assertEqual(checks["empty_result_negative_evidence"]["details"], ["preflight"])
+        self.assertTrue(any("limited negative evidence" in blocker for blocker in audit["blockers"]))
+
+    def test_completion_audit_accepts_empty_result_with_executed_verifier_evidence(self) -> None:
+        audit = completion_audit_payload(
+            result_status="done",
+            audit_payload=audit_payload(),
+            preflight={"mode": "static", "verifier": passed_verifier_result()[0]},
+            verification_audit={"candidateCount": 0, "reportedCount": 0},
+            logs_summary="verifier ran 1 command and found no failures\nreview produced no reportable issues",
+            candidate_count=0,
+            rejected_reasons={},
+        )
+
+        checks = {check["id"]: check for check in audit["checks"]}
+        self.assertEqual(audit["status"], "passed")
+        self.assertEqual(checks["empty_result_negative_evidence"]["status"], "passed")
+        self.assertEqual(checks["empty_result_negative_evidence"]["details"], ["preflight", "verifier", "logs"])
 
     def test_review_prompt_reuses_prior_issue_ids_for_convergence(self) -> None:
         prompt = worker_main.review_prompt(
@@ -3651,14 +3693,17 @@ func writeHealth() {}
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
-            ), \
+            ) as run_codex_review, \
             patch("pullwise_worker.main.shutil.rmtree"):
             worker.run_job(worker_job(job_id="job_verifier_error", attempt=1, repo="acme/api"))
 
+        run_codex_review.assert_called_once()
         result_payload = worker.client.result.call_args.args[1]
-        self.assertEqual(result_payload["status"], "done")
+        self.assertEqual(result_payload["status"], "failed")
+        self.assertEqual(result_payload["error_code"], "COMPLETION_AUDIT_FAILED")
         self.assertIn("Verifier failed before completing", result_payload["preflight"]["verifier"]["summary"])
         self.assertEqual(result_payload["preflight"]["verifier"]["runs"], [])
+        self.assertEqual(result_payload["completion_audit"]["status"], "failed")
 
     def test_run_job_uploads_verifier_findings_and_execution_scope(self) -> None:
         worker = Worker(config())
@@ -3736,6 +3781,7 @@ func writeHealth() {}
         worker.client.result.side_effect = [PullwiseRequestError("timed out"), None]
 
         with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
+            patch("pullwise_worker.main.run_verifier_commands", return_value=passed_verifier_result()), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
@@ -3765,10 +3811,7 @@ func writeHealth() {}
 
         with patch("pullwise_worker.main.clone_repository", side_effect=clone), \
             patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}), \
-            patch(
-                "pullwise_worker.main.run_verifier_commands",
-                return_value=({"enabled": False, "runs": []}, [], "verifier disabled"),
-            ), \
+            patch("pullwise_worker.main.run_verifier_commands", return_value=passed_verifier_result()), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
@@ -3786,6 +3829,7 @@ func writeHealth() {}
         worker.client.result.side_effect = PullwiseRequestError("timed out")
 
         with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
+            patch("pullwise_worker.main.run_verifier_commands", return_value=passed_verifier_result()), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
@@ -3806,6 +3850,7 @@ func writeHealth() {}
         worker.client.result.side_effect = [PullwiseHTTPError("HTTP 500", 500), None]
 
         with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
+            patch("pullwise_worker.main.run_verifier_commands", return_value=passed_verifier_result()), \
             patch(
                 "pullwise_worker.main.run_codex_review",
                 return_value=(audit_payload(), {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, "review ok"),
