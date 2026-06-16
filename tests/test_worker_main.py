@@ -798,6 +798,16 @@ func writeHealth() {}
         self.assertIn("preserve the required final JSON output structure exactly", prompt)
         self.assertIn("Return only JSON with top-level `audit_protocol`, `issue_cards`, and `verification_results`", prompt)
 
+    def test_review_prompt_requires_enumeration_then_reproduction_filtering(self) -> None:
+        prompt = worker_main.review_prompt({"repo": "acme/api", "branch": "main", "commit": "pending"})
+
+        self.assertIn("Stage 1", prompt)
+        self.assertIn("enumerate as many plausible issue candidates", prompt)
+        self.assertIn("Stage 2", prompt)
+        self.assertIn("reproduce or verify each candidate", prompt)
+        self.assertIn("The worker will filter out candidates that lack reproducible runtime evidence", prompt)
+        self.assertNotIn("omit the issue rather than reporting a speculative finding", prompt)
+
     def test_repository_semantic_agent_prompt_encourages_subagents_without_changing_output_shape(self) -> None:
         prompt = worker_main.repository_semantic_agent_prompt(
             {"repo": "acme/api", "branch": "main", "commit": "pending"},
@@ -3558,6 +3568,20 @@ func writeHealth() {}
                             }
                         ],
                     )
+                    ,
+                    issue_card(
+                        "Unreproduced candidate",
+                        severity="P2",
+                        issue_id="unreproduced",
+                        evidence=[
+                            {
+                                "summary": "The source line looks risky, but no reproduction command was captured.",
+                                "file": "src/app.py",
+                                "startLine": 18,
+                                "endLine": 18,
+                            }
+                        ],
+                    ),
                 ],
                 [
                     {
@@ -3602,21 +3626,25 @@ func writeHealth() {}
         self.assertEqual(result_payload["resolved_commit"], resolved_commit)
         self.assertEqual(result_payload["preflight"], {"mode": "static", "verifier": {"enabled": False, "runs": []}})
         self.assertEqual(result_payload["audit_protocol"], "audit-swarm/0.1")
-        self.assertEqual(result_payload["issue_cards"][0]["title"], "Bug")
+        self.assertEqual([card["title"] for card in result_payload["issue_cards"]], ["Bug"])
         self.assertEqual(result_payload["summary"]["high"], 1)
         self.assertNotIn("findings", result_payload)
         self.assertEqual(result_payload["convergence_state"]["protocol"], "pullwise-convergence/0.1")
         self.assertEqual(result_payload["convergence_state"]["open_findings"][0]["title"], "Bug")
         self.assertEqual(result_payload["aiUsage"], {"model": "gpt-5.5"})
-        self.assertEqual(result_payload["verification_audit"]["candidateCount"], 1)
+        self.assertEqual(result_payload["verification_audit"]["candidateCount"], 2)
         self.assertEqual(result_payload["verification_audit"]["reportedCount"], 1)
-        self.assertEqual(result_payload["verification_audit"]["rejectedCount"], 0)
+        self.assertEqual(result_payload["verification_audit"]["rejectedCount"], 1)
+        self.assertEqual(
+            result_payload["verification_audit"]["rejectedReasons"],
+            [{"reason": "missing_runtime_evidence", "count": 1}],
+        )
         self.assertEqual(result_payload["completion_audit"], result_payload["completionAudit"])
         self.assertEqual(result_payload["completion_audit"]["protocol"], "pullwise-completion-audit/0.1")
         self.assertEqual(result_payload["completion_audit"]["status"], "passed")
         self.assertEqual(result_payload["job_trace"], result_payload["jobTrace"])
         self.assertEqual(result_payload["job_trace"]["protocol"], "pullwise-job-trace/0.1")
-        self.assertEqual(result_payload["job_trace"]["candidateCountBeforeFilter"], 1)
+        self.assertEqual(result_payload["job_trace"]["candidateCountBeforeFilter"], 2)
         self.assertEqual(
             [checkpoint["stage"] for checkpoint in result_payload["job_trace"]["checkpoints"]],
             ["clone", "preflight", "graph", "verifier", "agent", "filter", "report"],

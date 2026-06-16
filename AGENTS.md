@@ -45,6 +45,10 @@ own `service_home` for Codex binaries, config, cache, and auth state.
 Worker scan agents should maximize reproducible evidence without expanding host
 scope.
 
+- Job scan flow should be two-stage: first enumerate as many plausible issue
+  candidates as the repository context supports, then reproduce or verify each
+  candidate one by one. Only candidates that survive reproduction/verification
+  should become formal reported findings.
 - Each scan job must run provider agents inside that job's isolated checkout or
   work directory.
 - Codex review and semantic fallback agent executions may use
