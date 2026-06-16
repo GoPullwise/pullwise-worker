@@ -53,6 +53,7 @@ _CHECKOUT_ROOT_SENTINEL_NAME = ".pullwise-checkout-root"
 _CHECKOUT_RUNTIME_DIR_NAMES = {_VERIFIER_HOME_DIR_NAME, _VERIFIER_TMP_DIR_NAME}
 _PROC_MEMINFO_PATH = "/proc/meminfo"
 DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
+WORKER_HTTP_TIMEOUT_SECONDS = 60
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
@@ -589,7 +590,7 @@ class PullwiseClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(response.read())
         except urllib.error.HTTPError as exc:
             reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
@@ -604,7 +605,7 @@ class PullwiseClient:
             method="DELETE",
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(response.read())
         except urllib.error.HTTPError as exc:
             reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"

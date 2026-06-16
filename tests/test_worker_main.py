@@ -4002,6 +4002,30 @@ func writeHealth() {}
         self.assertEqual(request.full_url, "https://server.test/worker/heartbeat")
         self.assertEqual(request.get_header("Authorization"), "Bearer worker-token")
         self.assertEqual(json.loads(request.data.decode("utf-8")), {"worker_id": "wk_1"})
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 60)
+        self.assertEqual(response.json(), {"ok": True})
+
+    def test_pullwise_client_delete_uses_one_minute_timeout(self) -> None:
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"ok": true}'
+
+        cfg = config()
+        client = PullwiseClient(cfg)
+
+        with patch("pullwise_worker.main.urllib.request.urlopen", return_value=FakeResponse()) as urlopen:
+            response = client.delete("/worker/registry")
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://server.test/worker/registry")
+        self.assertEqual(request.get_method(), "DELETE")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 60)
         self.assertEqual(response.json(), {"ok": True})
 
     def test_pullwise_client_heartbeat_includes_active_job_ids(self) -> None:
