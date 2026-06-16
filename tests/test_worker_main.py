@@ -37,6 +37,7 @@ from pullwise_worker.main import (
     codex_ready_check,
     default_worker_package,
     execute_lifecycle_command,
+    finalize_worker_uninstall,
     filter_audit_swarm_payload_by_findings,
     filter_reportable_findings,
     normalize_audit_swarm_files_for_checkout,

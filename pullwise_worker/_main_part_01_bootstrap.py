@@ -446,6 +446,11 @@ class WorkerConfig:
             os.environ.get("PULLWISE_LOGROTATE_FILE", f"/etc/logrotate.d/{self.service_name}").strip()
             or f"/etc/logrotate.d/{self.service_name}"
         )
+        self.remote_uninstall_finalizer = env_bool("PULLWISE_REMOTE_UNINSTALL_FINALIZER", False)
+        self.uninstall_marker_file = (
+            os.environ.get("PULLWISE_UNINSTALL_MARKER_FILE", f"/run/{self.service_name}/uninstall-requested").strip()
+            or f"/run/{self.service_name}/uninstall-requested"
+        )
         default_codex_command = default_provider_command(self.service_home, "codex")
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or default_codex_command
         self.codex_model = os.environ.get("PULLWISE_CODEX_MODEL", DEFAULT_CODEX_MODEL).strip() or DEFAULT_CODEX_MODEL
@@ -730,7 +735,7 @@ def main() -> None:
         "command",
         nargs="?",
         default="run",
-        choices=["run", "doctor", "start", "stop", "status", "restart", "update", "uninstall", "cleanup"],
+        choices=["run", "doctor", "start", "stop", "status", "restart", "update", "uninstall", "finalize-uninstall", "cleanup"],
     )
     parser.add_argument("--server-url")
     parser.add_argument("--worker-id")
@@ -758,6 +763,13 @@ def main() -> None:
         raise SystemExit(service_action(args.command, dry_run=args.dry_run, config=config))
     if args.command == "uninstall":
         raise SystemExit(uninstall_worker_command(args))
+    if args.command == "finalize-uninstall":
+        try:
+            config = WorkerConfig(args, require_worker_token=False, validate_server_url=False)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from exc
+        raise SystemExit(finalize_worker_uninstall(config, dry_run=args.dry_run))
     require_worker_token = args.command in {"run", "doctor"}
     try:
         config = WorkerConfig(

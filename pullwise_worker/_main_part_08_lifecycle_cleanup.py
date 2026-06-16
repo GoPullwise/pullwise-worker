@@ -29,6 +29,15 @@ def execute_lifecycle_command(action: str, config: WorkerConfig | None = None) -
         if config is None:
             print("Remote uninstall requires a worker configuration.", file=sys.stderr)
             return 2
+        if getattr(config, "remote_uninstall_finalizer", False):
+            try:
+                write_remote_uninstall_marker(config)
+                return 0
+            except Exception as exc:
+                print(
+                    f"remote uninstall finalizer marker failed; falling back to instance cleanup: {redact_secrets(str(exc), config)}",
+                    file=sys.stderr,
+                )
         try:
             cleanup_worker_instance(config)
         except Exception as exc:
@@ -44,6 +53,45 @@ def cleanup_worker_instance(config: WorkerConfig) -> None:
         safe_worker_instance_rmtree(target)
 
 
+def remote_uninstall_marker_path(config: WorkerConfig) -> Path:
+    marker_text = str(getattr(config, "uninstall_marker_file", "") or "").strip()
+    if not marker_text:
+        raise ValueError("PULLWISE_UNINSTALL_MARKER_FILE is not configured")
+    marker = Path(marker_text)
+    if not marker.is_absolute() or path_is_root(marker):
+        raise ValueError(f"refusing to use unsafe uninstall marker path: {marker}")
+    return marker
+
+
+def write_remote_uninstall_marker(config: WorkerConfig) -> Path:
+    marker = remote_uninstall_marker_path(config)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{getattr(config, 'worker_id', '')}\n", encoding="utf-8")
+    return marker
+
+
+def finalize_worker_uninstall(config: WorkerConfig, *, dry_run: bool = False) -> int:
+    marker = remote_uninstall_marker_path(config)
+    if dry_run:
+        print(f"require uninstall marker {marker}")
+    elif not marker.exists():
+        return 0
+    code = uninstall_worker(
+        config,
+        remove_config=True,
+        remove_logs=True,
+        remove_service_home=True,
+        remove_wrapper=True,
+        remove_logrotate=True,
+        remove_service_user=True,
+        stop_service=False,
+        dry_run=dry_run,
+    )
+    if code == 0 and not dry_run:
+        marker.unlink(missing_ok=True)
+    return code
+
+
 def worker_instance_cleanup_targets(config: WorkerConfig) -> list[Path]:
     targets: list[Path] = []
     work_dir = Path(config.work_dir)
@@ -56,7 +104,7 @@ def worker_instance_cleanup_targets(config: WorkerConfig) -> list[Path]:
         targets.append(work_dir)
 
     log_dir = Path(config.log_dir)
-    if not any(path_same_or_within(log_dir, target) for target in targets):
+    if safe_worker_instance_log_target(log_dir) and not any(path_same_or_within(log_dir, target) for target in targets):
         targets.append(log_dir)
     return dedupe_cleanup_targets(targets)
 
@@ -69,6 +117,12 @@ def safe_remote_service_home_target(service_home: Path, work_dir: Path) -> bool:
     if os.environ.get("PULLWISE_SERVICE_HOME", "").strip() == str(service_home):
         return True
     return service_home.resolve(strict=False).name not in {"", "pullwise-worker"}
+
+
+def safe_worker_instance_log_target(log_dir: Path) -> bool:
+    if path_is_root(log_dir):
+        return False
+    return log_dir.resolve(strict=False).name not in {"", "pullwise-worker"}
 
 
 def dedupe_cleanup_targets(targets: list[Path]) -> list[Path]:
@@ -250,6 +304,11 @@ def uninstall_worker(
     *,
     remove_config: bool = False,
     remove_logs: bool = False,
+    remove_service_home: bool = True,
+    remove_wrapper: bool = True,
+    remove_logrotate: bool = True,
+    remove_service_user: bool = True,
+    stop_service: bool = True,
     dry_run: bool = False,
 ) -> int:
     if config is None:
@@ -258,10 +317,13 @@ def uninstall_worker(
     service_file = Path(config.service_file)
     config_dir = Path(config.worker_env_file).parent
     log_dir = Path(config.log_dir)
-    commands = [
-        ["systemctl", "stop", service_name],
-        ["systemctl", "disable", service_name],
-    ]
+    service_home = Path(config.service_home)
+    wrapper = Path(config.worker_bin_path)
+    logrotate = Path(config.logrotate_file)
+    commands = []
+    if stop_service:
+        commands.append(["systemctl", "stop", service_name])
+    commands.append(["systemctl", "disable", service_name])
     for command in commands:
         if dry_run:
             print(" ".join(command))
@@ -271,17 +333,35 @@ def uninstall_worker(
             return completed.returncode
     if dry_run:
         print(f"remove {service_file}")
+        if remove_wrapper:
+            print(f"remove {wrapper}")
+        if remove_logrotate:
+            print(f"remove {logrotate}")
+        if remove_service_home:
+            print(f"remove {service_home}")
         if remove_config:
             print(f"remove {config_dir}")
         if remove_logs:
             print(f"remove {log_dir}")
+        if remove_service_user and removable_service_user(config.service_user):
+            print(f"userdel {config.service_user}")
         print("systemctl daemon-reload")
     else:
         safe_unlink(service_file, service_name=service_name)
+        if remove_wrapper:
+            safe_worker_file_unlink(wrapper, Path("/usr/local/bin"), service_name)
+        if remove_logrotate:
+            safe_worker_file_unlink(logrotate, Path("/etc/logrotate.d"), service_name)
+        if remove_service_home and safe_remote_service_home_target(service_home, Path(config.work_dir)):
+            safe_worker_instance_rmtree(service_home)
         if remove_config:
             safe_rmtree(config_dir, config_dir)
         if remove_logs:
-            safe_rmtree(log_dir, log_dir)
+            safe_worker_instance_rmtree(log_dir)
+        if remove_service_user and removable_service_user(config.service_user):
+            completed = subprocess.run(["userdel", config.service_user])
+            if completed.returncode != 0:
+                return completed.returncode
         completed = subprocess.run(["systemctl", "daemon-reload"])
         if completed.returncode != 0:
             return completed.returncode
@@ -388,6 +468,25 @@ def trim_file_to_last_bytes(path: Path, max_bytes: int) -> None:
         data = data[newline + 1 :]
     with path.open("wb") as handle:
         handle.write(data)
+
+
+def safe_worker_file_unlink(path: Path, allowed_root: Path, service_name: str) -> None:
+    safe_service_name = str(service_name or "").strip()
+    if not safe_service_name.startswith(DEFAULT_SERVICE_NAME):
+        raise ValueError(f"refusing to remove unexpected worker file for service: {service_name}")
+    resolved = path.resolve(strict=False)
+    allowed = allowed_root.resolve(strict=False)
+    try:
+        resolved.relative_to(allowed)
+    except ValueError as exc:
+        raise ValueError(f"refusing to remove unexpected file: {path}") from exc
+    if path.name != safe_service_name:
+        raise ValueError(f"refusing to remove unexpected file: {path}")
+    path.unlink(missing_ok=True)
+
+
+def removable_service_user(service_user: str) -> bool:
+    return str(service_user or "").strip().startswith("pw-worker-")
 
 
 def safe_unlink(path: Path, *, service_name: str = DEFAULT_SERVICE_NAME) -> None:
