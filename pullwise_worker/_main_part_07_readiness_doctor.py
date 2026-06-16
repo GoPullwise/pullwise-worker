@@ -318,7 +318,7 @@ def codex_ready_probe_confirmed(text: str) -> bool:
 
 def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     if not _CODEX_EXEC_LOCK.acquire(blocking=False):
-        return True, "ready check deferred while codex is running"
+        return False, "ready check deferred while codex is running"
     try:
         scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
         if not scope_ok:
@@ -370,7 +370,7 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
             if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
                 return False, "not logged in"
             if codex_node_runtime_error(output):
-                node_ok, node_detail = node_version_check()
+                node_ok, node_detail = node_version_check(env=provider_process_env(config))
                 if not node_ok:
                     return False, node_detail
                 return False, "Codex CLI failed to start; reinstall Codex CLI or verify Node.js 20+"

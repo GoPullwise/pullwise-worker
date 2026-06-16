@@ -277,7 +277,7 @@ def worker_tool_versions(config: WorkerConfig, package_managers: list[str] | Non
     if "codex" in config.provider_chain:
         scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
         if scope_ok:
-            results.append(safe_tool_version("codex", [config.codex_command, "--version"]))
+            results.append(safe_tool_version("codex", [config.codex_command, "--version"], env=provider_process_env(config)))
         else:
             results.append(scoped_tool_version_failure("codex", [config.codex_command, "--version"], scope_detail))
     return results
@@ -310,7 +310,7 @@ def scoped_tool_version_failure(name: str, command: list[str], detail: str) -> d
     }
 
 
-def safe_tool_version(name: str, command: list[str]) -> dict:
+def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | None = None) -> dict:
     command_text = public_tool_version_command(command)
     try:
         completed = subprocess.run(
@@ -320,6 +320,7 @@ def safe_tool_version(name: str, command: list[str]) -> dict:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=5,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {
@@ -1169,13 +1170,19 @@ def iter_secret_scan_files(checkout_dir: Path):
 
 
 def secret_scan_file_allowed(path: Path, checkout_dir: Path) -> bool:
-    if not path.is_file():
+    if path.is_symlink():
+        return False
+    try:
+        stat_result = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(stat_result.st_mode):
         return False
     try:
         relative = path.relative_to(checkout_dir)
-        size = path.stat().st_size
-    except (OSError, ValueError):
+    except ValueError:
         return False
+    size = stat_result.st_size
     if size <= 0 or size > _SECRET_SCAN_MAX_BYTES:
         return False
     parts = [part.lower() for part in relative.parts]
