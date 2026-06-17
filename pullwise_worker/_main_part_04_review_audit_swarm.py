@@ -36,6 +36,63 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
     raise RuntimeError(f"all review providers failed: {'; '.join(errors)}")
 
 
+def graph_verified_review_enabled(config: WorkerConfig, job: dict) -> bool:
+    agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
+    graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
+    if graph_config.get("enabled") is True:
+        return True
+    return env_bool("PULLWISE_GRAPH_VERIFIED_REVIEW_ENABLED", False)
+
+
+def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, head_ref: str) -> dict:
+    from codereview.main import run_review
+    from codereview.utils.jsonl import read_json
+
+    agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
+    graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
+    base_ref = clean_protocol_text(job.get("base_commit") or job.get("baseCommit"))
+    if not base_ref:
+        base_ref = f"{head_ref}^"
+    mode = clean_protocol_text(
+        graph_config.get("mode")
+        or agent_config.get("graphVerifiedMode")
+        or os.environ.get("PULLWISE_GRAPH_VERIFIED_REVIEW_MODE")
+        or "standard"
+    )
+    try:
+        final_path = run_review(checkout_dir, base_ref=base_ref, head_ref=head_ref, mode=mode)
+    except Exception as exc:
+        return {
+            "version": "graph-verified-code-review/1",
+            "mode": mode,
+            "base": base_ref,
+            "head": head_ref,
+            "confirmedCount": 0,
+            "rejectedCount": 0,
+            "blockedCount": 1,
+            "debugMarkdown": f"Graph-verified review failed before confirmation: {redact_secrets(str(exc), config)}",
+            "finalJson": {"confirmed": []},
+        }
+    reports = final_path.parent
+    confirmed = read_json(reports / "confirmed.json", [])
+    rejected = read_json(reports / "rejected.json", [])
+    final_json = read_json(reports / "final.json", {"confirmed": []})
+    run_id = final_path.parent.parent.name
+    return {
+        "version": "graph-verified-code-review/1",
+        "runId": run_id,
+        "mode": mode,
+        "base": base_ref,
+        "head": head_ref,
+        "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
+        "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
+        "blockedCount": 0,
+        "finalMarkdown": final_path.read_text(encoding="utf-8") if final_path.is_file() else "",
+        "debugMarkdown": (reports / "debug.md").read_text(encoding="utf-8") if (reports / "debug.md").is_file() else "",
+        "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
+    }
+
+
 def codex_auth_failure_error(config: WorkerConfig) -> str | None:
     with _CODEX_AUTH_FAILURE_LOCK:
         remaining = _codex_auth_failure_until - time.monotonic()

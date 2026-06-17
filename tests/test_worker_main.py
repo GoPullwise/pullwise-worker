@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import concurrent.futures
+import importlib
 import json
 import os
 import shutil
@@ -199,6 +200,40 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(worker_config.max_repo_files, 2000)
         self.assertEqual(worker_config.max_repo_bytes, 50 * 1024 * 1024)
         self.assertEqual(worker_config.max_claim_jobs, 2)
+
+    def test_graph_verified_review_uses_nested_agent_config_gate_and_mode(self) -> None:
+        worker_config = config()
+        job = worker_job(
+            agentConfig={
+                "provider": "codex",
+                "codex": {
+                    "command": "codex",
+                    "model": "gpt-5.5",
+                    "reasoningEffort": "medium",
+                },
+                "graphVerified": {"enabled": True, "mode": "deep"},
+            },
+            base_commit="origin/main",
+        )
+        run_root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(run_root, ignore_errors=True))
+        reports = run_root / "runs" / "run_1" / "reports"
+        reports.mkdir(parents=True)
+        (reports / "confirmed.json").write_text('[{"candidate": {"issue_id": "issue_1"}}]', encoding="utf-8")
+        (reports / "rejected.json").write_text("[]", encoding="utf-8")
+        (reports / "final.json").write_text('{"confirmed": [{"candidate": {"issue_id": "issue_1"}}]}', encoding="utf-8")
+        (reports / "final.md").write_text("# Graph-Verified Code Review Report\n", encoding="utf-8")
+        (reports / "debug.md").write_text("# Debug\n", encoding="utf-8")
+
+        codereview_main = importlib.import_module("codereview.main")
+        with patch.object(codereview_main, "run_review", return_value=reports / "final.md") as run_review:
+            payload = worker_main.run_graph_verified_review_payload(worker_config, job, Path("checkout"), "HEAD")
+
+        self.assertTrue(worker_main.graph_verified_review_enabled(worker_config, job))
+        run_review.assert_called_once_with(Path("checkout"), base_ref="origin/main", head_ref="HEAD", mode="deep")
+        self.assertEqual(payload["runId"], "run_1")
+        self.assertEqual(payload["confirmedCount"], 1)
+        self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["issue_id"], "issue_1")
 
     def test_worker_config_for_job_applies_admin_agent_policy_but_keeps_local_commands(self) -> None:
         worker_config = config()

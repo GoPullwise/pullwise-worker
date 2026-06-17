@@ -354,6 +354,7 @@ class Worker:
         preflight: dict = {}
         audit_payload: dict = empty_audit_swarm_payload()
         verification_audit: dict = {}
+        graph_verified_report: dict = {}
         candidate_count = 0
         rejected_reasons: dict[str, int] = {}
         logs_summary = ""
@@ -553,6 +554,13 @@ class Worker:
             )
             current_stage = "agent"
             audit_payload, summary, logs_summary = run_codex_review(job_config, job, checkout_dir)
+            if graph_verified_review_enabled(job_config, job):
+                graph_verified_report = run_graph_verified_review_payload(
+                    job_config,
+                    job,
+                    checkout_dir,
+                    resolved_commit or "HEAD",
+                )
             effective_agent_config = audit_payload.get("effectiveAgentConfig") if isinstance(audit_payload.get("effectiveAgentConfig"), dict) else {}
             if not effective_agent_config:
                 effective_agent_config = configured_agent
@@ -732,6 +740,9 @@ class Worker:
                 "job_trace": job_trace,
                 "jobTrace": job_trace,
             }
+            if graph_verified_report:
+                payload["graphVerifiedReport"] = graph_verified_report
+                payload["graph_verified_report"] = graph_verified_report
             if result_status == "failed":
                 payload["error"] = completion_error or "Worker completion audit failed."
                 payload["error_code"] = "COMPLETION_AUDIT_FAILED"

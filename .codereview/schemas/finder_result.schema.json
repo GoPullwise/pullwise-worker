@@ -1,0 +1,72 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidates": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "actual_behavior_hypothesis": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "code_evidence": {
+            "type": "array"
+          },
+          "expected_behavior": {
+            "type": "string"
+          },
+          "graph_evidence": {},
+          "issue_id": {
+            "type": "string"
+          },
+          "minimal_repro_idea": {
+            "type": "string"
+          },
+          "needs_network": {
+            "type": "boolean"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "trigger_condition": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue_id",
+          "title",
+          "severity",
+          "category",
+          "graph_evidence",
+          "code_evidence",
+          "trigger_condition",
+          "expected_behavior",
+          "actual_behavior_hypothesis",
+          "minimal_repro_idea",
+          "needs_network"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "candidates"
+  ],
+  "type": "object"
+}

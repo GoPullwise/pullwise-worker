@@ -1,0 +1,1 @@
+Render only confirmed findings. Do not include rejected or blocked candidates in user-facing findings.

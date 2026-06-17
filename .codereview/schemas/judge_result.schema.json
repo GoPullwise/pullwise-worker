@@ -1,0 +1,67 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_id": {
+      "type": "string"
+    },
+    "evidence_summary": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "log_path": {
+          "type": "string"
+        },
+        "observable": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "log_path",
+        "observable"
+      ],
+      "type": "object"
+    },
+    "level": {
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3"
+      ],
+      "type": "string"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "safe_to_show_user": {
+      "type": "boolean"
+    },
+    "status": {
+      "enum": [
+        "confirmed",
+        "rejected",
+        "blocked"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "candidate_id",
+    "status",
+    "level",
+    "safe_to_show_user",
+    "reason",
+    "evidence_summary",
+    "limitations"
+  ],
+  "type": "object"
+}

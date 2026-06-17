@@ -8,5 +8,5 @@ dependencies = []
 [project.scripts]
 pullwise-worker = "pullwise_worker.main:main"
 
-[tool.setuptools]
-packages = ["pullwise_worker"]
+[tool.setuptools.packages.find]
+include = ["pullwise_worker", "codereview", "codereview.*"]

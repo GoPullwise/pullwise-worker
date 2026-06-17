@@ -1,0 +1,19 @@
+{
+  "mode": "standard",
+  "codegraph": {
+    "command": "codegraph",
+    "optional_sync": true
+  },
+  "codex": {
+    "command": "codex",
+    "reasoning_effort": "high"
+  },
+  "finders": {
+    "enabled": true,
+    "max_workers": 4
+  },
+  "repro": {
+    "enabled": true,
+    "max_workers": 2
+  }
+}

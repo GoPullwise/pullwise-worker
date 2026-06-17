@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "candidate_id": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "files_written": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "log_path": {
+      "type": "string"
+    },
+    "observable": {
+      "type": "string"
+    },
+    "reproduced": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "candidate_id",
+    "reproduced",
+    "command",
+    "exit_code",
+    "log_path",
+    "observable",
+    "files_written",
+    "limitations"
+  ],
+  "type": "object"
+}

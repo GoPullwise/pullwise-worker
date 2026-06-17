@@ -33,3 +33,5 @@ Thumbs.db
 # Project
 .omx/
 .worktrees/
+.codereview/runs/
+.codereview/codegraph-index/

@@ -1,0 +1,11 @@
+{
+  "properties": {
+    "confirmed": {
+      "type": "array"
+    }
+  },
+  "required": [
+    "confirmed"
+  ],
+  "type": "object"
+}
