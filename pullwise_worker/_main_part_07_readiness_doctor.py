@@ -62,6 +62,20 @@ def provider_command_scope_check(command: str, config: WorkerConfig, label: str)
     return True, str(resolved)
 
 
+def worker_provider_home_isolation_check(config: WorkerConfig) -> tuple[bool, str]:
+    service_home = str(config.service_home or "").strip()
+    if not service_home:
+        return False, "PULLWISE_SERVICE_HOME is required"
+    normalized = service_home.replace("\\", "/").rstrip("/")
+    default_home = DEFAULT_SERVICE_HOME.rstrip("/")
+    if normalized == default_home:
+        return (
+            False,
+            f"PULLWISE_SERVICE_HOME must be worker-instance-specific, not shared default {DEFAULT_SERVICE_HOME}",
+        )
+    return True, service_home
+
+
 def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool, list[str]]:
     checks: list[tuple[str, bool, str]] = []
     checks.append(("server_url", server_url_allowed(config.server_url, allow_insecure=config.allow_insecure_server_url), config.server_url))
@@ -91,9 +105,15 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
             )
         )
     if "codex" in providers_to_check:
-        node_ok, node_detail = node_version_check(env=provider_env)
+        home_ok, home_detail = worker_provider_home_isolation_check(config)
+        checks.append(("worker_home_isolation", home_ok, home_detail))
+        node_ok, node_detail = node_version_check(env=provider_env) if home_ok else (False, "skipped until worker home isolation passes")
         checks.append(("node", node_ok, node_detail))
-        codex_scope_ok, codex_scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
+        codex_scope_ok, codex_scope_detail = (
+            provider_command_scope_check(config.codex_command, config, "Codex")
+            if home_ok
+            else (False, "skipped until worker home isolation passes")
+        )
         codex_cli_ok, codex_cli_detail = (
             command_ok([config.codex_command, "--version"], env=provider_env) if codex_scope_ok else (False, codex_scope_detail)
         )

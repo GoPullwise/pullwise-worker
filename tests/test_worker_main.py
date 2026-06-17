@@ -4628,6 +4628,24 @@ func writeHealth() {}
         self.assertFalse(by_name["server_url"][0])
         self.assertEqual(by_name["server_url"][1], "http://server.test")
 
+    def test_worker_readiness_rejects_shared_default_service_home_for_codex(self) -> None:
+        cfg = config()
+
+        with patch("pullwise_worker.main.command_ok", return_value=(True, "git ok")), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")) as codex_ready:
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
+            checks, provider_ready = worker_readiness_checks(cfg)
+
+        by_name = {name: (ok, detail) for name, ok, detail in checks}
+        self.assertFalse(by_name["worker_home_isolation"][0])
+        self.assertIn("worker-instance-specific", by_name["worker_home_isolation"][1])
+        self.assertFalse(by_name["node"][0])
+        self.assertEqual(by_name["node"][1], "skipped until worker home isolation passes")
+        self.assertFalse(by_name["codex"][0])
+        self.assertFalse(provider_ready)
+        codex_ready.assert_not_called()
+
     def test_worker_readiness_rejects_codex_command_outside_service_home(self) -> None:
         cfg = config()
         service_home = configure_instance_provider_commands(cfg)
@@ -5291,15 +5309,15 @@ func writeHealth() {}
 
     def test_readme_codex_login_example_uses_instance_isolated_env(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
-        self.assertIn("CODEX_HOME=/var/lib/pullwise-worker/.codex", readme)
-        self.assertIn("XDG_CONFIG_HOME=/var/lib/pullwise-worker/.config", readme)
-        self.assertIn("XDG_CACHE_HOME=/var/lib/pullwise-worker/.cache", readme)
-        self.assertIn("XDG_DATA_HOME=/var/lib/pullwise-worker/.local/share", readme)
+        self.assertIn("CODEX_HOME=/var/lib/pullwise-worker/wk_x/.codex", readme)
+        self.assertIn("XDG_CONFIG_HOME=/var/lib/pullwise-worker/wk_x/.config", readme)
+        self.assertIn("XDG_CACHE_HOME=/var/lib/pullwise-worker/wk_x/.cache", readme)
+        self.assertIn("XDG_DATA_HOME=/var/lib/pullwise-worker/wk_x/.local/share", readme)
         self.assertIn(
-            "PATH=/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/usr/local/sbin",
+            "PATH=/var/lib/pullwise-worker/wk_x/.local/bin:/var/lib/pullwise-worker/wk_x/.codex/bin:/usr/local/sbin",
             readme,
         )
-        self.assertIn("exec /var/lib/pullwise-worker/.codex/bin/codex login --device-auth", readme)
+        self.assertIn("exec /var/lib/pullwise-worker/wk_x/.codex/bin/codex login --device-auth", readme)
 
     def test_run_doctor_reports_ready_when_codex_probe_succeeds(self) -> None:
         cfg = config()

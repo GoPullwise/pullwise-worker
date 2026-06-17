@@ -127,5 +127,5 @@ worker stays in the registry; an uninstalled worker is removed from admin lists.
 Codex must be authenticated for the service user before Codex scans can run:
 
 ```bash
-sudo -u pullwise-worker env HOME=/var/lib/pullwise-worker USERPROFILE=/var/lib/pullwise-worker CODEX_HOME=/var/lib/pullwise-worker/.codex XDG_CONFIG_HOME=/var/lib/pullwise-worker/.config XDG_CACHE_HOME=/var/lib/pullwise-worker/.cache XDG_DATA_HOME=/var/lib/pullwise-worker/.local/share PATH=/var/lib/pullwise-worker/.local/bin:/var/lib/pullwise-worker/.codex/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -lc 'cd "$HOME" && exec /var/lib/pullwise-worker/.codex/bin/codex login --device-auth'
+sudo -u pullwise-worker-wk_x env HOME=/var/lib/pullwise-worker/wk_x USERPROFILE=/var/lib/pullwise-worker/wk_x CODEX_HOME=/var/lib/pullwise-worker/wk_x/.codex XDG_CONFIG_HOME=/var/lib/pullwise-worker/wk_x/.config XDG_CACHE_HOME=/var/lib/pullwise-worker/wk_x/.cache XDG_DATA_HOME=/var/lib/pullwise-worker/wk_x/.local/share PATH=/var/lib/pullwise-worker/wk_x/.local/bin:/var/lib/pullwise-worker/wk_x/.codex/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -lc 'cd "$HOME" && exec /var/lib/pullwise-worker/wk_x/.codex/bin/codex login --device-auth'
 ```
