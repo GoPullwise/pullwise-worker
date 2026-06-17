@@ -78,7 +78,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
 
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
     graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
-    base_ref = clean_protocol_text(job.get("base_commit") or job.get("baseCommit"))
+    base_ref = graph_verified_text(job.get("base_commit") or job.get("baseCommit"))
     if not base_ref:
         base_ref = f"{head_ref}^"
     mode = graph_verified_mode(graph_config.get("mode") or "standard")

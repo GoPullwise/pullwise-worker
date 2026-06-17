@@ -680,12 +680,6 @@ class WorkerConfig:
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
         self.max_repo_files = _DEFAULT_MAX_REPO_FILES
         self.max_repo_bytes = _DEFAULT_MAX_REPO_BYTES
-        self.semantic_graph_agent_fallback = env_bool("PULLWISE_SEMANTIC_GRAPH_AGENT_FALLBACK", False)
-        self.semantic_graph_agent_min_symbols = env_int("PULLWISE_SEMANTIC_GRAPH_AGENT_MIN_SYMBOLS", 8, minimum=0)
-        self.semantic_graph_agent_timeout_seconds = max(
-            30,
-            int(os.environ.get("PULLWISE_SEMANTIC_GRAPH_AGENT_TIMEOUT_SECONDS") or 180),
-        )
         self.cleanup_interval_seconds = max(60, int(os.environ.get("PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS") or 3600))
         self.log_retention_seconds = max(0, int(os.environ.get("PULLWISE_LOG_RETENTION_SECONDS") or 14 * 24 * 60 * 60))
         self.max_log_bytes = max(1, int(os.environ.get("PULLWISE_MAX_LOG_BYTES") or 1024 * 1024 * 1024))
@@ -697,42 +691,6 @@ class WorkerConfig:
         self.verifier_timeout_seconds = max(10, int(os.environ.get("PULLWISE_WORKER_VERIFIER_TIMEOUT_SECONDS") or 120))
         self.verifier_max_commands = max(1, int(os.environ.get("PULLWISE_WORKER_VERIFIER_MAX_COMMANDS") or 5))
         self.verifier_scripts = parse_verifier_scripts(os.environ.get("PULLWISE_WORKER_VERIFIER_SCRIPTS"))
-        self.review_calibration_mode = (
-            os.environ.get("PULLWISE_REVIEW_CALIBRATION_MODE", "shadow").strip().lower() or "shadow"
-        )
-        if self.review_calibration_mode not in {"off", "shadow", "audit_only", "enforce"}:
-            self.review_calibration_mode = "shadow"
-        self.review_calibration_model = (
-            os.environ.get("PULLWISE_REVIEW_CALIBRATION_MODEL", "relative_factor").strip().lower()
-            or "relative_factor"
-        )
-        if self.review_calibration_model not in {"relative_factor", "logit_beta"}:
-            self.review_calibration_model = "relative_factor"
-        self.review_calibration_half_life_days = env_float(
-            "PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS",
-            45.0,
-            minimum=1.0,
-        )
-        self.review_calibration_min_effective_samples = env_int(
-            "PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES",
-            20,
-            minimum=1,
-        )
-        self.review_calibration_enable_buckets = env_bool("PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS", False)
-        self.review_calibration_enable_hierarchy = env_bool("PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY", False)
-        self.review_calibration_enable_drift = env_bool("PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT", False)
-        self.review_calibration_sample_audit_rate = env_float(
-            "PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE",
-            0.02,
-            minimum=0.0,
-            maximum=1.0,
-        )
-        self.review_calibration_borderline_sample_window = env_float(
-            "PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW",
-            0.03,
-            minimum=0.0,
-            maximum=0.10,
-        )
         if require_worker_token and not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 

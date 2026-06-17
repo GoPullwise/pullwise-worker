@@ -354,7 +354,7 @@ def finding_primary_file(finding: dict) -> str:
 
 
 def finding_source(finding: dict) -> str:
-    source = str(finding.get("_auditSwarmRole") or finding.get("source") or finding.get("category") or "reviewer")
+    source = str(finding.get("source") or finding.get("category") or "reviewer")
     return normalized_source_key(source) or "reviewer"
 
 
@@ -854,5 +854,4 @@ def apply_convergence_gate(
         "source_stats": source_stats,
     }
     return reportable, rejected_reasons, rejected_samples, state
-
 
