@@ -31,6 +31,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(hasattr(worker_main, "run_codex_review"))
             self.assertFalse(hasattr(worker_main, "build_repository_graph_bundle"))
             self.assertFalse(hasattr(worker_main, "apply_review_calibration_decisions"))
+            self.assertFalse(hasattr(worker_main, "apply_convergence_gate"))
+            self.assertFalse(hasattr(worker_main, "convergence_context_for_job"))
+            self.assertFalse(hasattr(worker_main, "reportability_rejection_reason"))
 
     def test_write_graph_verified_codereview_config_uses_plan_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
