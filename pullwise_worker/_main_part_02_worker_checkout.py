@@ -363,6 +363,14 @@ class Worker:
             return self._doctor_status == "ok"
         checks, _provider_ready, ready_providers = worker_readiness_state(self.config)
         failed_check = first_failed_check(checks)
+        if (
+            failed_check is not None
+            and failed_check[0] == "codex_ready"
+            and "deferred" in str(failed_check[2] or "").lower()
+            and (self._doctor_status == "ok" or self._codex_ready or self._ready_providers)
+        ):
+            self._readiness_checked_at = current
+            return True
         self._codex_ready = readiness_check_ok(checks, "codex_ready")
         self._ready_providers = ready_providers
         self._doctor_status = "degraded" if failed_check else "ok"

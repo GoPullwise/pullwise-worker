@@ -4683,6 +4683,25 @@ func writeHealth() {}
         self.assertIn("deferred", by_name["codex_ready"][1])
         self.assertFalse(provider_ready)
 
+    def test_worker_preserves_ready_state_when_codex_probe_is_deferred(self) -> None:
+        worker = Worker(config())
+        worker._doctor_status = "ok"
+        worker._codex_ready = True
+        worker._ready_providers = ["codex"]
+        checks = [
+            ("git", True, "git ok"),
+            ("codex_ready", False, "ready check deferred while codex is running"),
+            ("provider_ready", False, "no configured provider is ready"),
+        ]
+
+        with patch("pullwise_worker.main.worker_readiness_state", return_value=(checks, False, [])):
+            self.assertTrue(worker.refresh_readiness_if_due())
+
+        self.assertEqual(worker._doctor_status, "ok")
+        self.assertTrue(worker._codex_ready)
+        self.assertEqual(worker._ready_providers, ["codex"])
+        self.assertIsNone(worker.last_error)
+
     def test_worker_tool_versions_uses_instance_env_for_codex_probe(self) -> None:
         cfg = config()
         service_home = configure_instance_provider_commands(cfg)
@@ -5748,6 +5767,8 @@ func writeHealth() {}
             service_text = watcher_file.read_text(encoding="utf-8")
             self.assertIn(f"EnvironmentFile={env_file}", service_text)
             self.assertIn(f"ExecStart={bin_path} watch", service_text)
+            self.assertIn("StartLimitIntervalSec=300", service_text)
+            self.assertIn("StartLimitBurst=5", service_text)
             command_args = [call.args for call in run.call_args_list]
             self.assertIn((["systemctl", "daemon-reload"],), command_args)
             self.assertIn((["systemctl", "enable", "pullwise-worker-wk_1-watcher"],), command_args)

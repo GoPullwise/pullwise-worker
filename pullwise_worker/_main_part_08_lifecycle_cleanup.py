@@ -358,6 +358,8 @@ def watcher_service_unit(config: WorkerConfig, *, env_path: Path | None = None, 
 Description=Pullwise Worker Watcher {worker_name}
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
