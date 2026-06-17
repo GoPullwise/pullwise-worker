@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from ..codex_runner import run_codex_exec
-from ..config import ReviewConfig
+from ..config import CodexConfig, ReviewConfig
 from ..utils.paths import safe_path_component
 from ..utils.process import run_process
 from .filesystem_guard import guard_worker_result
@@ -40,7 +40,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         sandbox="workspace-write",
         timeout_seconds=config.repro.timeout_seconds,
         config=config.codex,
-        env=worker_env(worker),
+        env=worker_env(worker, config.codex),
     )
     if process.returncode != 0:
         checkout_status_after = git_status_porcelain(
@@ -125,15 +125,24 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     }
 
 
-def worker_env(worker: Path) -> dict[str, str]:
+def worker_env(worker: Path, codex: CodexConfig | None = None) -> dict[str, str]:
     import os
 
     env = os.environ.copy()
     for child in ("home", "tmp", "cache", "cache/npm", "cache/pip", "cache/pycache"):
         (worker / child).mkdir(parents=True, exist_ok=True)
-    env["HOME"] = str(worker / "home")
-    env["USERPROFILE"] = str(worker / "home")
-    env["CODEX_HOME"] = str(worker / ".codex")
+    shared_keys = set()
+    if codex is not None and codex.env:
+        for key in ("HOME", "USERPROFILE", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "PATH"):
+            if codex.env.get(key):
+                env[key] = codex.env[key]
+                shared_keys.add(key)
+    if "HOME" not in shared_keys:
+        env["HOME"] = str(worker / "home")
+    if "USERPROFILE" not in shared_keys:
+        env["USERPROFILE"] = str(worker / "home")
+    if "CODEX_HOME" not in shared_keys:
+        env["CODEX_HOME"] = str(worker / ".codex")
     env["TMPDIR"] = str(worker / "tmp")
     env["TEMP"] = str(worker / "tmp")
     env["TMP"] = str(worker / "tmp")
@@ -141,6 +150,7 @@ def worker_env(worker: Path) -> dict[str, str]:
     env["npm_config_cache"] = str(worker / "cache" / "npm")
     env["PIP_CACHE_DIR"] = str(worker / "cache" / "pip")
     env["PYTHONPYCACHEPREFIX"] = str(worker / "cache" / "pycache")
+    env.pop("CODEGRAPH_DIR", None)
     return env
 
 

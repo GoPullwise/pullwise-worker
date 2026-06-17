@@ -394,6 +394,34 @@ def test_repro_worker_env_isolates_tmp_and_caches(tmp_path: Path) -> None:
     assert env["PYTHONPYCACHEPREFIX"] == str(worker / "cache" / "pycache")
 
 
+def test_repro_worker_env_shares_codex_config_but_keeps_runtime_dirs(tmp_path: Path) -> None:
+    worker = tmp_path / "worker"
+    config = ReviewConfig()
+    config.codex.env = {
+        "HOME": str(tmp_path / "worker-home"),
+        "USERPROFILE": str(tmp_path / "worker-home"),
+        "CODEX_HOME": str(tmp_path / "worker-home" / ".codex"),
+        "XDG_CONFIG_HOME": str(tmp_path / "worker-home" / ".config"),
+        "XDG_CACHE_HOME": str(tmp_path / "worker-home" / ".cache"),
+        "XDG_DATA_HOME": str(tmp_path / "worker-home" / ".local" / "share"),
+        "PATH": str(tmp_path / "worker-home" / ".codex" / "bin"),
+        "CODEGRAPH_DIR": "legacy-index",
+    }
+
+    env = worker_env(worker, config.codex)
+
+    assert env["HOME"] == str(tmp_path / "worker-home")
+    assert env["USERPROFILE"] == str(tmp_path / "worker-home")
+    assert env["CODEX_HOME"] == str(tmp_path / "worker-home" / ".codex")
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path / "worker-home" / ".config")
+    assert env["XDG_DATA_HOME"] == str(tmp_path / "worker-home" / ".local" / "share")
+    assert env["PATH"] == str(tmp_path / "worker-home" / ".codex" / "bin")
+    assert env["TMPDIR"] == str(worker / "tmp")
+    assert env["XDG_CACHE_HOME"] == str(worker / "cache")
+    assert env["npm_config_cache"] == str(worker / "cache" / "npm")
+    assert "CODEGRAPH_DIR" not in env
+
+
 def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None:
     config = ReviewConfig()
     config.codex.env = {
