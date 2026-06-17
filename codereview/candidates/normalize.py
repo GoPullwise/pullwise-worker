@@ -81,7 +81,20 @@ def normalize_category(value: object) -> str:
 def candidate_has_required_evidence(candidate: dict) -> bool:
     if not all(candidate.get(field) for field in REQUIRED_FIELDS):
         return False
-    return bool(candidate.get("graph_evidence")) and valid_code_evidence(candidate.get("evidence"))
+    return valid_graph_evidence(candidate.get("graph_evidence")) and valid_code_evidence(candidate.get("evidence"))
+
+
+def valid_graph_evidence(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    slice_id = str(value.get("slice_id") or "").strip()
+    codegraph_files = value.get("codegraph_files")
+    path_summary = value.get("path_summary")
+    if not slice_id or not isinstance(codegraph_files, list) or not isinstance(path_summary, list):
+        return False
+    has_file = any(str(item or "").strip() for item in codegraph_files)
+    has_path = any(str(item or "").strip() for item in path_summary)
+    return has_file and has_path
 
 
 def valid_code_evidence(value: object) -> bool:

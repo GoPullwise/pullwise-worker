@@ -27,6 +27,8 @@ DENIED_COMMAND_MARKERS = {
 def local_judge(candidate: dict, repro: dict) -> dict:
     result = repro.get("result") if isinstance(repro.get("result"), dict) else {}
     violations = repro.get("filesystem_violations") if isinstance(repro.get("filesystem_violations"), list) else []
+    if not valid_candidate_graph_evidence(candidate):
+        violations = [*violations, "candidate graph_evidence missing or invalid"]
     command_info = primary_command(result)
     command = str(command_info.get("cmd") or "")
     log_path = str(command_info.get("log_path") or "")
@@ -65,6 +67,20 @@ def local_judge(candidate: dict, repro: dict) -> dict:
         },
         "limitations": result.get("limitations") if isinstance(result.get("limitations"), list) else [],
     }
+
+
+def valid_candidate_graph_evidence(candidate: dict) -> bool:
+    graph = candidate.get("graph_evidence") if isinstance(candidate, dict) else None
+    if not isinstance(graph, dict):
+        return False
+    slice_id = str(graph.get("slice_id") or "").strip()
+    codegraph_files = graph.get("codegraph_files")
+    path_summary = graph.get("path_summary")
+    if not slice_id or not isinstance(codegraph_files, list) or not isinstance(path_summary, list):
+        return False
+    return any(str(item or "").strip() for item in codegraph_files) and any(
+        str(item or "").strip() for item in path_summary
+    )
 
 
 def primary_command(result: dict) -> dict:
