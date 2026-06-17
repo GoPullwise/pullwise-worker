@@ -80,25 +80,8 @@ PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "https_proxy",
     "no_proxy",
 )
-AUDIT_SWARM_PROTOCOL_VERSION = "audit-swarm/0.1"
-CONVERGENCE_PROTOCOL_VERSION = "pullwise-convergence/0.1"
 REVIEW_DECISION_EVENT_PROTOCOL_VERSION = "pullwise-review-decision/0.1"
-REVIEW_CALIBRATION_PROTOCOL_VERSION = "pullwise-review-calibration/0.2"
-REVIEW_SCORING_PROTOCOL_VERSION = "pullwise-review-score/0.1"
-CONVERGENCE_MIN_VERIFIED_CONFIDENCE = 0.75
-CONVERGENCE_MIN_UNVERIFIED_CONFIDENCE = 0.85
 REPOSITORY_TOO_LARGE_ERROR_CODE = "REPOSITORY_TOO_LARGE"
-AUDIT_SWARM_EVIDENCE_BLOCK_KINDS = {
-    "summary",
-    "claim",
-    "code_location",
-    "evidence",
-    "command",
-    "verifier_verdict",
-    "false_positive_check",
-    "invariant",
-    "risk",
-}
 CODEX_LOGIN_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
     f"USERPROFILE={DEFAULT_SERVICE_HOME} "
