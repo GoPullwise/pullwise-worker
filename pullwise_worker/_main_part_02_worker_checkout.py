@@ -91,6 +91,58 @@ def effective_agent_config_payload(config: WorkerConfig, provider: object = None
     }
 
 
+def graph_verified_summary_findings(report: dict) -> list[dict]:
+    final_json = report.get("finalJson") if isinstance(report.get("finalJson"), dict) else {}
+    confirmed = final_json.get("confirmed") if isinstance(final_json.get("confirmed"), list) else []
+    findings = []
+    for index, item in enumerate(confirmed):
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        judge = item.get("judge") if isinstance(item.get("judge"), dict) else {}
+        verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
+        status = str(judge.get("status") or verification.get("status") or verification.get("verdict") or "").strip().lower()
+        if status and status != "confirmed":
+            continue
+        if judge.get("safe_to_show_user") is False or verification.get("safe_to_show_user") is False:
+            continue
+        graph_evidence = candidate.get("graph_evidence") if isinstance(candidate.get("graph_evidence"), dict) else {}
+        if not graph_evidence:
+            continue
+        findings.append(
+            {
+                "id": clean_protocol_text(candidate.get("candidate_id") or candidate.get("issue_id")) or f"gv-{index + 1}",
+                "severity": audit_swarm_severity(candidate.get("severity")),
+            }
+        )
+    return findings
+
+
+def graph_verified_report_count(report: dict, key: str) -> int:
+    try:
+        return max(0, int(report.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def graph_verified_completion_payload(report: dict, *, result_status: str) -> dict:
+    if not report:
+        return {
+            "status": "failed",
+            "summary": "GraphVerified review did not produce a report.",
+            "blockers": ["missing_graph_verified_report"],
+        }
+    status = "ok" if result_status == "done" else "failed"
+    return {
+        "status": status,
+        "summary": "GraphVerified report produced.",
+        "confirmedCount": graph_verified_report_count(report, "confirmedCount"),
+        "rejectedCount": graph_verified_report_count(report, "rejectedCount"),
+        "blockedCount": graph_verified_report_count(report, "blockedCount"),
+        "runId": clean_protocol_text(report.get("runId")),
+    }
+
+
 def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
     agent_config = job.get("agentConfig")
     repository_limits = job.get("repositoryLimits")
@@ -566,8 +618,8 @@ class Worker:
                     checkout_dir,
                     resolved_commit or "HEAD",
                 )
-                audit_payload = graph_verified_audit_payload(graph_verified_report)
-                projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
+                audit_payload = empty_audit_swarm_payload()
+                projected_findings = graph_verified_summary_findings(graph_verified_report)
                 summary = summarize(projected_findings)
                 logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
                 job_trace_checkpoints.append(
@@ -599,7 +651,8 @@ class Worker:
                     audit_swarm_payload_from_findings(verifier_findings, verifier_role="verifier"),
                     audit_payload,
                 )
-            projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
+            if not graph_verified_enabled:
+                projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
             candidate_count = len(projected_findings)
             job_trace_checkpoints.append(
                 job_trace_checkpoint(
@@ -674,18 +727,23 @@ class Worker:
                 for reason, count in review_calibration["rejected_reasons"].items():
                     rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
                 rejected_samples = [*rejected_samples, *review_calibration["rejected_samples"]][:5]
-            audit_payload = filter_audit_swarm_payload_by_findings(audit_payload, projected_findings)
-            audit_payload["effectiveAgentConfig"] = effective_agent_config
-            summary = summarize(projected_findings)
-            verification_audit = verification_audit_payload(
-                candidate_count=candidate_count,
-                reported_findings=projected_findings,
-                rejected_reasons=rejected_reasons,
-                rejected_samples=rejected_samples,
-                audit_only_findings=review_calibration["audit_only_findings"],
-                audit_only_samples=review_calibration["audit_only_samples"],
-                verified_suppression_count=review_calibration["verified_suppression_count"],
-            )
+            if graph_verified_enabled:
+                audit_payload = empty_audit_swarm_payload()
+                verification_audit = {}
+                summary = summarize(projected_findings)
+            else:
+                audit_payload = filter_audit_swarm_payload_by_findings(audit_payload, projected_findings)
+                audit_payload["effectiveAgentConfig"] = effective_agent_config
+                summary = summarize(projected_findings)
+                verification_audit = verification_audit_payload(
+                    candidate_count=candidate_count,
+                    reported_findings=projected_findings,
+                    rejected_reasons=rejected_reasons,
+                    rejected_samples=rejected_samples,
+                    audit_only_findings=review_calibration["audit_only_findings"],
+                    audit_only_samples=review_calibration["audit_only_samples"],
+                    verified_suppression_count=review_calibration["verified_suppression_count"],
+                )
             if verifier_logs:
                 logs_summary = "\n".join([verifier_logs, logs_summary])[-1000:]
             job_trace_checkpoints.append(
@@ -709,17 +767,22 @@ class Worker:
             )
             duration_ms = int((time.monotonic() - started) * 1000)
             current_stage = "report"
-            completion_audit = completion_audit_payload(
-                result_status="done",
-                audit_payload=audit_payload,
-                preflight=preflight,
-                verification_audit=verification_audit,
-                logs_summary=logs_summary,
-                candidate_count=candidate_count,
-                rejected_reasons=rejected_reasons,
-            )
-            result_status = "failed" if completion_audit.get("status") == "failed" else "done"
-            completion_error = protocol_multiline_text(completion_audit.get("summary"))
+            if graph_verified_enabled:
+                completion_audit = graph_verified_completion_payload(graph_verified_report, result_status="done")
+                result_status = "done"
+                completion_error = ""
+            else:
+                completion_audit = completion_audit_payload(
+                    result_status="done",
+                    audit_payload=audit_payload,
+                    preflight=preflight,
+                    verification_audit=verification_audit,
+                    logs_summary=logs_summary,
+                    candidate_count=candidate_count,
+                    rejected_reasons=rejected_reasons,
+                )
+                result_status = "failed" if completion_audit.get("status") == "failed" else "done"
+                completion_error = protocol_multiline_text(completion_audit.get("summary"))
             if (
                 graph_verified_enabled
                 and graph_verified_report.get("blockedCount")
@@ -734,9 +797,17 @@ class Worker:
             completion_blocker_text = "; ".join(protocol_multiline_text(item) for item in completion_blockers if protocol_multiline_text(item))
             if completion_blocker_text:
                 completion_error = completion_blocker_text
-            result_issue_cards = audit_payload.get("issue_cards") if isinstance(audit_payload.get("issue_cards"), list) else []
+            result_issue_cards = (
+                []
+                if graph_verified_enabled
+                else audit_payload.get("issue_cards")
+                if isinstance(audit_payload.get("issue_cards"), list)
+                else []
+            )
             result_verification_results = (
-                audit_payload.get("verification_results")
+                []
+                if graph_verified_enabled
+                else audit_payload.get("verification_results")
                 if isinstance(audit_payload.get("verification_results"), list)
                 else []
             )
@@ -767,48 +838,63 @@ class Worker:
                 rejected_reasons=rejected_reasons,
                 next_retry_hint=completion_audit.get("retryReason") if completion_audit.get("retryRecommended") else "",
             )
-            audit_swarm = audit_swarm_scan_artifacts(
-                "report",
-                config=job_config,
-                audit_payload=audit_payload,
-                preflight=preflight,
-                verification_audit=verification_audit,
-                summary=verification_audit.get("summary") or "Audit Swarm result is ready.",
-                logs_summary=logs_summary,
-            )
-            payload = {
-                "status": result_status,
-                "commit": resolved_commit,
-                "resolved_commit": resolved_commit,
-                "audit_protocol": audit_payload.get("audit_protocol") or AUDIT_SWARM_PROTOCOL_VERSION,
-                "issue_cards": result_issue_cards,
-                "verification_results": result_verification_results,
-                "summary": result_summary,
-                "duration_ms": duration_ms,
-                "attempt_id": attempt_id,
-                "preflight": preflight,
-                "verification_audit": verification_audit,
-                "convergence_state": convergence_state,
-                "review_decision_events": review_calibration["decision_events"],
-                "audit_swarm": audit_swarm,
-                "effectiveAgentConfig": effective_agent_config,
-                "completion_audit": completion_audit,
-                "completionAudit": completion_audit,
-                "job_trace": job_trace,
-                "jobTrace": job_trace,
-            }
-            if graph_verified_report:
-                payload["graphVerifiedReport"] = graph_verified_report
+            if graph_verified_enabled:
+                audit_swarm = {}
+                payload = {
+                    "status": result_status,
+                    "commit": resolved_commit,
+                    "resolved_commit": resolved_commit,
+                    "summary": result_summary,
+                    "duration_ms": duration_ms,
+                    "attempt_id": attempt_id,
+                    "preflight": preflight,
+                    "effectiveAgentConfig": effective_agent_config,
+                    "graphVerifiedReport": graph_verified_report,
+                }
+            else:
+                audit_swarm = audit_swarm_scan_artifacts(
+                    "report",
+                    config=job_config,
+                    audit_payload=audit_payload,
+                    preflight=preflight,
+                    verification_audit=verification_audit,
+                    summary=verification_audit.get("summary") or "Audit Swarm result is ready.",
+                    logs_summary=logs_summary,
+                )
+                payload = {
+                    "status": result_status,
+                    "commit": resolved_commit,
+                    "resolved_commit": resolved_commit,
+                    "audit_protocol": audit_payload.get("audit_protocol") or AUDIT_SWARM_PROTOCOL_VERSION,
+                    "issue_cards": result_issue_cards,
+                    "verification_results": result_verification_results,
+                    "summary": result_summary,
+                    "duration_ms": duration_ms,
+                    "attempt_id": attempt_id,
+                    "preflight": preflight,
+                    "verification_audit": verification_audit,
+                    "convergence_state": convergence_state,
+                    "review_decision_events": review_calibration["decision_events"],
+                    "audit_swarm": audit_swarm,
+                    "effectiveAgentConfig": effective_agent_config,
+                    "completion_audit": completion_audit,
+                    "completionAudit": completion_audit,
+                    "job_trace": job_trace,
+                    "jobTrace": job_trace,
+                }
             if result_status == "failed":
                 payload["error"] = completion_error or "Worker completion audit failed."
                 payload["error_code"] = "COMPLETION_AUDIT_FAILED"
                 payload["errorCode"] = "COMPLETION_AUDIT_FAILED"
             if repository_graph:
-                payload["repositoryGraph"] = repository_graph
+                if not graph_verified_enabled:
+                    payload["repositoryGraph"] = repository_graph
             if semantic_graph:
-                payload["semanticGraph"] = semantic_graph
+                if not graph_verified_enabled:
+                    payload["semanticGraph"] = semantic_graph
             if impact_graph:
-                payload["impactGraph"] = impact_graph
+                if not graph_verified_enabled:
+                    payload["impactGraph"] = impact_graph
             if ai_usage:
                 payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
@@ -818,9 +904,9 @@ class Worker:
                 100,
                 "Uploading result",
                 logs_summary,
-                audit_swarm=audit_swarm,
-                completion_audit=completion_audit,
-                job_trace=job_trace,
+                audit_swarm=audit_swarm or None,
+                completion_audit=None if graph_verified_enabled else completion_audit,
+                job_trace=None if graph_verified_enabled else job_trace,
             )
             try:
                 self.upload_result_with_retry(job_id, payload)
