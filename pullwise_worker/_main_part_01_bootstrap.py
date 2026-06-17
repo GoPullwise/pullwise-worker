@@ -806,6 +806,7 @@ class PullwiseClient:
         self,
         *,
         running_jobs: int = 0,
+        max_concurrent_jobs: int | None = None,
         active_job_ids: list[str] | None = None,
         last_error: str | None = None,
         doctor_status: str | None = None,
@@ -815,14 +816,15 @@ class PullwiseClient:
         doctor_checked_at: int | None = None,
         machine_metrics: dict | None = None,
     ) -> dict:
+        reported_max_concurrent_jobs = max(1, int(max_concurrent_jobs or self.config.max_concurrent_jobs))
         payload = {
             "worker_id": self.config.worker_id,
             "version": __version__,
             "provider": self.config.provider,
             "providerChain": list(self.config.provider_chain),
-            "max_concurrent_jobs": self.config.max_concurrent_jobs,
+            "max_concurrent_jobs": reported_max_concurrent_jobs,
             "running_jobs": running_jobs,
-            "free_slots": max(0, self.config.max_concurrent_jobs - running_jobs),
+            "free_slots": max(0, reported_max_concurrent_jobs - running_jobs),
             "hostname": socket.gethostname(),
             "last_error": last_error,
             "doctor_status": doctor_status,

@@ -3698,6 +3698,12 @@ func writeHealth() {}
                 "output_tokens": 45,
                 "total_tokens": 168,
             }
+            audit_with_usage["reviewExecution"] = {
+                "provider": "codex",
+                "queueWaitMs": 321,
+                "execDurationMs": 654,
+                "timeoutSeconds": 60,
+            }
             run_codex_review.return_value = (
                 audit_with_usage,
                 {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
@@ -3711,6 +3717,7 @@ func writeHealth() {}
         collect_preflight.assert_called_once()
         run_verifier.assert_called_once()
         run_codex_review.assert_called_once()
+        self.assertTrue(callable(run_codex_review.call_args.kwargs["progress_callback"]))
         worker.client.result.assert_called_once()
         result_payload = worker.client.result.call_args.args[1]
         self.assertEqual(result_payload["status"], "done")
@@ -3725,6 +3732,8 @@ func writeHealth() {}
         self.assertEqual(result_payload["convergence_state"]["protocol"], "pullwise-convergence/0.1")
         self.assertEqual(result_payload["convergence_state"]["open_findings"][0]["title"], "Bug")
         self.assertEqual(result_payload["aiUsage"], {"model": "gpt-5.5"})
+        self.assertEqual(result_payload["reviewExecution"]["queueWaitMs"], 321)
+        self.assertEqual(result_payload["reviewExecution"]["execDurationMs"], 654)
         self.assertEqual(result_payload["verification_audit"]["candidateCount"], 2)
         self.assertEqual(result_payload["verification_audit"]["reportedCount"], 1)
         self.assertEqual(result_payload["verification_audit"]["rejectedCount"], 1)
@@ -3834,8 +3843,14 @@ func writeHealth() {}
         }
         review_jobs = []
 
-        def run_review(_config: WorkerConfig, job: dict, _checkout_dir: Path) -> tuple[dict, dict, str]:
+        def run_review(
+            _config: WorkerConfig,
+            job: dict,
+            _checkout_dir: Path,
+            progress_callback: object | None = None,
+        ) -> tuple[dict, dict, str]:
             review_jobs.append(dict(job))
+            self.assertTrue(callable(progress_callback))
             self.assertTrue(
                 any(call.kwargs.get("repositoryGraph") == graph for call in worker.client.progress.call_args_list)
             )
@@ -4337,6 +4352,8 @@ func writeHealth() {}
             pass
 
         worker = Worker(config())
+        worker.config.provider = "local"
+        worker.config.provider_chain = ["local"]
         worker.config.max_concurrent_jobs = 5
         worker.config.max_claim_jobs = 2
         worker.client = Mock()
@@ -4350,11 +4367,34 @@ func writeHealth() {}
 
         worker.client.claim_many.assert_called_once_with(2)
 
+    def test_codex_loop_reports_single_execution_slot_and_claims_one_job(self) -> None:
+        class StopLoop(Exception):
+            pass
+
+        worker = Worker(config())
+        worker.config.max_concurrent_jobs = 4
+        worker.config.max_claim_jobs = 4
+        worker.client = Mock()
+        worker.client.heartbeat.return_value = {}
+        worker.client.claim_many.return_value = []
+
+        with patch.object(worker, "refresh_readiness_if_due", return_value=True), \
+            patch("pullwise_worker.main.time.sleep", side_effect=StopLoop):
+            with self.assertRaises(StopLoop):
+                worker.run()
+
+        worker.client.claim_many.assert_called_once_with(1)
+        heartbeat_kwargs = worker.client.heartbeat.call_args.kwargs
+        self.assertEqual(heartbeat_kwargs["max_concurrent_jobs"], 1)
+        self.assertEqual(worker.effective_max_concurrent_jobs(), 1)
+
     def test_loop_refills_single_free_slot_after_job_finishes(self) -> None:
         class StopLoop(Exception):
             pass
 
         worker = Worker(config())
+        worker.config.provider = "local"
+        worker.config.provider_chain = ["local"]
         worker.config.max_concurrent_jobs = 2
         worker.config.max_claim_jobs = 4
         worker.client = Mock()
@@ -4396,6 +4436,8 @@ func writeHealth() {}
             pass
 
         worker = Worker(config())
+        worker.config.provider = "local"
+        worker.config.provider_chain = ["local"]
         worker.config.max_concurrent_jobs = 2
         worker.config.max_claim_jobs = 4
         worker.client = Mock()
@@ -4522,6 +4564,18 @@ func writeHealth() {}
         payload = post.call_args.args[1]
         self.assertEqual(payload["running_jobs"], 2)
         self.assertEqual(payload["active_job_ids"], ["job_1", "job_2"])
+
+    def test_pullwise_client_heartbeat_can_report_effective_capacity(self) -> None:
+        cfg = config()
+        cfg.max_concurrent_jobs = 4
+        client = PullwiseClient(cfg)
+
+        with patch.object(client, "post", return_value=PullwiseResponse(b"{}")) as post:
+            client.heartbeat(running_jobs=0, max_concurrent_jobs=1)
+
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["max_concurrent_jobs"], 1)
+        self.assertEqual(payload["free_slots"], 1)
 
     def test_pullwise_client_fetches_worker_agent_configs(self) -> None:
         cfg = config()
@@ -4667,7 +4721,7 @@ func writeHealth() {}
         self.assertFalse(provider_ready)
         self.assertNotIn([cfg.codex_command, "--version"], [call.args[0] for call in command.call_args_list])
 
-    def test_worker_readiness_does_not_count_deferred_codex_probe_as_ready(self) -> None:
+    def test_worker_readiness_counts_deferred_codex_probe_as_busy_ready(self) -> None:
         cfg = config()
         configure_instance_provider_commands(cfg)
 
@@ -4679,9 +4733,10 @@ func writeHealth() {}
             checks, provider_ready = worker_readiness_checks(cfg)
 
         by_name = {name: (ok, detail) for name, ok, detail in checks}
-        self.assertFalse(by_name["codex_ready"][0])
+        self.assertTrue(by_name["codex_ready"][0])
+        self.assertIn("busy", by_name["codex_ready"][1])
         self.assertIn("deferred", by_name["codex_ready"][1])
-        self.assertFalse(provider_ready)
+        self.assertTrue(provider_ready)
 
     def test_worker_preserves_ready_state_when_codex_probe_is_deferred(self) -> None:
         worker = Worker(config())
@@ -4951,6 +5006,44 @@ func writeHealth() {}
         self.assertTrue(concurrent_entries)
         self.assertLessEqual(max(concurrent_entries), 1)
 
+    def test_codex_provider_review_reports_waiting_and_running_progress(self) -> None:
+        cfg = config()
+        events = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> Mock:
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text(json.dumps(audit_payload()), encoding="utf-8")
+            return Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, patch("pullwise_worker.main.subprocess.run", side_effect=fake_run):
+            self.assertTrue(worker_main._CODEX_EXEC_LOCK.acquire(blocking=False))
+            lock_held_by_test = True
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        run_codex_provider_review,
+                        cfg,
+                        {"repo": "acme/api"},
+                        Path(tmp),
+                        progress_callback=lambda state, details: events.append((state, dict(details))),
+                    )
+                    for _ in range(50):
+                        if events:
+                            break
+                        time.sleep(0.01)
+                    self.assertTrue(events)
+                    self.assertEqual(events[0][0], "waiting")
+                    worker_main._CODEX_EXEC_LOCK.release()
+                    lock_held_by_test = False
+                    _payload, _summary, _logs, _ai_usage = future.result(timeout=5)
+            finally:
+                if lock_held_by_test:
+                    worker_main._CODEX_EXEC_LOCK.release()
+
+        self.assertEqual([event[0] for event in events], ["waiting", "running"])
+        self.assertEqual(events[1][1]["provider"], "codex")
+        self.assertIn("queueWaitMs", events[1][1])
+
     def test_codex_auth_failure_cooldown_skips_next_process_launch(self) -> None:
         cfg = config()
         cfg.codex_auth_failure_cooldown_seconds = 3600
@@ -5136,6 +5229,21 @@ func writeHealth() {}
             return_value=Mock(returncode=1, stdout="", stderr=codex_stderr),
         ):
             with self.assertRaisesRegex(RuntimeError, "schema output was not produced"):
+                run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
+
+    def test_run_codex_review_surfaces_timeout_and_timing(self) -> None:
+        cfg = config()
+
+        with patch(
+            "pullwise_worker.main.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                ["codex", "exec"],
+                timeout=60,
+                output="partial stdout",
+                stderr="model stream timed out",
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "timed out after 60s.*exec_duration_ms"):
                 run_codex_review(cfg, {"repo": "acme/api"}, Path("checkout"))
 
     def test_job_checkout_dir_refuses_path_traversal(self) -> None:
@@ -6054,13 +6162,25 @@ func writeHealth() {}
 
     def test_write_scan_summary_redacts_tokens(self) -> None:
         cfg = config()
-        write_scan_summary(cfg, "job_1", "failed", 12, "worker-token https://x-access-token:repo-token@github.com/acme/api.git")
+        write_scan_summary(
+            cfg,
+            "job_1",
+            "failed",
+            12,
+            "worker-token https://x-access-token:repo-token@github.com/acme/api.git",
+            {"provider": "codex", "queueWaitMs": 100, "execDurationMs": 200, "timeoutSeconds": 60},
+        )
 
         summary_log = Path(cfg.log_dir) / "scan-summary.log"
         content = summary_log.read_text(encoding="utf-8")
+        payload = json.loads(content)
         self.assertNotIn("worker-token", content)
         self.assertNotIn("repo-token", content)
         self.assertIn("[redacted]", content)
+        self.assertEqual(payload["review_provider"], "codex")
+        self.assertEqual(payload["codex_queue_wait_ms"], 100)
+        self.assertEqual(payload["codex_exec_duration_ms"], 200)
+        self.assertEqual(payload["codex_timeout_seconds"], 60)
 
     def test_safe_rmtree_refuses_non_worker_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

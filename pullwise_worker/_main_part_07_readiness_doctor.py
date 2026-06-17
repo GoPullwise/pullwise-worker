@@ -17,17 +17,32 @@ def redact_secrets(text: str, config: WorkerConfig | None = None) -> str:
     return redacted
 
 
-def write_scan_summary(config: WorkerConfig, job_id: str, status: str, duration_ms: int, error: str) -> None:
+def write_scan_summary(
+    config: WorkerConfig,
+    job_id: str,
+    status: str,
+    duration_ms: int,
+    error: str,
+    review_execution: dict | None = None,
+) -> None:
     config.log_dir.mkdir(parents=True, exist_ok=True)
     path = config.log_dir / "scan-summary.log"
+    payload = {
+        "time": int(time.time()),
+        "job_id": job_id,
+        "status": status,
+        "duration_ms": duration_ms,
+        "error": redact_secrets(error, config),
+    }
+    if isinstance(review_execution, dict) and review_execution:
+        provider = clean_protocol_text(review_execution.get("provider"))
+        if provider:
+            payload["review_provider"] = provider
+        payload["codex_queue_wait_ms"] = nonnegative_int(review_execution.get("queueWaitMs"))
+        payload["codex_exec_duration_ms"] = nonnegative_int(review_execution.get("execDurationMs"))
+        payload["codex_timeout_seconds"] = nonnegative_int(review_execution.get("timeoutSeconds"))
     line = json.dumps(
-        {
-            "time": int(time.time()),
-            "job_id": job_id,
-            "status": status,
-            "duration_ms": duration_ms,
-            "error": redact_secrets(error, config),
-        },
+        payload,
         sort_keys=True,
     )
     with path.open("a", encoding="utf-8") as log_file:
@@ -119,6 +134,13 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
         )
         checks.append(("codex", codex_cli_ok, codex_cli_detail))
         codex_login_ok, codex_login_detail = codex_ready_check(config) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
+        if (
+            not codex_login_ok
+            and "deferred" in str(codex_login_detail or "").lower()
+            and "codex is running" in str(codex_login_detail or "").lower()
+        ):
+            codex_login_ok = True
+            codex_login_detail = "busy: ready check deferred while codex is running"
         checks.append(("codex_ready", codex_login_ok, codex_login_detail))
         if node_ok and codex_cli_ok and codex_login_ok:
             ready_providers.append("codex")

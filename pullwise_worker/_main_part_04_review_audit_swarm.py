@@ -2,8 +2,14 @@ from __future__ import annotations
 
 # Loaded by main.py; keep definitions in that module's globals for compatibility.
 
-def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str]:
+def run_codex_review(
+    config: WorkerConfig,
+    job: dict,
+    checkout_dir: Path,
+    progress_callback: object | None = None,
+) -> tuple[dict, dict, str]:
     errors: list[str] = []
+    provider_failures: list[dict] = []
     try:
         deterministic_payload = audit_swarm_payload_from_findings(
             run_deterministic_repository_checks(job, checkout_dir),
@@ -16,30 +22,45 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
     for provider in provider_chain:
         try:
             if provider == "codex":
-                provider_result = run_codex_provider_review(config, job, checkout_dir)
+                provider_result = run_codex_provider_review(
+                    config,
+                    job,
+                    checkout_dir,
+                    progress_callback=progress_callback,
+                )
             else:
                 raise RuntimeError(f"unsupported review provider: {provider}")
             audit_payload, _summary, logs_summary = provider_result[:3]
             ai_usage = normalize_ai_usage(provider_result[3] if len(provider_result) > 3 else {})
+            review_execution = {}
+            if isinstance(audit_payload, dict):
+                raw_review_execution = audit_payload.get("reviewExecution") or audit_payload.get("providerExecution")
+                review_execution = raw_review_execution if isinstance(raw_review_execution, dict) else {}
             audit_payload = normalize_audit_swarm_files_for_checkout(audit_payload, checkout_dir)
             audit_payload = merge_audit_swarm_payloads(deterministic_payload, audit_payload)
             effective_agent_config = effective_agent_config_payload(config, provider)
             audit_payload["effectiveAgentConfig"] = effective_agent_config
             if ai_usage:
                 audit_payload["aiUsage"] = ai_usage
+            if review_execution:
+                audit_payload["reviewExecution"] = review_execution
             summary = summarize(audit_swarm_findings_from_payload(audit_payload) or [])
             if errors:
                 logs_summary = "\n".join([*errors, logs_summary])[-1000:]
             return audit_payload, summary, logs_summary
         except Exception as exc:
             errors.append(compact_review_provider_error(provider, exc, config))
-    raise RuntimeError(f"all review providers failed: {'; '.join(errors)}")
+            review_execution = getattr(exc, "review_execution", None)
+            if isinstance(review_execution, dict) and review_execution:
+                provider_failures.append(review_execution)
+    failure = RuntimeError(f"all review providers failed: {'; '.join(errors)}")
+    if provider_failures:
+        setattr(failure, "review_execution", provider_failures[-1])
+    raise failure
 
 
 def graph_verified_review_enabled(config: WorkerConfig, job: dict) -> bool:
-    agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
-    graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
-    return graph_config.get("enabled") is True
+    return True
 
 
 def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
@@ -396,7 +417,64 @@ def looks_like_codex_auth_failure(detail: str) -> bool:
     return any(marker.lower() in lowered for marker in _CODEX_AUTH_FAILURE_MARKERS)
 
 
-def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tuple[dict, dict, str, dict]:
+def emit_codex_review_progress(progress_callback: object | None, state: str, details: dict) -> None:
+    if callable(progress_callback):
+        progress_callback(state, details)
+
+
+def codex_review_execution_payload(*, queue_wait_ms: int, exec_duration_ms: int, timeout_seconds: int) -> dict:
+    return {
+        "provider": "codex",
+        "queueWaitMs": max(0, int(queue_wait_ms)),
+        "execDurationMs": max(0, int(exec_duration_ms)),
+        "timeoutSeconds": max(0, int(timeout_seconds)),
+    }
+
+
+def nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def codex_review_execution_summary(review_execution: dict) -> str:
+    if not isinstance(review_execution, dict) or not review_execution:
+        return ""
+    return (
+        "codex timing: "
+        f"queue_wait_ms={nonnegative_int(review_execution.get('queueWaitMs'))} "
+        f"exec_duration_ms={nonnegative_int(review_execution.get('execDurationMs'))} "
+        f"timeout_seconds={nonnegative_int(review_execution.get('timeoutSeconds'))}"
+    )
+
+
+def process_output_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value or "")
+
+
+def timeout_expired_output(exc: subprocess.TimeoutExpired) -> str:
+    stdout = getattr(exc, "stdout", None)
+    if stdout is None:
+        stdout = getattr(exc, "output", "")
+    return "\n".join([process_output_text(stdout), process_output_text(getattr(exc, "stderr", ""))])
+
+
+def raise_codex_review_error(message: str, review_execution: dict) -> None:
+    error = RuntimeError(message)
+    if review_execution:
+        setattr(error, "review_execution", review_execution)
+    raise error
+
+
+def run_codex_provider_review(
+    config: WorkerConfig,
+    job: dict,
+    checkout_dir: Path,
+    progress_callback: object | None = None,
+) -> tuple[dict, dict, str, dict]:
     prompt = review_prompt(job)
     with tempfile.TemporaryDirectory(prefix="pullwise-codex-") as tmpdir:
         schema_path = Path(tmpdir) / "audit-swarm.schema.json"
@@ -406,20 +484,67 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
         auth_failure = codex_auth_failure_error(config)
         if auth_failure:
             raise RuntimeError(auth_failure)
-        with _CODEX_EXEC_LOCK:
+        queue_started = time.monotonic()
+        if _CODEX_EXEC_LOCK.locked():
+            emit_codex_review_progress(
+                progress_callback,
+                "waiting",
+                {"provider": "codex", "timeoutSeconds": config.codex_timeout_seconds},
+            )
+        _CODEX_EXEC_LOCK.acquire()
+        queue_wait_ms = int((time.monotonic() - queue_started) * 1000)
+        review_execution: dict = {}
+        try:
             auth_failure = codex_auth_failure_error(config)
             if auth_failure:
                 raise RuntimeError(auth_failure)
-            completed = subprocess.run(
-                command,
-                cwd=str(checkout_dir),
-                env=provider_process_env(config),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=config.codex_timeout_seconds,
+            emit_codex_review_progress(
+                progress_callback,
+                "running",
+                {
+                    "provider": "codex",
+                    "queueWaitMs": queue_wait_ms,
+                    "timeoutSeconds": config.codex_timeout_seconds,
+                },
             )
+            exec_started = time.monotonic()
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(checkout_dir),
+                    env=provider_process_env(config),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=config.codex_timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                exec_duration_ms = int((time.monotonic() - exec_started) * 1000)
+                review_execution = codex_review_execution_payload(
+                    queue_wait_ms=queue_wait_ms,
+                    exec_duration_ms=exec_duration_ms,
+                    timeout_seconds=config.codex_timeout_seconds,
+                )
+                detail = codex_failure_detail(timeout_expired_output(exc), config) or "no stderr/stdout"
+                raise_codex_review_error(
+                    (
+                        f"codex exec timed out after {config.codex_timeout_seconds}s "
+                        f"({codex_review_execution_summary(review_execution)}): {detail}"
+                    ),
+                    review_execution,
+                )
+            exec_duration_ms = int((time.monotonic() - exec_started) * 1000)
+            review_execution = codex_review_execution_payload(
+                queue_wait_ms=queue_wait_ms,
+                exec_duration_ms=exec_duration_ms,
+                timeout_seconds=config.codex_timeout_seconds,
+            )
+        finally:
+            _CODEX_EXEC_LOCK.release()
         raw_logs = "\n".join([completed.stdout or "", completed.stderr or ""])
+        timing_summary = codex_review_execution_summary(review_execution)
+        if timing_summary:
+            raw_logs = "\n".join([raw_logs, timing_summary])
         logs_summary = redact_secrets(raw_logs[-1000:], config)
         if completed.returncode != 0:
             failure_output = completed.stderr or completed.stdout
@@ -427,9 +552,25 @@ def run_codex_provider_review(config: WorkerConfig, job: dict, checkout_dir: Pat
             detail = codex_failure_detail(failure_output, config, stream_name=failure_stream)
             if looks_like_codex_auth_failure(detail):
                 mark_codex_auth_failure(config, detail)
-            raise RuntimeError(f"codex exec failed with exit code {completed.returncode}: {detail[:700]}")
+            raise_codex_review_error(
+                (
+                    f"codex exec failed with exit code {completed.returncode} "
+                    f"({codex_review_execution_summary(review_execution)}): {detail}"
+                ),
+                review_execution,
+            )
         output = output_path.read_text(encoding="utf-8") if output_path.exists() else completed.stdout
-    audit_payload = parse_audit_swarm_payload(output)
+    try:
+        audit_payload = parse_audit_swarm_payload(output)
+    except Exception as exc:
+        raise_codex_review_error(
+            (
+                "codex output parse failed "
+                f"({codex_review_execution_summary(review_execution)}): {redact_secrets(str(exc), config)}"
+            ),
+            review_execution,
+        )
+    audit_payload["reviewExecution"] = review_execution
     return audit_payload, summarize(audit_swarm_findings_from_payload(audit_payload) or []), logs_summary, codex_ai_usage(raw_logs, config)
 
 
@@ -454,13 +595,23 @@ def codex_failure_detail(raw_output: str, config: WorkerConfig, *, stream_name: 
     return redact_secrets(raw_detail, config)
 
 
-def compact_review_provider_error(provider: str, exc: Exception, config: WorkerConfig, limit: int = 500) -> str:
+def compact_review_provider_error(provider: str, exc: Exception, config: WorkerConfig, limit: int = 1200) -> str:
     prefix = f"{provider}: "
     detail = redact_secrets(str(exc), config)
     body_limit = max(1, limit - len(prefix))
-    if len(detail) > body_limit:
-        detail = detail[-body_limit:].lstrip()
-    return f"{prefix}{detail}"
+    return f"{prefix}{compact_middle_text(detail, body_limit)}"
+
+
+def compact_middle_text(text: str, limit: int) -> str:
+    clean = str(text or "").strip()
+    if len(clean) <= limit:
+        return clean
+    marker = " ... [truncated] ... "
+    if limit <= len(marker) + 2:
+        return clean[:limit]
+    head = max(1, (limit - len(marker)) // 2)
+    tail = max(1, limit - len(marker) - head)
+    return f"{clean[:head].rstrip()}{marker}{clean[-tail:].lstrip()}"
 
 
 def compact_codex_failure_output(raw_output: str, *, stream_name: str = "", limit: int = 700) -> str:
@@ -472,10 +623,24 @@ def compact_codex_failure_output(raw_output: str, *, stream_name: str = "", limi
         return ""
     prefix = f"{stream_name}: " if stream_name else ""
     body_limit = max(1, limit - len(prefix))
-    detail = "\n".join(lines[-8:])
-    if len(detail) > body_limit:
-        detail = detail[-body_limit:].lstrip()
-    return f"{prefix}{detail}"
+    interesting_markers = (
+        "error",
+        "failed",
+        "failure",
+        "timeout",
+        "timed out",
+        "panic",
+        "unauthorized",
+        "authenticated",
+        "exception",
+    )
+    interesting = [
+        line
+        for line in lines
+        if any(marker in line.lower() for marker in interesting_markers)
+    ]
+    detail = "\n".join((interesting or lines)[-8:])
+    return f"{prefix}{compact_middle_text(detail, body_limit)}"
 
 
 def extract_codex_error_detail(raw_output: str) -> str | None:

@@ -40,6 +40,16 @@ worker instance's config.
 Multiple workers on the same server are supported only if each worker uses its
 own `service_home` for Codex binaries, config, cache, and auth state.
 
+## Codex Execution Concurrency
+
+Do not change a single worker instance to run multiple Codex review jobs in
+parallel. The process-wide Codex execution lock is intentional: concurrent
+Codex CLI executions under the same worker identity can refresh auth at the
+same time and invalidate the token/session state. If job latency or timeout
+behavior needs improvement, keep Codex execution serial within each worker and
+address queueing, timeout reporting, scheduling, or multi-worker capacity
+instead.
+
 Codex and CodeGraph configuration follows the same boundary:
 
 - Different worker instances on the same server must not share Codex config,
