@@ -9,6 +9,10 @@ def service_action(
     no_block: bool = False,
     config: WorkerConfig | None = None,
 ) -> int:
+    dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(["systemctl"], dry_run=dry_run)
+    if not dependency_ok:
+        print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
+        return 1
     service_name = str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
     command = ["systemctl"]
     if no_block:
@@ -330,7 +334,7 @@ export XDG_CACHE_HOME="$SERVICE_HOME/.cache"
 export XDG_DATA_HOME="$SERVICE_HOME/.local/share"
 SERVICE_PATH="${{PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
 export PATH="$SERVICE_HOME/.local/bin:$SERVICE_HOME/.codex/bin:$SERVICE_PATH"
-PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-python3}}"
+PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-python3.10}}"
 exec "$PYTHON_BIN" -m pullwise_worker.main "$@"
 """
 
@@ -399,6 +403,10 @@ def ensure_lifecycle_watcher(
     bin_path: Path | None = None,
     dry_run: bool = False,
 ) -> int:
+    dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(["systemctl"], dry_run=dry_run)
+    if not dependency_ok:
+        print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
+        return 1
     env_file = Path(env_path or config.worker_env_file)
     worker_bin = Path(bin_path or config.worker_bin_path)
     watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
@@ -439,8 +447,15 @@ def ensure_lifecycle_watcher(
 
 
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
+    dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(
+        ["python3.10", "python3-pip", "systemctl", "runuser"],
+        dry_run=dry_run,
+    )
+    if not dependency_ok:
+        print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
+        return 1
     package = default_worker_package()
-    python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3"
+    python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3.10"
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE", "").strip() or config.worker_env_file)
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", "").strip() or config.worker_env_backup_file)
     bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH", "").strip() or config.worker_bin_path)
@@ -515,6 +530,10 @@ def uninstall_worker(
 ) -> int:
     if config is None:
         config = WorkerConfig(argparse.Namespace(), require_worker_token=False, validate_server_url=False)
+    dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(["systemctl"], dry_run=dry_run)
+    if not dependency_ok:
+        print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
+        return 1
     service_name = config.service_name
     service_file = Path(config.service_file)
     config_dir = Path(config.worker_env_file).parent

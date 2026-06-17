@@ -44,6 +44,7 @@ from pullwise_worker.main import (
     filter_audit_swarm_payload_by_findings,
     filter_reportable_findings,
     normalize_audit_swarm_files_for_checkout,
+    install_ubuntu_2204_dependencies,
     node_version_check,
     package_install_command,
     parse_audit_swarm_payload,
@@ -5141,6 +5142,25 @@ func writeHealth() {}
         self.assertIn(worker_main.codex_login_command(cfg), printed)
         self.assertIn("--device-auth", printed)
 
+    def test_run_doctor_preinstalls_configured_provider_dependencies(self) -> None:
+        cfg = config()
+        cfg.provider_chain = ["codex"]
+        configure_instance_provider_commands(cfg)
+
+        with patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "installed Ubuntu 22.04 packages: git")) as install, \
+            patch("pullwise_worker.main.command_ok", side_effect=[(True, "git ok"), (True, "v22.21.0"), (True, "codex ok"), (True, "active")]), \
+            patch("pullwise_worker.main.codex_ready_check", return_value=(True, "ready")), \
+            patch("pullwise_worker.main.PullwiseClient") as client_class, \
+            patch("builtins.print") as print_mock:
+            client_class.return_value.agent_configs.return_value = agent_configs_payload()
+            client_class.return_value.heartbeat.return_value = None
+            ok = run_doctor(cfg)
+
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertTrue(ok)
+        install.assert_called_once_with(["git", "node", "npm"])
+        self.assertIn("ok dependency_install: installed Ubuntu 22.04 packages: git", printed)
+
     def test_readme_codex_login_example_uses_instance_isolated_env(self) -> None:
         readme = Path("README.md").read_text(encoding="utf-8")
         self.assertIn("CODEX_HOME=/var/lib/pullwise-worker/.codex", readme)
@@ -5434,16 +5454,46 @@ func writeHealth() {}
         run.assert_not_called()
 
     def test_update_dry_run_backs_up_env_and_does_not_run_commands(self) -> None:
-        with patch("pullwise_worker.main.subprocess.run") as run:
+        with patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
+            patch("pullwise_worker.main.subprocess.run") as run:
             code = update_worker(config(), dry_run=True)
 
         self.assertEqual(code, 0)
+        run.assert_not_called()
+
+    def test_ubuntu_2204_dependency_installer_dry_run_maps_missing_tools_to_apt_packages(self) -> None:
+        with patch("pullwise_worker.main.dependency_available", return_value=False), \
+            patch("pullwise_worker.main.ubuntu_2204_host", return_value=True), \
+            patch("pullwise_worker.main.subprocess.run") as run, \
+            patch("builtins.print") as print_mock:
+            ok, detail = install_ubuntu_2204_dependencies(["git", "python3-pip", "node", "npm"], dry_run=True)
+
+        printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
+        self.assertTrue(ok)
+        self.assertIn("would install Ubuntu 22.04 packages", detail)
+        self.assertIn("apt-get update", printed)
+        self.assertIn(
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git python3-pip ca-certificates curl gnupg",
+            printed,
+        )
+        self.assertIn("install NodeSource Node.js 22.x repository", printed)
+        self.assertIn("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs", printed)
+        run.assert_not_called()
+
+    def test_update_returns_error_when_dependency_install_fails(self) -> None:
+        with patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(False, "apt failed")) as install, \
+            patch("pullwise_worker.main.subprocess.run") as run:
+            code = update_worker(config())
+
+        self.assertEqual(code, 1)
+        install.assert_called_once_with(["python3.10", "python3-pip", "systemctl", "runuser"], dry_run=False)
         run.assert_not_called()
 
     def test_update_uses_installed_service_interpreter(self) -> None:
         cfg = config()
         expected_package = default_worker_package()
         with patch.dict("os.environ", {"PULLWISE_PYTHON_BIN": "/custom/python"}, clear=False), \
+            patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
             patch("pullwise_worker.main.subprocess.run") as run, \
             patch("builtins.print") as print_mock:
             code = update_worker(cfg, dry_run=True)
@@ -5456,7 +5506,7 @@ func writeHealth() {}
         )
         run.assert_not_called()
 
-    def test_update_falls_back_to_python3_when_service_interpreter_is_missing(self) -> None:
+    def test_update_falls_back_to_python310_when_service_interpreter_is_missing(self) -> None:
         cfg = config()
         expected_package = default_worker_package()
 
@@ -5465,6 +5515,7 @@ func writeHealth() {}
                 {"PULLWISE_WORKER_ENV_FILE": "/tmp/worker.env", "PULLWISE_WORKER_ENV_BACKUP_FILE": "/tmp/worker.env.bak"},
                 clear=True,
             ), \
+            patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
             patch("pullwise_worker.main.subprocess.run") as run, \
             patch("builtins.print") as print_mock:
             code = update_worker(cfg, dry_run=True)
@@ -5472,13 +5523,14 @@ func writeHealth() {}
         printed = "\n".join(str(call.args[0]) for call in print_mock.call_args_list if call.args)
         self.assertEqual(code, 0)
         self.assertIn(
-            f"python3 -m pip install --upgrade --force-reinstall --no-cache-dir {expected_package}",
+            f"python3.10 -m pip install --upgrade --force-reinstall --no-cache-dir {expected_package}",
             printed,
         )
         run.assert_not_called()
 
     def test_update_dry_run_restarts_service_before_running_doctor(self) -> None:
-        with patch("pullwise_worker.main.subprocess.run") as run, \
+        with patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
+            patch("pullwise_worker.main.subprocess.run") as run, \
             patch("builtins.print") as print_mock:
             code = update_worker(config(), dry_run=True)
 
@@ -5510,6 +5562,7 @@ func writeHealth() {}
                     },
                     clear=False,
                 ), \
+                patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
                 patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)):
                 code = update_worker(cfg)
 
@@ -5536,7 +5589,8 @@ func writeHealth() {}
             cfg.watcher_service_file = str(watcher_file)
             cfg.watcher_poll_seconds = 5
 
-            with patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)) as run:
+            with patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
+                patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0)) as run:
                 code = update_worker(cfg)
 
             self.assertEqual(code, 0)
@@ -5563,6 +5617,7 @@ func writeHealth() {}
         self.assertIn('export XDG_CONFIG_HOME="$SERVICE_HOME/.config"', wrapper)
         self.assertIn('export XDG_CACHE_HOME="$SERVICE_HOME/.cache"', wrapper)
         self.assertIn('export XDG_DATA_HOME="$SERVICE_HOME/.local/share"', wrapper)
+        self.assertIn('PYTHON_BIN="${PULLWISE_PYTHON_BIN:-python3.10}"', wrapper)
 
     def test_update_restores_existing_env_when_upgrade_fails(self) -> None:
         cfg = config()
@@ -5582,6 +5637,7 @@ func writeHealth() {}
                     },
                     clear=False,
                 ), \
+                patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
                 patch("pullwise_worker.main.subprocess.run", side_effect=[ok, failed, ok]) as run:
                 code = update_worker(cfg)
 
@@ -5589,7 +5645,7 @@ func writeHealth() {}
             self.assertEqual(
                 run.call_args_list[1].args[0],
                 [
-                    "python3",
+                    "python3.10",
                     "-m",
                     "pip",
                     "install",
@@ -5605,7 +5661,8 @@ func writeHealth() {}
     def test_service_action_supports_systemd_start_stop_status_restart(self) -> None:
         for action in ("start", "stop", "status", "restart"):
             with self.subTest(action=action):
-                with patch("pullwise_worker.main.subprocess.run") as run:
+                with patch("pullwise_worker.main.install_ubuntu_2204_dependencies", return_value=(True, "dependencies present")), \
+                    patch("pullwise_worker.main.subprocess.run") as run:
                     self.assertEqual(service_action(action, dry_run=True), 0)
                 run.assert_not_called()
 

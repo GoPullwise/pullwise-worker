@@ -169,7 +169,14 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 
 def run_doctor(config: WorkerConfig) -> bool:
+    requirements = ["git"]
+    local_provider_chain = parse_provider_chain(",".join(config.provider_chain) if config.provider_chain else None, config.provider)
+    if "codex" in local_provider_chain:
+        requirements.extend(["node", "npm"])
+    dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(requirements)
     checks, _provider_ready, ready_providers = worker_readiness_state(config)
+    if not dependency_ok or dependency_detail != "dependencies present":
+        checks.insert(0, ("dependency_install", dependency_ok, dependency_detail))
     codex_ready = readiness_check_ok(checks, "codex_ready")
     systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", config.service_name])
     checks.append(("systemd", systemd_ok, systemd_detail))
@@ -374,5 +381,3 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
             return False, detail
     finally:
         _CODEX_EXEC_LOCK.release()
-
-

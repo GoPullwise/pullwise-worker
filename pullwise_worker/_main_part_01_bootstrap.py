@@ -120,6 +120,195 @@ _CODEX_EXEC_LOCK = Lock()
 _CODEX_AUTH_FAILURE_LOCK = Lock()
 _codex_auth_failure_until = 0.0
 _codex_auth_failure_detail = ""
+_UBUNTU_2204_DEPENDENCY_PACKAGES = {
+    "git": ("git",),
+    "python3": ("python3.10", "python3.10-venv"),
+    "python3.10": ("python3.10", "python3.10-venv"),
+    "python3-pip": ("python3-pip",),
+    "runuser": ("util-linux",),
+    "systemctl": ("systemd",),
+    "logrotate": ("logrotate",),
+}
+_DEPENDENCY_INSTALL_DISABLED_VALUES = {"0", "false", "no", "off"}
+
+
+def auto_install_dependencies_enabled() -> bool:
+    value = os.environ.get("PULLWISE_WORKER_AUTO_INSTALL_DEPS")
+    return value is None or value.strip().lower() not in _DEPENDENCY_INSTALL_DISABLED_VALUES
+
+
+def os_release_values(path: str = "/etc/os-release") -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                key, sep, raw_value = line.strip().partition("=")
+                if not sep or not key:
+                    continue
+                values[key] = raw_value.strip().strip('"')
+    except OSError:
+        return {}
+    return values
+
+
+def ubuntu_2204_host() -> bool:
+    release = os_release_values()
+    return release.get("ID") == "ubuntu" and release.get("VERSION_ID") == "22.04"
+
+
+def python310_available() -> bool:
+    executable = shutil.which("python3.10")
+    if not executable:
+        return False
+    completed = subprocess.run(
+        [executable, "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def python310_pip_available() -> bool:
+    executable = shutil.which("python3.10")
+    if not executable:
+        return False
+    completed = subprocess.run(
+        [executable, "-m", "pip", "--version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def node20_available() -> bool:
+    executable = shutil.which("node")
+    if not executable:
+        return False
+    completed = subprocess.run(
+        [executable, "--version"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if completed.returncode != 0:
+        return False
+    match = re.search(r"v?(\d+)", completed.stdout.strip())
+    return bool(match and int(match.group(1)) >= _MIN_NODE_MAJOR)
+
+
+def npm_available() -> bool:
+    return node20_available() and shutil.which("npm") is not None
+
+
+def dependency_available(name: str) -> bool:
+    if name in {"python3", "python3.10"}:
+        return python310_available()
+    if name == "python3-pip":
+        return python310_pip_available()
+    if name == "node":
+        return node20_available()
+    if name == "npm":
+        return npm_available()
+    return shutil.which(name) is not None
+
+
+def dependency_packages(requirements: list[str]) -> list[str]:
+    packages: list[str] = []
+    for requirement in requirements:
+        for package in _UBUNTU_2204_DEPENDENCY_PACKAGES.get(requirement, ()):
+            if package not in packages:
+                packages.append(package)
+    return packages
+
+
+def run_apt_command(command: list[str]) -> tuple[bool, str]:
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    completed = subprocess.run(command, env=env)
+    if completed.returncode != 0:
+        return False, f"{' '.join(command)} exited {completed.returncode}"
+    return True, "ok"
+
+
+def install_nodesource_nodejs(*, dry_run: bool = False) -> tuple[bool, str]:
+    if dry_run:
+        print("install NodeSource Node.js 22.x repository")
+        print("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs")
+        return True, "would install NodeSource Node.js 22.x"
+    keyring_dir = Path("/etc/apt/keyrings")
+    keyring_path = keyring_dir / "nodesource.gpg"
+    source_path = Path("/etc/apt/sources.list.d/nodesource.list")
+    try:
+        keyring_dir.mkdir(parents=True, exist_ok=True)
+        curl = subprocess.run(
+            ["curl", "-fsSL", "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"],
+            stdout=subprocess.PIPE,
+        )
+        if curl.returncode != 0:
+            return False, f"curl NodeSource key exited {curl.returncode}"
+        gpg = subprocess.run(["gpg", "--dearmor", "--yes", "-o", str(keyring_path)], input=curl.stdout)
+        if gpg.returncode != 0:
+            return False, f"gpg NodeSource key exited {gpg.returncode}"
+        keyring_path.chmod(0o644)
+        source_path.write_text(
+            "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return False, str(exc)
+    ok, detail = run_apt_command(["apt-get", "update"])
+    if not ok:
+        return False, detail
+    ok, detail = run_apt_command(["apt-get", "install", "-y", "--no-install-recommends", "nodejs"])
+    if not ok:
+        return False, detail
+    if not node20_available() or shutil.which("npm") is None:
+        return False, "Node.js 20+ and npm are still unavailable after NodeSource install"
+    return True, "installed NodeSource Node.js 22.x"
+
+
+def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool = False) -> tuple[bool, str]:
+    missing = [requirement for requirement in requirements if not dependency_available(requirement)]
+    if not missing:
+        return True, "dependencies present"
+    node_missing = any(requirement in {"node", "npm"} for requirement in missing)
+    package_requirements = [requirement for requirement in missing if requirement not in {"node", "npm"}]
+    packages = dependency_packages(package_requirements)
+    if node_missing:
+        for package in ("ca-certificates", "curl", "gnupg"):
+            if package not in packages:
+                packages.append(package)
+    if not packages:
+        return False, f"missing dependencies without package mapping: {', '.join(missing)}"
+    if not ubuntu_2204_host():
+        return False, f"missing dependencies on unsupported host: {', '.join(missing)}"
+    if not auto_install_dependencies_enabled():
+        return False, f"missing dependencies and auto-install disabled: {', '.join(missing)}"
+    if dry_run:
+        print("apt-get update")
+        print("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " + " ".join(packages))
+        if node_missing:
+            install_nodesource_nodejs(dry_run=True)
+        return True, f"would install Ubuntu 22.04 packages: {', '.join(packages)}"
+    if os.geteuid() != 0:
+        return False, f"missing dependencies require root to install on Ubuntu 22.04: {', '.join(missing)}"
+    if shutil.which("apt-get") is None:
+        return False, "apt-get not found on Ubuntu 22.04 host"
+    for command in (
+        ["apt-get", "update"],
+        ["apt-get", "install", "-y", "--no-install-recommends", *packages],
+    ):
+        ok, detail = run_apt_command(command)
+        if not ok:
+            return False, detail
+    if node_missing:
+        ok, detail = install_nodesource_nodejs()
+        if not ok:
+            return False, detail
+    still_missing = [requirement for requirement in requirements if not dependency_available(requirement)]
+    if still_missing:
+        return False, f"dependencies still missing after install: {', '.join(still_missing)}"
+    return True, f"installed Ubuntu 22.04 packages: {', '.join(packages)}"
 
 
 def service_user_command(config: WorkerConfig | None, command: list[str]) -> str:
@@ -831,5 +1020,3 @@ def main() -> None:
         raise SystemExit(0)
     worker = Worker(config)
     worker.run(once=args.once)
-
-
