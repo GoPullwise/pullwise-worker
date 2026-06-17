@@ -50,7 +50,7 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, base_ref
         evidence = judge.get("evidence_summary") if isinstance(judge.get("evidence_summary"), dict) else {}
         lines.extend(
             [
-                f"## {index}. {candidate.get('title') or candidate.get('issue_id')}",
+                f"## {index}. {candidate.get('title') or candidate.get('claim') or candidate.get('issue_id')}",
                 "",
                 f"Severity: {candidate.get('severity') or 'medium'}",
                 f"Category: {candidate.get('category') or 'Correctness'}",
@@ -59,7 +59,7 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, base_ref
                 "",
                 "### Summary",
                 "",
-                str(candidate.get("summary") or candidate.get("actual_behavior_hypothesis") or ""),
+                str(candidate.get("summary") or candidate.get("claim") or candidate.get("actual_behavior_hypothesis") or ""),
                 "",
                 "### Graph Evidence",
                 "",
@@ -69,7 +69,7 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, base_ref
                 "",
                 "### Code Evidence",
                 "",
-                _bullet_lines(candidate.get("code_evidence")),
+                _bullet_lines(candidate.get("code_evidence") or candidate.get("evidence")),
                 "",
                 "### Trigger Condition",
                 "",

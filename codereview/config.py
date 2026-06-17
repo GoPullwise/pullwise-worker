@@ -41,6 +41,14 @@ class ReproConfig:
     enabled: bool = True
     timeout_seconds: int = 900
     max_workers: int = 2
+    max_repro: int = 0
+    require_red_green: bool = False
+
+
+@dataclass
+class ScoringConfig:
+    min_score_for_repro: int = 8
+    always_repro_severities: set[str] = field(default_factory=lambda: {"critical", "high"})
 
 
 @dataclass
@@ -50,6 +58,7 @@ class ReviewConfig:
     codex: CodexConfig = field(default_factory=CodexConfig)
     finders: FinderConfig = field(default_factory=FinderConfig)
     repro: ReproConfig = field(default_factory=ReproConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     @property
     def max_slices(self) -> int:
@@ -57,6 +66,8 @@ class ReviewConfig:
 
     @property
     def max_repro(self) -> int:
+        if self.repro.max_repro > 0:
+            return self.repro.max_repro
         return MODE_BUDGETS.get(self.mode, MODE_BUDGETS["standard"])["max_repro"]
 
 
@@ -77,6 +88,10 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
     codex = _section(raw, "codex")
     finders = _section(raw, "finders")
     repro = _section(raw, "repro")
+    scoring = _section(raw, "scoring")
+    always_repro = scoring.get("always_repro_severities", ["critical", "high"])
+    if isinstance(always_repro, str):
+        always_repro = [always_repro]
     return ReviewConfig(
         mode=selected_mode,
         codegraph=CodeGraphConfig(
@@ -100,6 +115,16 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
             enabled=bool(repro.get("enabled", True)),
             timeout_seconds=int(repro.get("timeout_seconds") or 900),
             max_workers=max(1, int(repro.get("max_workers") or 2)),
+            max_repro=max(0, int(repro.get("max_repro") or repro.get("maxRepro") or 0)),
+            require_red_green=bool(repro.get("require_red_green") or repro.get("requireRedGreen")),
+        ),
+        scoring=ScoringConfig(
+            min_score_for_repro=int(scoring.get("min_score_for_repro") or 8),
+            always_repro_severities={
+                str(item).lower()
+                for item in always_repro
+                if str(item).strip()
+            },
         ),
     )
 

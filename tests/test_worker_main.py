@@ -211,12 +211,20 @@ class WorkerMainTest(unittest.TestCase):
                     "model": "gpt-5.5",
                     "reasoningEffort": "medium",
                 },
-                "graphVerified": {"enabled": True, "mode": "deep"},
+                "graphVerified": {
+                    "enabled": True,
+                    "mode": "deep",
+                    "maxRepro": 12,
+                    "minScoreForRepro": 7,
+                    "requireRedGreen": True,
+                },
             },
             base_commit="origin/main",
         )
         run_root = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: shutil.rmtree(run_root, ignore_errors=True))
+        checkout_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(checkout_dir, ignore_errors=True))
         reports = run_root / "runs" / "run_1" / "reports"
         reports.mkdir(parents=True)
         (reports / "confirmed.json").write_text('[{"candidate": {"issue_id": "issue_1"}}]', encoding="utf-8")
@@ -227,10 +235,17 @@ class WorkerMainTest(unittest.TestCase):
 
         codereview_main = importlib.import_module("codereview.main")
         with patch.object(codereview_main, "run_review", return_value=reports / "final.md") as run_review:
-            payload = worker_main.run_graph_verified_review_payload(worker_config, job, Path("checkout"), "HEAD")
+            payload = worker_main.run_graph_verified_review_payload(worker_config, job, checkout_dir, "HEAD")
 
         self.assertTrue(worker_main.graph_verified_review_enabled(worker_config, job))
-        run_review.assert_called_once_with(Path("checkout"), base_ref="origin/main", head_ref="HEAD", mode="deep")
+        run_review.assert_called_once_with(checkout_dir, base_ref="origin/main", head_ref="HEAD", mode="deep")
+        codereview_config = json.loads((checkout_dir / ".codereview" / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(codereview_config["mode"], "deep")
+        self.assertEqual(codereview_config["codex"]["model"], "gpt-5.5")
+        self.assertEqual(codereview_config["codex"]["reasoning_effort"], "medium")
+        self.assertEqual(codereview_config["repro"]["max_repro"], 12)
+        self.assertEqual(codereview_config["repro"]["require_red_green"], True)
+        self.assertEqual(codereview_config["scoring"]["min_score_for_repro"], 7)
         self.assertEqual(payload["runId"], "run_1")
         self.assertEqual(payload["confirmedCount"], 1)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["issue_id"], "issue_1")
@@ -5871,4 +5886,3 @@ func writeHealth() {}
         self.assertIn("no third-party runtime dependencies", audit_requirements)
         self.assertIn('"3.9"', workflow)
         self.assertNotIn("requests", pyproject)
-

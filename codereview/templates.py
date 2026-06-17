@@ -28,7 +28,8 @@ def ensure_project_files(checkout: Path) -> None:
                     "codegraph": {"command": "codegraph", "optional_sync": True},
                     "codex": {"command": "codex", "reasoning_effort": "high"},
                     "finders": {"enabled": True, "max_workers": 4},
-                    "repro": {"enabled": True, "max_workers": 2},
+                    "scoring": {"min_score_for_repro": 8, "always_repro_severities": ["critical", "high"]},
+                    "repro": {"enabled": True, "max_workers": 2, "max_repro": 0, "require_red_green": False},
                 },
                 indent=2,
             ),
@@ -62,40 +63,78 @@ def ensure_project_files(checkout: Path) -> None:
 def finder_result_schema() -> dict:
     return {
         "type": "object",
-        "required": ["candidates"],
+        "required": ["slice_id", "focus", "candidates"],
         "additionalProperties": False,
         "properties": {
+            "slice_id": {"type": "string"},
+            "focus": {"type": "string"},
             "candidates": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "required": [
-                        "issue_id",
-                        "title",
+                        "candidate_id",
+                        "dedupe_key",
                         "severity",
                         "category",
+                        "confidence",
+                        "claim",
                         "graph_evidence",
-                        "code_evidence",
+                        "evidence",
                         "trigger_condition",
                         "expected_behavior",
                         "actual_behavior_hypothesis",
                         "minimal_repro_idea",
-                        "needs_network",
+                        "repro_likelihood",
                     ],
-                    "additionalProperties": True,
+                    "additionalProperties": False,
                     "properties": {
-                        "issue_id": {"type": "string"},
-                        "title": {"type": "string"},
-                        "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
-                        "category": {"type": "string"},
-                        "summary": {"type": "string"},
-                        "graph_evidence": {},
-                        "code_evidence": {"type": "array"},
+                        "candidate_id": {"type": "string"},
+                        "dedupe_key": {"type": "string"},
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "correctness",
+                                "security_auth_dataflow",
+                                "api_contract",
+                                "state_concurrency_resource",
+                                "test_repro",
+                            ],
+                        },
+                        "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "claim": {"type": "string"},
+                        "graph_evidence": {
+                            "type": "object",
+                            "required": ["slice_id", "codegraph_files", "path_summary"],
+                            "additionalProperties": False,
+                            "properties": {
+                                "slice_id": {"type": "string"},
+                                "codegraph_files": {"type": "array", "items": {"type": "string"}},
+                                "path_summary": {"type": "array", "items": {"type": "string"}},
+                            },
+                        },
+                        "evidence": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": ["file", "lines", "why_it_matters"],
+                                "additionalProperties": False,
+                                "properties": {
+                                    "file": {"type": "string"},
+                                    "lines": {"type": "string"},
+                                    "why_it_matters": {"type": "string"},
+                                },
+                            },
+                        },
                         "trigger_condition": {"type": "string"},
                         "expected_behavior": {"type": "string"},
                         "actual_behavior_hypothesis": {"type": "string"},
                         "minimal_repro_idea": {"type": "string"},
+                        "affected_tests": {"type": "array", "items": {"type": "string"}},
+                        "repro_likelihood": {"type": "string", "enum": ["high", "medium", "low"]},
                         "needs_network": {"type": "boolean"},
+                        "notes": {"type": "string"},
                     },
                 },
             }
@@ -106,17 +145,71 @@ def finder_result_schema() -> dict:
 def repro_result_schema() -> dict:
     return {
         "type": "object",
-        "required": ["candidate_id", "reproduced", "command", "exit_code", "log_path", "observable", "files_written", "limitations"],
+        "required": [
+            "candidate_id",
+            "status",
+            "level",
+            "summary",
+            "commands_run",
+            "files_written",
+            "proof",
+            "graph_path_exercised",
+            "why_valid",
+            "why_not_reproduced",
+            "safety_notes",
+        ],
         "additionalProperties": False,
         "properties": {
             "candidate_id": {"type": "string"},
-            "reproduced": {"type": "boolean"},
-            "command": {"type": "string"},
-            "exit_code": {"type": "integer"},
-            "log_path": {"type": "string"},
-            "observable": {"type": "string"},
+            "status": {
+                "type": "string",
+                "enum": ["reproduced", "not_reproduced", "blocked", "unsafe", "ambiguous", "harness_error", "timeout"],
+            },
+            "level": {"type": "string", "enum": ["L0", "L1", "L2", "L3"]},
+            "summary": {"type": "string"},
+            "commands_run": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["cmd", "cwd", "exit_code", "log_path"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "cmd": {"type": "string"},
+                        "cwd": {"type": "string"},
+                        "exit_code": {"type": "integer"},
+                        "log_path": {"type": "string"},
+                        "duration_ms": {"type": "integer"},
+                    },
+                },
+            },
             "files_written": {"type": "array", "items": {"type": "string"}},
-            "limitations": {"type": "array", "items": {"type": "string"}},
+            "proof": {
+                "type": "object",
+                "required": ["type", "expected", "actual", "log_excerpt"],
+                "additionalProperties": False,
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["failing_test", "runtime_output", "assertion", "red_green", "static_check", "other", "none"],
+                    },
+                    "expected": {"type": "string"},
+                    "actual": {"type": "string"},
+                    "log_excerpt": {"type": "string"},
+                },
+            },
+            "graph_path_exercised": {"type": "boolean"},
+            "touched_symbols": {"type": "array", "items": {"type": "string"}},
+            "environment": {
+                "type": "object",
+                "additionalProperties": True,
+                "properties": {
+                    "network_used": {"type": "boolean"},
+                    "dependencies_installed": {"type": "boolean"},
+                },
+            },
+            "why_valid": {"type": "string"},
+            "why_not_reproduced": {"type": "string"},
+            "safety_notes": {"type": "string"},
         },
     }
 
@@ -162,18 +255,30 @@ Hard gates:
 - Mark needs_network true when reproduction requires a network, credentials, production service, or external database.
 
 Output JSON only matching finder_result.schema.json.
+Top-level JSON must include slice_id, focus, and candidates.
+Each candidate must use candidate_id, dedupe_key, claim, graph_evidence, evidence, trigger_condition,
+expected_behavior, actual_behavior_hypothesis, minimal_repro_idea, and repro_likelihood.
 """
 
 
-REPRO_WORKER_PROMPT = """You are a reproduction worker.
+REPRO_WORKER_PROMPT = """You are a reproduction worker in a graph-verified code review system.
+
+Current directory:
+- ./repo is a private copy of the repository.
+- ./repro is for extra reproduction scripts.
+- ./logs is for command logs.
+- ./input_candidate.json contains exactly one candidate.
+- ./slice.context.md contains the CodeGraph context when available.
 
 Hard rules:
-- Work on exactly one candidate from ./candidate.json.
-- Write only inside the current worker directory.
+- Work on exactly one candidate.
+- Write only inside ./repo, ./repro, ./logs, or ./result.json.
+- Do not modify the original checkout.
 - Do not use real credentials, production services, external APIs, or destructive operations.
-- Generate and run the smallest local command that can prove or disprove the candidate.
-- Save command logs under ./logs.
-- If no safe local reproduction is possible, return reproduced=false with limitations.
+- Prefer existing tests, affected tests, local mocks, fixtures, and offline scripts.
+- Save full command output under ./logs.
+- Do not claim reproduced unless command output proves the candidate claim and exercises the graph path.
+- If no safe local reproduction is possible, return blocked, unsafe, ambiguous, harness_error, or not_reproduced.
 
 Output JSON only matching repro_result.schema.json.
 """

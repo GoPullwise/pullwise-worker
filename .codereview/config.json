@@ -12,8 +12,17 @@
     "enabled": true,
     "max_workers": 4
   },
+  "scoring": {
+    "always_repro_severities": [
+      "critical",
+      "high"
+    ],
+    "min_score_for_repro": 8
+  },
   "repro": {
     "enabled": true,
-    "max_workers": 2
+    "max_repro": 0,
+    "max_workers": 2,
+    "require_red_green": false
   }
 }

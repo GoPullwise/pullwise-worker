@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
 from ..config import ReviewConfig
+from ..utils.paths import safe_path_component
 from .validate import local_judge
 
 
@@ -18,11 +19,21 @@ def run_judges_parallel(run: Path, candidates: list[dict], repro_results: list[d
 
 def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: ReviewConfig) -> dict:
     local = local_judge(candidate, repro)
+    if local.get("safe_to_show_user") is True and config.repro.require_red_green and local.get("level") != "L3":
+        local = {
+            **local,
+            "status": "rejected",
+            "level": "L0",
+            "safe_to_show_user": False,
+            "reason": "red-green verification required but reproduction level was not L3",
+        }
+    if local.get("safe_to_show_user") is not True:
+        return local
     prompt_file = checkout / ".codereview" / "prompts" / "judge.md"
     schema = checkout / ".codereview" / "schemas" / "judge_result.schema.json"
     if not prompt_file.is_file() or not schema.is_file():
         return local
-    output = run / "judge" / f"{local['candidate_id']}.json"
+    output = run / "judge" / f"{safe_path_component(local['candidate_id'], default='candidate')}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     prompt = "\n\n".join(
         [

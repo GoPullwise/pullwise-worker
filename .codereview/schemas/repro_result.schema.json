@@ -4,11 +4,47 @@
     "candidate_id": {
       "type": "string"
     },
-    "command": {
-      "type": "string"
+    "commands_run": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "cmd": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "log_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cmd",
+          "cwd",
+          "exit_code",
+          "log_path"
+        ],
+        "type": "object"
+      },
+      "type": "array"
     },
-    "exit_code": {
-      "type": "integer"
+    "environment": {
+      "additionalProperties": true,
+      "properties": {
+        "dependencies_installed": {
+          "type": "boolean"
+        },
+        "network_used": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "files_written": {
       "items": {
@@ -16,31 +52,94 @@
       },
       "type": "array"
     },
-    "limitations": {
+    "graph_path_exercised": {
+      "type": "boolean"
+    },
+    "level": {
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3"
+      ],
+      "type": "string"
+    },
+    "proof": {
+      "additionalProperties": false,
+      "properties": {
+        "actual": {
+          "type": "string"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "log_excerpt": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "failing_test",
+            "runtime_output",
+            "assertion",
+            "red_green",
+            "static_check",
+            "other",
+            "none"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "expected",
+        "actual",
+        "log_excerpt"
+      ],
+      "type": "object"
+    },
+    "safety_notes": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "reproduced",
+        "not_reproduced",
+        "blocked",
+        "unsafe",
+        "ambiguous",
+        "harness_error",
+        "timeout"
+      ],
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "touched_symbols": {
       "items": {
         "type": "string"
       },
       "type": "array"
     },
-    "log_path": {
+    "why_not_reproduced": {
       "type": "string"
     },
-    "observable": {
+    "why_valid": {
       "type": "string"
-    },
-    "reproduced": {
-      "type": "boolean"
     }
   },
   "required": [
     "candidate_id",
-    "reproduced",
-    "command",
-    "exit_code",
-    "log_path",
-    "observable",
+    "status",
+    "level",
+    "summary",
+    "commands_run",
     "files_written",
-    "limitations"
+    "proof",
+    "graph_path_exercised",
+    "why_valid",
+    "why_not_reproduced",
+    "safety_notes"
   ],
   "type": "object"
 }

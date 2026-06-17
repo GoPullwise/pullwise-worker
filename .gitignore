@@ -35,3 +35,4 @@ Thumbs.db
 .worktrees/
 .codereview/runs/
 .codereview/codegraph-index/
+.codereview/test-tmp/

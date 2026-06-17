@@ -29,6 +29,7 @@ def run_codex_exec(
         "exec",
         "--cd",
         str(cd),
+        "--skip-git-repo-check",
         "--sandbox",
         sandbox,
         "--ask-for-approval",

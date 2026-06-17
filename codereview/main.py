@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -64,6 +65,8 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
     scored = score_candidates(deduped)
     selected = select_for_repro(scored, config)
     write_jsonl(run / "candidates" / "normalized.jsonl", normalized)
+    write_json(run / "candidates" / "deduped.json", deduped)
+    write_json(run / "candidates" / "scored.json", scored)
     write_jsonl(run / "candidates" / "selected_for_repro.jsonl", selected)
 
     repro_results = run_repro_workers_parallel(checkout, run, selected, config)
@@ -119,7 +122,13 @@ def main(argv: list[str] | None = None) -> int:
         return 5
     print(final)
     confirmed = final.with_name("confirmed.json")
-    return 1 if confirmed.is_file() and '"candidate"' in confirmed.read_text(encoding="utf-8") else 0
+    if not confirmed.is_file():
+        return 0
+    try:
+        payload = json.loads(confirmed.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return 5
+    return 1 if isinstance(payload, list) and payload else 0
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         or "standard"
     )
     try:
+        write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
         final_path = run_review(checkout_dir, base_ref=base_ref, head_ref=head_ref, mode=mode)
     except Exception as exc:
         return {
@@ -91,6 +92,72 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "debugMarkdown": (reports / "debug.md").read_text(encoding="utf-8") if (reports / "debug.md").is_file() else "",
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
     }
+
+
+def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: Path, graph_config: dict, mode: str) -> None:
+    root = checkout_dir / ".codereview"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "config.json"
+    current: dict = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            current = loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            current = {}
+    current["mode"] = graph_verified_mode(mode)
+    current["codegraph"] = {
+        **(current.get("codegraph") if isinstance(current.get("codegraph"), dict) else {}),
+        "command": graph_verified_text(graph_config.get("codegraphCommand")) or "codegraph",
+        "optional_sync": graph_config.get("syncBeforeRun") is not False,
+        "reindex": graph_config.get("forceIndexOnFailure") is True,
+    }
+    current["codex"] = {
+        **(current.get("codex") if isinstance(current.get("codex"), dict) else {}),
+        "command": getattr(config, "codex_command", "") or "codex",
+        "model": getattr(config, "codex_model", "") or "",
+        "reasoning_effort": getattr(config, "codex_reasoning_effort", "") or "high",
+    }
+    current["finders"] = {
+        **(current.get("finders") if isinstance(current.get("finders"), dict) else {}),
+        "enabled": True,
+        "max_workers": graph_verified_positive_int(graph_config.get("finderMaxParallel"), default=4, minimum=1, maximum=12),
+        "timeout_seconds": graph_verified_positive_int(graph_config.get("finderTimeoutSeconds"), default=600, minimum=60, maximum=3600),
+    }
+    current["repro"] = {
+        **(current.get("repro") if isinstance(current.get("repro"), dict) else {}),
+        "enabled": True,
+        "max_workers": graph_verified_positive_int(graph_config.get("reproMaxParallel"), default=2, minimum=1, maximum=8),
+        "timeout_seconds": graph_verified_positive_int(graph_config.get("reproTimeoutSeconds"), default=900, minimum=60, maximum=7200),
+        "max_repro": graph_verified_positive_int(graph_config.get("maxRepro"), default=0, minimum=0, maximum=100),
+        "require_red_green": graph_config.get("requireRedGreen") is True,
+    }
+    current["scoring"] = {
+        **(current.get("scoring") if isinstance(current.get("scoring"), dict) else {}),
+        "min_score_for_repro": graph_verified_positive_int(graph_config.get("minScoreForRepro"), default=8, minimum=0, maximum=50),
+        "always_repro_severities": ["critical", "high"],
+    }
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def graph_verified_mode(value: object) -> str:
+    text = graph_verified_text(value).lower()
+    return text if text in {"fast", "standard", "deep"} else "standard"
+
+
+def graph_verified_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > 128 or any(char in text for char in "\r\n\x00"):
+        return ""
+    return text
+
+
+def graph_verified_positive_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(maximum, number))
 
 
 def codex_auth_failure_error(config: WorkerConfig) -> str | None:
@@ -1453,5 +1520,3 @@ def audit_swarm_output_schema() -> dict:
             "verification_results": {"type": "array", "items": verification_result, "maxItems": 50},
         },
     }
-
-

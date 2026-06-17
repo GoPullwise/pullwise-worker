@@ -12,8 +12,9 @@ from codereview.candidates.normalize import normalize_candidates
 from codereview.candidates.select import select_for_repro
 from codereview.config import ReviewConfig
 from codereview.judge.validate import local_judge
+from codereview.judge.runner import run_judge
 from codereview.report.render import collect_confirmed, render_final_report
-from codereview.repro.runner import git_status_porcelain
+from codereview.repro.runner import git_status_porcelain, worker_env
 from codereview.repro.worker_dir import create_worker_dir
 from codereview.repro.filesystem_guard import guard_worker_result
 from codereview.slicing.risk_tags import choose_finders
@@ -51,6 +52,26 @@ def test_candidate_pipeline_requires_graph_and_repro_evidence() -> None:
                         "needs_network": False,
                     },
                     {
+                        "candidate_id": "../issue_new",
+                        "dedupe_key": "correctness|slice_1|src/app.py|bad-input",
+                        "severity": "high",
+                        "category": "correctness",
+                        "confidence": "high",
+                        "claim": "New schema bug",
+                        "graph_evidence": {
+                            "slice_id": "slice_1",
+                            "codegraph_files": ["src/app.py"],
+                            "path_summary": ["handler -> sink"],
+                        },
+                        "evidence": [{"file": "src/app.py", "lines": "8-9", "why_it_matters": "changed path"}],
+                        "trigger_condition": "bad input",
+                        "expected_behavior": "rejects input",
+                        "actual_behavior_hypothesis": "accepts input",
+                        "minimal_repro_idea": "run a focused test",
+                        "repro_likelihood": "high",
+                        "needs_network": False,
+                    },
+                    {
                         "issue_id": "issue_2",
                         "title": "Speculation",
                         "severity": "high",
@@ -78,8 +99,9 @@ def test_candidate_pipeline_requires_graph_and_repro_evidence() -> None:
     normalized = normalize_candidates(raw)
     selected = select_for_repro(normalized, ReviewConfig())
 
-    assert [item["issue_id"] for item in normalized if item["valid"]] == ["issue_1"]
-    assert [item["issue_id"] for item in selected] == ["issue_1"]
+    assert [item["issue_id"] for item in normalized if item["valid"]] == ["issue_1", "issue_new"]
+    assert [item["issue_id"] for item in selected] == ["issue_1", "issue_new"]
+    assert all(".." not in item["issue_id"] and "/" not in item["issue_id"] for item in normalized)
 
 
 def test_finder_assignment_uses_risk_tags() -> None:
@@ -126,12 +148,21 @@ def test_judge_and_report_are_confirmed_only(tmp_path: Path) -> None:
         "candidate_id": "issue_1",
         "worker": str(worker),
         "result": {
-            "reproduced": True,
-            "command": "python repro.py",
-            "exit_code": 1,
-            "log_path": "logs/repro.log",
-            "observable": "observable failure",
+            "status": "reproduced",
+            "level": "L2",
+            "summary": "observable failure",
+            "commands_run": [{"cmd": "python repro.py", "cwd": str(worker), "exit_code": 1, "log_path": "logs/repro.log"}],
+            "proof": {
+                "type": "runtime_output",
+                "expected": "reject",
+                "actual": "observable failure",
+                "log_excerpt": "observable failure",
+            },
+            "graph_path_exercised": True,
             "files_written": ["logs/repro.log"],
+            "why_valid": "local command exercises the path",
+            "why_not_reproduced": "",
+            "safety_notes": "",
         },
         "filesystem_violations": [],
     }
@@ -172,6 +203,61 @@ def test_judge_rejects_network_or_destructive_repro_command(tmp_path: Path) -> N
     assert "unsupported reproduction command marker" in judge["reason"]
 
 
+def test_codex_judge_cannot_promote_failed_local_gate(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    fake_codex = write_fake_cli(
+        tmp_path,
+        "fake_codex_judge",
+        r'''
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+out = ""
+for index, arg in enumerate(args):
+    if arg == "--output-last-message" and index + 1 < len(args):
+        out = args[index + 1]
+payload = {
+    "candidate_id": "issue_1",
+    "status": "confirmed",
+    "level": "L2",
+    "safe_to_show_user": True,
+    "reason": "agent tried to promote",
+    "evidence_summary": {"command": "python repro.py", "log_path": "logs/missing.log", "observable": "failure"},
+    "limitations": [],
+}
+Path(out).parent.mkdir(parents=True, exist_ok=True)
+Path(out).write_text(json.dumps(payload), encoding="utf-8")
+''',
+    )
+    config = ReviewConfig()
+    config.codex.command = str(fake_codex)
+    worker = tmp_path / "worker"
+    worker.mkdir()
+    repro = {
+        "candidate_id": "issue_1",
+        "worker": str(worker),
+        "result": {
+            "status": "reproduced",
+            "level": "L2",
+            "commands_run": [{"cmd": "python repro.py", "cwd": str(worker), "exit_code": 1, "log_path": "logs/missing.log"}],
+            "proof": {"actual": "failure", "log_excerpt": "failure"},
+            "graph_path_exercised": True,
+            "files_written": [],
+        },
+        "filesystem_violations": ["log path missing: logs/missing.log"],
+    }
+
+    judge = run_judge(tmp_path / "run", {"issue_id": "issue_1"}, repro, checkout, config)
+
+    assert judge["status"] == "rejected"
+    assert judge["safe_to_show_user"] is False
+    assert "missing" in judge["reason"]
+
+
 def test_repro_worker_dir_uses_shared_git_clone_without_dirtying_checkout(tmp_path: Path) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
@@ -188,9 +274,23 @@ def test_repro_worker_dir_uses_shared_git_clone_without_dirtying_checkout(tmp_pa
     after = git_status_porcelain(checkout)
 
     assert before == after == []
-    assert (worker / ".git").exists()
+    assert (worker / "repo" / ".git").exists()
+    assert (worker / "input_candidate.json").is_file()
     assert (worker / "candidate.json").is_file()
     assert (worker / "logs").is_dir()
+    assert (worker / "repro").is_dir()
+
+
+def test_repro_worker_env_isolates_tmp_and_caches(tmp_path: Path) -> None:
+    worker = tmp_path / "worker"
+    env = worker_env(worker)
+
+    assert env["HOME"] == str(worker / "home")
+    assert env["TMPDIR"] == str(worker / "tmp")
+    assert env["XDG_CACHE_HOME"] == str(worker / "cache")
+    assert env["npm_config_cache"] == str(worker / "cache" / "npm")
+    assert env["PIP_CACHE_DIR"] == str(worker / "cache" / "pip")
+    assert env["PYTHONPYCACHEPREFIX"] == str(worker / "cache" / "pycache")
 
 
 def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: Path, monkeypatch) -> None:
@@ -358,19 +458,27 @@ schema_name = Path(schema).name
 payload = {}
 if schema_name == "finder_result.schema.json":
     payload = {
+        "slice_id": "slice_1",
+        "focus": "correctness",
         "candidates": [
             {
-                "issue_id": "issue_cli_1",
-                "title": "CLI confirmed bug",
+                "candidate_id": "issue_cli_1",
+                "dedupe_key": "correctness|slice_1|app.py|none-input",
                 "severity": "high",
-                "category": "Correctness",
-                "summary": "Fake finder produced a graph-backed candidate.",
-                "graph_evidence": {"path": ["handle"]},
-                "code_evidence": [{"file": "app.py", "startLine": 1, "endLine": 2}],
+                "category": "correctness",
+                "confidence": "high",
+                "claim": "CLI confirmed bug",
+                "graph_evidence": {
+                    "slice_id": "slice_1",
+                    "codegraph_files": ["app.py"],
+                    "path_summary": ["handle"],
+                },
+                "evidence": [{"file": "app.py", "lines": "1-2", "why_it_matters": "changed behavior"}],
                 "trigger_condition": "None input",
                 "expected_behavior": "reject None",
                 "actual_behavior_hypothesis": "raises AttributeError",
                 "minimal_repro_idea": "run fake repro",
+                "repro_likelihood": "high",
                 "needs_network": False,
             }
         ]
@@ -380,13 +488,21 @@ elif schema_name == "repro_result.schema.json":
     Path("logs/repro.log").write_text("AttributeError reproduced\n", encoding="utf-8")
     payload = {
         "candidate_id": "issue_cli_1",
-        "reproduced": True,
-        "command": "python repro.py",
-        "exit_code": 1,
-        "log_path": "logs/repro.log",
-        "observable": "AttributeError reproduced",
+        "status": "reproduced",
+        "level": "L2",
+        "summary": "AttributeError reproduced",
+        "commands_run": [{"cmd": "python repro.py", "cwd": str(Path.cwd()), "exit_code": 1, "log_path": "logs/repro.log"}],
         "files_written": ["logs/repro.log"],
-        "limitations": [],
+        "proof": {
+            "type": "runtime_output",
+            "expected": "reject None",
+            "actual": "AttributeError reproduced",
+            "log_excerpt": "AttributeError reproduced",
+        },
+        "graph_path_exercised": True,
+        "why_valid": "fake repro exercises handle",
+        "why_not_reproduced": "",
+        "safety_notes": "",
     }
 elif schema_name == "judge_result.schema.json":
     payload = {

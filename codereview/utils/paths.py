@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 
@@ -35,3 +36,12 @@ def safe_relative_path(value: object) -> str:
         return ""
     normalized = os.path.normpath("/".join(parts)).replace("\\", "/")
     return "" if normalized.startswith("../") else normalized
+
+
+def safe_path_component(value: object, *, default: str = "item", max_length: int = 80) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    text = text.split("/")[-1] if "/" in text else text
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._-")
+    if not text or text in {".", ".."}:
+        text = default
+    return text[:max_length] or default

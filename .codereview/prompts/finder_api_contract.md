@@ -8,3 +8,6 @@ Hard gates:
 - Mark needs_network true when reproduction requires a network, credentials, production service, or external database.
 
 Output JSON only matching finder_result.schema.json.
+Top-level JSON must include slice_id, focus, and candidates.
+Each candidate must use candidate_id, dedupe_key, claim, graph_evidence, evidence, trigger_condition,
+expected_behavior, actual_behavior_hypothesis, minimal_repro_idea, and repro_likelihood.

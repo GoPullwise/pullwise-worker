@@ -3,23 +3,95 @@
   "properties": {
     "candidates": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "actual_behavior_hypothesis": {
             "type": "string"
           },
-          "category": {
+          "affected_tests": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "candidate_id": {
             "type": "string"
           },
-          "code_evidence": {
+          "category": {
+            "enum": [
+              "correctness",
+              "security_auth_dataflow",
+              "api_contract",
+              "state_concurrency_resource",
+              "test_repro"
+            ],
+            "type": "string"
+          },
+          "claim": {
+            "type": "string"
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
+          "dedupe_key": {
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "file": {
+                  "type": "string"
+                },
+                "lines": {
+                  "type": "string"
+                },
+                "why_it_matters": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file",
+                "lines",
+                "why_it_matters"
+              ],
+              "type": "object"
+            },
             "type": "array"
           },
           "expected_behavior": {
             "type": "string"
           },
-          "graph_evidence": {},
-          "issue_id": {
-            "type": "string"
+          "graph_evidence": {
+            "additionalProperties": false,
+            "properties": {
+              "codegraph_files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "path_summary": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "slice_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "slice_id",
+              "codegraph_files",
+              "path_summary"
+            ],
+            "type": "object"
           },
           "minimal_repro_idea": {
             "type": "string"
@@ -27,20 +99,24 @@
           "needs_network": {
             "type": "boolean"
           },
+          "notes": {
+            "type": "string"
+          },
+          "repro_likelihood": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
           "severity": {
             "enum": [
               "critical",
               "high",
               "medium",
-              "low",
-              "info"
+              "low"
             ],
-            "type": "string"
-          },
-          "summary": {
-            "type": "string"
-          },
-          "title": {
             "type": "string"
           },
           "trigger_condition": {
@@ -48,24 +124,34 @@
           }
         },
         "required": [
-          "issue_id",
-          "title",
+          "candidate_id",
+          "dedupe_key",
           "severity",
           "category",
+          "confidence",
+          "claim",
           "graph_evidence",
-          "code_evidence",
+          "evidence",
           "trigger_condition",
           "expected_behavior",
           "actual_behavior_hypothesis",
           "minimal_repro_idea",
-          "needs_network"
+          "repro_likelihood"
         ],
         "type": "object"
       },
       "type": "array"
+    },
+    "focus": {
+      "type": "string"
+    },
+    "slice_id": {
+      "type": "string"
     }
   },
   "required": [
+    "slice_id",
+    "focus",
     "candidates"
   ],
   "type": "object"
