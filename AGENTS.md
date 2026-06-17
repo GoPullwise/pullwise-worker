@@ -40,6 +40,25 @@ worker instance's config.
 Multiple workers on the same server are supported only if each worker uses its
 own `service_home` for Codex binaries, config, cache, and auth state.
 
+Codex and CodeGraph configuration follows the same boundary:
+
+- Different worker instances on the same server must not share Codex config,
+  Codex auth, CodeGraph MCP config, provider cache, or provider binaries. Each
+  worker's MCP config must live under that worker's `CODEX_HOME`, normally
+  `$service_home/.codex/config.toml`.
+- Different checkouts handled by the same worker may share that worker
+  instance's Codex and CodeGraph MCP configuration. This is intentional because
+  they run under the same worker identity and provider account.
+- Repository files and CodeGraph project indexes remain checkout-scoped. A
+  checkout's CodeGraph database belongs under that checkout's `.codegraph/`
+  directory, not under `service_home` and not under another checkout.
+- Reproduction workers may inherit the parent worker's Codex/MCP configuration
+  (`HOME`, `USERPROFILE`, `CODEX_HOME`, provider `PATH`, and non-cache XDG
+  config/data dirs), but their repository copy, logs, temp dirs, npm/pip caches,
+  and pycache prefix must remain candidate-worker scoped.
+- Do not use `CODEGRAPH_DIR` to point multiple jobs or workers at a shared graph
+  directory. Let CodeGraph use each checkout's `.codegraph/` directory.
+
 ## Worker Scan Reproduction Sandbox
 
 Worker scan agents should maximize reproducible evidence without expanding host
