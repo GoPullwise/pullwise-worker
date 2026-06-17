@@ -878,12 +878,6 @@ class PullwiseClient:
         progress: int,
         message: str = "",
         logs_summary: str = "",
-        audit_swarm: dict | None = None,
-        repositoryGraph: dict | None = None,
-        semanticGraph: dict | None = None,
-        impactGraph: dict | None = None,
-        completion_audit: dict | None = None,
-        job_trace: dict | None = None,
     ) -> None:
         payload = {
             "phase": phase,
@@ -892,20 +886,6 @@ class PullwiseClient:
             "started_at": int(time.time()),
             "logs_summary": logs_summary,
         }
-        if audit_swarm:
-            payload["audit_swarm"] = audit_swarm
-        if repositoryGraph:
-            payload["repositoryGraph"] = repositoryGraph
-        if semanticGraph:
-            payload["semanticGraph"] = semanticGraph
-        if impactGraph:
-            payload["impactGraph"] = impactGraph
-        if completion_audit:
-            payload["completion_audit"] = completion_audit
-            payload["completionAudit"] = completion_audit
-        if job_trace:
-            payload["job_trace"] = job_trace
-            payload["jobTrace"] = job_trace
         self.post(f"/worker/jobs/{job_id}/progress", payload)
 
     def result(self, job_id: str, payload: dict) -> None:
