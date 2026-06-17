@@ -14,8 +14,9 @@ class CodeGraphError(RuntimeError):
 
 
 def _codegraph_env(checkout: Path) -> dict[str, str]:
+    del checkout
     env = os.environ.copy()
-    env.setdefault("CODEGRAPH_DIR", str(checkout / ".codereview" / "codegraph-index"))
+    env.pop("CODEGRAPH_DIR", None)
     return env
 
 
@@ -31,10 +32,10 @@ def _run_codegraph(checkout: Path, run: Path, config: CodeGraphConfig, args: lis
 
 
 def preflight_codegraph(checkout: Path, run: Path, config: CodeGraphConfig) -> dict:
-    (checkout / ".codereview" / "codegraph-index").mkdir(parents=True, exist_ok=True)
+    codegraph_dir = checkout / ".codegraph"
     status = _run_codegraph(checkout, run, config, ["status", str(checkout)], "status")
     if status.returncode != 0:
-        init = _run_codegraph(checkout, run, config, ["init", str(checkout)], "init")
+        init = _run_codegraph(checkout, run, config, ["init", str(checkout), "--index"], "init")
         if init.returncode != 0:
             write_json(
                 run / "codegraph" / "preflight.json",
@@ -56,7 +57,7 @@ def preflight_codegraph(checkout: Path, run: Path, config: CodeGraphConfig) -> d
         "status": status.to_dict(),
         "reindex": reindex.to_dict() if reindex else None,
         "sync": sync.to_dict() if sync else None,
-        "codegraph_dir": str(checkout / ".codereview" / "codegraph-index"),
+        "codegraph_dir": str(codegraph_dir),
     }
     write_json(run / "codegraph" / "preflight.json", payload)
     if not ok:

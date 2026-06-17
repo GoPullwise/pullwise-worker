@@ -24,7 +24,10 @@ def run_repro_workers_parallel(checkout: Path, run: Path, candidates: list[dict]
 def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewConfig) -> dict:
     issue_id = safe_path_component(candidate.get("issue_id") or candidate.get("candidate_id"), default="candidate")
     worker = run / "workers" / issue_id
-    checkout_status_before = git_status_porcelain(checkout, ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codereview/codegraph-index/"))
+    checkout_status_before = git_status_porcelain(
+        checkout,
+        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/", ".codereview/codegraph-index/"),
+    )
     create_worker_dir(checkout, worker, candidate)
     copy_slice_context(run, worker, candidate)
     prompt = (checkout / ".codereview" / "prompts" / "repro_worker.md").read_text(encoding="utf-8")
@@ -40,7 +43,10 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         env=worker_env(worker),
     )
     if process.returncode != 0:
-        checkout_status_after = git_status_porcelain(checkout, ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codereview/codegraph-index/"))
+        checkout_status_after = git_status_porcelain(
+            checkout,
+            ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/", ".codereview/codegraph-index/"),
+        )
         violations: list[str] = []
         if checkout_status_after != checkout_status_before:
             violations.append("original checkout changed during repro worker execution")
@@ -100,7 +106,10 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
             "safety_notes": "",
         }
     violations = guard_worker_result(worker, parsed)
-    checkout_status_after = git_status_porcelain(checkout, ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codereview/codegraph-index/"))
+    checkout_status_after = git_status_porcelain(
+        checkout,
+        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/", ".codereview/codegraph-index/"),
+    )
     if checkout_status_after != checkout_status_before:
         violations.append("original checkout changed during repro worker execution")
     return {

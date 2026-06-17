@@ -14,6 +14,7 @@ from typing import Optional
 codereview_main = importlib.import_module("codereview.main")
 from codereview.candidates.normalize import normalize_candidates
 from codereview.candidates.select import select_for_repro
+from codereview.codex_runner import base_env
 from codereview.config import ReviewConfig
 from codereview.finder.runner import run_finder
 from codereview.finder.tasks import FinderTask
@@ -393,6 +394,23 @@ def test_repro_worker_env_isolates_tmp_and_caches(tmp_path: Path) -> None:
     assert env["PYTHONPYCACHEPREFIX"] == str(worker / "cache" / "pycache")
 
 
+def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    config.codex.env = {
+        "HOME": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "home" / ".codex"),
+        "PATH": str(tmp_path / "home" / ".local" / "bin"),
+        "CODEGRAPH_DIR": "legacy-index",
+    }
+
+    env = base_env(tmp_path, config.codex)
+
+    assert env["HOME"] == str(tmp_path / "home")
+    assert env["CODEX_HOME"] == str(tmp_path / "home" / ".codex")
+    assert env["PATH"] == str(tmp_path / "home" / ".local" / "bin")
+    assert "CODEGRAPH_DIR" not in env
+
+
 def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: Path, monkeypatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
@@ -531,7 +549,12 @@ def test_run_review_non_empty_diff_uses_codegraph_codex_cli_pipeline(tmp_path: P
         "fake_codegraph",
         r'''
 import json
+import os
 import sys
+
+if "CODEGRAPH_DIR" in os.environ:
+    print("unexpected CODEGRAPH_DIR", file=sys.stderr)
+    sys.exit(99)
 
 args = sys.argv[1:]
 if not args:
@@ -561,6 +584,10 @@ import json
 import os
 import sys
 from pathlib import Path
+
+if "CODEGRAPH_DIR" in os.environ:
+    print("unexpected CODEGRAPH_DIR", file=sys.stderr)
+    sys.exit(99)
 
 args = sys.argv[1:]
 out = ""
@@ -671,10 +698,12 @@ print(json.dumps({"ok": True, "schema": schema_name}))
     final = codereview_main.run_review(checkout, base_ref=base, head_ref="HEAD", mode="fast")
     final_text = final.read_text(encoding="utf-8")
     confirmed = json.loads(final.with_name("confirmed.json").read_text(encoding="utf-8"))
+    summary = json.loads(final.with_name("summary.json").read_text(encoding="utf-8"))
 
     assert "Confirmed findings: 1" in final_text
     assert "CLI confirmed bug" in final_text
     assert confirmed[0]["judge"]["safe_to_show_user"] is True
+    assert summary["preflight"]["codegraphDir"].endswith(".codegraph")
     assert (final.parent.parent / "workers" / "issue_cli_1" / "logs" / "repro.log").is_file()
 
 

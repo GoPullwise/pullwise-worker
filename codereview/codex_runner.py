@@ -7,9 +7,12 @@ from .config import CodexConfig
 from .utils.process import ProcessResult, run_process
 
 
-def base_env(checkout: Path) -> dict[str, str]:
+def base_env(checkout: Path, config: CodexConfig | None = None) -> dict[str, str]:
+    del checkout
     env = os.environ.copy()
-    env.setdefault("CODEGRAPH_DIR", str(checkout / ".codereview" / "codegraph-index"))
+    if config is not None and config.env:
+        env.update(config.env)
+    env.pop("CODEGRAPH_DIR", None)
     return env
 
 

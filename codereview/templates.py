@@ -18,7 +18,6 @@ def ensure_project_files(checkout: Path) -> None:
     (root / "schemas").mkdir(parents=True, exist_ok=True)
     (root / "prompts").mkdir(parents=True, exist_ok=True)
     (root / "runs").mkdir(parents=True, exist_ok=True)
-    (root / "codegraph-index").mkdir(parents=True, exist_ok=True)
     config = root / "config.json"
     if not config.is_file():
         config.write_text(
@@ -249,7 +248,8 @@ def finder_prompt(focus: str) -> str:
 
 Hard gates:
 - No graph evidence, no candidate.
-- Every candidate must be tied to the supplied CodeGraph context pack.
+- Use CodeGraph MCP tools when available; the supplied CodeGraph context pack is the fallback/audit trail.
+- Every candidate must be tied to CodeGraph evidence from MCP tools or the supplied context pack.
 - Every candidate must include file/line evidence, trigger condition, expected behavior, actual behavior hypothesis, and a local minimal repro idea.
 - Do not report style concerns or speculative risks.
 - Mark needs_network true when reproduction requires a network, credentials, production service, or external database.

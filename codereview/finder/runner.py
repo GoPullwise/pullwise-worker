@@ -31,7 +31,7 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
         sandbox="read-only",
         timeout_seconds=config.finders.timeout_seconds,
         config=config.codex,
-        env=base_env(checkout),
+        env=base_env(checkout, config.codex),
     )
     if result.returncode != 0:
         return {

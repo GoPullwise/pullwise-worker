@@ -42,6 +42,65 @@ def graph_verified_review_enabled(config: WorkerConfig, job: dict) -> bool:
     return graph_config.get("enabled") is True
 
 
+def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
+    provider_env = provider_process_env(config)
+    return {
+        key: provider_env[key]
+        for key in ("HOME", "USERPROFILE", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "PATH")
+        if provider_env.get(key)
+    }
+
+
+def ensure_graph_verified_codegraph_codex_mcp(config: WorkerConfig, checkout_dir: Path, graph_config: dict) -> None:
+    command = graph_verified_text(graph_config.get("codegraphCommand")) or "codegraph"
+    timeout = max(60, int(getattr(config, "codex_doctor_timeout_seconds", 60) or 60))
+    install_command = [command, "install", "--target=codex", "--location=global", "--yes"]
+    provider_env = provider_process_env(config)
+    try:
+        completed = subprocess.run(
+            install_command,
+            cwd=str(checkout_dir),
+            env=provider_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"CodeGraph Codex MCP install failed: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stderr or exc.stdout or ""
+        detail = compact_codex_failure_output(str(output), stream_name="timeout") or "timeout"
+        raise RuntimeError(f"CodeGraph Codex MCP install timed out after {timeout}s: {detail}") from exc
+    if completed.returncode != 0:
+        detail = compact_codex_failure_output(completed.stderr or completed.stdout, stream_name="stderr" if completed.stderr else "stdout")
+        raise RuntimeError(f"CodeGraph Codex MCP install failed with exit code {completed.returncode}: {detail or 'no stderr/stdout'}")
+    upsert_graph_verified_codex_mcp_config(provider_env, command)
+
+
+def upsert_graph_verified_codex_mcp_config(provider_env: dict[str, str], command: str) -> None:
+    codex_home = provider_env.get("CODEX_HOME") or provider_home_path(provider_env.get("HOME") or DEFAULT_SERVICE_HOME, ".codex")
+    path = Path(codex_home) / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    block = (
+        "[mcp_servers.codegraph]\n"
+        f"command = {graph_verified_toml_string(command)}\n"
+        'args = ["serve", "--mcp"]\n'
+    )
+    current = path.read_text(encoding="utf-8") if path.is_file() else ""
+    pattern = re.compile(r"(?ms)^\[mcp_servers\.codegraph\]\r?\n.*?(?=^\[|\Z)")
+    if pattern.search(current):
+        updated = pattern.sub(block, current, count=1)
+    else:
+        prefix = current.rstrip()
+        updated = f"{prefix}\n\n{block}" if prefix else block
+    path.write_text(updated.rstrip() + "\n", encoding="utf-8")
+
+
+def graph_verified_toml_string(value: object) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, head_ref: str) -> dict:
     from codereview.main import run_review
     from codereview.utils.jsonl import read_json
@@ -55,6 +114,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         graph_config.get("mode") or "standard"
     )
     try:
+        ensure_graph_verified_codegraph_codex_mcp(config, checkout_dir, graph_config)
         write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
         final_path = run_review(checkout_dir, base_ref=base_ref, head_ref=head_ref, mode=mode)
     except Exception as exc:
@@ -115,6 +175,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "command": getattr(config, "codex_command", "") or "codex",
         "model": getattr(config, "codex_model", "") or "",
         "reasoning_effort": getattr(config, "codex_reasoning_effort", "") or "high",
+        "env": graph_verified_codex_env(config),
     }
     current["finders"] = {
         **(current.get("finders") if isinstance(current.get("finders"), dict) else {}),

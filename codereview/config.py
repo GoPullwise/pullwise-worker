@@ -27,6 +27,7 @@ class CodexConfig:
     timeout_seconds: int = 600
     model: str = ""
     reasoning_effort: str = "high"
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -86,6 +87,7 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
         raise ValueError("mode must be one of fast, standard, deep")
     codegraph = _section(raw, "codegraph")
     codex = _section(raw, "codex")
+    codex_env = _string_map(codex.get("env"))
     finders = _section(raw, "finders")
     repro = _section(raw, "repro")
     scoring = _section(raw, "scoring")
@@ -105,6 +107,7 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
             timeout_seconds=int(codex.get("timeout_seconds") or 600),
             model=str(codex.get("model") or ""),
             reasoning_effort=str(codex.get("reasoning_effort") or "high"),
+            env=codex_env,
         ),
         finders=FinderConfig(
             enabled=bool(finders.get("enabled", True)),
@@ -127,6 +130,17 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
             },
         ),
     )
+
+
+def _string_map(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    items: dict[str, str] = {}
+    for key, item in value.items():
+        text_key = str(key or "").strip()
+        if text_key and item is not None:
+            items[text_key] = str(item)
+    return items
 
 
 def resolve_command(command: str) -> str:

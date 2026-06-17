@@ -54,7 +54,7 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
         sandbox="read-only",
         timeout_seconds=config.codex.timeout_seconds,
         config=config.codex,
-        env=base_env(checkout),
+        env=base_env(checkout, config.codex),
     )
     if process.returncode != 0 or not output.is_file():
         return local

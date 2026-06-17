@@ -204,6 +204,7 @@ class WorkerMainTest(unittest.TestCase):
 
     def test_graph_verified_review_uses_nested_agent_config_gate_and_mode(self) -> None:
         worker_config = config()
+        service_home = configure_instance_provider_commands(worker_config)
         job = worker_job(
             agentConfig={
                 "provider": "codex",
@@ -214,6 +215,7 @@ class WorkerMainTest(unittest.TestCase):
                 },
                 "graphVerified": {
                     "enabled": True,
+                    "codegraphCommand": "custom-codegraph",
                     "mode": "deep",
                     "maxRepro": 12,
                     "minScoreForRepro": 7,
@@ -236,15 +238,30 @@ class WorkerMainTest(unittest.TestCase):
         (reports / "debug.md").write_text("# Debug\n", encoding="utf-8")
 
         codereview_main = importlib.import_module("codereview.main")
-        with patch.object(codereview_main, "run_review", return_value=reports / "final.md") as run_review:
+        with patch.object(codereview_main, "run_review", return_value=reports / "final.md") as run_review, \
+            patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=0, stdout="", stderr="")) as install:
             payload = worker_main.run_graph_verified_review_payload(worker_config, job, checkout_dir, "HEAD")
 
         self.assertTrue(worker_main.graph_verified_review_enabled(worker_config, job))
+        install.assert_called_once()
+        self.assertEqual(install.call_args.args[0], ["custom-codegraph", "install", "--target=codex", "--location=global", "--yes"])
+        self.assertEqual(install.call_args.kwargs["cwd"], str(checkout_dir))
+        install_env = install.call_args.kwargs["env"]
+        self.assertEqual(install_env["HOME"], str(service_home))
+        self.assertEqual(install_env["USERPROFILE"], str(service_home))
+        self.assertEqual(install_env["CODEX_HOME"], str(service_home / ".codex"))
+        codex_toml = (service_home / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertIn("[mcp_servers.codegraph]", codex_toml)
+        self.assertIn('command = "custom-codegraph"', codex_toml)
+        self.assertIn('args = ["serve", "--mcp"]', codex_toml)
         run_review.assert_called_once_with(checkout_dir, base_ref="origin/main", head_ref="HEAD", mode="deep")
         codereview_config = json.loads((checkout_dir / ".codereview" / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(codereview_config["mode"], "deep")
+        self.assertEqual(codereview_config["codegraph"]["command"], "custom-codegraph")
         self.assertEqual(codereview_config["codex"]["model"], "gpt-5.5")
         self.assertEqual(codereview_config["codex"]["reasoning_effort"], "medium")
+        self.assertEqual(codereview_config["codex"]["env"]["HOME"], str(service_home))
+        self.assertEqual(codereview_config["codex"]["env"]["CODEX_HOME"], str(service_home / ".codex"))
         self.assertEqual(codereview_config["repro"]["max_repro"], 12)
         self.assertEqual(codereview_config["repro"]["require_red_green"], True)
         self.assertEqual(codereview_config["scoring"]["min_score_for_repro"], 7)
@@ -253,6 +270,28 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(payload["blockedCount"], 2)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["issue_id"], "issue_1")
         self.assertEqual(payload["summary"]["reports"]["blocked"], 2)
+
+    def test_graph_verified_review_blocks_when_codegraph_codex_mcp_install_fails(self) -> None:
+        worker_config = config()
+        job = worker_job(
+            agentConfig={
+                "provider": "codex",
+                "graphVerified": {"enabled": True, "mode": "fast"},
+            },
+        )
+        checkout_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(checkout_dir, ignore_errors=True))
+
+        codereview_main = importlib.import_module("codereview.main")
+        with patch("pullwise_worker.main.subprocess.run", return_value=Mock(returncode=2, stdout="", stderr="install failed")) as install, \
+            patch.object(codereview_main, "run_review") as run_review:
+            payload = worker_main.run_graph_verified_review_payload(worker_config, job, checkout_dir, "HEAD")
+
+        install.assert_called_once()
+        run_review.assert_not_called()
+        self.assertEqual(payload["mode"], "fast")
+        self.assertEqual(payload["blockedCount"], 1)
+        self.assertIn("CodeGraph Codex MCP install failed", payload["debugMarkdown"])
 
     def test_worker_config_for_job_applies_admin_agent_policy_but_keeps_local_commands(self) -> None:
         worker_config = config()
