@@ -407,10 +407,14 @@ class Worker:
         audit_payload: dict = empty_audit_swarm_payload()
         verification_audit: dict = {}
         graph_verified_report: dict = {}
+        graph_verified_enabled = False
         candidate_count = 0
         rejected_reasons: dict[str, int] = {}
         logs_summary = ""
         job_trace_checkpoints: list[dict] = []
+
+        def legacy_progress_artifacts(**kwargs: object) -> dict:
+            return {} if graph_verified_enabled else kwargs
 
         def current_job_trace(result_status: str = "running", next_retry_hint: str = "") -> dict:
             return job_trace_payload(
@@ -424,13 +428,16 @@ class Worker:
         try:
             job_config = worker_config_for_job(self.config, job)
             configured_agent = effective_agent_config_payload(job_config)
+            graph_verified_enabled = graph_verified_review_enabled(job_config, job)
             checkout_dir = checkout_dir_for_job(job_config.work_dir, job_id)
             self.client.progress(
                 job_id,
                 "clone",
                 PHASE_PROGRESS["clone"],
                 "Cloning repository",
-                audit_swarm=audit_swarm_scan_artifacts("clone", config=job_config, summary="Cloning repository."),
+                **legacy_progress_artifacts(
+                    audit_swarm=audit_swarm_scan_artifacts("clone", config=job_config, summary="Cloning repository."),
+                ),
             )
             resolved_commit = clone_repository(job, checkout_dir)
             job["resolved_commit"] = resolved_commit
@@ -447,8 +454,10 @@ class Worker:
                 "clone",
                 PHASE_PROGRESS["clone"],
                 "Repository cloned",
-                audit_swarm=audit_swarm_scan_artifacts("clone", config=job_config, summary="Repository cloned."),
-                job_trace=current_job_trace(),
+                **legacy_progress_artifacts(
+                    audit_swarm=audit_swarm_scan_artifacts("clone", config=job_config, summary="Repository cloned."),
+                    job_trace=current_job_trace(),
+                ),
             )
             current_stage = "preflight"
             limit_preflight = enforce_repository_limits(job_config, job, checkout_dir)
@@ -457,13 +466,15 @@ class Worker:
                 "index",
                 PHASE_PROGRESS["index"],
                 "Repository ready",
-                audit_swarm=audit_swarm_scan_artifacts(
-                    "preflight",
-                    config=job_config,
-                    preflight=limit_preflight,
-                    summary="Repository checkout is ready.",
+                **legacy_progress_artifacts(
+                    audit_swarm=audit_swarm_scan_artifacts(
+                        "preflight",
+                        config=job_config,
+                        preflight=limit_preflight,
+                        summary="Repository checkout is ready.",
+                    ),
+                    job_trace=current_job_trace(),
                 ),
-                job_trace=current_job_trace(),
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
             job_trace_checkpoints.append(
@@ -484,83 +495,94 @@ class Worker:
                 "index",
                 PHASE_PROGRESS["index"],
                 "Repository preflight ready",
-                audit_swarm=audit_swarm_scan_artifacts(
-                    "preflight",
-                    config=job_config,
-                    preflight=preflight,
-                    summary="Repository preflight collected.",
-                ),
-                job_trace=current_job_trace(),
-            )
-            current_stage = "graph"
-            graph_status = "ok"
-            graph_summary = "Repository graph is ready."
-            try:
-                repository_graph, semantic_graph = build_repository_graph_bundle(job_config, job, checkout_dir, preflight)
-            except Exception:
-                repository_graph = {}
-                semantic_graph = {}
-                impact_graph = {}
-                graph_status = "warning"
-                graph_summary = "Repository graph generation failed; review continued without graph context."
-                limitations = preflight.get("limitations")
-                if not isinstance(limitations, list):
-                    limitations = []
-                    preflight["limitations"] = limitations
-                limitations.append(graph_summary)
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "graph",
-                    status=graph_status,
-                    summary=graph_summary,
-                    counts={
-                        "nodes": len(repository_graph.get("nodes") or []) if isinstance(repository_graph, dict) else 0,
-                        "semanticNodes": len(semantic_graph.get("nodes") or []) if isinstance(semantic_graph, dict) else 0,
-                        "impactTargets": len(impact_graph.get("targets") or []) if isinstance(impact_graph, dict) else 0,
-                    },
-                )
-            )
-            if repository_graph:
-                job["repository_graph"] = repository_graph
-                if semantic_graph:
-                    job["semantic_graph"] = semantic_graph
-                raw_impact_graph = repository_graph.get("impactGraph") if isinstance(repository_graph, dict) else {}
-                impact_graph = raw_impact_graph if isinstance(raw_impact_graph, dict) else {}
-                if impact_graph:
-                    job["impact_graph"] = impact_graph
-                architecture_summary = repository_graph.get("architectureSummary")
-                if isinstance(architecture_summary, dict):
-                    job["architecture_summary"] = architecture_summary
-                self.client.progress(
-                    job_id,
-                    "index",
-                    PHASE_PROGRESS["index"],
-                    "Repository graph ready",
+                **legacy_progress_artifacts(
                     audit_swarm=audit_swarm_scan_artifacts(
                         "preflight",
                         config=job_config,
                         preflight=preflight,
-                        summary="Repository graph is ready.",
+                        summary="Repository preflight collected.",
                     ),
-                    repositoryGraph=repository_graph,
-                    semanticGraph=semantic_graph,
-                    impactGraph=impact_graph,
                     job_trace=current_job_trace(),
-                )
-            else:
+                ),
+            )
+            current_stage = "graph"
+            if graph_verified_enabled:
+                graph_summary = "GraphVerified will build graph slices during review."
                 self.client.progress(
                     job_id,
                     "index",
                     PHASE_PROGRESS["index"],
                     graph_summary,
-                    audit_swarm=audit_swarm_scan_artifacts(
-                        "preflight",
-                        config=job_config,
-                        preflight=preflight,
-                        summary=graph_summary,
-                    ),
-                    job_trace=current_job_trace(),
                 )
+            else:
+                graph_status = "ok"
+                graph_summary = "Repository graph is ready."
+                try:
+                    repository_graph, semantic_graph = build_repository_graph_bundle(job_config, job, checkout_dir, preflight)
+                except Exception:
+                    repository_graph = {}
+                    semantic_graph = {}
+                    impact_graph = {}
+                    graph_status = "warning"
+                    graph_summary = "Repository graph generation failed; review continued without graph context."
+                    limitations = preflight.get("limitations")
+                    if not isinstance(limitations, list):
+                        limitations = []
+                        preflight["limitations"] = limitations
+                    limitations.append(graph_summary)
+                job_trace_checkpoints.append(
+                    job_trace_checkpoint(
+                        "graph",
+                        status=graph_status,
+                        summary=graph_summary,
+                        counts={
+                            "nodes": len(repository_graph.get("nodes") or []) if isinstance(repository_graph, dict) else 0,
+                            "semanticNodes": len(semantic_graph.get("nodes") or []) if isinstance(semantic_graph, dict) else 0,
+                            "impactTargets": len(impact_graph.get("targets") or []) if isinstance(impact_graph, dict) else 0,
+                        },
+                    )
+                )
+                if repository_graph:
+                    job["repository_graph"] = repository_graph
+                    if semantic_graph:
+                        job["semantic_graph"] = semantic_graph
+                    raw_impact_graph = repository_graph.get("impactGraph") if isinstance(repository_graph, dict) else {}
+                    impact_graph = raw_impact_graph if isinstance(raw_impact_graph, dict) else {}
+                    if impact_graph:
+                        job["impact_graph"] = impact_graph
+                    architecture_summary = repository_graph.get("architectureSummary")
+                    if isinstance(architecture_summary, dict):
+                        job["architecture_summary"] = architecture_summary
+                    self.client.progress(
+                        job_id,
+                        "index",
+                        PHASE_PROGRESS["index"],
+                        "Repository graph ready",
+                        audit_swarm=audit_swarm_scan_artifacts(
+                            "preflight",
+                            config=job_config,
+                            preflight=preflight,
+                            summary="Repository graph is ready.",
+                        ),
+                        repositoryGraph=repository_graph,
+                        semanticGraph=semantic_graph,
+                        impactGraph=impact_graph,
+                        job_trace=current_job_trace(),
+                    )
+                else:
+                    self.client.progress(
+                        job_id,
+                        "index",
+                        PHASE_PROGRESS["index"],
+                        graph_summary,
+                        audit_swarm=audit_swarm_scan_artifacts(
+                            "preflight",
+                            config=job_config,
+                            preflight=preflight,
+                            summary=graph_summary,
+                        ),
+                        job_trace=current_job_trace(),
+                    )
             current_stage = "verifier"
             try:
                 verifier, verifier_findings, verifier_logs = run_verifier_commands(job_config, job, checkout_dir, preflight)
@@ -590,25 +612,21 @@ class Worker:
                     "Static preflight captured repository metadata, then the verifier executed allowlisted "
                     "setup and project check commands with bounded timeouts and logs."
                 )
-            graph_verified_enabled = graph_verified_review_enabled(job_config, job)
             self.client.progress(
                 job_id,
                 "ai",
                 PHASE_PROGRESS["ai"],
                 "Running GraphVerified review" if graph_verified_enabled else "Running Codex review",
                 verifier_logs,
-                audit_swarm=audit_swarm_scan_artifacts(
-                    "discovery",
-                    config=job_config,
-                    preflight=preflight,
-                    summary=(
-                        "Repository preflight is complete; GraphVerified is building graph slices, "
-                        "checking candidates, and running isolated reproductions."
-                        if graph_verified_enabled
-                        else "Repository preflight is complete; reviewer agents are discovering issue cards."
+                **legacy_progress_artifacts(
+                    audit_swarm=audit_swarm_scan_artifacts(
+                        "discovery",
+                        config=job_config,
+                        preflight=preflight,
+                        summary="Repository preflight is complete; reviewer agents are discovering issue cards.",
                     ),
+                    job_trace=current_job_trace(),
                 ),
-                job_trace=current_job_trace(),
             )
             current_stage = "graph_verified" if graph_verified_enabled else "agent"
             if graph_verified_enabled:
@@ -682,13 +700,15 @@ class Worker:
                 PHASE_PROGRESS["ai"],
                 "GraphVerified review complete" if graph_verified_enabled else "Codex review complete",
                 logs_summary,
-                audit_swarm=audit_swarm_scan_artifacts(
-                    "discovery",
-                    config=job_config,
-                    preflight=preflight,
-                    summary="GraphVerified confirmed-only report completed." if graph_verified_enabled else "Provider review completed.",
+                **legacy_progress_artifacts(
+                    audit_swarm=audit_swarm_scan_artifacts(
+                        "discovery",
+                        config=job_config,
+                        preflight=preflight,
+                        summary="Provider review completed.",
+                    ),
+                    job_trace=current_job_trace(),
                 ),
-                job_trace=current_job_trace(),
             )
             review_decision_records: list[dict] = []
             current_stage = "filter"
@@ -904,9 +924,11 @@ class Worker:
                 100,
                 "Uploading result",
                 logs_summary,
-                audit_swarm=audit_swarm or None,
-                completion_audit=None if graph_verified_enabled else completion_audit,
-                job_trace=None if graph_verified_enabled else job_trace,
+                **legacy_progress_artifacts(
+                    audit_swarm=audit_swarm or None,
+                    completion_audit=completion_audit,
+                    job_trace=job_trace,
+                ),
             )
             try:
                 self.upload_result_with_retry(job_id, payload)
@@ -956,26 +978,35 @@ class Worker:
                 rejected_reasons=rejected_reasons,
                 next_retry_hint=completion_audit.get("retryReason"),
             )
-            error_payload = {
-                "status": "failed",
-                "audit_protocol": AUDIT_SWARM_PROTOCOL_VERSION,
-                "issue_cards": [],
-                "verification_results": [],
-                "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-                "duration_ms": duration_ms,
-                "error": error,
-                "attempt_id": attempt_id,
-                "audit_swarm": audit_swarm_scan_artifacts(
-                    "failed",
-                    config=job_config,
-                    preflight=failure_preflight,
-                    summary=error,
-                ),
-                "completion_audit": completion_audit,
-                "completionAudit": completion_audit,
-                "job_trace": job_trace,
-                "jobTrace": job_trace,
-            }
+            if graph_verified_enabled:
+                error_payload = {
+                    "status": "failed",
+                    "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+                    "duration_ms": duration_ms,
+                    "error": error,
+                    "attempt_id": attempt_id,
+                }
+            else:
+                error_payload = {
+                    "status": "failed",
+                    "audit_protocol": AUDIT_SWARM_PROTOCOL_VERSION,
+                    "issue_cards": [],
+                    "verification_results": [],
+                    "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+                    "duration_ms": duration_ms,
+                    "error": error,
+                    "attempt_id": attempt_id,
+                    "audit_swarm": audit_swarm_scan_artifacts(
+                        "failed",
+                        config=job_config,
+                        preflight=failure_preflight,
+                        summary=error,
+                    ),
+                    "completion_audit": completion_audit,
+                    "completionAudit": completion_audit,
+                    "job_trace": job_trace,
+                    "jobTrace": job_trace,
+                }
             if error_code:
                 error_payload["error_code"] = error_code
                 error_payload["errorCode"] = error_code
@@ -994,9 +1025,11 @@ class Worker:
                     PHASE_PROGRESS["report"],
                     "Uploading failed result",
                     error,
-                    audit_swarm=error_payload["audit_swarm"],
-                    completion_audit=completion_audit,
-                    job_trace=job_trace,
+                    **legacy_progress_artifacts(
+                        audit_swarm=error_payload.get("audit_swarm"),
+                        completion_audit=completion_audit,
+                        job_trace=job_trace,
+                    ),
                 )
                 self.upload_result_with_retry(job_id, error_payload)
             except Exception as upload_exc:

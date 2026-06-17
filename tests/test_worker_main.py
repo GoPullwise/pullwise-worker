@@ -3837,6 +3837,95 @@ func writeHealth() {}
         self.assertNotIn("semantic_graph", result_payload)
         self.assertNotIn("impact_graph", result_payload)
 
+    def test_run_job_graph_verified_skips_legacy_progress_artifacts(self) -> None:
+        worker = Worker(config())
+        worker.client = Mock()
+        graph_verified_report = {
+            "version": "graph-verified-code-review/1",
+            "runId": "gv_run_1",
+            "mode": "standard",
+            "base": "origin/main",
+            "head": "HEAD",
+            "confirmedCount": 1,
+            "rejectedCount": 0,
+            "blockedCount": 0,
+            "finalJson": {
+                "confirmed": [
+                    {
+                        "candidate": {
+                            "issue_id": "issue-gv",
+                            "candidate_id": "candidate-gv",
+                            "severity": "high",
+                            "graph_evidence": {"slice_id": "slice-1", "codegraph_files": ["src/app.py"]},
+                            "evidence": [{"file": "src/app.py", "lines": "10-12"}],
+                        },
+                        "judge": {
+                            "status": "confirmed",
+                            "level": "L2",
+                            "safe_to_show_user": True,
+                            "evidence_summary": {"command": "pytest tests/test_app.py", "log_path": "logs/repro.log"},
+                        },
+                        "repro": {
+                            "status": "reproduced",
+                            "level": "L2",
+                            "commands_run": [
+                                {"cmd": "pytest tests/test_app.py", "exit_code": 1, "log_path": "logs/repro.log"}
+                            ],
+                            "graph_path_exercised": True,
+                        },
+                        "verification": {"verdict": "confirmed", "safe_to_show_user": True},
+                    }
+                ]
+            },
+        }
+        job = worker_job(
+            job_id="job_graph_verified",
+            attempt=1,
+            repo="acme/api",
+            commit="pending",
+            agentConfig={
+                "provider": "codex",
+                "codex": {"command": "codex", "model": "gpt-5.5", "reasoningEffort": "medium"},
+                "graphVerified": {"enabled": True, "mode": "standard"},
+            },
+        )
+
+        with patch("pullwise_worker.main.clone_repository", return_value="0123456789abcdef0123456789abcdef01234567"), \
+            patch("pullwise_worker.main.collect_preflight_metadata", return_value={"mode": "static"}) as collect_preflight, \
+            patch("pullwise_worker.main.build_repository_graph_bundle") as build_graph, \
+            patch(
+                "pullwise_worker.main.run_verifier_commands",
+                return_value=({"enabled": False, "runs": []}, [], "verifier disabled"),
+            ), \
+            patch("pullwise_worker.main.run_codex_review") as run_codex_review, \
+            patch("pullwise_worker.main.run_graph_verified_review_payload", return_value=graph_verified_report) as run_graph_verified, \
+            patch.object(worker, "upload_result_with_retry") as upload_result, \
+            patch("pullwise_worker.main.shutil.rmtree"):
+            worker.run_job(job)
+
+        collect_preflight.assert_called_once()
+        build_graph.assert_not_called()
+        run_codex_review.assert_not_called()
+        run_graph_verified.assert_called_once()
+        legacy_keys = {
+            "audit_swarm",
+            "repositoryGraph",
+            "semanticGraph",
+            "impactGraph",
+            "completion_audit",
+            "job_trace",
+        }
+        for call in worker.client.progress.call_args_list:
+            self.assertFalse(legacy_keys.intersection(call.kwargs.keys()), call.kwargs)
+        result_payload = upload_result.call_args.args[1]
+        self.assertEqual(result_payload["graphVerifiedReport"], graph_verified_report)
+        self.assertNotIn("audit_swarm", result_payload)
+        self.assertNotIn("completion_audit", result_payload)
+        self.assertNotIn("job_trace", result_payload)
+        self.assertNotIn("repositoryGraph", result_payload)
+        self.assertNotIn("semanticGraph", result_payload)
+        self.assertNotIn("impactGraph", result_payload)
+
     def test_run_job_fails_repository_too_large_before_verifier_or_review(self) -> None:
         worker = Worker(config())
         worker.client = Mock()
