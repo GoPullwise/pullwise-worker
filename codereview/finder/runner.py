@@ -33,10 +33,42 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
         config=config.codex,
         env=base_env(checkout),
     )
+    if result.returncode != 0:
+        return {
+            "task": task.__dict__,
+            "process": result.to_dict(),
+            "result": {"candidates": []},
+            "status": "blocked",
+            "blocked_reason": process_failure_reason("finder codex exec", result),
+        }
     parsed = {}
     if output.is_file():
         try:
             parsed = json.loads(output.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            parsed = {}
-    return {"task": task.__dict__, "process": result.to_dict(), "result": parsed}
+        except json.JSONDecodeError as exc:
+            return {
+                "task": task.__dict__,
+                "process": result.to_dict(),
+                "result": {"candidates": []},
+                "status": "blocked",
+                "blocked_reason": f"finder produced invalid JSON: {exc}",
+            }
+    if not output.is_file():
+        return {
+            "task": task.__dict__,
+            "process": result.to_dict(),
+            "result": {"candidates": []},
+            "status": "blocked",
+            "blocked_reason": "finder did not produce an output file",
+        }
+    return {"task": task.__dict__, "process": result.to_dict(), "result": parsed, "status": "ok"}
+
+
+def process_failure_reason(stage: str, result: object) -> str:
+    returncode = getattr(result, "returncode", "")
+    timed_out = getattr(result, "timed_out", False)
+    detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    if len(detail) > 700:
+        detail = detail[-700:].lstrip()
+    timeout_text = " timed out" if timed_out else ""
+    return f"{stage}{timeout_text} failed with exit code {returncode}: {detail or 'no stderr/stdout'}"

@@ -37,7 +37,7 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
 
     repo_state = inspect_repo(checkout, base_ref, head_ref)
     write_json(run / "repo_state.json", repo_state)
-    preflight_codegraph(checkout, run, config.codegraph)
+    preflight = preflight_codegraph(checkout, run, config.codegraph)
 
     diff = analyze_git_diff(checkout, base_ref, head_ref)
     write_json(run / "diff" / "changed_files.json", diff.changed_files)
@@ -77,19 +77,127 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
 
     confirmed = collect_confirmed(selected, repro_results, judge_results)
     rejected = collect_rejected(selected, repro_results, judge_results)
+    pipeline_summary = build_pipeline_summary(
+        preflight=preflight,
+        diff=diff,
+        slices=slices,
+        finder_tasks=finder_tasks,
+        raw_candidates=raw_candidates,
+        normalized=normalized,
+        deduped=deduped,
+        scored=scored,
+        selected=selected,
+        repro_results=repro_results,
+        judge_results=judge_results,
+        confirmed=confirmed,
+        rejected=rejected,
+    )
     write_json(run / "reports" / "confirmed.json", confirmed)
     write_json(run / "reports" / "rejected.json", rejected)
     write_json(run / "reports" / "final.json", {"confirmed": confirmed})
+    write_json(run / "reports" / "summary.json", pipeline_summary)
     (run / "reports").mkdir(parents=True, exist_ok=True)
     (run / "reports" / "final.md").write_text(
         render_final_report(confirmed, rejected, base_ref=base_ref, head_ref=head_ref, run_id=run_id, mode=config.mode),
         encoding="utf-8",
     )
     (run / "reports" / "debug.md").write_text(
-        render_debug_report(diff, slices, raw_candidates, selected, repro_results, judge_results),
+        render_debug_report(diff, slices, raw_candidates, selected, repro_results, judge_results, pipeline_summary),
         encoding="utf-8",
     )
     return run / "reports" / "final.md"
+
+
+def build_pipeline_summary(
+    *,
+    preflight: dict,
+    diff: object,
+    slices: list[dict],
+    finder_tasks: list[object],
+    raw_candidates: list[dict],
+    normalized: list[dict],
+    deduped: list[dict],
+    scored: list[dict],
+    selected: list[dict],
+    repro_results: list[dict],
+    judge_results: list[dict],
+    confirmed: list[dict],
+    rejected: list[dict],
+) -> dict:
+    finder_blocked = [blocked_summary(item) for item in raw_candidates if item.get("status") == "blocked"]
+    repro_blocked = [
+        blocked_summary(item)
+        for item in repro_results
+        if item.get("status") == "blocked" or _nested_status(item, "result") == "blocked"
+    ]
+    judge_confirmed = [item for item in judge_results if item.get("status") == "confirmed"]
+    judge_rejected = [item for item in judge_results if item.get("status") == "rejected"]
+    judge_blocked = [item for item in judge_results if item.get("status") == "blocked"]
+    return {
+        "preflight": {
+            "ok": preflight.get("ok") is True,
+            "codegraphDir": preflight.get("codegraph_dir"),
+        },
+        "diff": {
+            "changedFiles": len(getattr(diff, "changed_files", []) or []),
+            "hunks": len(getattr(diff, "hunks", []) or []),
+        },
+        "slices": {
+            "count": len(slices),
+            "ids": [str(item.get("slice_id") or "") for item in slices if isinstance(item, dict)],
+        },
+        "finder": {
+            "tasks": len(finder_tasks),
+            "results": len(raw_candidates),
+            "blocked": len(finder_blocked),
+            "blockedItems": finder_blocked[:20],
+            "candidates": sum(len((item.get("result") or {}).get("candidates") or []) for item in raw_candidates if isinstance(item.get("result"), dict)),
+        },
+        "candidates": {
+            "normalized": len(normalized),
+            "valid": sum(1 for item in normalized if item.get("valid")),
+            "deduped": len(deduped),
+            "scored": len(scored),
+            "selectedForRepro": len(selected),
+            "selectedIds": [str(item.get("issue_id") or "") for item in selected],
+        },
+        "repro": {
+            "results": len(repro_results),
+            "reproduced": sum(1 for item in repro_results if _nested_status(item, "result") == "reproduced"),
+            "rejected": sum(1 for item in repro_results if _nested_status(item, "result") in {"not_reproduced", "rejected"}),
+            "blocked": len(repro_blocked),
+            "blockedItems": repro_blocked[:20],
+        },
+        "judge": {
+            "confirmed": len(judge_confirmed),
+            "rejected": len(judge_rejected),
+            "blocked": len(judge_blocked),
+            "confirmedIds": [str(item.get("candidate_id") or "") for item in judge_confirmed],
+            "rejectedIds": [str(item.get("candidate_id") or "") for item in judge_rejected],
+            "blockedIds": [str(item.get("candidate_id") or "") for item in judge_blocked],
+        },
+        "reports": {
+            "confirmed": len(confirmed),
+            "rejected": len(rejected),
+            "blocked": len(finder_blocked) + len(repro_blocked) + len(judge_blocked),
+        },
+    }
+
+
+def blocked_summary(item: dict) -> dict:
+    task = item.get("task") if isinstance(item.get("task"), dict) else {}
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    return {
+        "candidateId": item.get("candidate_id") or result.get("candidate_id") or task.get("slice_id"),
+        "focus": task.get("focus"),
+        "sliceId": task.get("slice_id"),
+        "reason": item.get("blocked_reason") or result.get("why_not_reproduced") or result.get("summary") or "",
+    }
+
+
+def _nested_status(item: dict, key: str) -> str:
+    value = item.get(key) if isinstance(item, dict) else {}
+    return str(value.get("status") or "").lower() if isinstance(value, dict) else ""
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -538,34 +538,63 @@ class Worker:
                     "Static preflight captured repository metadata, then the verifier executed allowlisted "
                     "setup and project check commands with bounded timeouts and logs."
                 )
+            graph_verified_enabled = graph_verified_review_enabled(job_config, job)
             self.client.progress(
                 job_id,
                 "ai",
                 PHASE_PROGRESS["ai"],
-                "Running Codex review",
+                "Running GraphVerified review" if graph_verified_enabled else "Running Codex review",
                 verifier_logs,
                 audit_swarm=audit_swarm_scan_artifacts(
                     "discovery",
                     config=job_config,
                     preflight=preflight,
-                    summary="Repository preflight is complete; reviewer agents are discovering issue cards.",
+                    summary=(
+                        "Repository preflight is complete; GraphVerified is building graph slices, "
+                        "checking candidates, and running isolated reproductions."
+                        if graph_verified_enabled
+                        else "Repository preflight is complete; reviewer agents are discovering issue cards."
+                    ),
                 ),
                 job_trace=current_job_trace(),
             )
-            current_stage = "agent"
-            audit_payload, summary, logs_summary = run_codex_review(job_config, job, checkout_dir)
-            if graph_verified_review_enabled(job_config, job):
+            current_stage = "graph_verified" if graph_verified_enabled else "agent"
+            if graph_verified_enabled:
                 graph_verified_report = run_graph_verified_review_payload(
                     job_config,
                     job,
                     checkout_dir,
                     resolved_commit or "HEAD",
                 )
+                audit_payload = graph_verified_audit_payload(graph_verified_report)
+                projected_findings = audit_swarm_findings_from_payload(audit_payload) or []
+                summary = summarize(projected_findings)
+                logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
+                job_trace_checkpoints.append(
+                    job_trace_checkpoint(
+                        "graph_verified",
+                        status="warning" if graph_verified_report.get("blockedCount") else "ok",
+                        summary="GraphVerified confirmed-only review completed.",
+                        counts={
+                            "confirmed": graph_verified_report.get("confirmedCount"),
+                            "rejected": graph_verified_report.get("rejectedCount"),
+                            "blocked": graph_verified_report.get("blockedCount"),
+                        },
+                        details={
+                            "runId": graph_verified_report.get("runId"),
+                            "mode": graph_verified_report.get("mode"),
+                            "source": "confirmed-only-report",
+                        },
+                        logs_summary=logs_summary,
+                    )
+                )
+            else:
+                audit_payload, summary, logs_summary = run_codex_review(job_config, job, checkout_dir)
             effective_agent_config = audit_payload.get("effectiveAgentConfig") if isinstance(audit_payload.get("effectiveAgentConfig"), dict) else {}
             if not effective_agent_config:
                 effective_agent_config = configured_agent
             ai_usage = normalize_ai_usage(audit_payload.get("aiUsage"))
-            if verifier_findings:
+            if verifier_findings and not graph_verified_enabled:
                 audit_payload = merge_audit_swarm_payloads(
                     audit_swarm_payload_from_findings(verifier_findings, verifier_role="verifier"),
                     audit_payload,
@@ -575,7 +604,11 @@ class Worker:
             job_trace_checkpoints.append(
                 job_trace_checkpoint(
                     "agent",
-                    summary="Provider review payload normalized.",
+                    summary=(
+                        "GraphVerified confirmed-only report normalized."
+                        if graph_verified_enabled
+                        else "Provider review payload normalized."
+                    ),
                     counts={
                         "issueCards": len(audit_payload.get("issue_cards") or []) if isinstance(audit_payload, dict) else 0,
                         "verificationResults": len(audit_payload.get("verification_results") or [])
@@ -584,7 +617,7 @@ class Worker:
                         "candidateCount": candidate_count,
                     },
                     details={
-                        "provider": getattr(job_config, "provider", ""),
+                        "provider": "graph-verified" if graph_verified_enabled else getattr(job_config, "provider", ""),
                         "model": ai_usage.get("model"),
                     },
                     logs_summary=logs_summary,
@@ -594,39 +627,53 @@ class Worker:
                 job_id,
                 "ai",
                 PHASE_PROGRESS["ai"],
-                "Codex review complete",
+                "GraphVerified review complete" if graph_verified_enabled else "Codex review complete",
                 logs_summary,
                 audit_swarm=audit_swarm_scan_artifacts(
                     "discovery",
                     config=job_config,
                     preflight=preflight,
-                    summary="Provider review completed.",
+                    summary="GraphVerified confirmed-only report completed." if graph_verified_enabled else "Provider review completed.",
                 ),
                 job_trace=current_job_trace(),
             )
             review_decision_records: list[dict] = []
-            projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(
-                projected_findings,
-                review_decision_records,
-            )
             current_stage = "filter"
-            projected_findings, convergence_rejected_reasons, convergence_rejected_samples, convergence_state = (
-                apply_convergence_gate(job, checkout_dir, projected_findings, review_decision_records)
-            )
-            for reason, count in convergence_rejected_reasons.items():
-                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
-            rejected_samples = [*rejected_samples, *convergence_rejected_samples][:5]
-            review_calibration = apply_review_calibration_decisions(
-                job_config,
-                job,
-                projected_findings,
-                review_decision_records,
-                attempt_id=attempt_id,
-            )
-            projected_findings = review_calibration["reported_findings"]
-            for reason, count in review_calibration["rejected_reasons"].items():
-                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
-            rejected_samples = [*rejected_samples, *review_calibration["rejected_samples"]][:5]
+            if graph_verified_enabled:
+                rejected_reasons = {}
+                rejected_samples = []
+                convergence_state = {}
+                review_calibration = {
+                    "reported_findings": projected_findings,
+                    "rejected_reasons": {},
+                    "rejected_samples": [],
+                    "audit_only_findings": [],
+                    "audit_only_samples": [],
+                    "verified_suppression_count": 0,
+                    "decision_events": [],
+                }
+            else:
+                projected_findings, rejected_reasons, rejected_samples = filter_reportable_findings(
+                    projected_findings,
+                    review_decision_records,
+                )
+                projected_findings, convergence_rejected_reasons, convergence_rejected_samples, convergence_state = (
+                    apply_convergence_gate(job, checkout_dir, projected_findings, review_decision_records)
+                )
+                for reason, count in convergence_rejected_reasons.items():
+                    rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
+                rejected_samples = [*rejected_samples, *convergence_rejected_samples][:5]
+                review_calibration = apply_review_calibration_decisions(
+                    job_config,
+                    job,
+                    projected_findings,
+                    review_decision_records,
+                    attempt_id=attempt_id,
+                )
+                projected_findings = review_calibration["reported_findings"]
+                for reason, count in review_calibration["rejected_reasons"].items():
+                    rejected_reasons[reason] = rejected_reasons.get(reason, 0) + count
+                rejected_samples = [*rejected_samples, *review_calibration["rejected_samples"]][:5]
             audit_payload = filter_audit_swarm_payload_by_findings(audit_payload, projected_findings)
             audit_payload["effectiveAgentConfig"] = effective_agent_config
             summary = summarize(projected_findings)
@@ -673,6 +720,16 @@ class Worker:
             )
             result_status = "failed" if completion_audit.get("status") == "failed" else "done"
             completion_error = protocol_multiline_text(completion_audit.get("summary"))
+            if (
+                graph_verified_enabled
+                and graph_verified_report.get("blockedCount")
+                and not graph_verified_report.get("runId")
+            ):
+                result_status = "failed"
+                completion_error = (
+                    protocol_multiline_text(graph_verified_report.get("debugMarkdown"))
+                    or "GraphVerified review failed before producing a run report."
+                )
             completion_blockers = completion_audit.get("blockers") if isinstance(completion_audit.get("blockers"), list) else []
             completion_blocker_text = "; ".join(protocol_multiline_text(item) for item in completion_blockers if protocol_multiline_text(item))
             if completion_blocker_text:
@@ -742,7 +799,6 @@ class Worker:
             }
             if graph_verified_report:
                 payload["graphVerifiedReport"] = graph_verified_report
-                payload["graph_verified_report"] = graph_verified_report
             if result_status == "failed":
                 payload["error"] = completion_error or "Worker completion audit failed."
                 payload["error_code"] = "COMPLETION_AUDIT_FAILED"
@@ -1232,5 +1288,3 @@ _SECRET_PATTERNS = [
         "regex": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
     },
 ]
-
-

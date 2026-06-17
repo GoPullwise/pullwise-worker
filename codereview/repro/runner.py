@@ -39,12 +39,66 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         config=config.codex,
         env=worker_env(worker),
     )
+    if process.returncode != 0:
+        checkout_status_after = git_status_porcelain(checkout, ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codereview/codegraph-index/"))
+        violations: list[str] = []
+        if checkout_status_after != checkout_status_before:
+            violations.append("original checkout changed during repro worker execution")
+        return {
+            "candidate_id": issue_id,
+            "worker": str(worker),
+            "process": process.to_dict(),
+            "result": {
+                "candidate_id": issue_id,
+                "status": "blocked",
+                "level": "L0",
+                "summary": process_failure_reason("repro codex exec", process),
+                "commands_run": [],
+                "files_written": [],
+                "proof": {},
+                "graph_path_exercised": False,
+                "why_valid": "",
+                "why_not_reproduced": process_failure_reason("repro codex exec", process),
+                "safety_notes": "",
+            },
+            "status": "blocked",
+            "blocked_reason": process_failure_reason("repro codex exec", process),
+            "filesystem_violations": violations,
+            "checkout_status_before": checkout_status_before,
+            "checkout_status_after": checkout_status_after,
+        }
     parsed = {}
     if output.is_file():
         try:
             parsed = json.loads(output.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            parsed = {}
+        except json.JSONDecodeError as exc:
+            parsed = {
+                "candidate_id": issue_id,
+                "status": "blocked",
+                "level": "L0",
+                "summary": f"repro produced invalid JSON: {exc}",
+                "commands_run": [],
+                "files_written": [],
+                "proof": {},
+                "graph_path_exercised": False,
+                "why_valid": "",
+                "why_not_reproduced": f"repro produced invalid JSON: {exc}",
+                "safety_notes": "",
+            }
+    else:
+        parsed = {
+            "candidate_id": issue_id,
+            "status": "blocked",
+            "level": "L0",
+            "summary": "repro did not produce an output file",
+            "commands_run": [],
+            "files_written": [],
+            "proof": {},
+            "graph_path_exercised": False,
+            "why_valid": "",
+            "why_not_reproduced": "repro did not produce an output file",
+            "safety_notes": "",
+        }
     violations = guard_worker_result(worker, parsed)
     checkout_status_after = git_status_porcelain(checkout, ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codereview/codegraph-index/"))
     if checkout_status_after != checkout_status_before:
@@ -54,6 +108,8 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         "worker": str(worker),
         "process": process.to_dict(),
         "result": parsed,
+        "status": str(parsed.get("status") or "unknown") if isinstance(parsed, dict) else "unknown",
+        "blocked_reason": str(parsed.get("why_not_reproduced") or parsed.get("summary") or "") if isinstance(parsed, dict) and parsed.get("status") == "blocked" else "",
         "filesystem_violations": violations,
         "checkout_status_before": checkout_status_before,
         "checkout_status_after": checkout_status_after,
@@ -112,3 +168,13 @@ def _status_path(line: str) -> str:
     if " -> " in text:
         text = text.rsplit(" -> ", 1)[-1]
     return text.strip()
+
+
+def process_failure_reason(stage: str, result: object) -> str:
+    returncode = getattr(result, "returncode", "")
+    timed_out = getattr(result, "timed_out", False)
+    detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    if len(detail) > 700:
+        detail = detail[-700:].lstrip()
+    timeout_text = " timed out" if timed_out else ""
+    return f"{stage}{timeout_text} failed with exit code {returncode}: {detail or 'no stderr/stdout'}"

@@ -39,9 +39,7 @@ def run_codex_review(config: WorkerConfig, job: dict, checkout_dir: Path) -> tup
 def graph_verified_review_enabled(config: WorkerConfig, job: dict) -> bool:
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
     graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
-    if graph_config.get("enabled") is True:
-        return True
-    return env_bool("PULLWISE_GRAPH_VERIFIED_REVIEW_ENABLED", False)
+    return graph_config.get("enabled") is True
 
 
 def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, head_ref: str) -> dict:
@@ -54,10 +52,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     if not base_ref:
         base_ref = f"{head_ref}^"
     mode = clean_protocol_text(
-        graph_config.get("mode")
-        or agent_config.get("graphVerifiedMode")
-        or os.environ.get("PULLWISE_GRAPH_VERIFIED_REVIEW_MODE")
-        or "standard"
+        graph_config.get("mode") or "standard"
     )
     try:
         write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
@@ -78,6 +73,8 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     confirmed = read_json(reports / "confirmed.json", [])
     rejected = read_json(reports / "rejected.json", [])
     final_json = read_json(reports / "final.json", {"confirmed": []})
+    pipeline_summary = read_json(reports / "summary.json", {})
+    report_counts = pipeline_summary.get("reports") if isinstance(pipeline_summary, dict) and isinstance(pipeline_summary.get("reports"), dict) else {}
     run_id = final_path.parent.parent.name
     return {
         "version": "graph-verified-code-review/1",
@@ -87,10 +84,11 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "head": head_ref,
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
-        "blockedCount": 0,
+        "blockedCount": graph_verified_count(report_counts.get("blocked")),
         "finalMarkdown": final_path.read_text(encoding="utf-8") if final_path.is_file() else "",
         "debugMarkdown": (reports / "debug.md").read_text(encoding="utf-8") if (reports / "debug.md").is_file() else "",
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
+        "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
 
 
@@ -158,6 +156,146 @@ def graph_verified_positive_int(value: object, *, default: int, minimum: int, ma
     except (TypeError, ValueError):
         number = default
     return max(minimum, min(maximum, number))
+
+
+def graph_verified_count(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def graph_verified_audit_payload(report: dict) -> dict:
+    findings = graph_verified_findings(report)
+    payload = audit_swarm_payload_from_findings(findings, verifier_role="graph-verified-repro")
+    payload["audit_protocol"] = AUDIT_SWARM_PROTOCOL_VERSION
+    return payload
+
+
+def graph_verified_findings(report: dict) -> list[dict]:
+    final_json = report.get("finalJson") if isinstance(report.get("finalJson"), dict) else {}
+    confirmed = final_json.get("confirmed") if isinstance(final_json.get("confirmed"), list) else []
+    findings = []
+    for index, item in enumerate(confirmed):
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+        judge = item.get("judge") if isinstance(item.get("judge"), dict) else {}
+        repro = item.get("repro") if isinstance(item.get("repro"), dict) else {}
+        evidence_summary = (
+            judge.get("evidence_summary") if isinstance(judge.get("evidence_summary"), dict) else {}
+        )
+        issue_id = clean_protocol_text(
+            candidate.get("issue_id") or candidate.get("candidate_id") or judge.get("candidate_id")
+        ) or f"graph-verified-{index + 1}"
+        evidence_items = graph_verified_evidence_items(candidate, evidence_summary)
+        command = clean_protocol_text(evidence_summary.get("command"))
+        log_path = clean_protocol_text(evidence_summary.get("log_path"))
+        observable = protocol_multiline_text(evidence_summary.get("observable"))
+        reproduction_commands = [command] if command else []
+        reproduction = {"commands": reproduction_commands}
+        if log_path:
+            reproduction["logPath"] = log_path
+        finding = {
+            "id": issue_id,
+            "title": clean_protocol_text(candidate.get("title") or candidate.get("claim")) or issue_id,
+            "category": clean_protocol_text(candidate.get("category")) or "correctness",
+            "severity": clean_protocol_text(candidate.get("severity")) or "medium",
+            "confidence": graph_verified_confidence(candidate.get("confidence")),
+            "summary": protocol_multiline_text(candidate.get("claim") or candidate.get("summary")),
+            "claim": protocol_multiline_text(candidate.get("claim")),
+            "file": graph_verified_primary_file(candidate),
+            "line": graph_verified_primary_line(candidate),
+            "affectedLocations": graph_verified_locations(candidate),
+            "evidence": evidence_items,
+            "reproduction": reproduction,
+            "reproductionPath": protocol_multiline_text(candidate.get("minimal_repro_idea")),
+            "verificationStatus": "verified",
+            "verificationSummary": observable or protocol_multiline_text(judge.get("reason")),
+            "impact": protocol_multiline_text(candidate.get("impact")),
+            "steps": [protocol_multiline_text(candidate.get("suggested_fix") or candidate.get("fix_direction"))],
+            "limitations": protocol_text_list(judge.get("limitations")),
+            "whyNotFalsePositive": [
+                "Confirmed by GraphVerified isolated local reproduction and judge validation."
+            ],
+        }
+        findings.append(finding)
+    return findings
+
+
+def graph_verified_confidence(value: object) -> float:
+    text = clean_protocol_text(value).lower()
+    if text == "high":
+        return 0.95
+    if text == "medium":
+        return 0.75
+    if text == "low":
+        return 0.55
+    return 0.9
+
+
+def graph_verified_evidence_items(candidate: dict, evidence_summary: dict) -> list[dict]:
+    items = []
+    raw = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        file_path = safe_repo_relative_file(item.get("file") or item.get("path"))
+        summary = protocol_multiline_text(item.get("why_it_matters") or item.get("summary"))
+        if file_path or summary:
+            record = {"summary": summary}
+            if file_path:
+                record["file"] = file_path
+            items.append(record)
+    observable = protocol_multiline_text(evidence_summary.get("observable"))
+    command = clean_protocol_text(evidence_summary.get("command"))
+    log_path = clean_protocol_text(evidence_summary.get("log_path"))
+    if observable or command or log_path:
+        record = {"summary": observable}
+        if command:
+            record["command"] = command
+        if log_path:
+            record["logPath"] = log_path
+        items.append(record)
+    return items
+
+
+def graph_verified_locations(candidate: dict) -> list[dict]:
+    locations = []
+    raw = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        file_path = safe_repo_relative_file(item.get("file") or item.get("path"))
+        if not file_path:
+            continue
+        start_line, end_line = graph_verified_line_range(item.get("lines"))
+        if not start_line:
+            start_line = positive_int(item.get("startLine") or item.get("start_line") or item.get("line"))
+        if not end_line:
+            end_line = positive_int(item.get("endLine") or item.get("end_line")) or start_line
+        locations.append({"file": file_path, "startLine": start_line, "endLine": end_line or start_line})
+    return locations
+
+
+def graph_verified_primary_file(candidate: dict) -> str:
+    locations = graph_verified_locations(candidate)
+    return locations[0]["file"] if locations else ""
+
+
+def graph_verified_primary_line(candidate: dict) -> int:
+    locations = graph_verified_locations(candidate)
+    return positive_int(locations[0].get("startLine")) if locations else 0
+
+
+def graph_verified_line_range(value: object) -> tuple[int, int]:
+    text = clean_protocol_text(value)
+    if not text:
+        return 0, 0
+    first, sep, second = text.partition("-")
+    start = positive_int(first)
+    end = positive_int(second) if sep else start
+    return start, end or start
 
 
 def codex_auth_failure_error(config: WorkerConfig) -> str | None:

@@ -115,8 +115,8 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
             enabled=bool(repro.get("enabled", True)),
             timeout_seconds=int(repro.get("timeout_seconds") or 900),
             max_workers=max(1, int(repro.get("max_workers") or 2)),
-            max_repro=max(0, int(repro.get("max_repro") or repro.get("maxRepro") or 0)),
-            require_red_green=bool(repro.get("require_red_green") or repro.get("requireRedGreen")),
+            max_repro=max(0, int(repro.get("max_repro") or 0)),
+            require_red_green=bool(repro.get("require_red_green")),
         ),
         scoring=ScoringConfig(
             min_score_for_repro=int(scoring.get("min_score_for_repro") or 8),

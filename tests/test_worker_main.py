@@ -230,6 +230,7 @@ class WorkerMainTest(unittest.TestCase):
         (reports / "confirmed.json").write_text('[{"candidate": {"issue_id": "issue_1"}}]', encoding="utf-8")
         (reports / "rejected.json").write_text("[]", encoding="utf-8")
         (reports / "final.json").write_text('{"confirmed": [{"candidate": {"issue_id": "issue_1"}}]}', encoding="utf-8")
+        (reports / "summary.json").write_text('{"reports": {"blocked": 2}}', encoding="utf-8")
         (reports / "final.md").write_text("# Graph-Verified Code Review Report\n", encoding="utf-8")
         (reports / "debug.md").write_text("# Debug\n", encoding="utf-8")
 
@@ -248,7 +249,9 @@ class WorkerMainTest(unittest.TestCase):
         self.assertEqual(codereview_config["scoring"]["min_score_for_repro"], 7)
         self.assertEqual(payload["runId"], "run_1")
         self.assertEqual(payload["confirmedCount"], 1)
+        self.assertEqual(payload["blockedCount"], 2)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["issue_id"], "issue_1")
+        self.assertEqual(payload["summary"]["reports"]["blocked"], 2)
 
     def test_worker_config_for_job_applies_admin_agent_policy_but_keeps_local_commands(self) -> None:
         worker_config = config()
@@ -5494,7 +5497,9 @@ func writeHealth() {}
             env_file = Path(tmp) / "worker.env"
             backup_file = Path(tmp) / "worker.env.bak"
             bin_path = Path(tmp) / "pullwise-worker"
+            watcher_file = Path(tmp) / "systemd" / "pullwise-worker-watcher.service"
             env_file.write_text("PULLWISE_WORKER_TOKEN=worker-token\n", encoding="utf-8")
+            cfg.watcher_service_file = str(watcher_file)
 
             with patch.dict(
                     "os.environ",
@@ -5870,19 +5875,19 @@ func writeHealth() {}
         pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
         audit_requirements = (root / "requirements-audit.txt").read_text(encoding="utf-8")
 
-        self.assertIn('python-version: ["3.9", "3.10"]', workflow)
-        self.assertIn("\"pip>=25.3,<26; python_version < '3.10'\"", workflow)
-        self.assertIn("\"pip>=26.1.2,<27; python_version >= '3.10'\"", workflow)
-        self.assertIn("Install audit dependencies", workflow)
-        self.assertIn("if: matrix.python-version == '3.10'", workflow)
-        self.assertIn("\"pip-audit>=2.10.1,<2.11\"", workflow)
-        self.assertIn("\"filelock>=3.20.3,<4\"", workflow)
-        self.assertNotIn("\"pip-audit>=2.9,<2.10; python_version < '3.10'\"", workflow)
-        self.assertNotIn("\"filelock>=3.19.1,<3.20; python_version < '3.10'\"", workflow)
+        self.assertIn('python-version: "3.10"', workflow)
+        self.assertIn('"pip>=25.3,<27"', workflow)
+        self.assertNotIn("python-version: [", workflow)
+        self.assertNotIn("python_version >=", workflow)
+        self.assertNotIn("Install audit dependencies", workflow)
+        self.assertNotIn("pip-audit", workflow)
+        self.assertNotIn("matrix.python-version", workflow)
+        self.assertNotIn("\"pip-audit>=2.10.1,<2.11\"", workflow)
+        self.assertNotIn("\"filelock>=3.20.3,<4\"", workflow)
         self.assertIn('python -m unittest discover -s tests -p "test_*.py"', workflow)
         self.assertNotIn("deploy/install-worker.sh", workflow)
-        self.assertIn('requires-python = ">=3.9"', pyproject)
+        self.assertIn('requires-python = ">=3.10"', pyproject)
         self.assertIn("dependencies = []", pyproject)
         self.assertIn("no third-party runtime dependencies", audit_requirements)
-        self.assertIn('"3.9"', workflow)
+        self.assertIn('"3.10"', workflow)
         self.assertNotIn("requests", pyproject)

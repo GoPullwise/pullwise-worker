@@ -28,8 +28,8 @@ def local_judge(candidate: dict, repro: dict) -> dict:
     result = repro.get("result") if isinstance(repro.get("result"), dict) else {}
     violations = repro.get("filesystem_violations") if isinstance(repro.get("filesystem_violations"), list) else []
     command_info = primary_command(result)
-    command = str(command_info.get("cmd") or result.get("command") or "")
-    log_path = str(command_info.get("log_path") or result.get("log_path") or result.get("logPath") or "")
+    command = str(command_info.get("cmd") or "")
+    log_path = str(command_info.get("log_path") or "")
     observable = proof_observable(result)
     worker_text = str(repro.get("worker") or "")
     worker = Path(worker_text) if worker_text else None
@@ -40,10 +40,10 @@ def local_judge(candidate: dict, repro: dict) -> dict:
     if log_violation:
         violations = [*violations, log_violation]
     status_value = str(result.get("status") or "").lower()
-    reproduced = result.get("reproduced") is True or status_value == "reproduced"
+    reproduced = status_value == "reproduced"
     level = str(result.get("level") or ("L2" if reproduced else "L0"))
     graph_path_exercised = result.get("graph_path_exercised")
-    if graph_path_exercised is not True and uses_new_repro_schema(result):
+    if graph_path_exercised is not True:
         violations = [*violations, "graph path was not exercised"]
     exit_code = command_info.get("exit_code") if "exit_code" in command_info else result.get("exit_code")
     if command and exit_code is None:
@@ -67,20 +67,12 @@ def local_judge(candidate: dict, repro: dict) -> dict:
     }
 
 
-def uses_new_repro_schema(result: dict) -> bool:
-    return any(key in result for key in ("status", "level", "commands_run", "proof", "graph_path_exercised"))
-
-
 def primary_command(result: dict) -> dict:
     commands = result.get("commands_run")
     if isinstance(commands, list) and commands:
         first = commands[0]
         return first if isinstance(first, dict) else {}
-    return {
-        "cmd": result.get("command"),
-        "exit_code": result.get("exit_code"),
-        "log_path": result.get("log_path") or result.get("logPath"),
-    }
+    return {}
 
 
 def proof_observable(result: dict) -> str:
@@ -88,9 +80,6 @@ def proof_observable(result: dict) -> str:
     return str(
         proof.get("log_excerpt")
         or proof.get("actual")
-        or result.get("observable")
-        or result.get("observed_output")
-        or result.get("observedOutput")
         or ""
     )
 

@@ -38,7 +38,7 @@ def normalize_candidates(raw_candidates: list[dict]) -> list[dict]:
 def canonical_candidate(candidate: dict, source_task: dict | None = None) -> dict:
     clean = dict(candidate)
     generated_id = _candidate_id(clean)
-    raw_id = clean.get("candidate_id") or clean.get("issue_id") or generated_id
+    raw_id = clean.get("candidate_id") or generated_id
     issue_id = safe_path_component(raw_id, default=generated_id)
     clean["candidate_id"] = issue_id
     clean["issue_id"] = issue_id
@@ -48,13 +48,11 @@ def canonical_candidate(candidate: dict, source_task: dict | None = None) -> dic
     clean["confidence"] = str(clean.get("confidence") or "medium").lower()
     clean["repro_likelihood"] = str(clean.get("repro_likelihood") or "medium").lower()
 
-    claim = str(clean.get("claim") or clean.get("title") or clean.get("summary") or "").strip()
+    claim = str(clean.get("claim") or "").strip()
     clean["claim"] = claim
-    clean["title"] = str(clean.get("title") or claim[:96] or issue_id)
+    clean["title"] = claim[:96] or issue_id
 
     evidence = clean.get("evidence")
-    if not isinstance(evidence, list) or not evidence:
-        evidence = code_evidence_to_evidence(clean.get("code_evidence"))
     clean["evidence"] = evidence
     clean["code_evidence"] = evidence_to_code_evidence(evidence)
     clean["dedupe_key"] = str(clean.get("dedupe_key") or _canonical_dedupe_key(clean))
@@ -90,11 +88,6 @@ def valid_code_evidence(value: object) -> bool:
     if not isinstance(value, list) or not value:
         return False
     for item in value:
-        if isinstance(item, str):
-            file_part, _, lines = item.partition(":")
-            if safe_relative_path(file_part) and _line_text_has_number(lines):
-                return True
-            continue
         if not isinstance(item, dict):
             continue
         file_path = safe_relative_path(item.get("file") or item.get("path"))
@@ -104,34 +97,6 @@ def valid_code_evidence(value: object) -> bool:
         if start > 0:
             return True
     return False
-
-
-def code_evidence_to_evidence(value: object) -> list[dict]:
-    if not isinstance(value, list):
-        return []
-    evidence = []
-    for item in value:
-        if isinstance(item, str):
-            file_part, _, lines = item.partition(":")
-            file_path = safe_relative_path(file_part)
-            if file_path:
-                evidence.append({"file": file_path, "lines": lines or "1", "why_it_matters": ""})
-            continue
-        if not isinstance(item, dict):
-            continue
-        file_path = safe_relative_path(item.get("file") or item.get("path"))
-        if not file_path:
-            continue
-        start = _line_start(item)
-        end = int(item.get("endLine") or item.get("end_line") or start or 0) if start else 0
-        evidence.append(
-            {
-                "file": file_path,
-                "lines": f"{start}-{end}" if end and end != start else str(start or item.get("lines") or ""),
-                "why_it_matters": str(item.get("why_it_matters") or item.get("why") or ""),
-            }
-        )
-    return evidence
 
 
 def evidence_to_code_evidence(value: object) -> list[str]:
@@ -162,12 +127,8 @@ def _line_start(item: dict) -> int:
         return 0
 
 
-def _line_text_has_number(value: object) -> bool:
-    return bool(re.search(r"\d+", str(value or "")))
-
-
 def _candidate_id(candidate: dict) -> str:
-    key = "|".join(str(candidate.get(field) or "") for field in ("dedupe_key", "claim", "title", "severity", "category"))
+    key = "|".join(str(candidate.get(field) or "") for field in ("dedupe_key", "claim", "severity", "category"))
     return "issue_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 

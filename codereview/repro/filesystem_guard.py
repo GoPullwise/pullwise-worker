@@ -28,9 +28,6 @@ def result_log_paths(result: dict) -> list[str]:
         for command in commands:
             if isinstance(command, dict) and command.get("log_path"):
                 paths.append(str(command.get("log_path")))
-    legacy = result.get("log_path") or result.get("logPath")
-    if legacy:
-        paths.append(str(legacy))
     return paths
 
 

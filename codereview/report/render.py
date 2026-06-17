@@ -120,23 +120,56 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, base_ref
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_debug_report(diff: object, slices: list[dict], raw_candidates: list[dict], selected: list[dict], repro_results: list[dict], judge_results: list[dict]) -> str:
+def render_debug_report(
+    diff: object,
+    slices: list[dict],
+    raw_candidates: list[dict],
+    selected: list[dict],
+    repro_results: list[dict],
+    judge_results: list[dict],
+    summary: dict | None = None,
+) -> str:
     rejected = [item for item in judge_results if item.get("status") == "rejected"]
     blocked = [item for item in judge_results if item.get("status") == "blocked"]
-    return "\n".join(
+    lines = [
+        "# Debug Report",
+        "",
+        "## Pipeline Stats",
+        "",
+        f"- Changed files: {len(getattr(diff, 'changed_files', []) or [])}",
+        f"- Slices: {len(slices)}",
+        f"- Finder raw results: {len(raw_candidates)}",
+        f"- Selected for repro: {len(selected)}",
+        f"- Repro results: {len(repro_results)}",
+        f"- Confirmed: {sum(1 for item in judge_results if item.get('status') == 'confirmed')}",
+        f"- Rejected: {len(rejected)}",
+        f"- Blocked: {len(blocked)}",
+        "",
+    ]
+    if summary:
+        lines.extend(
+            [
+                "## Pipeline Summary",
+                "",
+                "```json",
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True)[:20000],
+                "```",
+                "",
+            ]
+        )
+    lines.extend(
         [
-            "# Debug Report",
+            "## Finder Results",
             "",
-            "## Pipeline Stats",
+            "```json",
+            json.dumps(raw_candidates, ensure_ascii=False, indent=2, sort_keys=True)[:20000],
+            "```",
             "",
-            f"- Changed files: {len(getattr(diff, 'changed_files', []) or [])}",
-            f"- Slices: {len(slices)}",
-            f"- Finder raw results: {len(raw_candidates)}",
-            f"- Selected for repro: {len(selected)}",
-            f"- Repro results: {len(repro_results)}",
-            f"- Confirmed: {sum(1 for item in judge_results if item.get('status') == 'confirmed')}",
-            f"- Rejected: {len(rejected)}",
-            f"- Blocked: {len(blocked)}",
+            "## Repro Results",
+            "",
+            "```json",
+            json.dumps(repro_results, ensure_ascii=False, indent=2, sort_keys=True)[:20000],
+            "```",
             "",
             "## Judge Results",
             "",
@@ -145,6 +178,7 @@ def render_debug_report(diff: object, slices: list[dict], raw_candidates: list[d
             "```",
         ]
     )
+    return "\n".join(lines)
 
 
 def _text(value: object) -> str:
