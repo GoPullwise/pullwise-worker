@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import gzip
 import io
 import json
@@ -120,6 +121,70 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(record["job_id"], "job_deferred")
             self.assertEqual(record["payload"], payload)
             schedule_upload.assert_called_once_with("job_deferred", pending_path)
+
+    def test_permanent_result_upload_failure_removes_pending_payload_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_bad_request")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps({"job_id": "job_bad_request", "payload": {"debugMarkdown": "sensitive report"}}),
+                encoding="utf-8",
+            )
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_exception(worker_main.PullwiseHTTPError("HTTP 400: bad request", 400))
+            worker._pending_result_uploads["job_bad_request"] = (future, pending_path)
+
+            worker.collect_result_uploads()
+
+            self.assertFalse(pending_path.exists())
+            self.assertFalse(pending_path.with_suffix(".failed.json").exists())
+            self.assertIn("permanently failed", worker.last_error or "")
+
+    def test_heartbeat_payload_does_not_report_capacity_or_free_slots(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            client.heartbeat(running_jobs=7, active_job_ids=["job_one"])
+
+        self.assertEqual(captured["payload"]["running_jobs"], 1)
+        self.assertEqual(captured["payload"]["active_job_ids"], ["job_one"])
+        self.assertNotIn("max_concurrent_jobs", captured["payload"])
+        self.assertNotIn("free_slots", captured["payload"])
 
     def test_run_job_uploads_result_when_progress_updates_fail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

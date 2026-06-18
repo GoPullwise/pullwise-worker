@@ -53,7 +53,6 @@ _CHECKOUT_RUNTIME_DIR_NAMES: set[str] = set()
 _PROC_MEMINFO_PATH = "/proc/meminfo"
 DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 WORKER_HTTP_TIMEOUT_SECONDS = 60
-WORKER_JOB_CAPACITY = 1
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
@@ -771,15 +770,13 @@ class PullwiseClient:
         doctor_checked_at: int | None = None,
         machine_metrics: dict | None = None,
     ) -> dict:
-        reported_running_jobs = max(0, min(WORKER_JOB_CAPACITY, int(running_jobs or 0)))
+        reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
         payload = {
             "worker_id": self.config.worker_id,
             "version": __version__,
             "provider": self.config.provider,
             "providerChain": list(self.config.provider_chain),
-            "max_concurrent_jobs": WORKER_JOB_CAPACITY,
             "running_jobs": reported_running_jobs,
-            "free_slots": max(0, WORKER_JOB_CAPACITY - reported_running_jobs),
             "hostname": socket.gethostname(),
             "last_error": last_error,
             "doctor_status": doctor_status,

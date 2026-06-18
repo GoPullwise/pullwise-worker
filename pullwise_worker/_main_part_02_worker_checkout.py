@@ -516,9 +516,8 @@ class Worker:
                 future.result()
             except PullwiseHTTPError as exc:
                 if exc.status_code < 500:
-                    failed_path = path.with_suffix(".failed.json")
                     try:
-                        path.replace(failed_path)
+                        path.unlink(missing_ok=True)
                     except OSError:
                         pass
                     self.last_error = (
