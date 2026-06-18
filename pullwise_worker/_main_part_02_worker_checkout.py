@@ -4,6 +4,27 @@ from __future__ import annotations
 
 AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
+PROTOCOL_TEXT_MAX_LENGTH = 4000
+PROTOCOL_SINGLE_LINE_TEXT_MAX_LENGTH = 500
+
+
+def protocol_multiline_text(value: object, max_length: int = PROTOCOL_TEXT_MAX_LENGTH) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, (str, int, float, bool)):
+        return ""
+    try:
+        limit = max(0, int(max_length))
+    except (TypeError, ValueError, OverflowError):
+        limit = PROTOCOL_TEXT_MAX_LENGTH
+    if limit <= 0:
+        return ""
+    text = str(value).replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text[:limit]
+
+
+def clean_protocol_text(value: object, max_length: int = PROTOCOL_SINGLE_LINE_TEXT_MAX_LENGTH) -> str:
+    return protocol_multiline_text(value, max_length).split("\n", 1)[0].strip()
 
 
 def normalized_agent_reasoning_level(value: object) -> str:
@@ -121,6 +142,32 @@ def graph_verified_summary_findings(report: dict) -> list[dict]:
 def graph_verified_severity(value: object) -> str:
     text = clean_protocol_text(value).lower()
     return text if text in {"critical", "high", "medium", "low", "info"} else "info"
+
+
+def summarize(findings: list[dict]) -> dict:
+    summary = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        severity = graph_verified_severity(finding.get("severity"))
+        summary[severity] += 1
+    return summary
+
+
+def normalize_ai_usage(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    usage = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            usage[key] = item
+        elif isinstance(item, dict):
+            nested = normalize_ai_usage(item)
+            if nested:
+                usage[key] = nested
+    return usage
 
 
 def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
@@ -543,6 +590,27 @@ class Worker:
         self.last_error = f"result upload deferred for {job_id}: {redact_secrets(str(error), self.config)}"[:500]
         return False
 
+    def report_progress(
+        self,
+        job_id: str,
+        phase: str,
+        progress: int,
+        message: str = "",
+        logs_summary: str = "",
+        *,
+        config: WorkerConfig | None = None,
+    ) -> bool:
+        try:
+            self.client.progress(job_id, phase, progress, message, logs_summary)
+            return True
+        except Exception as exc:
+            active_config = config or self.config
+            self.last_error = (
+                f"progress update failed for {job_id} at {phase}: "
+                f"{redact_secrets(str(exc), active_config)}"
+            )[:500]
+            return False
+
     def run_job(self, job: dict) -> None:
         job_id = safe_job_id(job.get("job_id"))
         job_config = self.config
@@ -566,48 +634,54 @@ class Worker:
             configured_agent = effective_agent_config_payload(job_config)
             graph_verified_review_enabled(job_config, job)
             checkout_dir = checkout_dir_for_job(job_config.work_dir, job_id)
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "clone",
                 PHASE_PROGRESS["clone"],
                 "Cloning repository",
+                config=job_config,
             )
             resolved_commit = clone_repository(job, checkout_dir)
             job["resolved_commit"] = resolved_commit
             job["commit"] = resolved_commit
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "clone",
                 PHASE_PROGRESS["clone"],
                 "Repository cloned",
+                config=job_config,
             )
             enforce_repository_limits(job_config, job, checkout_dir)
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "index",
                 PHASE_PROGRESS["index"],
                 "Repository ready",
+                config=job_config,
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "index",
                 PHASE_PROGRESS["index"],
                 "Repository preflight ready",
+                config=job_config,
             )
             graph_summary = "GraphVerified will build graph slices during review."
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "index",
                 PHASE_PROGRESS["index"],
                 graph_summary,
+                config=job_config,
             )
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "ai",
                 PHASE_PROGRESS["ai"],
                 "Running GraphVerified review",
                 protocol_multiline_text(preflight.get("summary")),
+                config=job_config,
             )
             graph_verified_report = run_graph_verified_review_payload(
                 job_config,
@@ -620,12 +694,13 @@ class Worker:
             logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
             effective_agent_config = configured_agent
             ai_usage = normalize_ai_usage({})
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "ai",
                 PHASE_PROGRESS["ai"],
                 "GraphVerified review complete",
                 logs_summary,
+                config=job_config,
             )
             summary = summarize(projected_findings)
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -661,12 +736,13 @@ class Worker:
             if ai_usage:
                 payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
-            self.client.progress(
+            self.report_progress(
                 job_id,
                 "report",
                 100,
                 "Uploading result",
                 logs_summary,
+                config=job_config,
             )
             try:
                 uploaded = self.upload_result_once_or_defer(job_id, payload)
@@ -751,12 +827,13 @@ class Worker:
                 error_payload["resolved_commit"] = resolved_commit
             error_payload["result_checksum"] = result_checksum(error_payload)
             try:
-                self.client.progress(
+                self.report_progress(
                     job_id,
                     "report",
                     PHASE_PROGRESS["report"],
                     "Uploading failed result",
                     error,
+                    config=job_config,
                 )
                 uploaded = self.upload_result_once_or_defer(job_id, error_payload)
             except Exception as upload_exc:
