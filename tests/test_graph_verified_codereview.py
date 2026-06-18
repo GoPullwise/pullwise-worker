@@ -473,6 +473,113 @@ def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None
     assert "CODEGRAPH_DIR" not in env
 
 
+def test_codex_runner_serializes_codex_cli_processes(tmp_path: Path, monkeypatch) -> None:
+    from codereview import codex_runner
+    import threading
+    import time
+
+    lock = threading.Lock()
+    entered_first = threading.Event()
+    release_first = threading.Event()
+    active = 0
+    max_active = 0
+    call_count = 0
+    results = []
+    errors = []
+
+    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
+        del env, timeout, kwargs
+        nonlocal active, max_active, call_count
+        with lock:
+            call_count += 1
+            local_call = call_count
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            if local_call == 1:
+                entered_first.set()
+                if not release_first.wait(timeout=1):
+                    raise AssertionError("first codex process was not released")
+            else:
+                time.sleep(0.01)
+            return codex_runner.ProcessResult(
+                command=command,
+                cwd=str(cwd),
+                returncode=0,
+                stdout="{}",
+                stderr="",
+                duration_ms=10,
+                queue_wait_ms=queue_wait_ms,
+            )
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    config = ReviewConfig()
+    config.codex.command = "codex"
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+
+    def invoke(output_name: str) -> None:
+        try:
+            results.append(
+                codex_runner.run_codex_exec(
+                    cd=tmp_path,
+                    prompt="review",
+                    output_schema=schema,
+                    output_file=tmp_path / output_name,
+                    sandbox="workspace-write",
+                    timeout_seconds=30,
+                    config=config.codex,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=invoke, args=("first.json",))
+    first.start()
+    assert entered_first.wait(timeout=1)
+    second = threading.Thread(target=invoke, args=("second.json",))
+    second.start()
+    time.sleep(0.03)
+    release_first.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    if errors:
+        raise errors[0]
+    assert len(results) == 2
+    assert max_active == 1
+    assert max(result.queue_wait_ms for result in results) > 0
+
+
+def test_run_process_streams_output_to_log_files_with_bounded_tail(tmp_path: Path) -> None:
+    from codereview.utils.process import run_process
+
+    script = tmp_path / "write_output.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdout.write('a' * 70000 + 'OUT-END')\n"
+        "sys.stderr.write('b' * 70000 + 'ERR-END')\n",
+        encoding="utf-8",
+    )
+
+    result = run_process([sys.executable, str(script)], cwd=tmp_path, timeout=30)
+
+    assert result.returncode == 0
+    assert result.stdout.endswith("OUT-END")
+    assert result.stderr.endswith("ERR-END")
+    assert len(result.stdout.encode("utf-8")) <= 65536
+    assert len(result.stderr.encode("utf-8")) <= 65536
+    assert Path(result.stdout_path).is_file()
+    assert Path(result.stderr_path).is_file()
+    assert Path(result.stdout_path).stat().st_size > len(result.stdout.encode("utf-8"))
+    assert Path(result.stderr_path).stat().st_size > len(result.stderr.encode("utf-8"))
+
+
 def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: Path, monkeypatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 from .config import CodexConfig
 from .utils.process import ProcessResult, run_process
+
+_CODEX_CLI_LOCK = threading.Lock()
 
 
 def base_env(checkout: Path, config: CodexConfig | None = None) -> dict[str, str]:
@@ -48,4 +52,7 @@ def run_codex_exec(
     if config.reasoning_effort:
         cmd.extend(["--config", f'model_reasoning_effort="{config.reasoning_effort}"'])
     cmd.append(prompt)
-    return run_process(cmd, cwd=cd, env=env, timeout=timeout_seconds)
+    queued_at = time.monotonic()
+    with _CODEX_CLI_LOCK:
+        queue_wait_ms = int((time.monotonic() - queued_at) * 1000)
+        return run_process(cmd, cwd=cd, env=env, timeout=timeout_seconds, queue_wait_ms=queue_wait_ms)

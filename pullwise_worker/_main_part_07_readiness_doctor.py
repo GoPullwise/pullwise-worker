@@ -142,7 +142,18 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
             codex_login_ok = True
             codex_login_detail = "busy: ready check deferred while codex is running"
         checks.append(("codex_ready", codex_login_ok, codex_login_detail))
+        graph_mcp_ok = True
+        graph_mcp_detail = "ready"
         if node_ok and codex_cli_ok and codex_login_ok:
+            try:
+                ensure_graph_verified_codegraph_codex_mcp(config, Path(config.service_home), {})
+            except Exception as exc:
+                graph_mcp_ok = False
+                graph_mcp_detail = redact_secrets(str(exc), config)
+        else:
+            graph_mcp_detail = "skipped until codex provider is ready"
+        checks.append(("graph_verified_mcp", graph_mcp_ok, graph_mcp_detail))
+        if node_ok and codex_cli_ok and codex_login_ok and graph_mcp_ok:
             ready_providers.append("codex")
     provider_ready = bool(ready_providers)
     provider_ready_detail = (

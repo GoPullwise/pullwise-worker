@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gzip
 import json
+import hashlib
+import subprocess
 import tempfile
 import unittest
 import importlib
@@ -23,6 +26,134 @@ def config_for(tmp: Path) -> SimpleNamespace:
 
 
 class GraphVerifiedWorkerTest(unittest.TestCase):
+    def git(self, repo: Path, *args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return (completed.stdout or "").strip()
+
+    def make_git_repo(self, root: Path) -> tuple[Path, str, str]:
+        repo = root / "source"
+        repo.mkdir()
+        self.git(repo, "init")
+        self.git(repo, "config", "user.email", "test@example.com")
+        self.git(repo, "config", "user.name", "Test User")
+        (repo / "app.txt").write_text("one\n", encoding="utf-8")
+        self.git(repo, "add", "app.txt")
+        self.git(repo, "commit", "-m", "one")
+        first = self.git(repo, "rev-parse", "HEAD")
+        (repo / "app.txt").write_text("two\n", encoding="utf-8")
+        self.git(repo, "commit", "-am", "two")
+        second = self.git(repo, "rev-parse", "HEAD")
+        return repo, first, second
+
+    def test_result_upload_uses_gzip_json_body(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            result_upload_compress_min_bytes=1,
+        )
+        client = worker_main.PullwiseClient(config)
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            client.result("job_gzip", {"status": "done", "debug": "x" * 2048})
+
+        request = captured["request"]
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(headers.get("content-encoding"), "gzip")
+        decoded = json.loads(gzip.decompress(request.data).decode("utf-8"))
+        self.assertEqual(decoded["status"], "done")
+        self.assertEqual(decoded["debug"], "x" * 2048)
+
+    def test_result_upload_defers_retry_without_sleeping_in_job_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=2,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            payload = {"status": "done", "result_checksum": "checksum-deferred"}
+
+            with patch.object(
+                worker.client,
+                "result",
+                side_effect=worker_main.PullwiseRequestError("offline"),
+            ), patch.object(worker, "schedule_pending_result_upload") as schedule_upload, patch.object(
+                worker_main.time,
+                "sleep",
+            ) as sleep:
+                uploaded = worker.upload_result_once_or_defer("job_deferred", payload)
+
+            self.assertFalse(uploaded)
+            sleep.assert_not_called()
+            pending_path = worker_main.result_upload_file(work_dir, "job_deferred")
+            self.assertTrue(pending_path.exists())
+            record = json.loads(pending_path.read_text(encoding="utf-8"))
+            self.assertEqual(record["job_id"], "job_deferred")
+            self.assertEqual(record["payload"], payload)
+            schedule_upload.assert_called_once_with("job_deferred", pending_path)
+
+    def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source, first_commit, second_commit = self.make_git_repo(root)
+            work_dir = root / "work"
+            first_checkout = work_dir / "job_1"
+            second_checkout = work_dir / "job_2"
+            job = {
+                "repo": "owner/repo",
+                "clone_url": str(source),
+                "branch": "master",
+                "commit": first_commit,
+            }
+
+            with patch.object(worker_main, "run_git_command", wraps=worker_main.run_git_command) as run_git:
+                resolved_first = worker_main.clone_repository(job, first_checkout)
+                resolved_second = worker_main.clone_repository({**job, "commit": second_commit}, second_checkout)
+
+            self.assertEqual(resolved_first, first_commit)
+            self.assertEqual(resolved_second, second_commit)
+            self.assertEqual((first_checkout / "app.txt").read_text(encoding="utf-8"), "one\n")
+            self.assertEqual((second_checkout / "app.txt").read_text(encoding="utf-8"), "two\n")
+            mirror_dirs = list((work_dir / ".pullwise-repo-cache").glob("*.git"))
+            self.assertEqual(len(mirror_dirs), 1)
+            self.assertTrue((mirror_dirs[0] / "shallow").is_file())
+            commands = [call.args[0] for call in run_git.call_args_list]
+            first_ref = f"refs/pullwise/commits/{hashlib.sha256(first_commit.encode('utf-8')).hexdigest()[:24]}"
+            self.assertIn(["git", "clone", "--shared", "--no-checkout", str(mirror_dirs[0]), str(first_checkout)], commands)
+            self.assertIn(
+                ["git", "-C", str(mirror_dirs[0]), "fetch", "--depth", "1", "origin", f"{first_commit}:{first_ref}"],
+                commands,
+            )
+            self.assertNotIn(["git", "clone", str(source), str(first_checkout)], commands)
+
     def test_graph_verified_review_is_the_only_review_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg = config_for(Path(tmp_dir))
@@ -89,6 +220,114 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("[mcp_servers.codegraph]\ncommand = \"codegraph\"\nargs = [\"serve\", \"--mcp\"]", content)
         self.assertEqual(content.count("[mcp_servers.codegraph]"), 1)
         self.assertIn("[agents]\nmax_threads = 6", content)
+
+    def test_graph_verified_mcp_install_is_cached_but_job_state_is_per_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            first_checkout = root / "checkout_1"
+            second_checkout = root / "checkout_2"
+            first_checkout.mkdir()
+            second_checkout.mkdir()
+            review_calls: list[tuple[Path, str]] = []
+            codereview_main = importlib.import_module("codereview.main")
+
+            def fake_run_review(checkout_dir: Path, *, base_ref: str, head_ref: str, mode: str) -> Path:
+                del base_ref, head_ref
+                review_calls.append((Path(checkout_dir), mode))
+                reports = Path(checkout_dir) / ".codereview" / "runs" / f"run_{len(review_calls)}" / "reports"
+                reports.mkdir(parents=True, exist_ok=True)
+                final_md = reports / "final.md"
+                final_md.write_text("# Graph-Verified Code Review Report\n", encoding="utf-8")
+                (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
+                (reports / "confirmed.json").write_text("[]", encoding="utf-8")
+                (reports / "rejected.json").write_text("[]", encoding="utf-8")
+                (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
+                (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
+                return final_md
+
+            worker_main._GRAPH_VERIFIED_MCP_READY.clear()
+            try:
+                with patch.object(
+                    worker_main.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0, stdout="installed", stderr=""),
+                ) as install_run, patch.object(
+                    worker_main,
+                    "upsert_graph_verified_codex_mcp_config",
+                ) as upsert_mcp, patch.object(codereview_main, "run_review", side_effect=fake_run_review):
+                    first_payload = worker_main.run_graph_verified_review_payload(
+                        cfg,
+                        {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                        first_checkout,
+                        "HEAD",
+                    )
+                    second_payload = worker_main.run_graph_verified_review_payload(
+                        cfg,
+                        {"agentConfig": {"graphVerified": {"mode": "deep"}}},
+                        second_checkout,
+                        "HEAD",
+                    )
+            finally:
+                worker_main._GRAPH_VERIFIED_MCP_READY.clear()
+
+            self.assertEqual(install_run.call_count, 1)
+            self.assertEqual(upsert_mcp.call_count, 1)
+            self.assertEqual(review_calls, [(first_checkout, "fast"), (second_checkout, "deep")])
+            self.assertEqual(first_payload["mode"], "fast")
+            self.assertEqual(second_payload["mode"], "deep")
+            first_config = json.loads((first_checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
+            second_config = json.loads((second_checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(first_config["mode"], "fast")
+            self.assertEqual(second_config["mode"], "deep")
+            self.assertNotEqual(first_checkout, second_checkout)
+
+    def test_readiness_state_ensures_graph_verified_mcp_when_codex_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            cfg.server_url = "https://api.pullwise.test"
+            cfg.allow_insecure_server_url = False
+            cfg.max_concurrent_jobs = 1
+            cfg.provider = "codex"
+            cfg.provider_chain = ["codex"]
+            cfg.service_path = str(root / "bin")
+            cfg.work_dir = root / "work"
+            cfg.log_dir = root / "logs"
+            cfg.work_dir.mkdir()
+            cfg.log_dir.mkdir()
+            cfg.codex_command = str(root / "home" / ".codex" / "bin" / "codex")
+
+            with patch.object(
+                worker_main,
+                "worker_agent_configs_check",
+                return_value=(True, "ok", [{"provider": "codex"}]),
+            ), patch.object(
+                worker_main,
+                "subscription_plan_required_providers",
+                return_value=["codex"],
+            ), patch.object(
+                worker_main,
+                "command_ok",
+                return_value=(True, "ok"),
+            ), patch.object(
+                worker_main,
+                "node_version_check",
+                return_value=(True, "v22.0.0"),
+            ), patch.object(
+                worker_main,
+                "codex_ready_check",
+                return_value=(True, "ready"),
+            ), patch.object(
+                worker_main,
+                "ensure_graph_verified_codegraph_codex_mcp",
+            ) as ensure_mcp:
+                checks, provider_ready, ready_providers = worker_main.worker_readiness_state(cfg)
+
+        ensure_mcp.assert_called_once_with(cfg, Path(cfg.service_home), {})
+        self.assertTrue(provider_ready)
+        self.assertEqual(ready_providers, ["codex"])
+        self.assertIn(("graph_verified_mcp", True, "ready"), checks)
 
     def test_run_graph_verified_review_payload_reads_confirmed_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

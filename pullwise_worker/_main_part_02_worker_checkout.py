@@ -167,19 +167,25 @@ class Worker:
         self._error_poll_count = 0
         self._last_cleanup_at = 0.0
         self._machine_metrics_checked_at = 0.0
+        self._cleanup_future: concurrent.futures.Future[None] | None = None
+        self._cleanup_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="pullwise-cleanup",
+        )
+        self._result_upload_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="pullwise-result-upload",
+        )
+        self._pending_result_uploads: dict[str, tuple[concurrent.futures.Future[None], Path]] = {}
+        self._pending_result_uploads_lock = Lock()
 
     def effective_max_concurrent_jobs(self) -> int:
-        configured = max(1, int(self.config.max_concurrent_jobs or 1))
-        provider_chain = self.config.provider_chain or [self.config.provider]
-        providers = {str(provider or "").strip().lower() for provider in provider_chain}
-        if "codex" in providers:
-            return 1
-        return configured
+        return 1
 
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
-        self.cleanup_resources_if_due([], force=True)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.max_concurrent_jobs) as executor:
+        self.load_pending_result_uploads()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             running: dict[concurrent.futures.Future[None], dict] = {}
 
             def collect_finished_jobs(futures: list[concurrent.futures.Future[None]]) -> None:
@@ -193,18 +199,21 @@ class Worker:
             while True:
                 done = [future for future in running if future.done()]
                 collect_finished_jobs(done)
-                self.cleanup_resources_if_due(running.values())
+                self.collect_result_uploads()
+                self.collect_cleanup()
                 max_running_jobs = self.effective_max_concurrent_jobs()
-                free_slots = max(0, max_running_jobs - len(running))
+                free_slots = 0 if running else 1
                 ready = self.refresh_readiness_if_due()
                 loop_error = False
                 claimed_jobs = 0
                 heartbeat_payload: dict = {}
                 machine_metrics = self.machine_metrics_if_due()
-                active_job_ids = []
+                active_job_ids = self.pending_result_job_ids()
                 for job in running.values():
                     try:
-                        active_job_ids.append(safe_job_id(job.get("job_id") if isinstance(job, dict) else job))
+                        active_job_id = safe_job_id(job.get("job_id") if isinstance(job, dict) else job)
+                        if active_job_id not in active_job_ids:
+                            active_job_ids.append(active_job_id)
                     except ValueError:
                         continue
                 try:
@@ -232,29 +241,32 @@ class Worker:
                     ready = False
                     if not running and not loop_error and self.handle_lifecycle_command(command):
                         return
-                if ready and free_slots:
-                    jobs = []
+                if self.cleanup_is_running():
+                    ready = False
+                if ready and not running:
+                    job = None
                     if not loop_error:
                         try:
-                            claim_limit = 1 if once else min(free_slots, self.config.max_claim_jobs)
-                            jobs = self.client.claim_many(claim_limit)
+                            job = self.client.claim()
                         except PullwiseRequestError as exc:
                             self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
                             loop_error = True
-                    if once:
-                        jobs = jobs[:1]
-                    for job in jobs:
+                    if job:
                         future = executor.submit(self.run_job, job)
                         running[future] = job
-                    claimed_jobs = len(jobs)
+                    claimed_jobs = 1 if job else 0
                     if once:
                         concurrent.futures.wait(running)
                         collect_finished_jobs([future for future in running if future.done()])
+                        self.collect_result_uploads()
                         return
                 elif once:
                     concurrent.futures.wait(running)
                     collect_finished_jobs([future for future in running if future.done()])
+                    self.collect_result_uploads()
                     return
+                if not running and not claimed_jobs and not loop_error:
+                    self.schedule_cleanup_resources_if_due(active_job_ids)
                 sleep_seconds = self.next_poll_sleep(
                     claimed_jobs=claimed_jobs,
                     loop_error=loop_error,
@@ -280,6 +292,38 @@ class Worker:
             error = f"machine metrics failed: {redact_secrets(str(exc), self.config)}"
             self.last_error = f"{self.last_error}; {error}"[:500] if self.last_error else error[:500]
             return None
+
+    def cleanup_is_running(self) -> bool:
+        return bool(self._cleanup_future and not self._cleanup_future.done())
+
+    def collect_cleanup(self) -> None:
+        if not self._cleanup_future or not self._cleanup_future.done():
+            return
+        future = self._cleanup_future
+        self._cleanup_future = None
+        try:
+            future.result()
+        except Exception as exc:
+            self.last_error = f"worker cleanup failed: {redact_secrets(str(exc), self.config)}"[:500]
+
+    def schedule_cleanup_resources_if_due(self, active_jobs: object, *, force: bool = False) -> None:
+        if self.cleanup_is_running():
+            return
+        current = time.monotonic()
+        if not force and current - self._last_cleanup_at < self.config.cleanup_interval_seconds:
+            return
+        self._last_cleanup_at = current
+        active_job_ids = set()
+        for job in active_jobs or []:
+            try:
+                active_job_ids.add(safe_job_id(job.get("job_id") if isinstance(job, dict) else job))
+            except ValueError:
+                continue
+        self._cleanup_future = self._cleanup_executor.submit(
+            cleanup_worker_resources,
+            self.config,
+            active_job_ids=active_job_ids,
+        )
 
     def cleanup_resources_if_due(self, active_jobs: object, *, force: bool = False) -> None:
         current = time.monotonic()
@@ -335,8 +379,7 @@ class Worker:
         elif free_slots is not None:
             self._error_poll_count = 0
             self._empty_poll_count = 0
-            capacity = max(1, self.config.max_concurrent_jobs)
-            if max(0, free_slots) >= capacity:
+            if max(0, free_slots) >= 1:
                 base = self.config.poll_seconds
             else:
                 base = max(self.config.poll_seconds, min(self.config.max_backoff_seconds, self.config.poll_seconds * 2))
@@ -386,6 +429,112 @@ class Worker:
                 time.sleep(min(30, 2 ** (attempt - 1)))
         if last_error:
             raise last_error
+
+    def load_pending_result_uploads(self) -> None:
+        pending_dir = result_upload_dir(self.config.work_dir)
+        if not pending_dir.exists():
+            return
+        for path in sorted(pending_dir.glob("*.json")):
+            job_id = path.stem
+            try:
+                job_id = safe_job_id(job_id)
+            except ValueError:
+                continue
+            self.schedule_pending_result_upload(job_id, path)
+
+    def pending_result_job_ids(self) -> list[str]:
+        with self._pending_result_uploads_lock:
+            return [
+                job_id
+                for job_id, (future, _path) in self._pending_result_uploads.items()
+                if not future.done()
+            ]
+
+    def collect_result_uploads(self) -> None:
+        done_uploads: list[tuple[str, concurrent.futures.Future[None], Path]] = []
+        with self._pending_result_uploads_lock:
+            for job_id, (future, path) in list(self._pending_result_uploads.items()):
+                if future.done():
+                    done_uploads.append((job_id, future, path))
+                    self._pending_result_uploads.pop(job_id, None)
+        for job_id, future, path in done_uploads:
+            try:
+                future.result()
+            except PullwiseHTTPError as exc:
+                if exc.status_code < 500:
+                    failed_path = path.with_suffix(".failed.json")
+                    try:
+                        path.replace(failed_path)
+                    except OSError:
+                        pass
+                    self.last_error = (
+                        f"result upload permanently failed for {job_id}: "
+                        f"{redact_secrets(str(exc), self.config)}"
+                    )[:500]
+                    continue
+                self.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                self.schedule_pending_result_upload(job_id, path)
+            except PullwiseRequestError as exc:
+                self.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                self.schedule_pending_result_upload(job_id, path)
+            except Exception as exc:
+                self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                self.schedule_pending_result_upload(job_id, path)
+
+    def schedule_pending_result_upload(self, job_id: str, path: Path) -> None:
+        job_id = safe_job_id(job_id)
+        with self._pending_result_uploads_lock:
+            current = self._pending_result_uploads.get(job_id)
+            if current and not current[0].done():
+                return
+            future = self._result_upload_executor.submit(self.upload_pending_result_file, path)
+            self._pending_result_uploads[job_id] = (future, path)
+
+    def upload_pending_result_file(self, path: Path) -> None:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            raise PullwiseRequestError("pending result upload record must be an object")
+        job_id = safe_job_id(record.get("job_id"))
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise PullwiseRequestError("pending result upload payload must be an object")
+        self.upload_result_with_retry(job_id, payload)
+        path.unlink(missing_ok=True)
+
+    def defer_result_upload(self, job_id: str, payload: dict) -> Path:
+        pending_dir = result_upload_dir(self.config.work_dir)
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        path = result_upload_file(self.config.work_dir, job_id)
+        temp_path = path.with_suffix(".tmp")
+        temp_path.write_text(
+            json.dumps(
+                {
+                    "job_id": safe_job_id(job_id),
+                    "created_at": int(time.time()),
+                    "payload": payload,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
+        self.schedule_pending_result_upload(job_id, path)
+        return path
+
+    def upload_result_once_or_defer(self, job_id: str, payload: dict) -> bool:
+        try:
+            self.client.result(job_id, payload)
+            return True
+        except PullwiseHTTPError as exc:
+            if exc.status_code < 500:
+                raise
+            error = exc
+        except PullwiseRequestError as exc:
+            error = exc
+        self.defer_result_upload(job_id, payload)
+        self.last_error = f"result upload deferred for {job_id}: {redact_secrets(str(error), self.config)}"[:500]
+        return False
 
     def run_job(self, job: dict) -> None:
         job_id = safe_job_id(job.get("job_id"))
@@ -513,7 +662,7 @@ class Worker:
                 logs_summary,
             )
             try:
-                self.upload_result_with_retry(job_id, payload)
+                uploaded = self.upload_result_once_or_defer(job_id, payload)
             except Exception as exc:
                 self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), job_config)}"[:500]
                 job_error = self.last_error
@@ -523,6 +672,16 @@ class Worker:
                     "upload_failed",
                     duration_ms,
                     self.last_error,
+                    scan_summary_review_execution(),
+                )
+                return
+            if not uploaded:
+                write_scan_summary(
+                    job_config,
+                    job_id,
+                    "upload_deferred",
+                    duration_ms,
+                    self.last_error or "result upload deferred for retry",
                     scan_summary_review_execution(),
                 )
                 return
@@ -592,7 +751,7 @@ class Worker:
                     "Uploading failed result",
                     error,
                 )
-                self.upload_result_with_retry(job_id, error_payload)
+                uploaded = self.upload_result_once_or_defer(job_id, error_payload)
             except Exception as upload_exc:
                 self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), job_config)}"[:500]
                 job_error = self.last_error
@@ -602,6 +761,16 @@ class Worker:
                     "upload_failed",
                     duration_ms,
                     self.last_error,
+                    scan_summary_review_execution(),
+                )
+                return
+            if not uploaded:
+                write_scan_summary(
+                    job_config,
+                    job_id,
+                    "upload_deferred",
+                    duration_ms,
+                    self.last_error or "failed result upload deferred for retry",
                     scan_summary_review_execution(),
                 )
                 return
@@ -633,6 +802,14 @@ def checkout_dir_for_job(work_dir: Path, job_id: str) -> Path:
     if os.path.normcase(common) != os.path.normcase(str(root)) or checkout_dir == root:
         raise ValueError("job checkout directory must stay inside work_dir")
     return checkout_dir
+
+
+def result_upload_dir(work_dir: Path) -> Path:
+    return work_dir / _RESULT_UPLOAD_DIR_NAME
+
+
+def result_upload_file(work_dir: Path, job_id: str) -> Path:
+    return result_upload_dir(work_dir) / f"{safe_job_id(job_id)}.json"
 
 
 def failed_checkout_marker(checkout_dir: Path) -> Path:
@@ -694,17 +871,105 @@ def clone_repository(job: dict, checkout_dir: Path) -> str:
         clone_url = trusted_clone_url_for_token(job, clone_url, clone_token)
     git_env = git_auth_env(clone_token, clone_url, job.get("repo"))
     commit = str(job.get("commit") or "pending")
-    clone_command = ["git", "clone"]
-    if not commit or commit == "pending":
-        clone_command.extend(["--depth", "1"])
-    clone_command.extend(["--branch", str(job.get("branch") or "main"), clone_url, str(checkout_dir)])
-    run_git_command(clone_command, phase="clone", env=git_env)
-    if commit and commit != "pending":
-        run_git_command(
-            ["git", "-C", str(checkout_dir), "checkout", commit],
-            phase="checkout",
-        )
+    branch = str(job.get("branch") or "main")
+    mirror_dir = repository_mirror_dir(checkout_dir.parent, job, clone_url)
+    for attempt in range(2):
+        try:
+            ensure_repository_mirror(mirror_dir, clone_url, git_env)
+            resolved_commit, mirror_ref = fetch_repository_ref(mirror_dir, branch=branch, commit=commit, env=git_env)
+            clone_checkout_from_mirror(mirror_dir, checkout_dir, clone_url=clone_url, mirror_ref=mirror_ref)
+            break
+        except RuntimeError:
+            remove_checkout_dir(checkout_dir)
+            if attempt == 0:
+                remove_checkout_dir(mirror_dir)
+                continue
+            raise
     return resolve_git_head(checkout_dir)
+
+
+def repository_mirror_dir(work_dir: Path, job: dict, clone_url: str) -> Path:
+    repo = str(job.get("repo") or "").strip()
+    try:
+        repo = validate_repo_full_name(repo)
+        slug = repo.replace("/", "__").lower()
+    except RuntimeError:
+        slug = "repository"
+    digest = hashlib.sha256(f"{repo}\n{clone_url}".encode("utf-8")).hexdigest()[:16]
+    cache_root = (work_dir / _REPO_CACHE_DIR_NAME).resolve(strict=False)
+    mirror_dir = (cache_root / f"{slug}-{digest}.git").resolve(strict=False)
+    try:
+        common = os.path.commonpath([str(cache_root), str(mirror_dir)])
+    except ValueError as exc:
+        raise RuntimeError("repository mirror cache path must stay inside checkout root") from exc
+    if os.path.normcase(common) != os.path.normcase(str(cache_root)) or mirror_dir == cache_root:
+        raise RuntimeError("repository mirror cache path must stay inside checkout root")
+    return mirror_dir
+
+
+def ensure_repository_mirror(mirror_dir: Path, clone_url: str, env: dict[str, str] | None) -> None:
+    mirror_dir.parent.mkdir(parents=True, exist_ok=True)
+    if not (mirror_dir / "HEAD").exists():
+        run_git_command(["git", "init", "--bare", str(mirror_dir)], phase="mirror-init")
+        run_git_command(["git", "-C", str(mirror_dir), "remote", "add", "origin", clone_url], phase="mirror-remote")
+    else:
+        run_git_command(["git", "-C", str(mirror_dir), "remote", "set-url", "origin", clone_url], phase="mirror-remote")
+
+
+def fetch_repository_ref(mirror_dir: Path, *, branch: str, commit: str, env: dict[str, str] | None) -> tuple[str, str]:
+    requested_commit = str(commit or "").strip()
+    if requested_commit and requested_commit.lower() != "pending":
+        target_ref = f"refs/pullwise/commits/{hashlib.sha256(requested_commit.encode('utf-8')).hexdigest()[:24]}"
+        run_git_command(
+            ["git", "-C", str(mirror_dir), "fetch", "--depth", "1", "origin", f"{requested_commit}:{target_ref}"],
+            phase="fetch",
+            env=env,
+        )
+        return resolve_git_ref(mirror_dir, target_ref), target_ref
+    target_ref = f"refs/pullwise/branches/{hashlib.sha256(branch.encode('utf-8')).hexdigest()[:24]}"
+    run_git_command(
+        ["git", "-C", str(mirror_dir), "fetch", "--depth", "1", "origin", f"+refs/heads/{branch}:{target_ref}"],
+        phase="fetch",
+        env=env,
+    )
+    return resolve_git_ref(mirror_dir, target_ref), target_ref
+
+
+def clone_checkout_from_mirror(mirror_dir: Path, checkout_dir: Path, *, clone_url: str, mirror_ref: str) -> None:
+    checkout_ref = "refs/pullwise/checkout"
+    run_git_command(
+        ["git", "clone", "--shared", "--no-checkout", str(mirror_dir), str(checkout_dir)],
+        phase="checkout-clone",
+    )
+    run_git_command(
+        ["git", "-C", str(checkout_dir), "fetch", "--depth", "1", "origin", f"{mirror_ref}:{checkout_ref}"],
+        phase="checkout-fetch",
+    )
+    run_git_command(
+        ["git", "-C", str(checkout_dir), "checkout", "--detach", checkout_ref],
+        phase="checkout",
+    )
+    run_git_command(
+        ["git", "-C", str(checkout_dir), "remote", "set-url", "origin", clone_url],
+        phase="checkout-remote",
+    )
+
+
+def resolve_git_ref(git_dir: Path, ref: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(git_dir), "rev-parse", ref],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(git_error_message("rev-parse", exc)) from exc
+    commit = (completed.stdout or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise RuntimeError("git rev-parse did not return a commit SHA")
+    return commit.lower()
 
 
 def resolve_git_head(checkout_dir: Path) -> str:
@@ -852,6 +1117,10 @@ _README_PACKAGE_SCRIPT_RE = re.compile(r"\b(npm|pnpm|yarn|bun)\s+run\s+([A-Za-z0
 _HIGH_SIGNAL_PACKAGE_SCRIPTS = {"dev", "start", "build", "test"}
 _PACKAGE_SCRIPT_NAMES = ["dev", "start", "build", "test", "lint", "typecheck", "check"]
 _VERIFICATION_STATUSES = {"verified", "static_proof", "potential_risk", "unverified"}
+_REPO_CACHE_DIR_NAME = ".pullwise-repo-cache"
+_RESULT_UPLOAD_DIR_NAME = ".pullwise-result-uploads"
+_CHECKOUT_RUNTIME_DIR_NAMES.add(_REPO_CACHE_DIR_NAME)
+_CHECKOUT_RUNTIME_DIR_NAMES.add(_RESULT_UPLOAD_DIR_NAME)
 _LOCKFILE_PACKAGE_MANAGERS = {
     "bun.lock": "bun",
     "bun.lockb": "bun",

@@ -7,6 +7,7 @@ import base64
 import concurrent.futures
 import copy
 import ctypes
+import gzip
 import hashlib
 import json
 import math
@@ -52,6 +53,7 @@ _CHECKOUT_RUNTIME_DIR_NAMES: set[str] = set()
 _PROC_MEMINFO_PATH = "/proc/meminfo"
 DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 WORKER_HTTP_TIMEOUT_SECONDS = 60
+WORKER_JOB_CAPACITY = 1
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
@@ -582,8 +584,7 @@ class WorkerConfig:
             configured_provider,
         )
         self.provider = configured_provider or (self.provider_chain[0] if self.provider_chain else "")
-        self.max_concurrent_jobs = max(1, int(getattr(args, "max_concurrent_jobs", None) or os.environ.get("PULLWISE_MAX_CONCURRENT_JOBS") or 1))
-        self.max_claim_jobs = max(1, int(getattr(args, "max_claim_jobs", None) or os.environ.get("PULLWISE_WORKER_MAX_CLAIM_JOBS") or 2))
+        self.max_concurrent_jobs = WORKER_JOB_CAPACITY
         self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))
         self.poll_jitter_seconds = max(0.0, float(os.environ.get("PULLWISE_WORKER_POLL_JITTER_SECONDS") or 2))
         self.max_backoff_seconds = max(self.poll_seconds, int(os.environ.get("PULLWISE_WORKER_MAX_BACKOFF_SECONDS") or 60))
@@ -648,6 +649,10 @@ class WorkerConfig:
             minimum=1,
         )
         self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
+        self.result_upload_compress_min_bytes = max(
+            0,
+            int(os.environ.get("PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES") or 1024),
+        )
         self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
         self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
         self.max_repo_files = _DEFAULT_MAX_REPO_FILES
@@ -693,12 +698,18 @@ class PullwiseClient:
             "Accept": "application/json",
         }
 
-    def post(self, path: str, payload: dict) -> PullwiseResponse:
+    def post(self, path: str, payload: dict, *, compress: bool = False) -> PullwiseResponse:
         body = json.dumps(payload).encode("utf-8")
+        headers = dict(self.headers)
+        if compress and len(body) >= self.config.result_upload_compress_min_bytes:
+            uncompressed_length = len(body)
+            body = gzip.compress(body)
+            headers["Content-Encoding"] = "gzip"
+            headers["X-Pullwise-Uncompressed-Length"] = str(uncompressed_length)
         request = urllib.request.Request(
             f"{self.config.server_url}{path}",
             data=body,
-            headers=self.headers,
+            headers=headers,
             method="POST",
         )
         try:
@@ -739,15 +750,16 @@ class PullwiseClient:
         doctor_checked_at: int | None = None,
         machine_metrics: dict | None = None,
     ) -> dict:
-        reported_max_concurrent_jobs = max(1, int(max_concurrent_jobs or self.config.max_concurrent_jobs))
+        reported_max_concurrent_jobs = WORKER_JOB_CAPACITY
+        reported_running_jobs = max(0, min(WORKER_JOB_CAPACITY, int(running_jobs or 0)))
         payload = {
             "worker_id": self.config.worker_id,
             "version": __version__,
             "provider": self.config.provider,
             "providerChain": list(self.config.provider_chain),
             "max_concurrent_jobs": reported_max_concurrent_jobs,
-            "running_jobs": running_jobs,
-            "free_slots": max(0, reported_max_concurrent_jobs - running_jobs),
+            "running_jobs": reported_running_jobs,
+            "free_slots": max(0, reported_max_concurrent_jobs - reported_running_jobs),
             "hostname": socket.gethostname(),
             "last_error": last_error,
             "doctor_status": doctor_status,
@@ -779,20 +791,8 @@ class PullwiseClient:
         return response.json()
 
     def claim(self) -> dict | None:
-        response = self.post(
-            "/worker/jobs/claim",
-            {"worker_id": self.config.worker_id, "max_jobs": min(self.config.max_concurrent_jobs, self.config.max_claim_jobs)},
-        )
+        response = self.post("/worker/jobs/claim", {"worker_id": self.config.worker_id})
         return response.json().get("job")
-
-    def claim_many(self, max_jobs: int) -> list[dict]:
-        response = self.post("/worker/jobs/claim", {"worker_id": self.config.worker_id, "max_jobs": max_jobs})
-        data = response.json()
-        jobs = data.get("jobs")
-        if isinstance(jobs, list):
-            return [job for job in jobs if isinstance(job, dict)]
-        job = data.get("job")
-        return [job] if isinstance(job, dict) else []
 
     def progress(
         self,
@@ -812,7 +812,7 @@ class PullwiseClient:
         self.post(f"/worker/jobs/{job_id}/progress", payload)
 
     def result(self, job_id: str, payload: dict) -> None:
-        self.post(f"/worker/jobs/{job_id}/result", payload)
+        self.post(f"/worker/jobs/{job_id}/result", payload, compress=True)
 
 
 def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False) -> bool:
@@ -868,8 +868,6 @@ def main() -> None:
     )
     parser.add_argument("--server-url")
     parser.add_argument("--worker-id")
-    parser.add_argument("--max-concurrent-jobs", type=int)
-    parser.add_argument("--max-claim-jobs", type=int)
     parser.add_argument("--poll-seconds", type=int)
     parser.add_argument("--work-dir")
     parser.add_argument("--checkout-root")

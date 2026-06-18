@@ -13,7 +13,7 @@ python -m pullwise_worker.main
 The worker loop:
 
 1. sends `POST /worker/heartbeat`
-2. claims queued jobs up to `min(free_slots, PULLWISE_WORKER_MAX_CLAIM_JOBS)` with `POST /worker/jobs/claim`
+2. claims one queued job with `POST /worker/jobs/claim` when no job is active locally
 3. clones the repository using the short-lived clone token returned by the server
 4. runs Codex with the server-selected plan model and reasoning effort
 5. uploads progress and final result
@@ -26,8 +26,6 @@ Required environment:
 - `PULLWISE_WORKER_ID` optional, defaults to `{hostname}-{pid}`
 - `PULLWISE_PROVIDER` optional, defaults to `codex`
 - `PULLWISE_PROVIDER_CHAIN` optional local install capability list; review policy comes from server `agentConfig`
-- `PULLWISE_MAX_CONCURRENT_JOBS` optional, defaults to `1`
-- `PULLWISE_WORKER_MAX_CLAIM_JOBS` optional, defaults to `2`
 - `PULLWISE_WORKER_POLL_SECONDS` optional, defaults to `5`
 - `PULLWISE_WORKER_POLL_JITTER_SECONDS` optional, defaults to `2`
 - `PULLWISE_WORKER_MAX_BACKOFF_SECONDS` optional, defaults to `60`
@@ -56,7 +54,7 @@ Required environment:
 - `PULLWISE_MAX_LOG_BYTES` optional, defaults to `1073741824` (1 GiB)
 - `PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES` optional, defaults to `10485760` (10 MiB)
 
-Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old run logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
+Each worker processes exactly one job at a time. Queuing is maintained on the server; after a job finishes, the worker returns to the server to claim the next job. Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old run logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
 Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. Review provider/model policy comes from the server-side subscription plan `agentConfig`; executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
 

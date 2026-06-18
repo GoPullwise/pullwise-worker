@@ -42,13 +42,25 @@ own `service_home` for Codex binaries, config, cache, and auth state.
 
 ## Codex Execution Concurrency
 
-Do not change a single worker instance to run multiple Codex review jobs in
-parallel. The process-wide Codex execution lock is intentional: concurrent
-Codex CLI executions under the same worker identity can refresh auth at the
-same time and invalidate the token/session state. If job latency or timeout
-behavior needs improvement, keep Codex execution serial within each worker and
-address queueing, timeout reporting, scheduling, or multi-worker capacity
-instead.
+Never run two Codex agent CLI processes concurrently when they use the same
+Codex login state or auth files. This is a hard correctness rule, not only a
+performance preference.
+
+- All code paths that can start `codex` or another Codex agent CLI process must
+  pass through the same worker-level execution lock/queue.
+- The risk is shared mutable auth state: concurrent CLI processes under the
+  same `CODEX_HOME`, `HOME`, or system credential store can try to refresh the
+  same login token/session at the same time and invalidate `auth.json` or the
+  stored credential state.
+- Do not bypass the lock for finder/repro/semantic fallback/readiness helper
+  threads if they launch the Codex agent CLI.
+- If job latency or timeout behavior needs improvement, keep Codex agent CLI
+  execution serial within each worker identity and address queueing, timeout
+  reporting, scheduling, or multi-worker capacity instead.
+- The only acceptable way to consider process-level Codex parallelism is to use
+  fully isolated auth state per process, including separate `CODEX_HOME` and
+  provider home/config/cache paths, and only after verifying that no system
+  credential store or shared login cache is still reused.
 
 Codex and CodeGraph configuration follows the same boundary:
 
@@ -68,6 +80,55 @@ Codex and CodeGraph configuration follows the same boundary:
   and pycache prefix must remain candidate-worker scoped.
 - Do not use `CODEGRAPH_DIR` to point multiple jobs or workers at a shared graph
   directory. Let CodeGraph use each checkout's `.codegraph/` directory.
+
+## GraphVerified MCP Cache Boundary
+
+GraphVerified CodeGraph/Codex MCP setup is intentionally cached only at the
+worker provider-config layer.
+
+- It is safe to cache global MCP install/config readiness by
+  `CODEX_HOME + codegraph command` for one worker instance.
+- Do not share one unscoped MCP server, CodeGraph database, `.codegraph/`
+  directory, `.codereview/config.json`, or review run across multiple job
+  checkouts.
+- Readiness may eagerly ensure MCP once so jobs take the lightweight cached
+  path. Job execution must still write checkout-local GraphVerified config and
+  run against that checkout.
+- If a future change introduces a long-lived CodeGraph daemon, key it by
+  project root/check out path, matching CodeGraph's project-root sharing model.
+  Never make a worker-global daemon that can mix repositories.
+
+## Job Slot And Upload Discipline
+
+One worker job slot must not be occupied by avoidable retry sleep or cleanup IO.
+
+- Final result upload should attempt the immediate request once. Retryable
+  network/5xx failures should be written to the pending result upload spool and
+  retried by the background upload worker.
+- Pending result uploads must remain in heartbeat `active_job_ids` so the server
+  renews the claimed job lease while the final payload is being retried. They do
+  not count as active Codex/job execution capacity.
+- Result upload payloads should use gzip compression for large JSON. Keep server
+  gzip JSON support and worker compression thresholds compatible.
+- Do not add `time.sleep()`-based retry loops to `run_job()` or other code that
+  holds the only job execution slot. Put backoff in a background path.
+- Pending result upload files live under `.pullwise-result-uploads`; keep this
+  directory protected from checkout cleanup.
+- Cleanup should run only when the worker is idle or on a low-priority
+  background path. Do not run checkout/log cleanup before heartbeat/claim in the
+  hot loop.
+
+## Checkout And Cache Discipline
+
+Repository checkout performance depends on the worker mirror cache.
+
+- Keep repository mirrors under `.pullwise-repo-cache` and protect that runtime
+  directory from ordinary checkout cleanup.
+- Commit-specific jobs should use shallow fetch into the mirror plus a shared
+  no-checkout worktree/checkout, not a full fresh clone per job.
+- Do not include clone tokens in mirror path names, logs, or persistent config.
+  Token-sensitive remote URLs may be used for fetch, but persisted cache
+  identity and diagnostics must be redacted.
 
 ## Worker Scan Reproduction Sandbox
 

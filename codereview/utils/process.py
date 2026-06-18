@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
+import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +18,9 @@ class ProcessResult:
     stderr: str
     duration_ms: int
     timed_out: bool = False
+    stdout_path: str = ""
+    stderr_path: str = ""
+    queue_wait_ms: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -25,7 +31,23 @@ class ProcessResult:
             "stderr": self.stderr,
             "duration_ms": self.duration_ms,
             "timed_out": self.timed_out,
+            "stdout_path": self.stdout_path,
+            "stderr_path": self.stderr_path,
+            "queueWaitMs": self.queue_wait_ms,
+            "execDurationMs": self.duration_ms,
         }
+
+
+def _tail_text(path: Path, limit: int = 65536) -> str:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > limit:
+                handle.seek(-limit, 2)
+            data = handle.read()
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace")
 
 
 def run_process(
@@ -35,37 +57,44 @@ def run_process(
     env: dict[str, str] | None = None,
     timeout: int = 600,
     check: bool = False,
+    log_dir: Path | None = None,
+    queue_wait_ms: int = 0,
 ) -> ProcessResult:
     started = time.monotonic()
+    cwd_key = hashlib.sha256(str(cwd.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:16]
+    log_root = log_dir or (Path(tempfile.gettempdir()) / "pullwise-codereview-process-logs" / cwd_key)
+    log_root.mkdir(parents=True, exist_ok=True)
+    prefix = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in (command[0] if command else "process"))
+    stamp = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
+    stdout_path = log_root / f"{prefix}-{stamp}.stdout.log"
+    stderr_path = log_root / f"{prefix}-{stamp}.stderr.log"
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(cwd),
-            env=env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
+        with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+            process = subprocess.Popen(
+                command,
+                cwd=str(cwd),
+                env=env,
+                stdout=stdout_file,
+                stderr=stderr_file,
+            )
+            try:
+                returncode = process.wait(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                process.kill()
+                returncode = process.wait()
+                timed_out = True
         result = ProcessResult(
             command=command,
             cwd=str(cwd),
-            returncode=completed.returncode,
-            stdout=completed.stdout or "",
-            stderr=completed.stderr or "",
+            returncode=124 if timed_out else returncode,
+            stdout=_tail_text(stdout_path),
+            stderr=_tail_text(stderr_path),
             duration_ms=int((time.monotonic() - started) * 1000),
-        )
-    except subprocess.TimeoutExpired as exc:
-        result = ProcessResult(
-            command=command,
-            cwd=str(cwd),
-            returncode=124,
-            stdout=exc.stdout or "",
-            stderr=exc.stderr or "",
-            duration_ms=int((time.monotonic() - started) * 1000),
-            timed_out=True,
+            timed_out=timed_out,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            queue_wait_ms=max(0, int(queue_wait_ms or 0)),
         )
     except FileNotFoundError as exc:
         result = ProcessResult(
@@ -75,6 +104,9 @@ def run_process(
             stdout="",
             stderr=str(exc),
             duration_ms=int((time.monotonic() - started) * 1000),
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            queue_wait_ms=max(0, int(queue_wait_ms or 0)),
         )
     if check and result.returncode != 0:
         raise RuntimeError(f"{command[0]} exited {result.returncode}: {(result.stderr or result.stdout)[-500:]}")
