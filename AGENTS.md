@@ -47,7 +47,7 @@ Codex login state or auth files. This is a hard correctness rule, not only a
 performance preference.
 
 - All code paths that can start `codex` or another Codex agent CLI process must
-  pass through the same worker-level execution lock/queue.
+  pass through the same worker-level execution lock.
 - The risk is shared mutable auth state: concurrent CLI processes under the
   same `CODEX_HOME`, `HOME`, or system credential store can try to refresh the
   same login token/session at the same time and invalidate `auth.json` or the
@@ -57,10 +57,8 @@ performance preference.
 - If job latency or timeout behavior needs improvement, keep Codex agent CLI
   execution serial within each worker identity and address queueing, timeout
   reporting, scheduling, or multi-worker capacity instead.
-- The only acceptable way to consider process-level Codex parallelism is to use
-  fully isolated auth state per process, including separate `CODEX_HOME` and
-  provider home/config/cache paths, and only after verifying that no system
-  credential store or shared login cache is still reused.
+- Do not add process-level Codex parallelism to a worker identity. Add more
+  worker instances when more throughput is needed.
 
 Codex and CodeGraph configuration follows the same boundary:
 
@@ -100,7 +98,10 @@ worker provider-config layer.
 
 ## Job Slot And Upload Discipline
 
-One worker job slot must not be occupied by avoidable retry sleep or cleanup IO.
+Each worker instance has exactly one job execution slot. It does not maintain a
+local job queue and must claim a new server-side job only after the current job
+has finished. The only job slot must not be occupied by avoidable retry sleep or
+cleanup IO.
 
 - Final result upload should attempt the immediate request once. Retryable
   network/5xx failures should be written to the pending result upload spool and

@@ -179,47 +179,47 @@ class Worker:
         self._pending_result_uploads: dict[str, tuple[concurrent.futures.Future[None], Path]] = {}
         self._pending_result_uploads_lock = Lock()
 
-    def effective_max_concurrent_jobs(self) -> int:
-        return 1
-
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
         self.load_pending_result_uploads()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            running: dict[concurrent.futures.Future[None], dict] = {}
+            running_future: concurrent.futures.Future[None] | None = None
+            running_job: dict | None = None
 
-            def collect_finished_jobs(futures: list[concurrent.futures.Future[None]]) -> None:
-                for future in futures:
-                    job = running.pop(future)
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        self.last_error = f"job {job.get('job_id')} failed unexpectedly: {exc}"[:500]
+            def collect_finished_job() -> None:
+                nonlocal running_future, running_job
+                if running_future is None or not running_future.done():
+                    return
+                future = running_future
+                job = running_job or {}
+                running_future = None
+                running_job = None
+                try:
+                    future.result()
+                except Exception as exc:
+                    self.last_error = f"job {job.get('job_id')} failed unexpectedly: {exc}"[:500]
 
             while True:
-                done = [future for future in running if future.done()]
-                collect_finished_jobs(done)
+                collect_finished_job()
                 self.collect_result_uploads()
                 self.collect_cleanup()
-                max_running_jobs = self.effective_max_concurrent_jobs()
-                free_slots = 0 if running else 1
+                job_running = running_future is not None
                 ready = self.refresh_readiness_if_due()
                 loop_error = False
                 claimed_jobs = 0
                 heartbeat_payload: dict = {}
                 machine_metrics = self.machine_metrics_if_due()
                 active_job_ids = self.pending_result_job_ids()
-                for job in running.values():
+                if running_job is not None:
                     try:
-                        active_job_id = safe_job_id(job.get("job_id") if isinstance(job, dict) else job)
+                        active_job_id = safe_job_id(running_job.get("job_id"))
                         if active_job_id not in active_job_ids:
                             active_job_ids.append(active_job_id)
                     except ValueError:
-                        continue
+                        pass
                 try:
                     heartbeat_response = self.client.heartbeat(
-                        running_jobs=len(running),
-                        max_concurrent_jobs=max_running_jobs,
+                        running_jobs=1 if job_running else 0,
                         active_job_ids=active_job_ids,
                         last_error=self.last_error,
                         doctor_status=self._doctor_status,
@@ -239,11 +239,11 @@ class Worker:
                     ready = False
                 if command:
                     ready = False
-                    if not running and not loop_error and self.handle_lifecycle_command(command):
+                    if not job_running and not loop_error and self.handle_lifecycle_command(command):
                         return
                 if self.cleanup_is_running():
                     ready = False
-                if ready and not running:
+                if ready and not job_running:
                     job = None
                     if not loop_error:
                         try:
@@ -252,29 +252,31 @@ class Worker:
                             self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
                             loop_error = True
                     if job:
-                        future = executor.submit(self.run_job, job)
-                        running[future] = job
+                        running_job = job
+                        running_future = executor.submit(self.run_job, job)
                     claimed_jobs = 1 if job else 0
                     if once:
-                        concurrent.futures.wait(running)
-                        collect_finished_jobs([future for future in running if future.done()])
+                        if running_future is not None:
+                            concurrent.futures.wait([running_future])
+                        collect_finished_job()
                         self.collect_result_uploads()
                         return
                 elif once:
-                    concurrent.futures.wait(running)
-                    collect_finished_jobs([future for future in running if future.done()])
+                    if running_future is not None:
+                        concurrent.futures.wait([running_future])
+                    collect_finished_job()
                     self.collect_result_uploads()
                     return
-                if not running and not claimed_jobs and not loop_error:
+                if running_future is None and not claimed_jobs and not loop_error:
                     self.schedule_cleanup_resources_if_due(active_job_ids)
                 sleep_seconds = self.next_poll_sleep(
                     claimed_jobs=claimed_jobs,
                     loop_error=loop_error,
-                    free_slots=free_slots,
+                    worker_busy=running_future is not None,
                 )
-                if running:
+                if running_future is not None:
                     concurrent.futures.wait(
-                        list(running),
+                        [running_future],
                         timeout=sleep_seconds,
                         return_when=concurrent.futures.FIRST_COMPLETED,
                     )
@@ -367,7 +369,7 @@ class Worker:
             self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
         return False
 
-    def next_poll_sleep(self, *, claimed_jobs: int, loop_error: bool, free_slots: int | None = None) -> float:
+    def next_poll_sleep(self, *, claimed_jobs: int, loop_error: bool, worker_busy: bool = False) -> float:
         if loop_error:
             self._error_poll_count += 1
             self._empty_poll_count = 0
@@ -376,17 +378,14 @@ class Worker:
             self._error_poll_count = 0
             self._empty_poll_count = 0
             base = min(self.config.poll_seconds, 1)
-        elif free_slots is not None:
+        elif worker_busy:
             self._error_poll_count = 0
             self._empty_poll_count = 0
-            if max(0, free_slots) >= 1:
-                base = self.config.poll_seconds
-            else:
-                base = max(self.config.poll_seconds, min(self.config.max_backoff_seconds, self.config.poll_seconds * 2))
+            base = max(self.config.poll_seconds, min(self.config.max_backoff_seconds, self.config.poll_seconds * 2))
         else:
             self._error_poll_count = 0
-            self._empty_poll_count += 1
-            base = self.config.poll_seconds * (2 ** min(self._empty_poll_count - 1, 6))
+            self._empty_poll_count = 0
+            base = self.config.poll_seconds
         jitter = random.uniform(0, self.config.poll_jitter_seconds) if self.config.poll_jitter_seconds else 0
         return min(self.config.max_backoff_seconds, base) + jitter
 

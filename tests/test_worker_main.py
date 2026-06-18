@@ -120,6 +120,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(record["payload"], payload)
             schedule_upload.assert_called_once_with("job_deferred", pending_path)
 
+    def test_worker_run_once_claims_and_runs_one_job_without_capacity_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                work_dir=Path(tmp_dir),
+                poll_seconds=1,
+                poll_jitter_seconds=0,
+                max_backoff_seconds=1,
+                machine_metrics_interval_seconds=3600,
+                cleanup_interval_seconds=3600,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            self.assertFalse(hasattr(worker, "effective_max_concurrent_jobs"))
+
+            with patch.object(worker, "refresh_readiness_if_due", return_value=True), patch.object(
+                worker, "machine_metrics_if_due", return_value=None
+            ), patch.object(worker.client, "heartbeat", return_value={"worker": {"status": "idle"}}), patch.object(
+                worker.client, "claim", return_value={"job_id": "job_inline"}
+            ), patch.object(
+                worker, "run_job"
+            ) as run_job:
+                worker.run(once=True)
+
+        run_job.assert_called_once_with({"job_id": "job_inline"})
+
     def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -288,7 +316,6 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             cfg = config_for(root)
             cfg.server_url = "https://api.pullwise.test"
             cfg.allow_insecure_server_url = False
-            cfg.max_concurrent_jobs = 1
             cfg.provider = "codex"
             cfg.provider_chain = ["codex"]
             cfg.service_path = str(root / "bin")

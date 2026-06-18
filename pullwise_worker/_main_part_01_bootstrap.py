@@ -584,7 +584,6 @@ class WorkerConfig:
             configured_provider,
         )
         self.provider = configured_provider or (self.provider_chain[0] if self.provider_chain else "")
-        self.max_concurrent_jobs = WORKER_JOB_CAPACITY
         self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))
         self.poll_jitter_seconds = max(0.0, float(os.environ.get("PULLWISE_WORKER_POLL_JITTER_SECONDS") or 2))
         self.max_backoff_seconds = max(self.poll_seconds, int(os.environ.get("PULLWISE_WORKER_MAX_BACKOFF_SECONDS") or 60))
@@ -740,7 +739,6 @@ class PullwiseClient:
         self,
         *,
         running_jobs: int = 0,
-        max_concurrent_jobs: int | None = None,
         active_job_ids: list[str] | None = None,
         last_error: str | None = None,
         doctor_status: str | None = None,
@@ -750,16 +748,15 @@ class PullwiseClient:
         doctor_checked_at: int | None = None,
         machine_metrics: dict | None = None,
     ) -> dict:
-        reported_max_concurrent_jobs = WORKER_JOB_CAPACITY
         reported_running_jobs = max(0, min(WORKER_JOB_CAPACITY, int(running_jobs or 0)))
         payload = {
             "worker_id": self.config.worker_id,
             "version": __version__,
             "provider": self.config.provider,
             "providerChain": list(self.config.provider_chain),
-            "max_concurrent_jobs": reported_max_concurrent_jobs,
+            "max_concurrent_jobs": WORKER_JOB_CAPACITY,
             "running_jobs": reported_running_jobs,
-            "free_slots": max(0, reported_max_concurrent_jobs - reported_running_jobs),
+            "free_slots": max(0, WORKER_JOB_CAPACITY - reported_running_jobs),
             "hostname": socket.gethostname(),
             "last_error": last_error,
             "doctor_status": doctor_status,

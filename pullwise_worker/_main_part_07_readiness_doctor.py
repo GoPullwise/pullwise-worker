@@ -97,7 +97,6 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
     checks.append(("worker_token", bool(config.worker_token), "configured" if config.worker_token else "missing"))
     agent_configs_ok, agent_configs_detail, agent_configs = worker_agent_configs_check(config)
     checks.append(("agent_configs", agent_configs_ok, agent_configs_detail))
-    checks.append(("max_concurrent_jobs", config.max_concurrent_jobs > 0, str(config.max_concurrent_jobs)))
 
     provider_env = provider_process_env(config)
     git_ok, git_detail = command_ok(["git", "--version"])
