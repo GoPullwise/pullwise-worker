@@ -356,6 +356,47 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(ready_providers, ["codex"])
         self.assertIn(("graph_verified_mcp", True, "ready"), checks)
 
+    def test_codex_ready_check_clears_auth_failure_state_on_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            cfg.codex_auth_failure_cooldown_seconds = 3600
+            worker_main.mark_codex_auth_failure(cfg, "401 Unauthorized")
+            self.assertGreater(worker_main._codex_auth_failure_until, 0)
+
+            def fake_run(command, **_kwargs):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text('{"ok": true}', encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}\n', stderr="")
+
+            with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
+                worker_main,
+                "provider_process_env",
+                return_value={},
+            ), patch.object(worker_main.subprocess, "run", side_effect=fake_run):
+                ok, detail = worker_main.codex_ready_check(cfg)
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "ready")
+        self.assertEqual(worker_main._codex_auth_failure_until, 0.0)
+        self.assertEqual(worker_main._codex_auth_failure_detail, "")
+
+    def test_refresh_readiness_reports_degraded_instead_of_crashing_on_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = config_for(Path(tmp_dir))
+            cfg.readiness_check_seconds = 60
+            worker = worker_main.Worker(cfg)
+
+            with patch.object(worker_main, "worker_readiness_state", side_effect=NameError("missing helper")):
+                ready = worker.refresh_readiness_if_due()
+
+        self.assertFalse(ready)
+        self.assertEqual(worker._doctor_status, "degraded")
+        self.assertFalse(worker._codex_ready)
+        self.assertEqual(worker._ready_providers, [])
+        self.assertIn("readiness check failed", worker.last_error or "")
+        self.assertIn("missing helper", worker.last_error or "")
+
     def test_run_graph_verified_review_payload_reads_confirmed_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
