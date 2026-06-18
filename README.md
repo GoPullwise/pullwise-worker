@@ -96,6 +96,7 @@ Useful lifecycle commands:
 
 ```bash
 pullwise-worker doctor
+pullwise-worker logs
 pullwise-worker start
 pullwise-worker status
 pullwise-worker stop

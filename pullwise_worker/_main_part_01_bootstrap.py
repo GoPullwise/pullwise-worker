@@ -810,6 +810,13 @@ class PullwiseClient:
         response = self.post("/worker/commands/poll", {"worker_id": self.config.worker_id})
         return response.json()
 
+    def log_stream_lines(self, session_id: str, lines: list[dict]) -> dict:
+        response = self.post(
+            f"/worker/log-streams/{urllib.parse.quote(str(session_id), safe='')}/lines",
+            {"worker_id": self.config.worker_id, "lines": lines},
+        )
+        return response.json()
+
     def claim(self) -> dict | None:
         response = self.post("/worker/jobs/claim", {"worker_id": self.config.worker_id})
         return response.json().get("job")
@@ -878,6 +885,7 @@ def main() -> None:
             "start",
             "stop",
             "status",
+            "logs",
             "restart",
             "update",
             "uninstall",
@@ -895,18 +903,22 @@ def main() -> None:
     parser.add_argument("--provider")
     parser.add_argument("--codex-command")
     parser.add_argument("--codex-timeout-seconds", type=int)
+    parser.add_argument("--lines", type=int, default=120)
+    parser.add_argument("--follow", action="store_true")
     parser.add_argument("--once", action="store_true", help="Process at most one job and exit.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--remove-config", action="store_true")
     parser.add_argument("--remove-logs", action="store_true")
     args = parser.parse_args()
 
-    if args.command in {"start", "stop", "status", "restart"}:
+    if args.command in {"start", "stop", "status", "restart", "logs"}:
         try:
             config = WorkerConfig(args, require_worker_token=False, validate_server_url=False)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             raise SystemExit(2) from exc
+        if args.command == "logs":
+            raise SystemExit(worker_logs(config, lines=args.lines, follow=args.follow, dry_run=args.dry_run))
         raise SystemExit(service_action(args.command, dry_run=args.dry_run, config=config))
     if args.command == "uninstall":
         raise SystemExit(uninstall_worker_command(args))

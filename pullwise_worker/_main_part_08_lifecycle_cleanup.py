@@ -24,6 +24,197 @@ def service_action(
     return subprocess.run(command).returncode
 
 
+def tail_text_lines(path: Path, lines: int) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+    except OSError:
+        return []
+
+
+def worker_logs(config: WorkerConfig, *, lines: int = 120, follow: bool = False, dry_run: bool = False) -> int:
+    safe_lines = max(1, min(1000, int(lines or 120)))
+    service_name = str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
+    log_dir = Path(getattr(config, "log_dir", None) or tempfile.gettempdir())
+    scan_summary = log_dir / "scan-summary.log"
+    journal_command = ["journalctl", "-u", service_name, "-n", str(safe_lines), "--no-pager"]
+    if follow:
+        journal_command.append("-f")
+    if dry_run:
+        print(" ".join(shlex.quote(part) for part in journal_command))
+        print(f"tail -n {safe_lines} {shlex.quote(str(scan_summary))}")
+        return 0
+    print(f"== journal: {service_name} ==")
+    journal = subprocess.run(journal_command)
+    if follow:
+        return journal.returncode
+    print(f"== scan summary: {scan_summary} ==")
+    summary_lines = tail_text_lines(scan_summary, safe_lines)
+    if summary_lines:
+        print("\n".join(summary_lines))
+    else:
+        print("scan summary log not found or empty")
+    return journal.returncode
+
+
+def log_stream_text(value: object, limit: int = 4000) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\x00", "").splitlines()[0].strip()[:limit]
+
+
+def log_stream_session_id(session: dict | None) -> str:
+    if not isinstance(session, dict):
+        return ""
+    return log_stream_text(session.get("id"), 128)
+
+
+def log_stream_created_at(session: dict | None) -> int:
+    if not isinstance(session, dict):
+        return int(time.time())
+    try:
+        return max(0, int(session.get("created_at") or session.get("createdAt") or time.time()))
+    except (TypeError, ValueError):
+        return int(time.time())
+
+
+def journal_log_entry_from_json(raw: str) -> tuple[dict | None, str]:
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, ""
+    if not isinstance(payload, dict):
+        return None, ""
+    message = payload.get("MESSAGE")
+    if isinstance(message, list):
+        message = " ".join(str(part) for part in message)
+    line = log_stream_text(message)
+    if not line:
+        return None, log_stream_text(payload.get("__CURSOR"), 500)
+    timestamp = int(time.time())
+    raw_timestamp = payload.get("__REALTIME_TIMESTAMP") or payload.get("_SOURCE_REALTIME_TIMESTAMP")
+    try:
+        timestamp = int(int(raw_timestamp) / 1_000_000)
+    except (TypeError, ValueError):
+        pass
+    return {
+        "source": "worker",
+        "stream": "journal",
+        "timestamp": timestamp,
+        "line": line,
+    }, log_stream_text(payload.get("__CURSOR"), 500)
+
+
+class WorkerJournalLogTailer:
+    def __init__(self, service_name: str, *, since_timestamp: int) -> None:
+        self.service_name = service_name
+        self.since_timestamp = max(0, int(since_timestamp or time.time()))
+        self.cursor = ""
+
+    def collect(self) -> tuple[list[dict], str]:
+        command = ["journalctl", "-u", self.service_name, "--no-pager", "-o", "json"]
+        if self.cursor:
+            command.extend(["--after-cursor", self.cursor])
+        else:
+            command.extend(["--since", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.since_timestamp))])
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return [
+                {
+                    "source": "worker",
+                    "stream": "journal",
+                    "timestamp": int(time.time()),
+                    "line": f"journalctl unavailable: {log_stream_text(exc)}",
+                }
+            ], self.cursor
+        if completed.returncode != 0:
+            detail = log_stream_text(completed.stderr or completed.stdout or f"journalctl exited {completed.returncode}")
+            return [{"source": "worker", "stream": "journal", "timestamp": int(time.time()), "line": detail}], self.cursor
+        entries: list[dict] = []
+        next_cursor = self.cursor
+        for raw in completed.stdout.splitlines():
+            entry, cursor = journal_log_entry_from_json(raw)
+            if cursor:
+                next_cursor = cursor
+            if entry:
+                entries.append(entry)
+        return entries, next_cursor
+
+    def commit(self, cursor: str) -> None:
+        if cursor:
+            self.cursor = cursor
+
+
+class WorkerFileLogTailer:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        try:
+            self.offset = path.stat().st_size
+        except OSError:
+            self.offset = 0
+        self.partial = ""
+
+    def collect(self, *, max_bytes: int = 128 * 1024) -> tuple[list[dict], int, str]:
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return [], self.offset, self.partial
+        start = self.offset if 0 <= self.offset <= size else 0
+        try:
+            with self.path.open("rb") as stream:
+                stream.seek(start)
+                chunk = stream.read(max_bytes)
+                next_offset = stream.tell()
+        except OSError:
+            return [], self.offset, self.partial
+        if not chunk:
+            return [], next_offset, self.partial
+        text = self.partial + chunk.decode("utf-8", errors="replace")
+        parts = text.splitlines(keepends=True)
+        next_partial = ""
+        if parts and not parts[-1].endswith(("\n", "\r")):
+            next_partial = parts.pop()
+        timestamp = int(time.time())
+        entries = [
+            {"source": "worker", "stream": "scan-summary", "timestamp": timestamp, "line": line.rstrip("\r\n")}
+            for line in parts
+            if line.rstrip("\r\n")
+        ]
+        return entries, next_offset, next_partial
+
+    def commit(self, offset: int, partial: str) -> None:
+        self.offset = offset
+        self.partial = partial
+
+
+class WorkerLogStreamTailer:
+    def __init__(self, config: WorkerConfig, session: dict) -> None:
+        self.session_id = log_stream_session_id(session)
+        self.journal = WorkerJournalLogTailer(
+            str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME,
+            since_timestamp=log_stream_created_at(session),
+        )
+        self.summary = WorkerFileLogTailer(Path(getattr(config, "log_dir", None) or tempfile.gettempdir()) / "scan-summary.log")
+
+    def collect(self) -> tuple[list[dict], dict]:
+        journal_entries, journal_cursor = self.journal.collect()
+        summary_entries, summary_offset, summary_partial = self.summary.collect()
+        ordered_entries = list(enumerate([*journal_entries, *summary_entries]))
+        ordered_entries.sort(key=lambda item: (int(item[1].get("timestamp") or 0), item[0]))
+        entries = [entry for _, entry in ordered_entries]
+        return entries, {
+            "journal_cursor": journal_cursor,
+            "summary_offset": summary_offset,
+            "summary_partial": summary_partial,
+        }
+
+    def commit(self, state: dict) -> None:
+        self.journal.commit(str(state.get("journal_cursor") or ""))
+        self.summary.commit(int(state.get("summary_offset") or self.summary.offset), str(state.get("summary_partial") or ""))
+
+
 def execute_lifecycle_command(action: str, config: WorkerConfig | None = None) -> int:
     if action == "stop":
         # Admin-queued lifecycle commands run inside the unprivileged service
@@ -81,6 +272,7 @@ class WorkerLifecycleWatcher:
         self.config = config
         self.client = PullwiseClient(config)
         self.last_error: str | None = None
+        self.log_tailers: dict[str, WorkerLogStreamTailer] = {}
 
     def run(self, *, once: bool = False) -> int:
         while True:
@@ -94,6 +286,7 @@ class WorkerLifecycleWatcher:
             worker_state = payload.get("worker") if isinstance(payload.get("worker"), dict) else None
             if command and self.handle_lifecycle_command(command, worker_state=worker_state):
                 handled_uninstall = str(command.get("command") or "").strip().lower() == "uninstall"
+            self.handle_log_session(payload.get("logSession") or payload.get("log_session"))
             if handled_uninstall:
                 return 0
             if once:
@@ -125,6 +318,24 @@ class WorkerLifecycleWatcher:
         except PullwiseRequestError as exc:
             self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
         return False
+
+    def handle_log_session(self, session: object) -> None:
+        session_id = log_stream_session_id(session if isinstance(session, dict) else None)
+        if not session_id:
+            self.log_tailers.clear()
+            return
+        if session_id not in self.log_tailers:
+            self.log_tailers = {session_id: WorkerLogStreamTailer(self.config, session)}
+        tailer = self.log_tailers[session_id]
+        entries, state = tailer.collect()
+        if not entries:
+            return
+        try:
+            self.client.log_stream_lines(session_id, entries[:500])
+        except PullwiseRequestError as exc:
+            self.last_error = f"log stream upload failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return
+        tailer.commit(state)
 
 
 def run_lifecycle_watcher(config: WorkerConfig, *, once: bool = False) -> int:

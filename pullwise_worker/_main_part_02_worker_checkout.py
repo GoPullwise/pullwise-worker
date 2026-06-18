@@ -996,7 +996,39 @@ def resolve_git_head(checkout_dir: Path) -> str:
     return commit.lower()
 
 
+def git_log_safe_url(value: object) -> str:
+    text = str(value or "")
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        host = parsed.netloc.rsplit("@", 1)[-1].lower()
+        path = parsed.path or ""
+        return urllib.parse.urlunparse((parsed.scheme, host, path, "", "", ""))
+    return text
+
+
+def git_log_safe_arg(value: object) -> str:
+    text = str(value or "")
+    text = re.sub(r"x-access-token:[^@\s]+@", "x-access-token:redacted@", text)
+    text = re.sub(r"(https?://)([^/@\s]+):([^/@\s]+)@", r"\1redacted@", text)
+    return re.sub(r"https?://[^\s'\"<>]+", lambda match: git_log_safe_url(match.group(0)), text)
+
+
+def git_log_command(command: list[str]) -> str:
+    return " ".join(shlex.quote(git_log_safe_arg(part)) for part in command)
+
+
+def log_worker_git_event(phase: str, event: str, *, command: list[str] | None = None, detail: object = "") -> None:
+    parts = [f"pullwise_worker git {event}", f"phase={phase}"]
+    if command is not None:
+        parts.append(f"command={git_log_command(command)}")
+    if detail:
+        parts.append(f"detail={git_log_safe_arg(detail)}")
+    print(" ".join(parts), file=sys.stderr, flush=True)
+
+
 def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | None = None) -> None:
+    timeout_seconds = env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600)
+    log_worker_git_event(phase, "start", command=command, detail=f"timeout={timeout_seconds}s")
     try:
         subprocess.run(
             command,
@@ -1004,13 +1036,17 @@ def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | Non
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600),
+            timeout=timeout_seconds,
             env=env,
         )
+        log_worker_git_event(phase, "done", command=command)
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"git {phase} timed out after {env_int('PULLWISE_GIT_TIMEOUT_SECONDS', 600)}s") from exc
+        log_worker_git_event(phase, "timeout", command=command, detail=f"timeout={timeout_seconds}s")
+        raise RuntimeError(f"git {phase} timed out after {timeout_seconds}s") from exc
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(git_error_message(phase, exc)) from exc
+        message = git_error_message(phase, exc)
+        log_worker_git_event(phase, "failed", command=command, detail=message)
+        raise RuntimeError(message) from exc
 
 
 def git_error_message(phase: str, exc: subprocess.CalledProcessError) -> str:

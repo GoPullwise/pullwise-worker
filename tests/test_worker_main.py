@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import hashlib
 import subprocess
@@ -181,6 +182,86 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 commands,
             )
             self.assertNotIn(["git", "clone", str(source), str(first_checkout)], commands)
+
+    def test_git_logging_redacts_url_credentials(self) -> None:
+        self.assertEqual(
+            worker_main.git_log_safe_arg("https://user:secret@example.com/owner/repo.git?token=ignored"),
+            "https://example.com/owner/repo.git",
+        )
+        self.assertNotIn(
+            "secret",
+            worker_main.git_log_safe_arg("fatal: https://user:secret@example.com/owner/repo.git failed"),
+        )
+        self.assertNotIn(
+            "token=ignored",
+            worker_main.git_log_safe_arg("fatal: https://user:secret@example.com/owner/repo.git?token=ignored failed"),
+        )
+        command = worker_main.git_log_command(
+            ["git", "remote", "set-url", "origin", "https://x-access-token:ghs_secret@example.com/owner/repo.git"]
+        )
+        self.assertNotIn("ghs_secret", command)
+        self.assertIn("https://example.com/owner/repo.git", command)
+
+    def test_worker_logs_dry_run_prints_journal_and_scan_summary_commands(self) -> None:
+        config = SimpleNamespace(
+            service_name="pullwise-worker-wk_1",
+            log_dir=Path("/var/log/pullwise-worker/wk_1"),
+        )
+        output = io.StringIO()
+
+        with patch("sys.stdout", output):
+            code = worker_main.worker_logs(config, lines=5, dry_run=True)
+
+        self.assertEqual(code, 0)
+        text = output.getvalue()
+        self.assertIn("journalctl -u pullwise-worker-wk_1 -n 5 --no-pager", text)
+        self.assertIn("tail -n 5", text)
+        self.assertIn("pullwise-worker", text)
+        self.assertIn("scan-summary.log", text)
+
+    def test_lifecycle_watcher_uploads_active_log_session_lines(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def log_stream_lines(self, session_id, lines):
+                self.calls.append((session_id, lines))
+                return {"ok": True, "accepted": True}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            summary = log_dir / "scan-summary.log"
+            summary.write_text("old summary\n", encoding="utf-8")
+            config = SimpleNamespace(
+                worker_id="wk_1",
+                worker_token="pwk_test",
+                server_url="https://api.example.com",
+                service_name="pullwise-worker-wk_1",
+                log_dir=log_dir,
+            )
+            watcher = worker_main.WorkerLifecycleWatcher(config)
+            watcher.client = FakeClient()
+            session = {"id": "log_1", "created_at": 1781200000}
+
+            with patch.object(
+                worker_main.WorkerJournalLogTailer,
+                "collect",
+                side_effect=[
+                    ([{"source": "worker", "stream": "journal", "timestamp": 1781200001, "line": "journal line"}], "cursor-1"),
+                    ([], "cursor-1"),
+                ],
+            ):
+                watcher.handle_log_session(session)
+                summary.write_text("old summary\nnew summary\n", encoding="utf-8")
+                watcher.handle_log_session(session)
+
+            self.assertEqual(watcher.client.calls[0][0], "log_1")
+            self.assertEqual(watcher.client.calls[0][1][0]["line"], "journal line")
+            self.assertEqual(watcher.client.calls[1][1][0]["stream"], "scan-summary")
+            self.assertEqual(watcher.client.calls[1][1][0]["line"], "new summary")
+            self.assertEqual(watcher.log_tailers["log_1"].journal.cursor, "cursor-1")
 
     def test_graph_verified_review_is_the_only_review_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
