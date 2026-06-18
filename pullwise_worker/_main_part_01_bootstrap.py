@@ -116,6 +116,29 @@ _DEPENDENCY_INSTALL_DISABLED_VALUES = {"0", "false", "no", "off"}
 _ENV_FALSE_VALUES = {"", "0", "false", "no", "off"}
 
 
+def looks_like_codex_auth_failure(output: object) -> bool:
+    text = str(output or "")
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker.lower() in lowered for marker in _CODEX_AUTH_FAILURE_MARKERS)
+
+
+def mark_codex_auth_failure(config: object, detail: object) -> None:
+    global _codex_auth_failure_until, _codex_auth_failure_detail
+    cooldown = max(0, int(getattr(config, "codex_auth_failure_cooldown_seconds", 0) or 0))
+    with _CODEX_AUTH_FAILURE_LOCK:
+        _codex_auth_failure_until = time.time() + cooldown if cooldown else 0.0
+        _codex_auth_failure_detail = str(detail or "")[:500]
+
+
+def clear_codex_auth_failure() -> None:
+    global _codex_auth_failure_until, _codex_auth_failure_detail
+    with _CODEX_AUTH_FAILURE_LOCK:
+        _codex_auth_failure_until = 0.0
+        _codex_auth_failure_detail = ""
+
+
 def auto_install_dependencies_enabled() -> bool:
     value = os.environ.get("PULLWISE_WORKER_AUTO_INSTALL_DEPS")
     return value is None or value.strip().lower() not in _DEPENDENCY_INSTALL_DISABLED_VALUES

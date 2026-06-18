@@ -393,7 +393,15 @@ class Worker:
         current = time.time()
         if current - self._readiness_checked_at < self.config.readiness_check_seconds:
             return self._doctor_status == "ok"
-        checks, _provider_ready, ready_providers = worker_readiness_state(self.config)
+        try:
+            checks, _provider_ready, ready_providers = worker_readiness_state(self.config)
+        except Exception as exc:
+            self._codex_ready = False
+            self._ready_providers = []
+            self._doctor_status = "degraded"
+            self._readiness_checked_at = current
+            self.last_error = f"worker not ready: readiness check failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return False
         failed_check = first_failed_check(checks)
         if (
             failed_check is not None
