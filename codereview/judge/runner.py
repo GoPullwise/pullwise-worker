@@ -7,7 +7,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_exec
 from ..config import ReviewConfig
 from ..utils.paths import safe_path_component
-from .validate import local_judge
+from .validate import local_judge, validate_judge_result
 
 
 def run_judges_parallel(run: Path, candidates: list[dict], repro_results: list[dict], checkout: Path, config: ReviewConfig) -> list[dict]:
@@ -61,6 +61,9 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
     try:
         parsed = json.loads(output.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
+        return local
+    violations = validate_judge_result(parsed, expected_candidate_id=str(local.get("candidate_id") or ""))
+    if violations:
         return local
     if parsed.get("safe_to_show_user") is True and parsed.get("status") == "confirmed":
         return parsed

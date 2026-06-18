@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..codex_runner import run_codex_exec
 from ..config import CodexConfig, ReviewConfig
+from ..judge.validate import validate_repro_result
 from ..utils.paths import safe_path_component
 from ..utils.process import run_process
 from .filesystem_guard import guard_worker_result
@@ -26,7 +27,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     worker = run / "workers" / issue_id
     checkout_status_before = git_status_porcelain(
         checkout,
-        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/", ".codereview/codegraph-index/"),
+        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/"),
     )
     create_worker_dir(checkout, worker, candidate)
     copy_slice_context(run, worker, candidate)
@@ -45,30 +46,19 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     if process.returncode != 0:
         checkout_status_after = git_status_porcelain(
             checkout,
-            ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/", ".codereview/codegraph-index/"),
+            ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/"),
         )
         violations: list[str] = []
         if checkout_status_after != checkout_status_before:
             violations.append("original checkout changed during repro worker execution")
+        failure = process_failure_reason("repro codex exec", process)
         return {
             "candidate_id": issue_id,
             "worker": str(worker),
             "process": process.to_dict(),
-            "result": {
-                "candidate_id": issue_id,
-                "status": "blocked",
-                "level": "L0",
-                "summary": process_failure_reason("repro codex exec", process),
-                "commands_run": [],
-                "files_written": [],
-                "proof": {},
-                "graph_path_exercised": False,
-                "why_valid": "",
-                "why_not_reproduced": process_failure_reason("repro codex exec", process),
-                "safety_notes": "",
-            },
+            "result": blocked_repro_result(issue_id, failure),
             "status": "blocked",
-            "blocked_reason": process_failure_reason("repro codex exec", process),
+            "blocked_reason": failure,
             "filesystem_violations": violations,
             "checkout_status_before": checkout_status_before,
             "checkout_status_after": checkout_status_after,
@@ -78,37 +68,13 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         try:
             parsed = json.loads(output.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            parsed = {
-                "candidate_id": issue_id,
-                "status": "blocked",
-                "level": "L0",
-                "summary": f"repro produced invalid JSON: {exc}",
-                "commands_run": [],
-                "files_written": [],
-                "proof": {},
-                "graph_path_exercised": False,
-                "why_valid": "",
-                "why_not_reproduced": f"repro produced invalid JSON: {exc}",
-                "safety_notes": "",
-            }
+            parsed = blocked_repro_result(issue_id, f"repro produced invalid JSON: {exc}")
     else:
-        parsed = {
-            "candidate_id": issue_id,
-            "status": "blocked",
-            "level": "L0",
-            "summary": "repro did not produce an output file",
-            "commands_run": [],
-            "files_written": [],
-            "proof": {},
-            "graph_path_exercised": False,
-            "why_valid": "",
-            "why_not_reproduced": "repro did not produce an output file",
-            "safety_notes": "",
-        }
-    violations = guard_worker_result(worker, parsed)
+        parsed = blocked_repro_result(issue_id, "repro did not produce an output file")
+    violations = [*guard_worker_result(worker, parsed), *validate_repro_result(parsed, expected_candidate_id=issue_id)]
     checkout_status_after = git_status_porcelain(
         checkout,
-        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/", ".codereview/codegraph-index/"),
+        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/"),
     )
     if checkout_status_after != checkout_status_before:
         violations.append("original checkout changed during repro worker execution")
@@ -152,6 +118,22 @@ def worker_env(worker: Path, codex: CodexConfig | None = None) -> dict[str, str]
     env["PYTHONPYCACHEPREFIX"] = str(worker / "cache" / "pycache")
     env.pop("CODEGRAPH_DIR", None)
     return env
+
+
+def blocked_repro_result(issue_id: str, reason: str) -> dict:
+    return {
+        "candidate_id": issue_id,
+        "status": "blocked",
+        "level": "L0",
+        "summary": reason,
+        "commands_run": [],
+        "files_written": [],
+        "proof": {"type": "none", "expected": "", "actual": "", "log_excerpt": ""},
+        "graph_path_exercised": False,
+        "why_valid": "",
+        "why_not_reproduced": reason,
+        "safety_notes": "",
+    }
 
 
 def git_status_porcelain(path: Path, ignore_prefixes: tuple[str, ...] = ()) -> list[str]:

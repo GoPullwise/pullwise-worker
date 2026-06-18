@@ -248,7 +248,7 @@ def finder_prompt(focus: str) -> str:
 
 Hard gates:
 - No graph evidence, no candidate.
-- Use CodeGraph MCP tools when available; the supplied CodeGraph context pack is the fallback/audit trail.
+- Use CodeGraph MCP tools when available; the supplied CodeGraph context pack is review input and audit evidence.
 - Every candidate must be tied to CodeGraph evidence from MCP tools or the supplied context pack.
 - Every candidate must include file/line evidence, trigger condition, expected behavior, actual behavior hypothesis, and a local minimal repro idea.
 - Do not report style concerns or speculative risks.

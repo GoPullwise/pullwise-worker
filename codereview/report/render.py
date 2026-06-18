@@ -16,18 +16,21 @@ def collect_confirmed(candidates: list[dict], repro_results: list[dict], judge_r
 
 def collect_rejected(candidates: list[dict], repro_results: list[dict], judge_results: list[dict]) -> list[dict]:
     confirmed_ids = {str(item.get("candidate_id") or "") for item in judge_results if item.get("status") == "confirmed"}
-    rejected = []
+    rejected_by_id: dict[str, str] = {}
+    for judge in judge_results:
+        if judge.get("status") == "confirmed":
+            continue
+        candidate_id = str(judge.get("candidate_id") or "")
+        if candidate_id:
+            rejected_by_id[candidate_id] = str(judge.get("reason") or "not confirmed by judge")
     for candidate in candidates:
         issue_id = str(candidate.get("issue_id") or "")
-        if issue_id not in confirmed_ids:
-            rejected.append({"candidate_id": issue_id, "reason": "not confirmed by judge"})
-    for judge in judge_results:
-        if judge.get("status") != "confirmed":
-            rejected.append({"candidate_id": judge.get("candidate_id"), "reason": judge.get("reason")})
-    return rejected
+        if issue_id and issue_id not in confirmed_ids and issue_id not in rejected_by_id:
+            rejected_by_id[issue_id] = "not confirmed by judge"
+    return [{"candidate_id": candidate_id, "reason": reason} for candidate_id, reason in rejected_by_id.items()]
 
 
-def render_final_report(confirmed: list[dict], rejected: list[dict], *, base_ref: str, head_ref: str, run_id: str, mode: str) -> str:
+def render_final_report(confirmed: list[dict], rejected: list[dict], *, blocked: int = 0, base_ref: str, head_ref: str, run_id: str, mode: str) -> str:
     lines = [
         "# Graph-Verified Code Review Report",
         "",
@@ -38,7 +41,7 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, base_ref
         "",
         f"Confirmed findings: {len(confirmed)}",
         f"Rejected candidates: {len(rejected)}",
-        "Blocked candidates: 0",
+        f"Blocked candidates: {blocked}",
         "",
         "---",
         "",

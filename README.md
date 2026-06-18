@@ -56,7 +56,7 @@ Required environment:
 - `PULLWISE_MAX_LOG_BYTES` optional, defaults to `1073741824` (1 GiB)
 - `PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES` optional, defaults to `10485760` (10 MiB)
 
-Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old verifier logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
+Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old run logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
 Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. Review provider/model policy comes from the server-side subscription plan `agentConfig`; executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
 
@@ -117,9 +117,8 @@ watcher service per worker instance; the watcher polls lifecycle commands,
 stops the paired worker service, writes an uninstall marker, reports command
 status, and removes the service unit, watcher unit, wrapper binary, logrotate
 file, `/etc` configuration directory, instance home, and instance log directory.
-Older units without the watcher may rely on the running worker or the legacy
-finalizer path, which is less reliable when the worker is already stopped or
-degraded.
+Units installed before watcher rollout may rely on the running worker for
+cleanup, which is less reliable when the worker is already stopped or degraded.
 `pullwise-worker uninstall` first unregisters the worker from the server when
 `PULLWISE_WORKER_TOKEN` is configured, then removes the local service. A stopped
 worker stays in the registry; an uninstalled worker is removed from admin lists.

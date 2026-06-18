@@ -43,5 +43,5 @@ def create_worker_dir(checkout: Path, worker: Path, candidate: dict) -> Path:
 def _copytree_ignore(directory: str, names: list[str]) -> set[str]:
     ignored = {".git", ".codegraph", "node_modules", ".venv", "__pycache__"} & set(names)
     if Path(directory).name == ".codereview":
-        ignored.update({"runs", "codegraph-index"} & set(names))
+        ignored.update({"runs"} & set(names))
     return ignored

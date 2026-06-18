@@ -1,25 +1,36 @@
 from __future__ import annotations
 
-import hashlib
 import re
+from pathlib import Path
 
 from ..utils.paths import safe_path_component, safe_relative_path
 
 
 REQUIRED_FIELDS = {
-    "claim",
-    "severity",
+    "candidate_id",
+    "dedupe_key",
     "category",
+    "severity",
+    "confidence",
+    "claim",
     "graph_evidence",
     "evidence",
     "trigger_condition",
     "expected_behavior",
     "actual_behavior_hypothesis",
     "minimal_repro_idea",
+    "repro_likelihood",
 }
+OPTIONAL_FIELDS = {"affected_tests", "needs_network", "notes"}
+ALLOWED_FIELDS = REQUIRED_FIELDS | OPTIONAL_FIELDS
+DERIVED_FIELDS = {"issue_id", "source_task", "title", "code_evidence", "valid", "invalid_reasons", "score"}
+CATEGORIES = {"correctness", "security_auth_dataflow", "api_contract", "state_concurrency_resource", "test_repro"}
+SEVERITIES = {"critical", "high", "medium", "low"}
+CONFIDENCES = {"high", "medium", "low"}
+REPRO_LIKELIHOODS = {"high", "medium", "low"}
 
 
-def normalize_candidates(raw_candidates: list[dict]) -> list[dict]:
+def normalize_candidates(raw_candidates: list[dict], checkout: Path | None = None, run: Path | None = None) -> list[dict]:
     normalized = []
     for raw in raw_candidates:
         result = raw.get("result") if isinstance(raw, dict) else {}
@@ -29,87 +40,152 @@ def normalize_candidates(raw_candidates: list[dict]) -> list[dict]:
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
-            clean = canonical_candidate(candidate, raw.get("task") if isinstance(raw.get("task"), dict) else {})
-            clean["valid"] = candidate_has_required_evidence(clean)
+            clean = canonical_candidate(
+                candidate,
+                raw.get("task") if isinstance(raw.get("task"), dict) else {},
+                checkout=checkout,
+                run=run,
+            )
             normalized.append(clean)
     return normalized
 
 
-def canonical_candidate(candidate: dict, source_task: dict | None = None) -> dict:
+def canonical_candidate(
+    candidate: dict,
+    source_task: dict | None = None,
+    *,
+    checkout: Path | None = None,
+    run: Path | None = None,
+) -> dict:
     clean = dict(candidate)
-    generated_id = _candidate_id(clean)
-    raw_id = clean.get("candidate_id") or generated_id
-    issue_id = safe_path_component(raw_id, default=generated_id)
-    clean["candidate_id"] = issue_id
-    clean["issue_id"] = issue_id
+    candidate_id = str(clean.get("candidate_id") or "").strip()
+    clean["issue_id"] = candidate_id if _is_safe_issue_id(candidate_id) else ""
     clean["source_task"] = source_task or {}
-    clean["severity"] = str(clean.get("severity") or "medium").lower()
-    clean["category"] = normalize_category(clean.get("category"))
-    clean["confidence"] = str(clean.get("confidence") or "medium").lower()
-    clean["repro_likelihood"] = str(clean.get("repro_likelihood") or "medium").lower()
-
     claim = str(clean.get("claim") or "").strip()
     clean["claim"] = claim
-    clean["title"] = claim[:96] or issue_id
+    clean["title"] = claim[:96] or candidate_id
 
     evidence = clean.get("evidence")
-    clean["evidence"] = evidence
     clean["code_evidence"] = evidence_to_code_evidence(evidence)
-    clean["dedupe_key"] = str(clean.get("dedupe_key") or _canonical_dedupe_key(clean))
+    invalid_reasons = validate_candidate(clean, checkout=checkout, run=run)
+    clean["valid"] = not invalid_reasons
+    clean["invalid_reasons"] = invalid_reasons
     return clean
 
 
-def normalize_category(value: object) -> str:
-    text = str(value or "correctness").strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "correctness": "correctness",
-        "security": "security_auth_dataflow",
-        "security_auth": "security_auth_dataflow",
-        "security_auth_dataflow": "security_auth_dataflow",
-        "api": "api_contract",
-        "api_contract": "api_contract",
-        "state": "state_concurrency_resource",
-        "concurrency": "state_concurrency_resource",
-        "resource": "state_concurrency_resource",
-        "state_concurrency_resource": "state_concurrency_resource",
-        "test": "test_repro",
-        "test_repro": "test_repro",
-    }
-    return aliases.get(text, text or "correctness")
+def validate_candidate(candidate: dict, *, checkout: Path | None = None, run: Path | None = None) -> list[str]:
+    reasons: list[str] = []
+    missing = [field for field in sorted(REQUIRED_FIELDS) if not _present(candidate.get(field))]
+    if missing:
+        reasons.append(f"missing required fields: {', '.join(missing)}")
+
+    unexpected = sorted(set(candidate) - ALLOWED_FIELDS - DERIVED_FIELDS)
+    if unexpected:
+        reasons.append(f"unexpected fields: {', '.join(unexpected)}")
+
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    if candidate_id and not _is_safe_issue_id(candidate_id):
+        reasons.append("candidate_id must be a safe path component")
+
+    _validate_enum(candidate, "category", CATEGORIES, reasons)
+    _validate_enum(candidate, "severity", SEVERITIES, reasons)
+    _validate_enum(candidate, "confidence", CONFIDENCES, reasons)
+    _validate_enum(candidate, "repro_likelihood", REPRO_LIKELIHOODS, reasons)
+
+    graph_reasons = validate_graph_evidence(candidate.get("graph_evidence"), checkout=checkout, run=run)
+    if graph_reasons:
+        reasons.extend(graph_reasons)
+
+    evidence_reasons = validate_code_evidence(candidate.get("evidence"), checkout=checkout)
+    if evidence_reasons:
+        reasons.extend(evidence_reasons)
+
+    for field in ("claim", "dedupe_key", "trigger_condition", "expected_behavior", "actual_behavior_hypothesis", "minimal_repro_idea"):
+        if field in candidate and not str(candidate.get(field) or "").strip():
+            reasons.append(f"{field} must be non-empty")
+    return reasons
 
 
 def candidate_has_required_evidence(candidate: dict) -> bool:
-    if not all(candidate.get(field) for field in REQUIRED_FIELDS):
-        return False
-    return valid_graph_evidence(candidate.get("graph_evidence")) and valid_code_evidence(candidate.get("evidence"))
+    return not validate_candidate(candidate)
 
 
 def valid_graph_evidence(value: object) -> bool:
+    return not validate_graph_evidence(value)
+
+
+def validate_graph_evidence(value: object, *, checkout: Path | None = None, run: Path | None = None) -> list[str]:
+    reasons: list[str] = []
     if not isinstance(value, dict):
-        return False
+        return ["graph_evidence must be an object"]
+    unexpected = sorted(set(value) - {"slice_id", "codegraph_files", "path_summary"})
+    if unexpected:
+        reasons.append(f"graph_evidence has unexpected fields: {', '.join(unexpected)}")
     slice_id = str(value.get("slice_id") or "").strip()
     codegraph_files = value.get("codegraph_files")
     path_summary = value.get("path_summary")
     if not slice_id or not isinstance(codegraph_files, list) or not isinstance(path_summary, list):
-        return False
-    has_file = any(str(item or "").strip() for item in codegraph_files)
-    has_path = any(str(item or "").strip() for item in path_summary)
-    return has_file and has_path
+        reasons.append("graph_evidence requires slice_id, codegraph_files, and path_summary")
+    if run is not None and slice_id and not _slice_exists(run, slice_id):
+        reasons.append(f"graph_evidence.slice_id does not exist under run/slices: {slice_id}")
+    if not isinstance(codegraph_files, list) or not codegraph_files:
+        reasons.append("graph_evidence.codegraph_files must be a non-empty list")
+    elif not any(str(item or "").strip() for item in codegraph_files):
+        reasons.append("graph_evidence.codegraph_files must contain at least one file")
+    else:
+        for item in codegraph_files:
+            rel = _safe_source_path(item)
+            if not rel:
+                reasons.append(f"graph_evidence.codegraph_files contains an unsafe path: {item}")
+                continue
+            if checkout is not None and not (checkout / rel).is_file():
+                reasons.append(f"graph_evidence.codegraph_files file does not exist: {rel}")
+    if not isinstance(path_summary, list) or not path_summary or not any(str(item or "").strip() for item in path_summary):
+        reasons.append("graph_evidence.path_summary must be a non-empty list")
+    return reasons
 
 
 def valid_code_evidence(value: object) -> bool:
+    return not validate_code_evidence(value)
+
+
+def validate_code_evidence(value: object, *, checkout: Path | None = None) -> list[str]:
+    reasons: list[str] = []
     if not isinstance(value, list) or not value:
-        return False
-    for item in value:
+        return ["evidence must be a non-empty list"]
+    has_valid_location = False
+    for index, item in enumerate(value):
         if not isinstance(item, dict):
+            reasons.append(f"evidence[{index}] must be an object")
             continue
-        file_path = safe_relative_path(item.get("file") or item.get("path"))
+        unexpected = sorted(set(item) - {"file", "lines", "why_it_matters"})
+        if unexpected:
+            reasons.append(f"evidence[{index}] has unexpected fields: {', '.join(unexpected)}")
+        file_path = safe_relative_path(item.get("file"))
         if not file_path:
+            reasons.append(f"evidence[{index}].file must be a safe checkout-relative path")
             continue
-        start = _line_start(item)
+        if checkout is not None and not (checkout / file_path).is_file():
+            reasons.append(f"evidence[{index}].file does not exist: {file_path}")
+            continue
+        line_range = _line_range(item.get("lines"))
+        if line_range is None:
+            reasons.append(f"evidence[{index}].lines must be a positive line or line range")
+            continue
+        start, end = line_range
+        if checkout is not None and (checkout / file_path).is_file():
+            line_count = _line_count(checkout / file_path)
+            if end > line_count:
+                reasons.append(f"evidence[{index}].lines exceed file length: {file_path}")
+                continue
+        if not str(item.get("why_it_matters") or "").strip():
+            reasons.append(f"evidence[{index}].why_it_matters must be non-empty")
+            continue
         if start > 0:
-            return True
-    return False
+            has_valid_location = True
+    if not has_valid_location:
+        reasons.append("evidence must contain at least one valid file/line location")
+    return reasons
 
 
 def evidence_to_code_evidence(value: object) -> list[str]:
@@ -117,47 +193,64 @@ def evidence_to_code_evidence(value: object) -> list[str]:
         return []
     rendered = []
     for item in value:
-        if isinstance(item, str):
-            rendered.append(item)
-            continue
         if not isinstance(item, dict):
             continue
-        file_path = safe_relative_path(item.get("file") or item.get("path"))
+        file_path = safe_relative_path(item.get("file"))
         lines = str(item.get("lines") or "").strip()
         if file_path:
             rendered.append(f"{file_path}:{lines}" if lines else file_path)
     return rendered
 
 
-def _line_start(item: dict) -> int:
-    raw = item.get("startLine") or item.get("start_line") or item.get("line") or item.get("lines") or 0
-    if isinstance(raw, str):
-        match = re.search(r"\d+", raw)
-        raw = match.group(0) if match else "0"
+def _present(value: object) -> bool:
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return bool(str(value or "").strip())
+
+
+def _validate_enum(candidate: dict, field: str, allowed: set[str], reasons: list[str]) -> None:
+    value = str(candidate.get(field) or "").strip()
+    if value and value not in allowed:
+        reasons.append(f"{field} must be one of: {', '.join(sorted(allowed))}")
+
+
+def _is_safe_issue_id(value: str) -> bool:
+    return bool(value) and safe_path_component(value, default="") == value
+
+
+def _safe_source_path(value: object) -> str:
+    rel = safe_relative_path(value)
+    if not rel:
+        return ""
+    blocked_prefixes = (".codereview/", ".codegraph/", "node_modules/", ".venv/", "venv/")
+    if rel in {".codereview", ".codegraph", "node_modules", ".venv", "venv"} or rel.startswith(blocked_prefixes):
+        return ""
+    return rel
+
+
+def _line_range(value: object) -> tuple[int, int] | None:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", text)
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2) or match.group(1))
+    if start <= 0 or end < start:
+        return None
+    return start, end
+
+
+def _line_count(path: Path) -> int:
     try:
-        return int(raw)
-    except (TypeError, ValueError):
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
         return 0
 
 
-def _candidate_id(candidate: dict) -> str:
-    key = "|".join(str(candidate.get(field) or "") for field in ("dedupe_key", "claim", "severity", "category"))
-    return "issue_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
-
-
-def _canonical_dedupe_key(candidate: dict) -> str:
-    source = candidate.get("source_task") if isinstance(candidate.get("source_task"), dict) else {}
-    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
-    first_file = ""
-    if evidence and isinstance(evidence[0], dict):
-        first_file = str(evidence[0].get("file") or "")
-    return "|".join(
-        str(part or "")
-        for part in (
-            candidate.get("category"),
-            source.get("slice_id"),
-            first_file,
-            candidate.get("trigger_condition"),
-            candidate.get("expected_behavior"),
-        )
-    )
+def _slice_exists(run: Path, slice_id: str) -> bool:
+    safe_id = safe_path_component(slice_id, default="")
+    if safe_id != slice_id:
+        return False
+    slices = run / "slices"
+    return (slices / f"{slice_id}.json").is_file() or (slices / f"{slice_id}.context.md").is_file()

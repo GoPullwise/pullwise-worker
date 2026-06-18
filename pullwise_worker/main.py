@@ -5,7 +5,7 @@ from pathlib import Path as _Path
 _PART_FILES = (
     "_main_part_01_bootstrap.py",
     "_main_part_02_worker_checkout.py",
-    "_main_part_03_preflight_verifier.py",
+    "_main_part_03_preflight.py",
     "_main_part_04_graph_verified_review.py",
     "_main_part_07_readiness_doctor.py",
     "_main_part_08_lifecycle_cleanup.py",

@@ -60,7 +60,7 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
     raw_candidates = run_finders_parallel(checkout, run, finder_tasks, config)
     write_jsonl(run / "candidates" / "raw.jsonl", raw_candidates)
 
-    normalized = normalize_candidates(raw_candidates)
+    normalized = normalize_candidates(raw_candidates, checkout=checkout, run=run)
     deduped = dedupe_candidates(normalized)
     scored = score_candidates(deduped)
     selected = select_for_repro(scored, config)
@@ -98,7 +98,15 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
     write_json(run / "reports" / "summary.json", pipeline_summary)
     (run / "reports").mkdir(parents=True, exist_ok=True)
     (run / "reports" / "final.md").write_text(
-        render_final_report(confirmed, rejected, base_ref=base_ref, head_ref=head_ref, run_id=run_id, mode=config.mode),
+        render_final_report(
+            confirmed,
+            rejected,
+            blocked=pipeline_summary["reports"]["blocked"],
+            base_ref=base_ref,
+            head_ref=head_ref,
+            run_id=run_id,
+            mode=config.mode,
+        ),
         encoding="utf-8",
     )
     (run / "reports" / "debug.md").write_text(

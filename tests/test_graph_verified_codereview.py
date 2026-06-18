@@ -79,7 +79,13 @@ def test_init_writes_required_codereview_assets(tmp_path: Path) -> None:
     assert (tmp_path / ".codereview" / "prompts" / "repro_worker.md").is_file()
 
 
-def test_candidate_pipeline_requires_graph_and_repro_evidence() -> None:
+def test_candidate_pipeline_requires_graph_and_repro_evidence(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    (checkout / "src").mkdir(parents=True)
+    (checkout / "src" / "app.py").write_text("\n".join(f"line {index}" for index in range(1, 30)), encoding="utf-8")
+    (run / "slices").mkdir(parents=True)
+    (run / "slices" / "slice_1.context.md").write_text("context", encoding="utf-8")
     raw = [
         {
             "task": {"slice_id": "slice_1", "focus": "correctness"},
@@ -161,11 +167,11 @@ def test_candidate_pipeline_requires_graph_and_repro_evidence() -> None:
                     },
                     {
                         "candidate_id": "issue_4",
-                        "dedupe_key": "correctness|slice_1|legacy-graph-evidence",
+                        "dedupe_key": "correctness|slice_1|invalid-graph-evidence-shape",
                         "severity": "high",
                         "category": "correctness",
                         "confidence": "high",
-                        "claim": "Legacy graph evidence shape",
+                        "claim": "Invalid graph evidence shape",
                         "graph_evidence": ["entrypoint -> sink"],
                         "evidence": [{"file": "src/app.py", "lines": "12", "why_it_matters": "changed path"}],
                         "trigger_condition": "bad input",
@@ -180,11 +186,12 @@ def test_candidate_pipeline_requires_graph_and_repro_evidence() -> None:
         }
     ]
 
-    normalized = normalize_candidates(raw)
+    normalized = normalize_candidates(raw, checkout=checkout, run=run)
     selected = select_for_repro(normalized, ReviewConfig())
 
-    assert [item["issue_id"] for item in normalized if item["valid"]] == ["issue_1", "issue_new"]
-    assert [item["issue_id"] for item in selected] == ["issue_1", "issue_new"]
+    assert [item["issue_id"] for item in normalized if item["valid"]] == ["issue_1"]
+    assert [item["issue_id"] for item in selected] == ["issue_1"]
+    assert any("candidate_id must be a safe path component" in "; ".join(item["invalid_reasons"]) for item in normalized)
     assert all(".." not in item["issue_id"] and "/" not in item["issue_id"] for item in normalized)
 
 
@@ -265,6 +272,7 @@ def test_judge_and_report_are_confirmed_only(tmp_path: Path) -> None:
         "candidate_id": "issue_1",
         "worker": str(worker),
         "result": {
+            "candidate_id": "issue_1",
             "status": "reproduced",
             "level": "L2",
             "summary": "observable failure",
@@ -303,6 +311,7 @@ def test_judge_rejects_network_or_destructive_repro_command(tmp_path: Path) -> N
         "candidate_id": "issue_1",
         "worker": str(worker),
         "result": {
+            "candidate_id": "issue_1",
             "status": "reproduced",
             "level": "L2",
             "summary": "failure",
@@ -362,12 +371,17 @@ Path(out).write_text(json.dumps(payload), encoding="utf-8")
         "candidate_id": "issue_1",
         "worker": str(worker),
         "result": {
+            "candidate_id": "issue_1",
             "status": "reproduced",
             "level": "L2",
+            "summary": "failure",
             "commands_run": [{"cmd": "python repro.py", "cwd": str(worker), "exit_code": 1, "log_path": "logs/missing.log"}],
-            "proof": {"actual": "failure", "log_excerpt": "failure"},
+            "proof": {"type": "runtime_output", "expected": "safe", "actual": "failure", "log_excerpt": "failure"},
             "graph_path_exercised": True,
             "files_written": [],
+            "why_valid": "ran command",
+            "why_not_reproduced": "",
+            "safety_notes": "",
         },
         "filesystem_violations": ["log path missing: logs/missing.log"],
     }
@@ -425,7 +439,7 @@ def test_repro_worker_env_shares_codex_config_but_keeps_runtime_dirs(tmp_path: P
         "XDG_CACHE_HOME": str(tmp_path / "worker-home" / ".cache"),
         "XDG_DATA_HOME": str(tmp_path / "worker-home" / ".local" / "share"),
         "PATH": str(tmp_path / "worker-home" / ".codex" / "bin"),
-        "CODEGRAPH_DIR": "legacy-index",
+        "CODEGRAPH_DIR": "unexpected-shared-index",
     }
 
     env = worker_env(worker, config.codex)
@@ -448,7 +462,7 @@ def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None
         "HOME": str(tmp_path / "home"),
         "CODEX_HOME": str(tmp_path / "home" / ".codex"),
         "PATH": str(tmp_path / "home" / ".local" / "bin"),
-        "CODEGRAPH_DIR": "legacy-index",
+        "CODEGRAPH_DIR": "unexpected-shared-index",
     }
 
     env = base_env(tmp_path, config.codex)
@@ -489,7 +503,11 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
             }
         ],
     )
-    monkeypatch.setattr(codereview_main, "write_slices", lambda slices_dir, slices: slices_dir.mkdir(parents=True, exist_ok=True))
+    def fake_write_slices(slices_dir: Path, slices: list[dict]) -> None:
+        slices_dir.mkdir(parents=True, exist_ok=True)
+        (slices_dir / "slice_1.context.md").write_text("context", encoding="utf-8")
+
+    monkeypatch.setattr(codereview_main, "write_slices", fake_write_slices)
     monkeypatch.setattr(codereview_main, "plan_finder_tasks", lambda slices: [object()])
     monkeypatch.setattr(
         codereview_main,
@@ -537,6 +555,7 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
                 "candidate_id": "issue_1",
                 "worker": str(run / "workers" / "issue_1"),
                 "result": {
+                    "candidate_id": "issue_1",
                     "status": "reproduced",
                     "level": "L2",
                     "summary": "AttributeError",
@@ -646,21 +665,28 @@ for index, arg in enumerate(args):
     if arg == "--output-schema" and index + 1 < len(args):
         schema = args[index + 1]
 schema_name = Path(schema).name
+prompt = args[-1] if args else ""
+slice_id = "slice_1"
+if schema_name == "finder_result.schema.json" and out:
+    slice_id = Path(out).name.split(".result", 1)[0]
+for line in prompt.splitlines():
+    if line.startswith("# Context Pack: "):
+        slice_id = line.split(":", 1)[1].strip()
 payload = {}
 if schema_name == "finder_result.schema.json":
     payload = {
-        "slice_id": "slice_1",
+        "slice_id": slice_id,
         "focus": "correctness",
         "candidates": [
             {
                 "candidate_id": "issue_cli_1",
-                "dedupe_key": "correctness|slice_1|app.py|none-input",
+                "dedupe_key": f"correctness|{slice_id}|app.py|none-input",
                 "severity": "high",
                 "category": "correctness",
                 "confidence": "high",
                 "claim": "CLI confirmed bug",
                 "graph_evidence": {
-                    "slice_id": "slice_1",
+                    "slice_id": slice_id,
                     "codegraph_files": ["app.py"],
                     "path_summary": ["handle"],
                 },

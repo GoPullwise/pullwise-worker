@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Loaded by main.py; keep definitions in that module's globals for compatibility.
+# Loaded by main.py; definitions are executed in that module's globals.
 
 def service_action(
     action: str,

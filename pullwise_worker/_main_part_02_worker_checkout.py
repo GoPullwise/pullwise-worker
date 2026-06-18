@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Loaded by main.py; keep definitions in that module's globals for compatibility.
+# Loaded by main.py; definitions are executed in that module's globals.
 
 AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
@@ -121,31 +121,6 @@ def graph_verified_summary_findings(report: dict) -> list[dict]:
 def graph_verified_severity(value: object) -> str:
     text = clean_protocol_text(value).lower()
     return text if text in {"critical", "high", "medium", "low", "info"} else "info"
-
-
-def graph_verified_report_count(report: dict, key: str) -> int:
-    try:
-        return max(0, int(report.get(key) or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def graph_verified_completion_payload(report: dict, *, result_status: str) -> dict:
-    if not report:
-        return {
-            "status": "failed",
-            "summary": "GraphVerified review did not produce a report.",
-            "blockers": ["missing_graph_verified_report"],
-        }
-    status = "ok" if result_status == "done" else "failed"
-    return {
-        "status": status,
-        "summary": "GraphVerified report produced.",
-        "confirmedCount": graph_verified_report_count(report, "confirmedCount"),
-        "rejectedCount": graph_verified_report_count(report, "rejectedCount"),
-        "blockedCount": graph_verified_report_count(report, "blockedCount"),
-        "runId": clean_protocol_text(report.get("runId")),
-    }
 
 
 def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
@@ -421,37 +396,14 @@ class Worker:
         started = time.monotonic()
         duration_ms = 0
         job_error = ""
-        current_stage = "clone"
         resolved_commit = ""
         preflight: dict = {}
         graph_verified_report: dict = {}
-        candidate_count = 0
-        rejected_reasons: dict[str, int] = {}
         review_execution: dict = {}
         logs_summary = ""
-        job_trace_checkpoints: list[dict] = []
-
-        def current_job_trace(result_status: str = "running", next_retry_hint: str = "") -> dict:
-            return job_trace_payload(
-                result_status=result_status,
-                checkpoints=job_trace_checkpoints,
-                candidate_count_before_filter=candidate_count,
-                rejected_reasons=rejected_reasons,
-                next_retry_hint=next_retry_hint,
-            )
 
         def scan_summary_review_execution() -> dict:
             return review_execution if isinstance(review_execution, dict) else {}
-
-        def completion_error_detail(base_error: str) -> str:
-            parts = [protocol_multiline_text(base_error) or "Worker completion audit failed."]
-            timing_summary = codex_review_execution_summary(review_execution)
-            if timing_summary:
-                parts.append(timing_summary)
-            log_excerpt = protocol_multiline_text(logs_summary)
-            if log_excerpt:
-                parts.append(f"logs: {log_excerpt[-500:]}")
-            return redact_secrets("; ".join(part for part in parts if part), job_config)[:1200]
 
         try:
             job_config = worker_config_for_job(self.config, job)
@@ -467,21 +419,13 @@ class Worker:
             resolved_commit = clone_repository(job, checkout_dir)
             job["resolved_commit"] = resolved_commit
             job["commit"] = resolved_commit
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "clone",
-                    summary="Repository cloned.",
-                    details={"commit": resolved_commit[:12], "repo": job.get("repo")},
-                )
-            )
             self.client.progress(
                 job_id,
                 "clone",
                 PHASE_PROGRESS["clone"],
                 "Repository cloned",
             )
-            current_stage = "preflight"
-            limit_preflight = enforce_repository_limits(job_config, job, checkout_dir)
+            enforce_repository_limits(job_config, job, checkout_dir)
             self.client.progress(
                 job_id,
                 "index",
@@ -489,77 +433,26 @@ class Worker:
                 "Repository ready",
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "preflight",
-                    summary=protocol_multiline_text(preflight.get("summary")) or "Repository preflight collected.",
-                    details={
-                        "mode": preflight.get("mode"),
-                        "execution": preflight.get("execution"),
-                        "languages": preflight.get("languages"),
-                        "packageManagers": preflight.get("packageManagers"),
-                        "repositoryStats": limit_preflight.get("repositoryStats"),
-                    },
-                )
-            )
             self.client.progress(
                 job_id,
                 "index",
                 PHASE_PROGRESS["index"],
                 "Repository preflight ready",
             )
-            current_stage = "graph"
             graph_summary = "GraphVerified will build graph slices during review."
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "graph",
-                    summary=graph_summary,
-                    details={"source": "codereview-slices"},
-                )
-            )
             self.client.progress(
                 job_id,
                 "index",
                 PHASE_PROGRESS["index"],
                 graph_summary,
             )
-            current_stage = "verifier"
-            try:
-                verifier, verifier_findings, verifier_logs = run_verifier_commands(job_config, job, checkout_dir, preflight)
-            except Exception as exc:
-                verifier = {
-                    "enabled": job_config.verifier_enabled,
-                    "summary": f"Verifier failed before completing: {redact_secrets(str(exc), job_config)}"[:500],
-                    "runs": [],
-                }
-                verifier_findings = []
-                verifier_logs = verifier["summary"]
-            preflight["verifier"] = verifier
-            verifier_runs = verifier.get("runs") if isinstance(verifier.get("runs"), list) else []
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "verifier",
-                    status="warning" if protocol_multiline_text(verifier.get("summary")).startswith("Verifier failed") else "ok",
-                    summary=protocol_multiline_text(verifier.get("summary")) or "Verifier stage completed.",
-                    counts={"runs": len(verifier_runs), "findings": len(verifier_findings)},
-                    details={"enabled": verifier.get("enabled") is True},
-                    logs_summary=verifier_logs,
-                )
-            )
-            if verifier.get("enabled") and verifier.get("runs"):
-                preflight["execution"] = "allowlisted_verifier_scripts"
-                preflight["summary"] = (
-                    "Static preflight captured repository metadata, then the verifier executed allowlisted "
-                    "setup and project check commands with bounded timeouts and logs."
-                )
             self.client.progress(
                 job_id,
                 "ai",
                 PHASE_PROGRESS["ai"],
                 "Running GraphVerified review",
-                verifier_logs,
+                protocol_multiline_text(preflight.get("summary")),
             )
-            current_stage = "graph_verified"
             graph_verified_report = run_graph_verified_review_payload(
                 job_config,
                 job,
@@ -569,46 +462,8 @@ class Worker:
             projected_findings = graph_verified_summary_findings(graph_verified_report)
             summary = summarize(projected_findings)
             logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "graph_verified",
-                    status="warning" if graph_verified_report.get("blockedCount") else "ok",
-                    summary="GraphVerified confirmed-only review completed.",
-                    counts={
-                        "confirmed": graph_verified_report.get("confirmedCount"),
-                        "rejected": graph_verified_report.get("rejectedCount"),
-                        "blocked": graph_verified_report.get("blockedCount"),
-                    },
-                    details={
-                        "runId": graph_verified_report.get("runId"),
-                        "mode": graph_verified_report.get("mode"),
-                        "source": "confirmed-only-report",
-                    },
-                    logs_summary=logs_summary,
-                )
-            )
             effective_agent_config = configured_agent
             ai_usage = normalize_ai_usage({})
-            candidate_count = len(projected_findings)
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "agent",
-                    summary=(
-                        "GraphVerified confirmed-only report normalized."
-                    ),
-                    counts={
-                        "confirmed": graph_verified_report.get("confirmedCount"),
-                        "rejected": graph_verified_report.get("rejectedCount"),
-                        "blocked": graph_verified_report.get("blockedCount"),
-                        "candidateCount": candidate_count,
-                    },
-                    details={
-                        "provider": "graph-verified",
-                        "model": ai_usage.get("model"),
-                    },
-                    logs_summary=logs_summary,
-                )
-            )
             self.client.progress(
                 job_id,
                 "ai",
@@ -616,74 +471,22 @@ class Worker:
                 "GraphVerified review complete",
                 logs_summary,
             )
-            current_stage = "filter"
-            rejected_reasons = {}
             summary = summarize(projected_findings)
-            if verifier_logs:
-                logs_summary = "\n".join([verifier_logs, logs_summary])[-1000:]
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "filter",
-                    summary="GraphVerified confirmed-only report accepted for reporting.",
-                    counts={
-                        "candidateCountBeforeFilter": candidate_count,
-                        "confirmed": graph_verified_report.get("confirmedCount"),
-                        "rejected": graph_verified_report.get("rejectedCount"),
-                        "blocked": graph_verified_report.get("blockedCount"),
-                    },
-                    details={
-                        "rejectionReasons": [
-                            {"reason": reason, "count": count}
-                            for reason, count in sorted(rejected_reasons.items())
-                            if count > 0
-                        ]
-                    },
-                )
-            )
             duration_ms = int((time.monotonic() - started) * 1000)
-            current_stage = "report"
-            completion_audit = graph_verified_completion_payload(graph_verified_report, result_status="done")
             result_status = "done"
             completion_error = ""
-            if (
-                graph_verified_report.get("blockedCount")
-                and not graph_verified_report.get("runId")
-            ):
+            if not graph_verified_report:
+                result_status = "failed"
+                completion_error = "GraphVerified review did not produce a report."
+            elif graph_verified_report.get("blockedCount") and not graph_verified_report.get("runId"):
                 result_status = "failed"
                 completion_error = (
                     protocol_multiline_text(graph_verified_report.get("debugMarkdown"))
                     or "GraphVerified review failed before producing a run report."
                 )
-            completion_blockers = completion_audit.get("blockers") if isinstance(completion_audit.get("blockers"), list) else []
-            completion_blocker_text = "; ".join(protocol_multiline_text(item) for item in completion_blockers if protocol_multiline_text(item))
-            if completion_blocker_text:
-                completion_error = completion_error_detail(completion_blocker_text)
             result_summary = summary
             if result_status == "failed":
                 result_summary = summarize([])
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    "report",
-                    status=(
-                        "failed"
-                        if completion_audit.get("status") == "failed"
-                        else "warning" if completion_audit.get("status") == "warning" else "ok"
-                    ),
-                    summary=completion_audit.get("summary") or "Worker result payload is ready.",
-                    counts={
-                        "confirmed": graph_verified_report.get("confirmedCount"),
-                        "rejected": graph_verified_report.get("rejectedCount"),
-                        "blocked": graph_verified_report.get("blockedCount"),
-                    },
-                )
-            )
-            job_trace = job_trace_payload(
-                result_status=result_status,
-                checkpoints=job_trace_checkpoints,
-                candidate_count_before_filter=candidate_count,
-                rejected_reasons=rejected_reasons,
-                next_retry_hint=completion_audit.get("retryReason") if completion_audit.get("retryRecommended") else "",
-            )
             payload = {
                 "status": result_status,
                 "commit": resolved_commit,
@@ -696,9 +499,9 @@ class Worker:
                 "graphVerifiedReport": graph_verified_report,
             }
             if result_status == "failed":
-                payload["error"] = completion_error or "Worker completion audit failed."
-                payload["error_code"] = "COMPLETION_AUDIT_FAILED"
-                payload["errorCode"] = "COMPLETION_AUDIT_FAILED"
+                payload["error"] = completion_error or "GraphVerified completion gate failed."
+                payload["error_code"] = "GRAPH_VERIFIED_COMPLETION_FAILED"
+                payload["errorCode"] = "GRAPH_VERIFIED_COMPLETION_FAILED"
             if ai_usage:
                 payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
@@ -762,14 +565,6 @@ class Worker:
                 "debugMarkdown": f"Graph-verified review failed before confirmation: {error}",
                 "finalJson": {"confirmed": []},
             }
-            job_trace_checkpoints.append(
-                job_trace_checkpoint(
-                    current_stage,
-                    status="failed",
-                    summary=error,
-                    details={"errorCode": error_code},
-                )
-            )
             error_payload = {
                 "status": "failed",
                 "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
@@ -1056,22 +851,6 @@ def git_auth_env(clone_token: object, clone_url: object = None, repo: object = N
 _README_PACKAGE_SCRIPT_RE = re.compile(r"\b(npm|pnpm|yarn|bun)\s+run\s+([A-Za-z0-9:_-]+)\b")
 _HIGH_SIGNAL_PACKAGE_SCRIPTS = {"dev", "start", "build", "test"}
 _PACKAGE_SCRIPT_NAMES = ["dev", "start", "build", "test", "lint", "typecheck", "check"]
-_VERIFIER_DEFAULT_SCRIPTS = ["build", "test", "lint", "typecheck", "check"]
-_VERIFIER_DISABLED_VALUES = {"", "0", "false", "no", "off"}
-_VERIFIER_MAX_OUTPUT_CHARS = 4000
-_VERIFIER_OUTPUT_WITHHELD = "Verifier stdout/stderr is withheld from API responses and audit bundles."
-_VERIFIER_ENV_PASSTHROUGH_KEYS = (
-    "PATH",
-    "Path",
-    "SystemRoot",
-    "WINDIR",
-    "COMSPEC",
-    "ComSpec",
-    "PATHEXT",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-)
 _VERIFICATION_STATUSES = {"verified", "static_proof", "potential_risk", "unverified"}
 _LOCKFILE_PACKAGE_MANAGERS = {
     "bun.lock": "bun",

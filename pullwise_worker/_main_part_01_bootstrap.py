@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Loaded by main.py; keep definitions in that module's globals for compatibility.
+# Loaded by main.py; definitions are executed in that module's globals.
 
 import argparse
 import base64
@@ -47,10 +47,8 @@ _DEFAULT_MAX_REPO_FILES = 2000
 _DEFAULT_MAX_REPO_BYTES = 50 * 1024 * 1024
 _MIN_NODE_MAJOR = 20
 _CODEX_SKIP_GIT_REPO_CHECK_ARG = "--skip-git-repo-check"
-_VERIFIER_HOME_DIR_NAME = ".verifier-home"
-_VERIFIER_TMP_DIR_NAME = ".verifier-tmp"
 _CHECKOUT_ROOT_SENTINEL_NAME = ".pullwise-checkout-root"
-_CHECKOUT_RUNTIME_DIR_NAMES = {_VERIFIER_HOME_DIR_NAME, _VERIFIER_TMP_DIR_NAME}
+_CHECKOUT_RUNTIME_DIR_NAMES: set[str] = set()
 _PROC_MEMINFO_PATH = "/proc/meminfo"
 DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 WORKER_HTTP_TIMEOUT_SECONDS = 60
@@ -113,6 +111,7 @@ _UBUNTU_2204_DEPENDENCY_PACKAGES = {
     "logrotate": ("logrotate",),
 }
 _DEPENDENCY_INSTALL_DISABLED_VALUES = {"0", "false", "no", "off"}
+_ENV_FALSE_VALUES = {"", "0", "false", "no", "off"}
 
 
 def auto_install_dependencies_enabled() -> bool:
@@ -375,7 +374,7 @@ def env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
     if value is None:
         return default
-    return value.strip().lower() not in _VERIFIER_DISABLED_VALUES
+    return value.strip().lower() not in _ENV_FALSE_VALUES
 
 
 def env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -549,16 +548,6 @@ def worker_machine_metrics_payload(*, storage_path: str, timestamp: int | None =
     }
 
 
-def parse_verifier_scripts(value: str | None) -> list[str]:
-    raw_items = value.split(",") if value else _VERIFIER_DEFAULT_SCRIPTS
-    scripts = []
-    for item in raw_items:
-        script = item.strip()
-        if script in _PACKAGE_SCRIPT_NAMES and script not in scripts:
-            scripts.append(script)
-    return scripts or list(_VERIFIER_DEFAULT_SCRIPTS)
-
-
 def server_url_allowed(server_url: str, *, allow_insecure: bool = False) -> bool:
     parsed = urllib.parse.urlparse(server_url)
     if parsed.scheme == "https" and parsed.netloc:
@@ -667,13 +656,6 @@ class WorkerConfig:
         self.log_retention_seconds = max(0, int(os.environ.get("PULLWISE_LOG_RETENTION_SECONDS") or 14 * 24 * 60 * 60))
         self.max_log_bytes = max(1, int(os.environ.get("PULLWISE_MAX_LOG_BYTES") or 1024 * 1024 * 1024))
         self.scan_summary_log_max_bytes = max(1024, int(os.environ.get("PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES") or 10 * 1024 * 1024))
-        self.verifier_enabled = env_bool("PULLWISE_WORKER_VERIFIER_ENABLED", False)
-        self.verifier_install_deps = env_bool("PULLWISE_WORKER_VERIFIER_INSTALL_DEPS", True)
-        self.verifier_confirm_failures = env_bool("PULLWISE_WORKER_VERIFIER_CONFIRM_FAILURES", True)
-        self.verifier_host_execution_allowed = env_bool("PULLWISE_WORKER_VERIFIER_ALLOW_HOST_EXECUTION", False)
-        self.verifier_timeout_seconds = max(10, int(os.environ.get("PULLWISE_WORKER_VERIFIER_TIMEOUT_SECONDS") or 120))
-        self.verifier_max_commands = max(1, int(os.environ.get("PULLWISE_WORKER_VERIFIER_MAX_COMMANDS") or 5))
-        self.verifier_scripts = parse_verifier_scripts(os.environ.get("PULLWISE_WORKER_VERIFIER_SCRIPTS"))
         if require_worker_token and not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 
