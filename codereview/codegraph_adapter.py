@@ -30,7 +30,6 @@ def _run_codegraph(checkout: Path, run: Path, config: CodeGraphConfig, args: lis
     write_json(run / "codegraph" / "raw" / f"{name}.json", result.to_dict())
     return result
 
-
 def preflight_codegraph(checkout: Path, run: Path, config: CodeGraphConfig) -> dict:
     codegraph_dir = checkout / ".codegraph"
     status = _run_codegraph(checkout, run, config, ["status", str(checkout)], "status")
@@ -99,17 +98,3 @@ def codegraph_symbol_context(checkout: Path, run: Path, config: CodeGraphConfig,
             parsed = {"text": process.stdout}
         result[command_name] = {"command": args, "process": process.to_dict(), "result": parsed}
     return result
-
-
-def codegraph_affected_tests(checkout: Path, run: Path, changed_files: list[str], config: CodeGraphConfig) -> list[dict]:
-    if not changed_files:
-        write_json(run / "codegraph" / "affected_tests.json", [])
-        return []
-    process = _run_codegraph(checkout, run, config, ["affected", *changed_files[:80], "--json"], "affected-tests")
-    try:
-        parsed = json.loads(process.stdout) if process.stdout.strip() else []
-    except json.JSONDecodeError:
-        parsed = {"text": process.stdout}
-    tests = [{"command": process.command, "result": parsed, "returncode": process.returncode}]
-    write_json(run / "codegraph" / "affected_tests.json", tests)
-    return tests

@@ -8,17 +8,34 @@ from ..config import ReviewConfig
 from .risk_tags import risk_tags_for_symbol
 
 
+_RISK_ORDER = [
+    "auth",
+    "authorization",
+    "public-entrypoint",
+    "db-write",
+    "transaction",
+    "cache",
+    "serialization",
+    "api-contract",
+    "filesystem",
+    "network",
+    "test-only",
+    "isolated-helper",
+]
+_RISK_RANK = {tag: index for index, tag in enumerate(_RISK_ORDER)}
+
+
 def build_slices_with_codegraph(
     *,
     checkout: Path,
     run: Path,
     rough_symbols: list[dict],
-    affected_tests: list[dict],
+    repository_tests: list[dict],
     config: ReviewConfig,
 ) -> list[dict]:
     slices = []
-    tests_by_file = {str(item.get("file") or ""): item for item in affected_tests}
-    for item in rough_symbols:
+    tests_by_file = {str(item.get("file") or ""): item for item in repository_tests}
+    for item in prioritize_rough_symbols(rough_symbols)[: config.max_slices]:
         file_path = str(item.get("file") or "")
         symbol = str(item.get("symbol") or "<module>")
         graph = codegraph_symbol_context(checkout, run, config.codegraph, symbol, file_path, f"slice-{len(slices)}")
@@ -30,34 +47,24 @@ def build_slices_with_codegraph(
                 "file": file_path,
                 "symbol": symbol,
                 "line": int(item.get("line") or 0),
-                "hunk": item.get("hunk") or {},
+                "span": item.get("span") or {},
                 "risk_tags": tags,
-                "affected_tests": [tests_by_file[file_path]] if file_path in tests_by_file else [],
+                "repository_tests": [tests_by_file[file_path]] if file_path in tests_by_file else [],
                 "codegraph": graph,
             }
         )
     return prioritize_slices(slices)[: config.max_slices]
 
 
+def prioritize_rough_symbols(rough_symbols: list[dict]) -> list[dict]:
+    return sorted(rough_symbols, key=_risk_key)
+
+
 def prioritize_slices(slices: list[dict]) -> list[dict]:
-    order = [
-        "auth",
-        "authorization",
-        "public-entrypoint",
-        "db-write",
-        "transaction",
-        "cache",
-        "serialization",
-        "api-contract",
-        "filesystem",
-        "network",
-        "test-only",
-        "isolated-helper",
-    ]
-    rank = {tag: index for index, tag in enumerate(order)}
+    return sorted(slices, key=_risk_key)
 
-    def key(item: dict) -> tuple[int, str]:
-        tags = item.get("risk_tags") if isinstance(item.get("risk_tags"), list) else []
-        return (min([rank.get(str(tag), 99) for tag in tags] or [99]), str(item.get("file") or ""))
 
-    return sorted(slices, key=key)
+def _risk_key(item: dict) -> tuple[int, str, int]:
+    tags = item.get("risk_tags") if isinstance(item.get("risk_tags"), list) else risk_tags_for_symbol(item)
+    line = int(item.get("line") or 0)
+    return (min([_RISK_RANK.get(str(tag), 99) for tag in tags] or [99]), str(item.get("file") or ""), line)

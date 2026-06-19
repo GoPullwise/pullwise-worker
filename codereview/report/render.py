@@ -30,11 +30,11 @@ def collect_rejected(candidates: list[dict], repro_results: list[dict], judge_re
     return [{"candidate_id": candidate_id, "reason": reason} for candidate_id, reason in rejected_by_id.items()]
 
 
-def render_final_report(confirmed: list[dict], rejected: list[dict], *, blocked: int = 0, base_ref: str, head_ref: str, run_id: str, mode: str) -> str:
+def render_final_report(confirmed: list[dict], rejected: list[dict], *, blocked: int = 0, head_ref: str, run_id: str, mode: str) -> str:
     lines = [
-        "# Graph-Verified Code Review Report",
+        "# Graph-Verified Repository Review Report",
         "",
-        f"Base: {base_ref}",
+        "Scope: repository",
         f"Head: {head_ref}",
         f"Run ID: {run_id}",
         f"Mode: {mode}",
@@ -124,7 +124,7 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, blocked:
 
 
 def render_debug_report(
-    diff: object,
+    snapshot: object,
     slices: list[dict],
     raw_candidates: list[dict],
     selected: list[dict],
@@ -139,7 +139,7 @@ def render_debug_report(
         "",
         "## Pipeline Stats",
         "",
-        f"- Changed files: {len(getattr(diff, 'changed_files', []) or [])}",
+        f"- Repository files: {len(getattr(snapshot, 'files', []) or [])}",
         f"- Slices: {len(slices)}",
         f"- Finder raw results: {len(raw_candidates)}",
         f"- Selected for repro: {len(selected)}",

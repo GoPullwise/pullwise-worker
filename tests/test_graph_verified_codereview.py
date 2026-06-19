@@ -20,11 +20,14 @@ from codereview.finder.runner import run_finder
 from codereview.finder.tasks import FinderTask
 from codereview.judge.validate import local_judge
 from codereview.judge.runner import run_judge
+from codereview.repository.snapshot import analyze_repository_snapshot
+from codereview.repository.symbols import map_repository_symbols
 from codereview.report.render import collect_confirmed, render_final_report
 from codereview.repro.runner import git_status_porcelain, worker_env
 from codereview.repro.worker_dir import create_worker_dir
 from codereview.repro.filesystem_guard import guard_worker_result
 from codereview.slicing.risk_tags import choose_finders
+from codereview.slicing import planner as slicing_planner
 from codereview.templates import ensure_project_files
 
 
@@ -76,6 +79,130 @@ def test_init_writes_required_codereview_assets(tmp_path: Path) -> None:
     assert (tmp_path / ".codereview" / "schemas" / "repro_result.schema.json").is_file()
     assert (tmp_path / ".codereview" / "schemas" / "judge_result.schema.json").is_file()
     assert (tmp_path / ".codereview" / "prompts" / "finder_correctness.md").is_file()
+
+
+def test_repository_snapshot_uses_head_tree_without_parent_commit(tmp_path: Path) -> None:
+    checkout = tmp_path
+    subprocess.run(["git", "init"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=checkout, check=True)
+    (checkout / "app.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    snapshot = analyze_repository_snapshot(checkout, head)
+
+    assert snapshot.files == ["app.py"]
+    assert snapshot.spans == [
+        {
+            "file": "app.py",
+            "start": 1,
+            "lines": 2,
+            "end": 2,
+            "kind": "repository",
+        }
+    ]
+
+
+def test_repository_snapshot_maps_all_file_symbols(tmp_path: Path) -> None:
+    checkout = tmp_path
+    (checkout / "app.py").write_text(
+        "\n".join(
+            [
+                "def first_handler():",
+                "    return 1",
+                "",
+                "class BillingWriter:",
+                "    pass",
+                "",
+                "def update_cache():",
+                "    return 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    snapshot = type(
+        "Snapshot",
+        (),
+        {
+            "spans": [
+                {
+                    "file": "app.py",
+                    "start": 1,
+                    "lines": 8,
+                    "end": 8,
+                    "kind": "repository",
+                }
+            ],
+        },
+    )()
+
+    symbols = map_repository_symbols(checkout, snapshot)
+
+    assert [(item["symbol"], item["line"]) for item in symbols] == [
+        ("first_handler", 1),
+        ("BillingWriter", 4),
+        ("update_cache", 7),
+    ]
+    assert all(item["span"]["kind"] == "repository" for item in symbols)
+    assert [item["span"]["start"] for item in symbols] == [1, 4, 7]
+
+
+def test_repository_slices_limit_before_codegraph(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    rough_symbols = [
+        {"file": f"src/file_{index}.py", "symbol": f"handler_{index}", "line": index + 1, "span": {"kind": "repository"}}
+        for index in range(30)
+    ]
+    calls = []
+
+    def fake_codegraph_symbol_context(checkout: Path, run: Path, config: object, symbol: str, file_path: str, name: str) -> dict:
+        calls.append((symbol, file_path, name))
+        return {}
+
+    monkeypatch.setattr(slicing_planner, "codegraph_symbol_context", fake_codegraph_symbol_context)
+
+    config = ReviewConfig(mode="fast")
+    slices = slicing_planner.build_slices_with_codegraph(
+        checkout=tmp_path,
+        run=tmp_path / "run",
+        rough_symbols=rough_symbols,
+        repository_tests=[],
+        config=config,
+    )
+
+    assert len(slices) == config.max_slices
+    assert len(calls) == config.max_slices
+
+
+def test_run_review_without_base_uses_repository_scope(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path
+    subprocess.run(["git", "init"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=checkout, check=True)
+    (checkout / "app.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    monkeypatch.setattr(codereview_main, "preflight_codegraph", lambda checkout, run, config: {"ok": True, "codegraph_dir": str(checkout / ".codegraph")})
+    monkeypatch.setattr(
+        codereview_main,
+        "build_slices_with_codegraph",
+        lambda **kwargs: [{"slice_id": "slice_repo", "file": "app.py", "symbol": "handler", "line": 1, "risk_tags": []}],
+    )
+    monkeypatch.setattr(codereview_main, "plan_finder_tasks", lambda slices: [])
+    monkeypatch.setattr(codereview_main, "run_finders_parallel", lambda checkout, run, finder_tasks, config: [])
+    monkeypatch.setattr(codereview_main, "run_repro_workers_parallel", lambda checkout, run, selected, config: [])
+    monkeypatch.setattr(codereview_main, "run_judges_parallel", lambda run, selected, repro_results, checkout, config: [])
+
+    final = codereview_main.run_review(checkout, head_ref=head, mode="fast")
+    run_dir = final.parent.parent
+
+    assert json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))["scope"] == "repository"
+    assert json.loads((run_dir / "repo_state.json").read_text(encoding="utf-8"))["scope"] == "repository"
+    assert json.loads((run_dir / "repository" / "files.json").read_text(encoding="utf-8")) == ["app.py"]
+    assert json.loads((run_dir / "reports" / "summary.json").read_text(encoding="utf-8"))["repository"]["files"] == 1
     assert (tmp_path / ".codereview" / "prompts" / "repro_worker.md").is_file()
 
 
@@ -103,7 +230,7 @@ def test_candidate_pipeline_requires_graph_and_repro_evidence(tmp_path: Path) ->
                             "codegraph_files": ["src/app.py"],
                             "path_summary": ["handler", "sink"],
                         },
-                        "evidence": [{"file": "src/app.py", "lines": "3-4", "why_it_matters": "changed path"}],
+                        "evidence": [{"file": "src/app.py", "lines": "3-4", "why_it_matters": "repository path"}],
                         "trigger_condition": "bad input",
                         "expected_behavior": "rejects input",
                         "actual_behavior_hypothesis": "accepts input",
@@ -123,7 +250,7 @@ def test_candidate_pipeline_requires_graph_and_repro_evidence(tmp_path: Path) ->
                             "codegraph_files": ["src/app.py"],
                             "path_summary": ["handler -> sink"],
                         },
-                        "evidence": [{"file": "src/app.py", "lines": "8-9", "why_it_matters": "changed path"}],
+                        "evidence": [{"file": "src/app.py", "lines": "8-9", "why_it_matters": "repository path"}],
                         "trigger_condition": "bad input",
                         "expected_behavior": "rejects input",
                         "actual_behavior_hypothesis": "accepts input",
@@ -173,7 +300,7 @@ def test_candidate_pipeline_requires_graph_and_repro_evidence(tmp_path: Path) ->
                         "confidence": "high",
                         "claim": "Invalid graph evidence shape",
                         "graph_evidence": ["entrypoint -> sink"],
-                        "evidence": [{"file": "src/app.py", "lines": "12", "why_it_matters": "changed path"}],
+                        "evidence": [{"file": "src/app.py", "lines": "12", "why_it_matters": "repository path"}],
                         "trigger_condition": "bad input",
                         "expected_behavior": "rejects input",
                         "actual_behavior_hypothesis": "accepts input",
@@ -261,7 +388,7 @@ def test_judge_and_report_are_confirmed_only(tmp_path: Path) -> None:
             "codegraph_files": ["src/app.py"],
             "path_summary": ["entrypoint -> sink"],
         },
-        "evidence": [{"file": "src/app.py", "lines": "10-12", "why_it_matters": "changed path"}],
+        "evidence": [{"file": "src/app.py", "lines": "10-12", "why_it_matters": "repository path"}],
         "code_evidence": ["src/app.py:10-12"],
         "trigger_condition": "bad input",
         "expected_behavior": "reject",
@@ -294,7 +421,7 @@ def test_judge_and_report_are_confirmed_only(tmp_path: Path) -> None:
 
     judge = local_judge(candidate, repro)
     confirmed = collect_confirmed([candidate], [repro], [judge])
-    report = render_final_report(confirmed, [{"candidate_id": "issue_2"}], base_ref="origin/main", head_ref="HEAD", run_id="run", mode="standard")
+    report = render_final_report(confirmed, [{"candidate_id": "issue_2"}], head_ref="HEAD", run_id="run", mode="standard")
 
     assert judge["safe_to_show_user"] is True
     assert len(confirmed) == 1
@@ -586,16 +713,11 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
     subprocess.run(["git", "init"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=checkout, check=True)
-    (checkout / "app.py").write_text("def handle(value):\n    return value\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=checkout, check=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
     (checkout / "app.py").write_text("def handle(value):\n    return value.strip()\n", encoding="utf-8")
     subprocess.run(["git", "add", "app.py"], cwd=checkout, check=True)
     subprocess.run(["git", "commit", "-m", "head"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     monkeypatch.setattr(codereview_main, "preflight_codegraph", lambda checkout, run, config: {"ok": True})
-    monkeypatch.setattr(codereview_main, "codegraph_affected_tests", lambda checkout, run, changed_files, config: [])
     monkeypatch.setattr(
         codereview_main,
         "build_slices_with_codegraph",
@@ -636,7 +758,7 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
                                 "codegraph_files": ["app.py"],
                                 "path_summary": ["handle"],
                             },
-                            "evidence": [{"file": "app.py", "lines": "1-2", "why_it_matters": "changed behavior"}],
+                            "evidence": [{"file": "app.py", "lines": "1-2", "why_it_matters": "repository behavior"}],
                             "trigger_condition": "value is None",
                             "expected_behavior": "rejects None",
                             "actual_behavior_hypothesis": "raises AttributeError",
@@ -698,7 +820,7 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
         ],
     )
 
-    final = codereview_main.run_review(checkout, base_ref=base, head_ref="HEAD", mode="fast")
+    final = codereview_main.run_review(checkout, head_ref="HEAD", mode="fast")
     final_text = final.read_text(encoding="utf-8")
     confirmed = json.loads(final.with_name("confirmed.json").read_text(encoding="utf-8"))
     summary = json.loads(final.with_name("summary.json").read_text(encoding="utf-8"))
@@ -709,13 +831,14 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
     assert "Static only" not in final_text
     assert confirmed[0]["candidate"]["issue_id"] == "issue_1"
     assert summary["preflight"]["ok"] is True
+    assert summary["repository"]["files"] == 1
     assert summary["finder"]["candidates"] == 2
     assert summary["candidates"]["selectedForRepro"] == 1
     assert summary["judge"]["confirmed"] == 1
     assert "Pipeline Summary" in debug
 
 
-def test_run_review_non_empty_diff_uses_codegraph_codex_cli_pipeline(tmp_path: Path) -> None:
+def test_run_review_repository_uses_codegraph_codex_cli_pipeline(tmp_path: Path) -> None:
     tools = tmp_path / "tools"
     tools.mkdir()
     codegraph = write_fake_cli(
@@ -736,9 +859,6 @@ if not args:
 cmd = args[0]
 if cmd in {"status", "sync", "index", "init"}:
     print("ok")
-    sys.exit(0)
-if cmd == "affected":
-    print(json.dumps([{"file": "tests/test_app.py", "reason": "fake affected"}]))
     sys.exit(0)
 if cmd == "query":
     print(json.dumps([{"node": {"name": "handle", "filePath": "app.py", "startLine": 1}}]))
@@ -797,7 +917,7 @@ if schema_name == "finder_result.schema.json":
                     "codegraph_files": ["app.py"],
                     "path_summary": ["handle"],
                 },
-                "evidence": [{"file": "app.py", "lines": "1-2", "why_it_matters": "changed behavior"}],
+                "evidence": [{"file": "app.py", "lines": "1-2", "why_it_matters": "repository behavior"}],
                 "trigger_condition": "None input",
                 "expected_behavior": "reject None",
                 "actual_behavior_hypothesis": "raises AttributeError",
@@ -855,10 +975,6 @@ print(json.dumps({"ok": True, "schema": schema_name}))
     subprocess.run(["git", "init"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=checkout, check=True)
-    (checkout / "app.py").write_text("def handle(value):\n    return value\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=checkout, check=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
     (checkout / "app.py").write_text("def handle(value):\n    return value.strip()\n", encoding="utf-8")
     subprocess.run(["git", "add", "app.py"], cwd=checkout, check=True)
     subprocess.run(["git", "commit", "-m", "head"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -876,7 +992,7 @@ print(json.dumps({"ok": True, "schema": schema_name}))
         encoding="utf-8",
     )
 
-    final = codereview_main.run_review(checkout, base_ref=base, head_ref="HEAD", mode="fast")
+    final = codereview_main.run_review(checkout, head_ref="HEAD", mode="fast")
     final_text = final.read_text(encoding="utf-8")
     confirmed = json.loads(final.with_name("confirmed.json").read_text(encoding="utf-8"))
     summary = json.loads(final.with_name("summary.json").read_text(encoding="utf-8"))
@@ -885,6 +1001,7 @@ print(json.dumps({"ok": True, "schema": schema_name}))
     assert "CLI confirmed bug" in final_text
     assert confirmed[0]["judge"]["safe_to_show_user"] is True
     assert summary["preflight"]["codegraphDir"].endswith(".codegraph")
+    assert summary["repository"]["files"] == 1
     assert (final.parent.parent / "workers" / "issue_cli_1" / "logs" / "repro.log").is_file()
 
 

@@ -130,7 +130,7 @@ def finder_result_schema() -> dict:
                         "expected_behavior": {"type": "string"},
                         "actual_behavior_hypothesis": {"type": "string"},
                         "minimal_repro_idea": {"type": "string"},
-                        "affected_tests": {"type": "array", "items": {"type": "string"}},
+                        "repository_tests": {"type": "array", "items": {"type": "string"}},
                         "repro_likelihood": {"type": "string", "enum": ["high", "medium", "low"]},
                         "needs_network": {"type": "boolean"},
                         "notes": {"type": "string"},
@@ -275,7 +275,7 @@ Hard rules:
 - Write only inside ./repo, ./repro, ./logs, or ./result.json.
 - Do not modify the original checkout.
 - Do not use real credentials, production services, external APIs, or destructive operations.
-- Prefer existing tests, affected tests, local mocks, fixtures, and offline scripts.
+- Prefer existing tests, repository tests, local mocks, fixtures, and offline scripts.
 - Save full command output under ./logs.
 - Do not claim reproduced unless command output proves the candidate claim and exercises the graph path.
 - If no safe local reproduction is possible, return blocked, unsafe, ambiguous, harness_error, or not_reproduced.
@@ -290,7 +290,7 @@ Confirm only when:
 - The reproduction command actually ran.
 - Logs exist.
 - The observed output proves the candidate claim.
-- The repro exercises the graph path or affected behavior.
+- The repro exercises the graph path or repository behavior.
 - The failure is not caused by the generated test harness itself.
 - The worker obeyed filesystem boundaries.
 - The reproduction does not require real credentials, production services, or destructive operations.

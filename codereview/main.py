@@ -10,14 +10,14 @@ from .candidates.dedupe import dedupe_candidates
 from .candidates.normalize import normalize_candidates
 from .candidates.score import score_candidates
 from .candidates.select import select_for_repro
-from .codegraph_adapter import codegraph_affected_tests, preflight_codegraph
+from .codegraph_adapter import preflight_codegraph
 from .config import load_config
-from .diff.analyzer import analyze_git_diff
-from .diff.rough_symbols import map_rough_symbols
 from .finder.runner import run_finders_parallel
 from .finder.tasks import plan_finder_tasks
 from .judge.runner import run_judges_parallel
 from .repo import inspect_repo
+from .repository.snapshot import analyze_repository_snapshot
+from .repository.symbols import map_repository_symbols
 from .report.render import collect_confirmed, collect_rejected, render_debug_report, render_final_report
 from .repro.runner import run_repro_workers_parallel
 from .slicing.context_pack import write_slices
@@ -26,32 +26,31 @@ from .templates import ensure_project_files
 from .utils.jsonl import write_json, write_jsonl
 
 
-def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> Path:
+def run_review(checkout: Path, head_ref: str, mode: str = "") -> Path:
     checkout = checkout.resolve(strict=False)
     ensure_project_files(checkout)
     config = load_config(checkout, mode=mode)
     run_id = time.strftime("%Y%m%d-%H%M%S")
     run = checkout / ".codereview" / "runs" / run_id
     run.mkdir(parents=True, exist_ok=True)
-    write_json(run / "meta.json", {"run_id": run_id, "mode": config.mode, "base": base_ref, "head": head_ref})
+    write_json(run / "meta.json", {"run_id": run_id, "mode": config.mode, "scope": "repository", "head": head_ref})
 
-    repo_state = inspect_repo(checkout, base_ref, head_ref)
+    repo_state = inspect_repo(checkout, head_ref)
     write_json(run / "repo_state.json", repo_state)
     preflight = preflight_codegraph(checkout, run, config.codegraph)
 
-    diff = analyze_git_diff(checkout, base_ref, head_ref)
-    write_json(run / "diff" / "changed_files.json", diff.changed_files)
-    write_json(run / "diff" / "hunks.json", diff.hunks)
+    snapshot = analyze_repository_snapshot(checkout, head_ref)
+    write_json(run / "repository" / "files.json", snapshot.files)
+    write_json(run / "repository" / "spans.json", snapshot.spans)
 
-    rough_symbols = map_rough_symbols(checkout, diff)
-    write_json(run / "diff" / "rough_symbols.json", rough_symbols)
+    repository_symbols = map_repository_symbols(checkout, snapshot)
+    write_json(run / "repository" / "symbols.json", repository_symbols)
 
-    affected_tests = codegraph_affected_tests(checkout, run, diff.changed_files, config.codegraph)
     slices = build_slices_with_codegraph(
         checkout=checkout,
         run=run,
-        rough_symbols=rough_symbols,
-        affected_tests=affected_tests,
+        rough_symbols=repository_symbols,
+        repository_tests=[],
         config=config,
     )
     write_slices(run / "slices", slices)
@@ -79,7 +78,7 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
     rejected = collect_rejected(selected, repro_results, judge_results)
     pipeline_summary = build_pipeline_summary(
         preflight=preflight,
-        diff=diff,
+        snapshot=snapshot,
         slices=slices,
         finder_tasks=finder_tasks,
         raw_candidates=raw_candidates,
@@ -102,7 +101,6 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
             confirmed,
             rejected,
             blocked=pipeline_summary["reports"]["blocked"],
-            base_ref=base_ref,
             head_ref=head_ref,
             run_id=run_id,
             mode=config.mode,
@@ -110,7 +108,7 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
         encoding="utf-8",
     )
     (run / "reports" / "debug.md").write_text(
-        render_debug_report(diff, slices, raw_candidates, selected, repro_results, judge_results, pipeline_summary),
+        render_debug_report(snapshot, slices, raw_candidates, selected, repro_results, judge_results, pipeline_summary),
         encoding="utf-8",
     )
     return run / "reports" / "final.md"
@@ -119,7 +117,7 @@ def run_review(checkout: Path, base_ref: str, head_ref: str, mode: str = "") -> 
 def build_pipeline_summary(
     *,
     preflight: dict,
-    diff: object,
+    snapshot: object,
     slices: list[dict],
     finder_tasks: list[object],
     raw_candidates: list[dict],
@@ -146,9 +144,9 @@ def build_pipeline_summary(
             "ok": preflight.get("ok") is True,
             "codegraphDir": preflight.get("codegraph_dir"),
         },
-        "diff": {
-            "changedFiles": len(getattr(diff, "changed_files", []) or []),
-            "hunks": len(getattr(diff, "hunks", []) or []),
+        "repository": {
+            "files": len(getattr(snapshot, "files", []) or []),
+            "spans": len(getattr(snapshot, "spans", []) or []),
         },
         "slices": {
             "count": len(slices),
@@ -215,7 +213,6 @@ def main(argv: list[str] | None = None) -> int:
     init_parser.add_argument("--checkout", default=".")
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--checkout", default=".")
-    run_parser.add_argument("--base", required=True)
     run_parser.add_argument("--head", default="HEAD")
     run_parser.add_argument("--mode", choices=["fast", "standard", "deep"], default="")
     args = parser.parse_args(argv)
@@ -225,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         print(checkout / ".codereview")
         return 0
     try:
-        final = run_review(checkout, args.base, args.head, mode=args.mode)
+        final = run_review(checkout, args.head, mode=args.mode)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2

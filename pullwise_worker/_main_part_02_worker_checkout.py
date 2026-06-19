@@ -798,7 +798,7 @@ class Worker:
             graph_verified_report = graph_verified_report or {
                 "version": "graph-verified-code-review/1",
                 "mode": graph_mode,
-                "base": protocol_multiline_text(job.get("base_commit") or job.get("baseCommit")) or "",
+                "scope": "repository",
                 "head": resolved_commit or "HEAD",
                 "confirmedCount": 0,
                 "rejectedCount": 0,

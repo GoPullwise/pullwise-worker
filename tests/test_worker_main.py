@@ -479,12 +479,11 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             second_checkout = root / "checkout_2"
             first_checkout.mkdir()
             second_checkout.mkdir()
-            review_calls: list[tuple[Path, str]] = []
+            review_calls: list[tuple[Path, str, str]] = []
             codereview_main = importlib.import_module("codereview.main")
 
-            def fake_run_review(checkout_dir: Path, *, base_ref: str, head_ref: str, mode: str) -> Path:
-                del base_ref, head_ref
-                review_calls.append((Path(checkout_dir), mode))
+            def fake_run_review(checkout_dir: Path, *, head_ref: str, mode: str) -> Path:
+                review_calls.append((Path(checkout_dir), head_ref, mode))
                 reports = Path(checkout_dir) / ".codereview" / "runs" / f"run_{len(review_calls)}" / "reports"
                 reports.mkdir(parents=True, exist_ok=True)
                 final_md = reports / "final.md"
@@ -523,7 +522,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(install_run.call_count, 1)
             self.assertEqual(upsert_mcp.call_count, 1)
-            self.assertEqual(review_calls, [(first_checkout, "fast"), (second_checkout, "deep")])
+            self.assertEqual(review_calls, [(first_checkout, "HEAD", "fast"), (second_checkout, "HEAD", "deep")])
             self.assertEqual(first_payload["mode"], "fast")
             self.assertEqual(second_payload["mode"], "deep")
             first_config = json.loads((first_checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
@@ -641,7 +640,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             ):
                 payload = worker_main.run_graph_verified_review_payload(
                     cfg,
-                    {"base_commit": "origin/main", "agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
                     root,
                     "HEAD",
                 )
@@ -649,7 +648,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["version"], "graph-verified-code-review/1")
         self.assertEqual(payload["runId"], "run_1")
         self.assertEqual(payload["mode"], "fast")
-        self.assertEqual(payload["base"], "origin/main")
+        self.assertEqual(payload["scope"], "repository")
+        self.assertNotIn("base", payload)
         self.assertEqual(payload["confirmedCount"], 1)
         self.assertEqual(payload["rejectedCount"], 1)
         self.assertEqual(payload["blockedCount"], 2)
@@ -673,7 +673,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertEqual(payload["version"], "graph-verified-code-review/1")
         self.assertEqual(payload["mode"], "standard")
-        self.assertEqual(payload["base"], "abc123^")
+        self.assertEqual(payload["scope"], "repository")
+        self.assertNotIn("base", payload)
+        self.assertEqual(payload["head"], "abc123")
         self.assertEqual(payload["confirmedCount"], 0)
         self.assertEqual(payload["blockedCount"], 1)
         self.assertEqual(payload["finalJson"], {"confirmed": []})

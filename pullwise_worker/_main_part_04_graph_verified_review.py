@@ -88,19 +88,16 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
 
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
     graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
-    base_ref = graph_verified_text(job.get("base_commit") or job.get("baseCommit"))
-    if not base_ref:
-        base_ref = f"{head_ref}^"
     mode = graph_verified_mode(graph_config.get("mode") or "standard")
     try:
         ensure_graph_verified_codegraph_codex_mcp(config, checkout_dir, graph_config)
         write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
-        final_path = run_review(checkout_dir, base_ref=base_ref, head_ref=head_ref, mode=mode)
+        final_path = run_review(checkout_dir, head_ref=head_ref, mode=mode)
     except Exception as exc:
         return {
             "version": "graph-verified-code-review/1",
             "mode": mode,
-            "base": base_ref,
+            "scope": "repository",
             "head": head_ref,
             "confirmedCount": 0,
             "rejectedCount": 0,
@@ -123,7 +120,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "version": "graph-verified-code-review/1",
         "runId": run_id,
         "mode": mode,
-        "base": base_ref,
+        "scope": "repository",
         "head": head_ref,
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,

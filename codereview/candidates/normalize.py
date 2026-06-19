@@ -21,7 +21,7 @@ REQUIRED_FIELDS = {
     "minimal_repro_idea",
     "repro_likelihood",
 }
-OPTIONAL_FIELDS = {"affected_tests", "needs_network", "notes"}
+OPTIONAL_FIELDS = {"repository_tests", "needs_network", "notes"}
 ALLOWED_FIELDS = REQUIRED_FIELDS | OPTIONAL_FIELDS
 DERIVED_FIELDS = {"issue_id", "source_task", "title", "code_evidence", "valid", "invalid_reasons", "score"}
 CATEGORIES = {"correctness", "security_auth_dataflow", "api_contract", "state_concurrency_resource", "test_repro"}

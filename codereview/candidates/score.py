@@ -17,7 +17,7 @@ def score_candidates(candidates: list[dict], _scoring: object = None) -> list[di
         score += REPRO_SCORE.get(str(item.get("repro_likelihood") or "medium").lower(), 0)
         if item.get("valid"):
             score += 1
-        if item.get("affected_tests"):
+        if item.get("repository_tests"):
             score += 2
         tags = _risk_tags(item)
         if tags & ENTRYPOINT_TAGS:

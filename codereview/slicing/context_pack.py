@@ -15,14 +15,14 @@ def write_slices(slices_dir: Path, slices: list[dict]) -> None:
 
 def render_context_pack(item: dict) -> str:
     graph = item.get("codegraph") if isinstance(item.get("codegraph"), dict) else {}
-    hunk = item.get("hunk") if isinstance(item.get("hunk"), dict) else {}
+    span = item.get("span") if isinstance(item.get("span"), dict) else {}
     return "\n".join(
         [
             f"# Context Pack: {item.get('slice_id')}",
             "",
             f"File: `{item.get('file')}`",
             f"Symbol: `{item.get('symbol')}` at line {item.get('line')}",
-            f"Changed lines: {hunk.get('new_start')}..{hunk.get('new_end')}",
+            f"Repository span: {span.get('start')}..{span.get('end')}",
             f"Risk tags: {', '.join(item.get('risk_tags') or [])}",
             "",
             "## CodeGraph Evidence",
@@ -30,9 +30,9 @@ def render_context_pack(item: dict) -> str:
             _compact_json(graph),
             "```",
             "",
-            "## Affected Tests",
+            "## Repository Tests",
             "```json",
-            _compact_json(item.get("affected_tests") or []),
+            _compact_json(item.get("repository_tests") or []),
             "```",
         ]
     )
