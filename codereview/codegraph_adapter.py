@@ -13,6 +13,40 @@ class CodeGraphError(RuntimeError):
     pass
 
 
+def _compact_process_output(value: str, *, limit: int = 600) -> str:
+    text = " ".join(str(value or "").replace("\x00", "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _process_failure_detail(stage: str, result: ProcessResult) -> str:
+    parts = [f"{stage} exited {result.returncode}"]
+    if result.timed_out:
+        parts.append("timed out")
+    if result.stderr:
+        parts.append(f"stderr: {_compact_process_output(result.stderr)}")
+    elif result.stdout:
+        parts.append(f"stdout: {_compact_process_output(result.stdout)}")
+    else:
+        parts.append("no stdout/stderr")
+    return "; ".join(parts)
+
+
+def _preflight_failure_message(stage: str, result: ProcessResult, *, prior_status: ProcessResult | None = None) -> str:
+    message = f"CodeGraph preflight failed during {stage}: {_process_failure_detail(stage, result)}"
+    if prior_status is not None:
+        message += f"; prior {_process_failure_detail('status', prior_status)}"
+    return message
+
+
+def _status_requires_init(status: ProcessResult, codegraph_dir: Path) -> bool:
+    if status.returncode != 0:
+        return True
+    output = f"{status.stdout}\n{status.stderr}".lower()
+    return "not initialized" in output or not codegraph_dir.is_dir()
+
+
 def _codegraph_env(checkout: Path) -> dict[str, str]:
     del checkout
     env = os.environ.copy()
@@ -30,27 +64,35 @@ def _run_codegraph(checkout: Path, run: Path, config: CodeGraphConfig, args: lis
     write_json(run / "codegraph" / "raw" / f"{name}.json", result.to_dict())
     return result
 
+
 def preflight_codegraph(checkout: Path, run: Path, config: CodeGraphConfig) -> dict:
     codegraph_dir = checkout / ".codegraph"
     status = _run_codegraph(checkout, run, config, ["status", str(checkout)], "status")
-    if status.returncode != 0:
+    if _status_requires_init(status, codegraph_dir):
         init = _run_codegraph(checkout, run, config, ["init", str(checkout), "--index"], "init")
         if init.returncode != 0:
             write_json(
                 run / "codegraph" / "preflight.json",
                 {"ok": False, "status": status.to_dict(), "init": init.to_dict()},
             )
-            raise CodeGraphError("CodeGraph preflight failed")
+            raise CodeGraphError(_preflight_failure_message("init", init, prior_status=status))
         status = _run_codegraph(checkout, run, config, ["status", str(checkout)], "status-after-init")
     reindex = None
+    failures: list[tuple[str, ProcessResult]] = []
     if config.reindex:
         reindex = _run_codegraph(checkout, run, config, ["index", str(checkout), "--force"], "index-force")
+        if reindex.returncode != 0:
+            failures.append(("index-force", reindex))
         if reindex.returncode == 0:
             status = _run_codegraph(checkout, run, config, ["status", str(checkout)], "status-after-index")
     sync = None
     if config.optional_sync:
         sync = _run_codegraph(checkout, run, config, ["sync", str(checkout)], "sync")
+        if sync.returncode != 0:
+            failures.append(("sync", sync))
     ok = status.returncode == 0 and (reindex is None or reindex.returncode == 0) and (sync is None or sync.returncode == 0)
+    if status.returncode != 0:
+        failures.insert(0, ("status", status))
     payload = {
         "ok": ok,
         "status": status.to_dict(),
@@ -60,7 +102,8 @@ def preflight_codegraph(checkout: Path, run: Path, config: CodeGraphConfig) -> d
     }
     write_json(run / "codegraph" / "preflight.json", payload)
     if not ok:
-        raise CodeGraphError("CodeGraph preflight failed")
+        stage, result = failures[0] if failures else ("unknown", status)
+        raise CodeGraphError(_preflight_failure_message(stage, result))
     return payload
 
 

@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Optional
 
 codereview_main = importlib.import_module("codereview.main")
+from codereview.codegraph_adapter import CodeGraphError, preflight_codegraph
 from codereview.candidates.normalize import normalize_candidates
 from codereview.candidates.select import select_for_repro
 from codereview.codex_runner import base_env
-from codereview.config import ReviewConfig
+from codereview.config import CodeGraphConfig, ReviewConfig
 from codereview.finder.runner import run_finder
 from codereview.finder.tasks import FinderTask
 from codereview.judge.validate import local_judge
@@ -29,6 +30,7 @@ from codereview.repro.filesystem_guard import guard_worker_result
 from codereview.slicing.risk_tags import choose_finders
 from codereview.slicing import planner as slicing_planner
 from codereview.templates import ensure_project_files
+from codereview.utils.process import ProcessResult
 
 
 class _MonkeyPatch:
@@ -173,6 +175,144 @@ def test_repository_slices_limit_before_codegraph(tmp_path: Path, monkeypatch: _
 
     assert len(slices) == config.max_slices
     assert len(calls) == config.max_slices
+
+
+def test_codegraph_preflight_initializes_when_status_reports_not_initialized_with_zero_exit(
+    tmp_path: Path, monkeypatch: _MonkeyPatch
+) -> None:
+    import codereview.codegraph_adapter as codegraph_adapter
+
+    checkout = tmp_path / "repo"
+    run = tmp_path / "run"
+    checkout.mkdir()
+    calls: list[str] = []
+
+    def fake_run_codegraph(
+        checkout_arg: Path,
+        run_arg: Path,
+        config_arg: CodeGraphConfig,
+        args: list[str],
+        name: str,
+    ) -> ProcessResult:
+        del run_arg, config_arg
+        calls.append(name)
+        if name == "status":
+            return ProcessResult(
+                ["codegraph", *args],
+                str(checkout_arg),
+                0,
+                "Project: repo\nNot initialized\nRun \"codegraph init\" to initialize\n",
+                "",
+                10,
+            )
+        if name == "init":
+            (checkout_arg / ".codegraph").mkdir()
+            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "Indexed 1 files\n", "", 20)
+        if name == "status-after-init":
+            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "Index is up to date\n", "", 10)
+        if name == "sync":
+            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "Already up to date\n", "", 10)
+        raise AssertionError(f"unexpected codegraph call: {name}")
+
+    monkeypatch.setattr(codegraph_adapter, "_run_codegraph", fake_run_codegraph)
+
+    payload = preflight_codegraph(checkout, run, CodeGraphConfig(optional_sync=True))
+
+    assert calls == ["status", "init", "status-after-init", "sync"]
+    assert payload["ok"] is True
+    assert payload["status"]["stdout"] == "Index is up to date\n"
+    assert payload["sync"]["returncode"] == 0
+
+
+def test_codegraph_preflight_init_failure_includes_process_diagnostics(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    import codereview.codegraph_adapter as codegraph_adapter
+
+    checkout = tmp_path / "repo"
+    run = tmp_path / "run"
+    checkout.mkdir()
+
+    def fake_run_codegraph(
+        checkout_arg: Path,
+        run_arg: Path,
+        config_arg: CodeGraphConfig,
+        args: list[str],
+        name: str,
+    ) -> ProcessResult:
+        del run_arg, config_arg
+        if name == "status":
+            return ProcessResult(
+                ["codegraph", *args],
+                str(checkout_arg),
+                1,
+                "",
+                "not initialized\n",
+                12,
+            )
+        if name == "init":
+            return ProcessResult(
+                ["codegraph", *args],
+                str(checkout_arg),
+                2,
+                "",
+                "unknown option --index\nrun codegraph init -i\n",
+                34,
+            )
+        raise AssertionError(f"unexpected codegraph call: {name}")
+
+    monkeypatch.setattr(codegraph_adapter, "_run_codegraph", fake_run_codegraph)
+
+    try:
+        preflight_codegraph(checkout, run, CodeGraphConfig(optional_sync=False))
+        raise AssertionError("expected CodeGraphError")
+    except CodeGraphError as exc:
+        message = str(exc)
+
+    assert "CodeGraph preflight failed during init" in message
+    assert "init exited 2" in message
+    assert "stderr: unknown option --index run codegraph init -i" in message
+    assert "prior status exited 1" in message
+    payload = json.loads((run / "codegraph" / "preflight.json").read_text(encoding="utf-8"))
+    assert payload["init"]["returncode"] == 2
+    assert payload["status"]["stderr"] == "not initialized\n"
+
+
+def test_codegraph_preflight_sync_failure_includes_process_diagnostics(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    import codereview.codegraph_adapter as codegraph_adapter
+
+    checkout = tmp_path / "repo"
+    run = tmp_path / "run"
+    checkout.mkdir()
+    (checkout / ".codegraph").mkdir()
+
+    def fake_run_codegraph(
+        checkout_arg: Path,
+        run_arg: Path,
+        config_arg: CodeGraphConfig,
+        args: list[str],
+        name: str,
+    ) -> ProcessResult:
+        del run_arg, config_arg
+        if name == "status":
+            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "ready\n", "", 10)
+        if name == "sync":
+            return ProcessResult(["codegraph", *args], str(checkout_arg), 7, "", "database locked\n", 25, timed_out=True)
+        raise AssertionError(f"unexpected codegraph call: {name}")
+
+    monkeypatch.setattr(codegraph_adapter, "_run_codegraph", fake_run_codegraph)
+
+    try:
+        preflight_codegraph(checkout, run, CodeGraphConfig(optional_sync=True))
+        raise AssertionError("expected CodeGraphError")
+    except CodeGraphError as exc:
+        message = str(exc)
+
+    assert "CodeGraph preflight failed during sync" in message
+    assert "sync exited 7" in message
+    assert "timed out" in message
+    assert "stderr: database locked" in message
+    payload = json.loads((run / "codegraph" / "preflight.json").read_text(encoding="utf-8"))
+    assert payload["ok"] is False
+    assert payload["sync"]["returncode"] == 7
 
 
 def test_run_review_without_base_uses_repository_scope(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
