@@ -740,6 +740,144 @@ def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None
     assert "CODEGRAPH_DIR" not in env
 
 
+def test_codex_exec_places_approval_flag_before_exec_when_only_top_level_supports_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from codereview import codex_runner
+
+    captured = {}
+
+    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
+        del env, timeout, queue_wait_ms, kwargs
+        captured["command"] = command
+        return ProcessResult(command, str(cwd), 0, "{}", "", 1)
+
+    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    monkeypatch.setattr(
+        codex_runner,
+        "codex_cli_capabilities",
+        lambda command, env=None: codex_runner.CodexCliCapabilities(
+            frozenset({"--ask-for-approval"}),
+            frozenset(
+                {
+                    "--cd",
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "--output-schema",
+                    "--output-last-message",
+                    "--json",
+                    "--model",
+                    "--config",
+                }
+            ),
+        ),
+    )
+    config = ReviewConfig()
+    config.codex.command = "codex"
+    config.codex.model = "gpt-test"
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+
+    result = codex_runner.run_codex_exec(
+        cd=tmp_path,
+        prompt="review",
+        output_schema=schema,
+        output_file=tmp_path / "result.json",
+        sandbox="read-only",
+        timeout_seconds=30,
+        config=config.codex,
+    )
+
+    assert result.returncode == 0
+    command = captured["command"]
+    assert command[:4] == ["codex", "--ask-for-approval", "never", "exec"]
+    assert command.count("--ask-for-approval") == 1
+    assert command.index("--ask-for-approval") < command.index("exec")
+
+
+def test_codex_exec_omits_unsupported_optional_flags(tmp_path: Path, monkeypatch) -> None:
+    from codereview import codex_runner
+
+    captured = {}
+
+    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
+        del env, timeout, queue_wait_ms, kwargs
+        captured["command"] = command
+        return ProcessResult(command, str(cwd), 0, "{}", "", 1)
+
+    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    monkeypatch.setattr(
+        codex_runner,
+        "codex_cli_capabilities",
+        lambda command, env=None: codex_runner.CodexCliCapabilities(
+            frozenset(),
+            frozenset({"--sandbox", "--output-last-message"}),
+        ),
+    )
+    config = ReviewConfig()
+    config.codex.command = "codex"
+    config.codex.model = "gpt-test"
+    config.codex.reasoning_effort = "high"
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+
+    result = codex_runner.run_codex_exec(
+        cd=tmp_path,
+        prompt="review",
+        output_schema=schema,
+        output_file=tmp_path / "result.json",
+        sandbox="read-only",
+        timeout_seconds=30,
+        config=config.codex,
+    )
+
+    assert result.returncode == 0
+    command = captured["command"]
+    assert "--sandbox" in command
+    assert "--output-last-message" in command
+    assert "--ask-for-approval" not in command
+    assert "--output-schema" not in command
+    assert "--model" not in command
+    assert "--config" not in command
+    assert "--json" not in command
+    assert "--skip-git-repo-check" not in command
+
+
+def test_codex_exec_fails_fast_when_required_cli_flags_are_missing(tmp_path: Path, monkeypatch) -> None:
+    from codereview import codex_runner
+
+    def fail_run_process(*_args, **_kwargs):
+        raise AssertionError("run_process should not be called when required flags are missing")
+
+    monkeypatch.setattr(codex_runner, "run_process", fail_run_process)
+    monkeypatch.setattr(
+        codex_runner,
+        "codex_cli_capabilities",
+        lambda command, env=None: codex_runner.CodexCliCapabilities(
+            frozenset(),
+            frozenset({"--output-last-message"}),
+        ),
+    )
+    config = ReviewConfig()
+    config.codex.command = "codex"
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+
+    result = codex_runner.run_codex_exec(
+        cd=tmp_path,
+        prompt="review",
+        output_schema=schema,
+        output_file=tmp_path / "result.json",
+        sandbox="read-only",
+        timeout_seconds=30,
+        config=config.codex,
+    )
+
+    assert result.returncode == 2
+    assert "--sandbox" in result.stderr
+
+
 def test_codex_runner_serializes_codex_cli_processes(tmp_path: Path, monkeypatch) -> None:
     from codereview import codex_runner
     import threading
@@ -783,6 +921,25 @@ def test_codex_runner_serializes_codex_cli_processes(tmp_path: Path, monkeypatch
                 active -= 1
 
     monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    monkeypatch.setattr(
+        codex_runner,
+        "codex_cli_capabilities",
+        lambda command, env=None: codex_runner.CodexCliCapabilities(
+            frozenset({"--ask-for-approval"}),
+            frozenset(
+                {
+                    "--cd",
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "--output-schema",
+                    "--output-last-message",
+                    "--json",
+                    "--model",
+                    "--config",
+                }
+            ),
+        ),
+    )
     config = ReviewConfig()
     config.codex.command = "codex"
     schema = tmp_path / "schema.json"

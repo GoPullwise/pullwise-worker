@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import posixpath
 
+from codereview.codex_runner import build_codex_exec_command
+
 def result_checksum(payload: dict) -> str:
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
@@ -377,30 +379,30 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
             return False, scope_detail
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "codex-ready.json"
-            command = [
-                config.codex_command,
-                "--ask-for-approval",
-                "never",
-                "exec",
-                _CODEX_SKIP_GIT_REPO_CHECK_ARG,
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--ephemeral",
-                "--json",
-                "--output-last-message",
-                str(output_path),
-                "--config",
-                f'model_reasoning_effort="{config.codex_reasoning_effort}"',
-                "--sandbox",
-                "read-only",
-            ]
-            if config.codex_model:
-                command.extend(["--model", config.codex_model])
-            command.append('Return only JSON: {"ok": true}')
+            provider_env = provider_process_env(config)
+            command, command_error = build_codex_exec_command(
+                command=config.codex_command,
+                cd=Path(tmpdir),
+                prompt='Return only JSON: {"ok": true}',
+                output_file=output_path,
+                sandbox="read-only",
+                output_schema=None,
+                model=config.codex_model,
+                reasoning_effort=config.codex_reasoning_effort,
+                env=provider_env,
+                ask_for_approval="never",
+                skip_git_repo_check=True,
+                ignore_user_config=True,
+                ignore_rules=True,
+                ephemeral=True,
+                json_events=True,
+            )
+            if command_error:
+                return False, command_error
             try:
                 completed = subprocess.run(
                     command,
-                    env=provider_process_env(config),
+                    env=provider_env,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,

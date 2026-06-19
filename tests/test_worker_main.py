@@ -262,6 +262,93 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(summary_log.is_file())
             self.assertIn('"status": "done"', summary_log.read_text(encoding="utf-8"))
 
+    def test_run_job_marks_all_blocked_graph_verified_report_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_blocked",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_all_blocked",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+            blocked_report = {
+                "version": "graph-verified-code-review/1",
+                "runId": "20260619-115800",
+                "confirmedCount": 0,
+                "rejectedCount": 0,
+                "blockedCount": 99,
+                "debugMarkdown": "Finder blocked before producing candidates.",
+                "finalJson": {"confirmed": []},
+                "summary": {
+                    "finder": {
+                        "results": 99,
+                        "blocked": 99,
+                        "candidates": 0,
+                        "blockedItems": [
+                            {
+                                "reason": (
+                                    "finder codex exec failed with exit code 2: "
+                                    "error: unexpected argument '--ask-for-approval' found"
+                                )
+                            }
+                        ],
+                    },
+                    "candidates": {"valid": 0, "selectedForRepro": 0},
+                    "reports": {"confirmed": 0, "rejected": 0, "blocked": 99},
+                },
+            }
+
+            with patch.object(worker_main, "clone_repository", return_value="abc123"), patch.object(
+                worker_main,
+                "enforce_repository_limits",
+            ), patch.object(
+                worker_main,
+                "collect_preflight_metadata",
+                return_value={"summary": "preflight ok"},
+            ), patch.object(
+                worker_main,
+                "run_graph_verified_review_payload",
+                return_value=blocked_report,
+            ), patch.object(
+                worker,
+                "upload_result_once_or_defer",
+                return_value=True,
+            ) as upload:
+                worker.run_job(job)
+
+            upload.assert_called_once()
+            payload = upload.call_args.args[1]
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["error_code"], "GRAPH_VERIFIED_COMPLETION_FAILED")
+            self.assertIn("GraphVerified finder pipeline blocked every finder task", payload["error"])
+            self.assertIn("unexpected argument '--ask-for-approval'", payload["error"])
+            summary_text = (config.log_dir / "scan-summary.log").read_text(encoding="utf-8")
+            self.assertIn('"status": "failed"', summary_text)
+            self.assertIn("unexpected argument '--ask-for-approval'", summary_text)
+
     def test_worker_run_once_claims_and_runs_one_job_without_capacity_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config = SimpleNamespace(

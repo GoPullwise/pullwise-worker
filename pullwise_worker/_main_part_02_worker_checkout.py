@@ -144,6 +144,79 @@ def graph_verified_severity(value: object) -> str:
     return text if text in {"critical", "high", "medium", "low", "info"} else "info"
 
 
+def graph_verified_completion_error(report: dict | None) -> str:
+    if not isinstance(report, dict) or not report:
+        return "GraphVerified review did not produce a report."
+    blocked_count = graph_verified_report_int(report.get("blockedCount"))
+    if blocked_count and not report.get("runId"):
+        return (
+            protocol_multiline_text(report.get("debugMarkdown"))
+            or "GraphVerified review failed before producing a run report."
+        )
+
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    finder = summary.get("finder") if isinstance(summary.get("finder"), dict) else {}
+    candidates = summary.get("candidates") if isinstance(summary.get("candidates"), dict) else {}
+    reports = summary.get("reports") if isinstance(summary.get("reports"), dict) else {}
+    finder_results = graph_verified_report_int(finder.get("results"))
+    finder_blocked = graph_verified_report_int(finder.get("blocked"))
+    finder_candidates = graph_verified_report_int(finder.get("candidates"))
+    valid_candidates = graph_verified_report_int(candidates.get("valid"))
+    selected_for_repro = graph_verified_report_int(candidates.get("selectedForRepro"))
+    confirmed = graph_verified_report_int(report.get("confirmedCount")) or graph_verified_report_int(reports.get("confirmed"))
+    rejected = graph_verified_report_int(report.get("rejectedCount")) or graph_verified_report_int(reports.get("rejected"))
+    blocked_total = blocked_count or graph_verified_report_int(reports.get("blocked"))
+
+    no_reportable_work = (
+        confirmed == 0
+        and rejected == 0
+        and finder_candidates == 0
+        and valid_candidates == 0
+        and selected_for_repro == 0
+    )
+    if finder_results > 0 and finder_blocked >= finder_results and no_reportable_work:
+        return graph_verified_blocked_completion_message(
+            "GraphVerified finder pipeline blocked every finder task before producing candidates",
+            graph_verified_first_blocked_reason(report),
+        )
+    if blocked_total > 0 and no_reportable_work:
+        return graph_verified_blocked_completion_message(
+            "GraphVerified review blocked before producing reportable candidates",
+            graph_verified_first_blocked_reason(report),
+        )
+    return ""
+
+
+def graph_verified_report_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def graph_verified_first_blocked_reason(report: dict) -> str:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    for section_name in ("finder", "repro", "judge"):
+        section = summary.get(section_name) if isinstance(summary.get(section_name), dict) else {}
+        blocked_items = section.get("blockedItems")
+        if not isinstance(blocked_items, list):
+            continue
+        for item in blocked_items:
+            if not isinstance(item, dict):
+                continue
+            reason = clean_protocol_text(item.get("reason"), 700)
+            if reason:
+                return reason
+    return clean_protocol_text(report.get("debugMarkdown"), 700)
+
+
+def graph_verified_blocked_completion_message(message: str, reason: str) -> str:
+    reason_text = clean_protocol_text(reason, 700)
+    return f"{message}: {reason_text}" if reason_text else message
+
+
 def summarize(findings: list[dict]) -> dict:
     summary = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for finding in findings:
@@ -703,17 +776,10 @@ class Worker:
             )
             summary = summarize(projected_findings)
             duration_ms = int((time.monotonic() - started) * 1000)
-            result_status = "done"
-            completion_error = ""
-            if not graph_verified_report:
-                result_status = "failed"
-                completion_error = "GraphVerified review did not produce a report."
-            elif graph_verified_report.get("blockedCount") and not graph_verified_report.get("runId"):
-                result_status = "failed"
-                completion_error = (
-                    protocol_multiline_text(graph_verified_report.get("debugMarkdown"))
-                    or "GraphVerified review failed before producing a run report."
-                )
+            completion_error = graph_verified_completion_error(graph_verified_report)
+            result_status = "failed" if completion_error else "done"
+            if completion_error:
+                logs_summary = completion_error[-1000:]
             result_summary = summary
             if result_status == "failed":
                 result_summary = summarize([])
@@ -739,7 +805,7 @@ class Worker:
                 job_id,
                 "report",
                 100,
-                "Uploading result",
+                "Uploading failed result" if result_status == "failed" else "Uploading result",
                 logs_summary,
                 config=job_config,
             )
