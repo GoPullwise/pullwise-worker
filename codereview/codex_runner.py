@@ -144,7 +144,7 @@ def build_codex_exec_command(
         detail = ", ".join(sorted(set(missing_required)))
         return [command, "exec", prompt], f"codex exec does not support required option(s): {detail}"
 
-    return [command, *top_level_args, "exec", *exec_args, prompt], ""
+    return [command, *top_level_args, "exec", *exec_args, "-"], ""
 
 
 def run_codex_exec(
@@ -181,7 +181,14 @@ def run_codex_exec(
     queued_at = time.monotonic()
     with _CODEX_CLI_LOCK:
         queue_wait_ms = int((time.monotonic() - queued_at) * 1000)
-        return run_process(cmd, cwd=cd, env=env, timeout=timeout_seconds, queue_wait_ms=queue_wait_ms)
+        return run_process(
+            cmd,
+            cwd=cd,
+            env=env,
+            timeout=timeout_seconds,
+            queue_wait_ms=queue_wait_ms,
+            stdin_text=prompt,
+        )
 
 
 def _codex_help_options(command: list[str], env: dict[str, str] | None) -> tuple[frozenset[str], str]:
@@ -248,5 +255,5 @@ def _fallback_codex_exec_command(
         cmd.extend(["--model", model])
     if reasoning_effort:
         cmd.extend(["--config", f'model_reasoning_effort="{reasoning_effort}"'])
-    cmd.append(prompt)
+    cmd.append("-")
     return cmd

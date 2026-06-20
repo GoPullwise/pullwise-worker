@@ -193,12 +193,52 @@ def build_pipeline_summary(
 def blocked_summary(item: dict) -> dict:
     task = item.get("task") if isinstance(item.get("task"), dict) else {}
     result = item.get("result") if isinstance(item.get("result"), dict) else {}
-    return {
+    summary = {
         "candidateId": item.get("candidate_id") or result.get("candidate_id") or task.get("slice_id"),
         "focus": task.get("focus"),
         "sliceId": task.get("slice_id"),
         "reason": item.get("blocked_reason") or result.get("why_not_reproduced") or result.get("summary") or "",
     }
+    process = blocked_process_summary(item.get("process"))
+    if process:
+        summary["process"] = process
+    return summary
+
+
+def blocked_process_summary(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    payload: dict[str, object] = {}
+    for source_key, target_key in (
+        ("returncode", "returncode"),
+        ("timed_out", "timedOut"),
+        ("duration_ms", "durationMs"),
+        ("queueWaitMs", "queueWaitMs"),
+        ("execDurationMs", "execDurationMs"),
+        ("stdout_path", "stdoutPath"),
+        ("stderr_path", "stderrPath"),
+    ):
+        if source_key in value:
+            payload[target_key] = value.get(source_key)
+    stdout_tail = compact_debug_text(value.get("stdout"), limit=1200)
+    stderr_tail = compact_debug_text(value.get("stderr"), limit=1200)
+    if stdout_tail:
+        payload["stdoutTail"] = stdout_tail
+    if stderr_tail:
+        payload["stderrTail"] = stderr_tail
+    command = value.get("command")
+    if isinstance(command, list):
+        payload["command"] = [compact_debug_text(part, limit=200) for part in command[:40]]
+        if len(command) > 40:
+            payload["commandTruncated"] = True
+    return {key: val for key, val in payload.items() if val not in ("", None)}
+
+
+def compact_debug_text(value: object, *, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) > limit:
+        return text[-limit:].lstrip()
+    return text
 
 
 def _nested_status(item: dict, key: str) -> str:

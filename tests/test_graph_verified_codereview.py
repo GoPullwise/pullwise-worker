@@ -487,6 +487,7 @@ def test_finder_codex_failure_is_blocked_not_silent_empty(tmp_path: Path) -> Non
         r'''
 import sys
 
+print("finder stdout detail")
 print("finder failed", file=sys.stderr)
 sys.exit(42)
 ''',
@@ -499,6 +500,55 @@ sys.exit(42)
     assert result["status"] == "blocked"
     assert result["result"]["candidates"] == []
     assert "exit code 42" in result["blocked_reason"]
+    assert "stderr: finder failed" in result["blocked_reason"]
+    assert "stdout: finder stdout detail" in result["blocked_reason"]
+
+
+def test_pipeline_summary_preserves_blocked_process_evidence() -> None:
+    snapshot = type("Snapshot", (), {"files": [], "spans": []})()
+    raw_candidates = [
+        {
+            "status": "blocked",
+            "task": {"slice_id": "slice_1", "focus": "correctness"},
+            "blocked_reason": "finder failed",
+            "process": {
+                "command": ["codex", "exec", "-"],
+                "returncode": 1,
+                "timed_out": False,
+                "duration_ms": 123,
+                "queueWaitMs": 7,
+                "stdout": "stdout detail",
+                "stderr": "stderr detail",
+                "stdout_path": "/tmp/stdout.log",
+                "stderr_path": "/tmp/stderr.log",
+            },
+            "result": {"candidates": []},
+        }
+    ]
+
+    summary = codereview_main.build_pipeline_summary(
+        preflight={"ok": True},
+        snapshot=snapshot,
+        slices=[],
+        finder_tasks=[FinderTask(slice_id="slice_1", focus="correctness")],
+        raw_candidates=raw_candidates,
+        normalized=[],
+        deduped=[],
+        scored=[],
+        selected=[],
+        repro_results=[],
+        judge_results=[],
+        confirmed=[],
+        rejected=[],
+    )
+
+    item = summary["finder"]["blockedItems"][0]
+    assert item["reason"] == "finder failed"
+    assert item["process"]["returncode"] == 1
+    assert item["process"]["queueWaitMs"] == 7
+    assert item["process"]["stdoutTail"] == "stdout detail"
+    assert item["process"]["stderrTail"] == "stderr detail"
+    assert item["process"]["command"] == ["codex", "exec", "-"]
 
 
 def test_filesystem_guard_rejects_missing_or_outside_logs(tmp_path: Path) -> None:
@@ -749,8 +799,9 @@ def test_codex_exec_places_approval_flag_before_exec_when_only_top_level_support
     captured = {}
 
     def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
-        del env, timeout, queue_wait_ms, kwargs
+        del env, timeout, queue_wait_ms
         captured["command"] = command
+        captured["stdin_text"] = kwargs.get("stdin_text")
         return ProcessResult(command, str(cwd), 0, "{}", "", 1)
 
     monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
@@ -794,6 +845,8 @@ def test_codex_exec_places_approval_flag_before_exec_when_only_top_level_support
     assert command[:4] == ["codex", "--ask-for-approval", "never", "exec"]
     assert command.count("--ask-for-approval") == 1
     assert command.index("--ask-for-approval") < command.index("exec")
+    assert command[-1] == "-"
+    assert captured["stdin_text"] == "review"
 
 
 def test_codex_exec_omits_unsupported_optional_flags(tmp_path: Path, monkeypatch) -> None:
@@ -802,8 +855,9 @@ def test_codex_exec_omits_unsupported_optional_flags(tmp_path: Path, monkeypatch
     captured = {}
 
     def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
-        del env, timeout, queue_wait_ms, kwargs
+        del env, timeout, queue_wait_ms
         captured["command"] = command
+        captured["stdin_text"] = kwargs.get("stdin_text")
         return ProcessResult(command, str(cwd), 0, "{}", "", 1)
 
     monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
@@ -842,6 +896,8 @@ def test_codex_exec_omits_unsupported_optional_flags(tmp_path: Path, monkeypatch
     assert "--config" not in command
     assert "--json" not in command
     assert "--skip-git-repo-check" not in command
+    assert command[-1] == "-"
+    assert captured["stdin_text"] == "review"
 
 
 def test_codex_exec_fails_fast_when_required_cli_flags_are_missing(tmp_path: Path, monkeypatch) -> None:
@@ -893,7 +949,8 @@ def test_codex_runner_serializes_codex_cli_processes(tmp_path: Path, monkeypatch
     errors = []
 
     def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
-        del env, timeout, kwargs
+        del env, timeout
+        assert kwargs.get("stdin_text") == "review"
         nonlocal active, max_active, call_count
         with lock:
             call_count += 1
@@ -1002,6 +1059,79 @@ def test_run_process_streams_output_to_log_files_with_bounded_tail(tmp_path: Pat
     assert Path(result.stderr_path).is_file()
     assert Path(result.stdout_path).stat().st_size > len(result.stdout.encode("utf-8"))
     assert Path(result.stderr_path).stat().st_size > len(result.stderr.encode("utf-8"))
+
+
+def test_run_process_detaches_child_stdin(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    import codereview.utils.process as process_utils
+
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            del command
+            captured.update(kwargs)
+            stdout = kwargs.get("stdout")
+            stderr = kwargs.get("stderr")
+            if hasattr(stdout, "write"):
+                stdout.write(b"ok")
+            if hasattr(stderr, "write"):
+                stderr.write(b"")
+
+        def wait(self, timeout: int | None = None) -> int:
+            del timeout
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(process_utils.subprocess, "Popen", FakePopen)
+
+    result = process_utils.run_process(["tool"], cwd=tmp_path, timeout=30)
+
+    assert result.returncode == 0
+    assert result.stdout == "ok"
+    assert captured["stdin"] == process_utils.subprocess.DEVNULL
+
+
+def test_run_process_can_send_explicit_stdin_text(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    import codereview.utils.process as process_utils
+
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            del command
+            captured.update(kwargs)
+            stdout = kwargs.get("stdout")
+            stderr = kwargs.get("stderr")
+            if hasattr(stdout, "write"):
+                stdout.write(b"ok")
+            if hasattr(stderr, "write"):
+                stderr.write(b"")
+
+        def communicate(self, input: bytes | None = None, timeout: int | None = None) -> tuple[bytes, bytes]:
+            captured["input"] = input
+            captured["timeout"] = timeout
+            return b"", b""
+
+        def wait(self, timeout: int | None = None) -> int:
+            del timeout
+            raise AssertionError("wait should not be used when stdin_text is provided")
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(process_utils.subprocess, "Popen", FakePopen)
+
+    result = process_utils.run_process(["tool"], cwd=tmp_path, timeout=30, stdin_text="review")
+
+    assert result.returncode == 0
+    assert result.stdout == "ok"
+    assert captured["stdin"] == process_utils.subprocess.PIPE
+    assert captured["input"] == b"review"
+    assert captured["timeout"] == 30
 
 
 def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: Path, monkeypatch) -> None:

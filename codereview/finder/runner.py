@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
 from ..config import ReviewConfig
+from ..utils.process import compact_process_output
 from .tasks import FinderTask
 
 
@@ -67,8 +68,5 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
 def process_failure_reason(stage: str, result: object) -> str:
     returncode = getattr(result, "returncode", "")
     timed_out = getattr(result, "timed_out", False)
-    detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
-    if len(detail) > 700:
-        detail = detail[-700:].lstrip()
     timeout_text = " timed out" if timed_out else ""
-    return f"{stage}{timeout_text} failed with exit code {returncode}: {detail or 'no stderr/stdout'}"
+    return f"{stage}{timeout_text} failed with exit code {returncode}: {compact_process_output(result)}"

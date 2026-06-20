@@ -50,6 +50,18 @@ def _tail_text(path: Path, limit: int = 65536) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def compact_process_output(result: object, *, limit: int = 700) -> str:
+    parts = []
+    for label in ("stderr", "stdout"):
+        text = str(getattr(result, label, "") or "").strip()
+        if text:
+            parts.append(f"{label}: {text}")
+    detail = "\n".join(parts).strip()
+    if len(detail) > limit:
+        detail = detail[-limit:].lstrip()
+    return detail or "no stderr/stdout"
+
+
 def run_process(
     command: list[str],
     *,
@@ -59,6 +71,7 @@ def run_process(
     check: bool = False,
     log_dir: Path | None = None,
     queue_wait_ms: int = 0,
+    stdin_text: str | None = None,
 ) -> ProcessResult:
     started = time.monotonic()
     cwd_key = hashlib.sha256(str(cwd.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:16]
@@ -70,19 +83,29 @@ def run_process(
     stderr_path = log_root / f"{prefix}-{stamp}.stderr.log"
     try:
         with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+            stdin_pipe = subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL
             process = subprocess.Popen(
                 command,
                 cwd=str(cwd),
                 env=env,
+                stdin=stdin_pipe,
                 stdout=stdout_file,
                 stderr=stderr_file,
             )
             try:
-                returncode = process.wait(timeout=timeout)
+                if stdin_text is not None:
+                    process.communicate(stdin_text.encode("utf-8"), timeout=timeout)
+                    returncode = process.returncode
+                else:
+                    returncode = process.wait(timeout=timeout)
                 timed_out = False
             except subprocess.TimeoutExpired:
                 process.kill()
-                returncode = process.wait()
+                if stdin_text is not None:
+                    process.communicate()
+                    returncode = process.returncode
+                else:
+                    returncode = process.wait()
                 timed_out = True
         result = ProcessResult(
             command=command,

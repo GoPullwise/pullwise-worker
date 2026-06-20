@@ -217,6 +217,27 @@ def graph_verified_blocked_completion_message(message: str, reason: str) -> str:
     return f"{message}: {reason_text}" if reason_text else message
 
 
+def log_graph_verified_completion(job_id: str, attempt_id: str, status: str, report: dict | None, error: str = "") -> None:
+    summary = report.get("summary") if isinstance(report, dict) and isinstance(report.get("summary"), dict) else {}
+    finder = summary.get("finder") if isinstance(summary.get("finder"), dict) else {}
+    candidates = summary.get("candidates") if isinstance(summary.get("candidates"), dict) else {}
+    fields = [
+        "pullwise_worker graph_verified completion",
+        f"job_id={clean_protocol_text(job_id)}",
+        f"attempt_id={clean_protocol_text(attempt_id)}",
+        f"status={clean_protocol_text(status)}",
+        f"blocked={graph_verified_report_int((report or {}).get('blockedCount') if isinstance(report, dict) else 0)}",
+        f"finder_tasks={graph_verified_report_int(finder.get('tasks'))}",
+        f"finder_blocked={graph_verified_report_int(finder.get('blocked'))}",
+        f"finder_candidates={graph_verified_report_int(finder.get('candidates'))}",
+        f"valid_candidates={graph_verified_report_int(candidates.get('valid'))}",
+    ]
+    error_text = clean_protocol_text(error, 500)
+    if error_text:
+        fields.append(f"error={error_text}")
+    print(" ".join(fields), file=sys.stderr, flush=True)
+
+
 def summarize(findings: list[dict]) -> dict:
     summary = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for finding in findings:
@@ -800,6 +821,7 @@ class Worker:
             result_status = "failed" if completion_error else "done"
             if completion_error:
                 logs_summary = completion_error[-1000:]
+            log_graph_verified_completion(job_id, attempt_id, result_status, graph_verified_report, completion_error)
             result_summary = summary
             if result_status == "failed":
                 result_summary = summarize([])
@@ -911,6 +933,7 @@ class Worker:
                 error_payload["commit"] = resolved_commit
                 error_payload["resolved_commit"] = resolved_commit
             error_payload["result_checksum"] = result_checksum(error_payload)
+            log_graph_verified_completion(job_id, attempt_id, "failed", graph_verified_report, error)
             try:
                 self.report_progress(
                     job_id,

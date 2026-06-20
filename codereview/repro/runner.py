@@ -9,7 +9,7 @@ from ..codex_runner import run_codex_exec
 from ..config import CodexConfig, ReviewConfig
 from ..judge.validate import validate_repro_result
 from ..utils.paths import safe_path_component
-from ..utils.process import run_process
+from ..utils.process import compact_process_output, run_process
 from .filesystem_guard import guard_worker_result
 from .worker_dir import create_worker_dir
 
@@ -174,8 +174,5 @@ def _status_path(line: str) -> str:
 def process_failure_reason(stage: str, result: object) -> str:
     returncode = getattr(result, "returncode", "")
     timed_out = getattr(result, "timed_out", False)
-    detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
-    if len(detail) > 700:
-        detail = detail[-700:].lstrip()
     timeout_text = " timed out" if timed_out else ""
-    return f"{stage}{timeout_text} failed with exit code {returncode}: {detail or 'no stderr/stdout'}"
+    return f"{stage}{timeout_text} failed with exit code {returncode}: {compact_process_output(result)}"
