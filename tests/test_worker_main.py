@@ -585,6 +585,36 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(watcher.client.calls[1][1][0]["line"], "new summary")
             self.assertEqual(watcher.log_tailers["log_1"].journal.cursor, "cursor-1")
 
+    def test_journal_log_tailer_reports_unavailable_once_and_backs_off(self) -> None:
+        tailer = worker_main.WorkerJournalLogTailer("pullwise-worker-wk_1", since_timestamp=1781200000)
+
+        with patch.object(
+            worker_main.subprocess,
+            "run",
+            side_effect=worker_main.subprocess.TimeoutExpired(["journalctl"], 15),
+        ) as run, patch.dict(
+            worker_main.os.environ,
+            {
+                "PULLWISE_LOG_STREAM_JOURNAL_TIMEOUT_SECONDS": "15",
+                "PULLWISE_LOG_STREAM_JOURNAL_RETRY_SECONDS": "60",
+            },
+            clear=False,
+        ), patch.object(
+            worker_main.time,
+            "time",
+            side_effect=[1781200001, 1781200001, 1781200002, 1781200003],
+        ):
+            first_entries, first_cursor = tailer.collect()
+            second_entries, second_cursor = tailer.collect()
+
+        self.assertEqual(first_cursor, "")
+        self.assertEqual(second_cursor, "")
+        self.assertEqual(len(first_entries), 1)
+        self.assertIn("journalctl unavailable", first_entries[0]["line"])
+        self.assertEqual(second_entries, [])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs["timeout"], 15)
+
     def test_graph_verified_review_is_the_only_review_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg = config_for(Path(tmp_dir))

@@ -111,27 +111,43 @@ class WorkerJournalLogTailer:
         self.service_name = service_name
         self.since_timestamp = max(0, int(since_timestamp or time.time()))
         self.cursor = ""
+        self.unavailable_reported = False
+        self.retry_after = 0.0
+
+    def unavailable(self, detail: object) -> tuple[list[dict], str]:
+        self.retry_after = time.time() + env_int("PULLWISE_LOG_STREAM_JOURNAL_RETRY_SECONDS", 60, minimum=1)
+        if self.unavailable_reported:
+            return [], self.cursor
+        self.unavailable_reported = True
+        return [
+            {
+                "source": "worker",
+                "stream": "journal",
+                "timestamp": int(time.time()),
+                "line": f"journalctl unavailable: {log_stream_text(detail)}",
+            }
+        ], self.cursor
 
     def collect(self) -> tuple[list[dict], str]:
+        if self.retry_after and time.time() < self.retry_after:
+            return [], self.cursor
         command = ["journalctl", "-u", self.service_name, "--no-pager", "-o", "json"]
         if self.cursor:
             command.extend(["--after-cursor", self.cursor])
         else:
             command.extend(["--since", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.since_timestamp))])
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=env_int("PULLWISE_LOG_STREAM_JOURNAL_TIMEOUT_SECONDS", 15, minimum=1),
+            )
         except (OSError, subprocess.SubprocessError) as exc:
-            return [
-                {
-                    "source": "worker",
-                    "stream": "journal",
-                    "timestamp": int(time.time()),
-                    "line": f"journalctl unavailable: {log_stream_text(exc)}",
-                }
-            ], self.cursor
+            return self.unavailable(exc)
         if completed.returncode != 0:
             detail = log_stream_text(completed.stderr or completed.stdout or f"journalctl exited {completed.returncode}")
-            return [{"source": "worker", "stream": "journal", "timestamp": int(time.time()), "line": detail}], self.cursor
+            return self.unavailable(detail)
         entries: list[dict] = []
         next_cursor = self.cursor
         for raw in completed.stdout.splitlines():
@@ -140,6 +156,8 @@ class WorkerJournalLogTailer:
                 next_cursor = cursor
             if entry:
                 entries.append(entry)
+        self.retry_after = 0.0
+        self.unavailable_reported = False
         return entries, next_cursor
 
     def commit(self, cursor: str) -> None:
