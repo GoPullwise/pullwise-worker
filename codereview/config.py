@@ -7,9 +7,9 @@ from pathlib import Path
 
 
 MODE_BUDGETS = {
-    "fast": {"max_slices": 12, "max_repro": 8},
-    "standard": {"max_slices": 30, "max_repro": 20},
-    "deep": {"max_slices": 80, "max_repro": 50},
+    "fast": {"max_review_units": 12, "max_repro": 8},
+    "standard": {"max_review_units": 30, "max_repro": 20},
+    "deep": {"max_review_units": 80, "max_repro": 50},
 }
 
 
@@ -51,8 +51,78 @@ class ScoringConfig:
 
 
 @dataclass
+class ScanConfig:
+    mode: str = "full-cached"
+    include_untracked: bool = True
+    fail_on_source_change: bool = True
+    confirmed_only: bool = True
+
+
+@dataclass
+class ScopeConfig:
+    exclude: list[str] = field(default_factory=lambda: [
+        ".git/**",
+        ".codereview/**",
+        "node_modules/**",
+        "vendor/**",
+        "dist/**",
+        "build/**",
+        "coverage/**",
+        "target/**",
+    ])
+    max_text_file_bytes: int = 1000000
+    inventory_excluded_files: bool = True
+
+
+@dataclass
+class GraphConfig:
+    schema_version: str = "3"
+    prompt_version: str = "graph-v3"
+    full_inventory: bool = True
+    incremental: bool = True
+    max_shard_files: int = 25
+    max_shard_bytes: int = 500000
+    large_file_bytes: int = 120000
+    double_map_high_risk: bool = True
+    max_repair_rounds: int = 2
+    use_sqlite_index: bool = True
+    codex_mappers: bool = True
+    map_parallel: int = 6
+    graph_timeout_seconds: int = 480
+
+
+@dataclass
+class ReviewUnitConfig:
+    require_baseline_for_every_unit: bool = True
+    require_boundary_review: bool = True
+    require_global_review: bool = True
+    max_context_repair_rounds: int = 1
+    max_candidates_per_finder: int = 3
+    default_upstream_depth: int = 1
+    default_downstream_depth: int = 1
+    high_risk_upstream_depth: int = 2
+    high_risk_downstream_depth: int = 2
+    max_unit_nodes: int = 100
+    max_unit_paths: int = 30
+    max_context_chars: int = 80000
+
+
+@dataclass
+class CandidateConfig:
+    max_per_finder_per_unit: int = 3
+    max_total_for_verification: int = 60
+    max_total_for_reproduction: int = 20
+    require_expected_behavior_source: bool = True
+
+
+@dataclass
 class ReviewConfig:
     mode: str = "standard"
+    scan: ScanConfig = field(default_factory=ScanConfig)
+    scope: ScopeConfig = field(default_factory=ScopeConfig)
+    graph: GraphConfig = field(default_factory=GraphConfig)
+    units: ReviewUnitConfig = field(default_factory=ReviewUnitConfig)
+    candidates: CandidateConfig = field(default_factory=CandidateConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     finders: FinderConfig = field(default_factory=FinderConfig)
@@ -60,8 +130,8 @@ class ReviewConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     @property
-    def max_slices(self) -> int:
-        return MODE_BUDGETS.get(self.mode, MODE_BUDGETS["standard"])["max_slices"]
+    def max_review_units(self) -> int:
+        return MODE_BUDGETS.get(self.mode, MODE_BUDGETS["standard"])["max_review_units"]
 
     @property
     def max_repro(self) -> int:
@@ -80,9 +150,16 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
     raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     if not isinstance(raw, dict):
         raw = {}
-    selected_mode = mode or str(raw.get("mode") or "standard")
+    review_units = _section(raw, "review")
+    selected_mode = mode or str(raw.get("mode") or review_units.get("mode") or "standard")
     if selected_mode not in MODE_BUDGETS:
         raise ValueError("mode must be one of fast, standard, deep")
+    graph = _section(raw, "graph")
+    agents = _section(raw, "agents")
+    scan = _section(raw, "scan")
+    scope = _section(raw, "scope")
+    units = review_units
+    candidates = _section(raw, "candidates")
     context = _section(raw, "context")
     codex = _section(raw, "codex")
     codex_env = _string_map(codex.get("env"))
@@ -94,6 +171,52 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
         always_repro = [always_repro]
     return ReviewConfig(
         mode=selected_mode,
+        scan=ScanConfig(
+            mode=str(scan.get("mode") or "full-cached"),
+            include_untracked=bool(scan.get("include_untracked", True)),
+            fail_on_source_change=bool(scan.get("fail_on_source_change", True)),
+            confirmed_only=bool(scan.get("confirmed_only", True)),
+        ),
+        scope=ScopeConfig(
+            exclude=[str(item) for item in scope.get("exclude", []) if str(item)] or ScopeConfig().exclude,
+            max_text_file_bytes=max(1, int(scope.get("max_text_file_bytes") or 1000000)),
+            inventory_excluded_files=bool(scope.get("inventory_excluded_files", True)),
+        ),
+        graph=GraphConfig(
+            schema_version=str(graph.get("schema_version") or "3"),
+            prompt_version=str(graph.get("prompt_version") or "graph-v3"),
+            full_inventory=bool(graph.get("full_inventory", True)),
+            incremental=str(scan.get("mode") or "full-cached") != "full-strict" and bool(graph.get("incremental", True)),
+            max_shard_files=max(1, int(graph.get("max_shard_files") or 25)),
+            max_shard_bytes=max(1, int(graph.get("max_shard_bytes") or 500000)),
+            large_file_bytes=max(1, int(graph.get("large_file_bytes") or graph.get("max_large_file_bytes") or 120000)),
+            double_map_high_risk=bool(graph.get("double_map_high_risk", True)),
+            max_repair_rounds=max(0, int(graph.get("max_repair_rounds") or 2)),
+            use_sqlite_index=bool(graph.get("use_sqlite_index", True)),
+            codex_mappers=bool(graph.get("codex_mappers", True)),
+            map_parallel=max(1, int(agents.get("graph_map_parallel") or graph.get("map_parallel") or 6)),
+            graph_timeout_seconds=max(30, int(agents.get("graph_timeout_seconds") or graph.get("graph_timeout_seconds") or 480)),
+        ),
+        units=ReviewUnitConfig(
+            require_baseline_for_every_unit=bool(units.get("require_baseline_for_every_unit", True)),
+            require_boundary_review=bool(units.get("require_boundary_review", True)),
+            require_global_review=bool(units.get("require_global_review", True)),
+            max_context_repair_rounds=max(0, int(units.get("max_context_repair_rounds") or 1)),
+            max_candidates_per_finder=max(1, int(units.get("max_candidates_per_finder") or candidates.get("max_per_finder_per_unit") or 3)),
+            default_upstream_depth=max(0, int(units.get("default_upstream_depth") or 1)),
+            default_downstream_depth=max(0, int(units.get("default_downstream_depth") or 1)),
+            high_risk_upstream_depth=max(0, int(units.get("high_risk_upstream_depth") or 2)),
+            high_risk_downstream_depth=max(0, int(units.get("high_risk_downstream_depth") or 2)),
+            max_unit_nodes=max(1, int(units.get("max_unit_nodes") or 100)),
+            max_unit_paths=max(1, int(units.get("max_unit_paths") or 30)),
+            max_context_chars=max(1000, int(units.get("max_context_chars") or 80000)),
+        ),
+        candidates=CandidateConfig(
+            max_per_finder_per_unit=max(1, int(candidates.get("max_per_finder_per_unit") or 3)),
+            max_total_for_verification=max(1, int(candidates.get("max_total_for_verification") or 60)),
+            max_total_for_reproduction=max(1, int(candidates.get("max_total_for_reproduction") or 20)),
+            require_expected_behavior_source=bool(candidates.get("require_expected_behavior_source", True)),
+        ),
         context=ContextConfig(
             enabled=bool(context.get("enabled", True)),
             timeout_seconds=int(context.get("timeout_seconds") or 300),
@@ -107,14 +230,14 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
         ),
         finders=FinderConfig(
             enabled=bool(finders.get("enabled", True)),
-            timeout_seconds=int(finders.get("timeout_seconds") or 600),
-            max_workers=max(1, int(finders.get("max_workers") or 4)),
+            timeout_seconds=int(finders.get("timeout_seconds") or agents.get("finder_timeout_seconds") or 600),
+            max_workers=max(1, int(finders.get("max_workers") or agents.get("finder_parallel") or 4)),
         ),
         repro=ReproConfig(
             enabled=bool(repro.get("enabled", True)),
-            timeout_seconds=int(repro.get("timeout_seconds") or 900),
-            max_workers=max(1, int(repro.get("max_workers") or 2)),
-            max_repro=max(0, int(repro.get("max_repro") or 0)),
+            timeout_seconds=int(repro.get("timeout_seconds") or agents.get("repro_timeout_seconds") or 900),
+            max_workers=max(1, int(repro.get("max_workers") or agents.get("repro_parallel") or 2)),
+            max_repro=max(0, int(repro.get("max_repro") or candidates.get("max_total_for_reproduction") or 0)),
             require_red_green=bool(repro.get("require_red_green")),
         ),
         scoring=ScoringConfig(

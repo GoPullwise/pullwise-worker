@@ -25,11 +25,11 @@ def create_worker_dir(checkout: Path, worker: Path, candidate: dict) -> Path:
         )
         if clone.returncode != 0:
             raise RuntimeError(f"git clone --shared failed: {(clone.stderr or clone.stdout)[-500:]}")
-        head = run_process(["git", "rev-parse", "HEAD"], cwd=checkout, timeout=60)
-        if head.returncode == 0 and head.stdout.strip():
-            checkout_head = run_process(["git", "checkout", "--detach", head.stdout.strip()], cwd=repo, timeout=120)
-            if checkout_head.returncode != 0:
-                raise RuntimeError(f"worker checkout failed: {(checkout_head.stderr or checkout_head.stdout)[-500:]}")
+        current_commit = run_process(["git", "rev-parse", "HEAD"], cwd=checkout, timeout=60)
+        if current_commit.returncode == 0 and current_commit.stdout.strip():
+            checkout_current = run_process(["git", "checkout", "--detach", current_commit.stdout.strip()], cwd=repo, timeout=120)
+            if checkout_current.returncode != 0:
+                raise RuntimeError(f"worker checkout failed: {(checkout_current.stderr or checkout_current.stdout)[-500:]}")
     else:
         shutil.copytree(checkout, repo, ignore=_copytree_ignore)
     for child in ("logs", "repro", "home", "tmp", "cache"):

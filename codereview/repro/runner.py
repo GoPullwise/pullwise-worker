@@ -7,7 +7,9 @@ from pathlib import Path
 
 from ..codex_runner import run_codex_exec
 from ..config import CodexConfig, ReviewConfig
+from ..judge.precheck import verify_repro_events_and_paths
 from ..judge.validate import validate_repro_result
+from ..units.context import unit_file_stem
 from ..utils.paths import safe_path_component
 from ..utils.process import compact_process_output, run_process
 from .filesystem_guard import guard_worker_result
@@ -30,9 +32,10 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/"),
     )
     create_worker_dir(checkout, worker, candidate)
-    copy_slice_context(run, worker, candidate)
+    copy_review_unit_context(run, worker, candidate)
     prompt = (checkout / ".codereview" / "prompts" / "repro_worker.md").read_text(encoding="utf-8")
     output = worker / "result.json"
+    events = worker / "events.jsonl"
     process = run_codex_exec(
         cd=worker,
         prompt=prompt,
@@ -42,7 +45,9 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         timeout_seconds=config.repro.timeout_seconds,
         config=config.codex,
         env=worker_env(worker, config.codex),
+        events_file=events,
     )
+    process_payload = {**process.to_dict(), "events_path": str(events)}
     if process.returncode != 0:
         checkout_status_after = git_status_porcelain(
             checkout,
@@ -50,12 +55,12 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         )
         violations: list[str] = []
         if checkout_status_after != checkout_status_before:
-            violations.append("original checkout changed during repro worker execution")
+            violations.append("snapshot checkout changed during repro worker execution")
         failure = process_failure_reason("repro codex exec", process)
         return {
             "candidate_id": issue_id,
             "worker": str(worker),
-            "process": process.to_dict(),
+            "process": process_payload,
             "result": blocked_repro_result(issue_id, failure),
             "status": "blocked",
             "blocked_reason": failure,
@@ -77,11 +82,11 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/"),
     )
     if checkout_status_after != checkout_status_before:
-        violations.append("original checkout changed during repro worker execution")
-    return {
+        violations.append("snapshot checkout changed during repro worker execution")
+    payload = {
         "candidate_id": issue_id,
         "worker": str(worker),
-        "process": process.to_dict(),
+        "process": process_payload,
         "result": parsed,
         "status": str(parsed.get("status") or "unknown") if isinstance(parsed, dict) else "unknown",
         "blocked_reason": str(parsed.get("why_not_reproduced") or parsed.get("summary") or "") if isinstance(parsed, dict) and parsed.get("status") == "blocked" else "",
@@ -89,6 +94,8 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         "checkout_status_before": checkout_status_before,
         "checkout_status_after": checkout_status_after,
     }
+    payload["event_precheck"] = verify_repro_events_and_paths(payload)
+    return payload
 
 
 def worker_env(worker: Path, codex: CodexConfig | None = None) -> dict[str, str]:
@@ -147,15 +154,15 @@ def git_status_porcelain(path: Path, ignore_prefixes: tuple[str, ...] = ()) -> l
     return [line for line in lines if not _status_path(line).startswith(ignore_prefixes)]
 
 
-def copy_slice_context(run: Path, worker: Path, candidate: dict) -> None:
+def copy_review_unit_context(run: Path, worker: Path, candidate: dict) -> None:
     source_task = candidate.get("source_task") if isinstance(candidate.get("source_task"), dict) else {}
     graph = candidate.get("graph_evidence") if isinstance(candidate.get("graph_evidence"), dict) else {}
-    slice_id = str(source_task.get("slice_id") or graph.get("slice_id") or "")
-    if not slice_id:
+    unit_id = str(source_task.get("unit_id") or graph.get("unit_id") or "")
+    if not unit_id:
         return
-    context = run / "slices" / f"{slice_id}.context.md"
+    context = run / "artifacts" / "review-units" / f"{unit_file_stem(unit_id)}.context.md"
     if context.is_file():
-        shutil.copyfile(context, worker / "slice.context.md")
+        shutil.copyfile(context, worker / "review-unit.context.md")
 
 
 def checkout_relative(path: Path) -> str:

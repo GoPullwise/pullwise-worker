@@ -671,15 +671,15 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             second_checkout = root / "checkout_2"
             first_checkout.mkdir()
             second_checkout.mkdir()
-            review_calls: list[tuple[Path, str, str]] = []
+            review_calls: list[tuple[Path, str]] = []
             codereview_main = importlib.import_module("codereview.main")
 
-            def fake_run_review(checkout_dir: Path, *, head_ref: str, mode: str) -> Path:
-                review_calls.append((Path(checkout_dir), head_ref, mode))
+            def fake_run_review(checkout_dir: Path, *, mode: str) -> Path:
+                review_calls.append((Path(checkout_dir), mode))
                 reports = Path(checkout_dir) / ".codereview" / "runs" / f"run_{len(review_calls)}" / "reports"
                 reports.mkdir(parents=True, exist_ok=True)
                 final_md = reports / "final.md"
-                final_md.write_text("# Graph-Verified Code Review Report\n", encoding="utf-8")
+                final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
                 (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
                 (reports / "confirmed.json").write_text("[]", encoding="utf-8")
                 (reports / "rejected.json").write_text("[]", encoding="utf-8")
@@ -692,16 +692,14 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     cfg,
                     {"agentConfig": {"graphVerified": {"mode": "fast"}}},
                     first_checkout,
-                    "HEAD",
                 )
                 second_payload = worker_main.run_graph_verified_review_payload(
                     cfg,
                     {"agentConfig": {"graphVerified": {"mode": "deep"}}},
                     second_checkout,
-                    "HEAD",
                 )
 
-            self.assertEqual(review_calls, [(first_checkout, "HEAD", "fast"), (second_checkout, "HEAD", "deep")])
+            self.assertEqual(review_calls, [(first_checkout, "fast"), (second_checkout, "deep")])
             self.assertEqual(first_payload["mode"], "fast")
             self.assertEqual(second_payload["mode"], "deep")
             first_config = json.loads((first_checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
@@ -779,6 +777,21 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(worker_main._codex_auth_failure_until, 0.0)
         self.assertEqual(worker_main._codex_auth_failure_detail, "")
 
+    def test_codex_ready_check_defers_while_review_codex_lock_is_held(self) -> None:
+        from codereview.codex_runner import acquire_codex_cli_lock, release_codex_cli_lock
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = config_for(Path(tmp_dir))
+            acquired = acquire_codex_cli_lock(blocking=False)
+            self.assertTrue(acquired)
+            try:
+                ok, detail = worker_main.codex_ready_check(cfg)
+            finally:
+                release_codex_cli_lock()
+
+        self.assertFalse(ok)
+        self.assertIn("deferred while codex is running", detail)
+
     def test_refresh_readiness_reports_degraded_instead_of_crashing_on_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg = config_for(Path(tmp_dir))
@@ -802,7 +815,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             reports = root / ".codereview" / "runs" / "run_1" / "reports"
             reports.mkdir(parents=True)
             final_md = reports / "final.md"
-            final_md.write_text("# Graph-Verified Code Review Report\n", encoding="utf-8")
+            final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
             (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
             (reports / "confirmed.json").write_text(json.dumps([{"candidate": {"candidate_id": "c1"}}]), encoding="utf-8")
             (reports / "rejected.json").write_text(json.dumps([{"candidate_id": "r1"}]), encoding="utf-8")
@@ -815,14 +828,14 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     cfg,
                     {"agentConfig": {"graphVerified": {"mode": "fast"}}},
                     root,
-                    "HEAD",
                 )
 
         self.assertEqual(payload["version"], "graph-verified-code-review/1")
         self.assertEqual(payload["runId"], "run_1")
         self.assertEqual(payload["mode"], "fast")
-        self.assertEqual(payload["scope"], "repository")
+        self.assertEqual(payload["scope"], "full-repository")
         self.assertNotIn("base", payload)
+        self.assertNotIn("head", payload)
         self.assertEqual(payload["confirmedCount"], 1)
         self.assertEqual(payload["rejectedCount"], 1)
         self.assertEqual(payload["blockedCount"], 2)
@@ -838,14 +851,13 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     cfg,
                     {"agentConfig": {"graphVerified": {"mode": "invalid"}}},
                     root,
-                    "abc123",
                 )
 
         self.assertEqual(payload["version"], "graph-verified-code-review/1")
         self.assertEqual(payload["mode"], "standard")
-        self.assertEqual(payload["scope"], "repository")
+        self.assertEqual(payload["scope"], "full-repository")
         self.assertNotIn("base", payload)
-        self.assertEqual(payload["head"], "abc123")
+        self.assertNotIn("head", payload)
         self.assertEqual(payload["confirmedCount"], 0)
         self.assertEqual(payload["blockedCount"], 1)
         self.assertEqual(payload["finalJson"], {"confirmed": []})

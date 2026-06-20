@@ -1,8 +1,73 @@
 {
   "mode": "standard",
-  "codegraph": {
-    "command": "codegraph",
-    "optional_sync": true
+  "scan": {
+    "mode": "full-cached",
+    "include_untracked": true,
+    "fail_on_source_change": true
+  },
+  "scope": {
+    "exclude": [
+      ".git/**",
+      ".codereview/**",
+      "node_modules/**",
+      "vendor/**",
+      "dist/**",
+      "build/**",
+      "coverage/**",
+      "target/**"
+    ],
+    "max_text_file_bytes": 1000000,
+    "inventory_excluded_files": true
+  },
+  "graph": {
+    "schema_version": "3",
+    "prompt_version": "graph-v3",
+    "full_inventory": true,
+    "incremental": true,
+    "max_shard_files": 25,
+    "max_shard_bytes": 500000,
+    "large_file_bytes": 120000,
+    "double_map_high_risk": true,
+    "max_repair_rounds": 2,
+    "use_sqlite_index": true,
+    "codex_mappers": true
+  },
+  "review": {
+    "require_baseline_for_every_unit": true,
+    "require_boundary_review": true,
+    "require_global_review": true,
+    "max_context_repair_rounds": 1,
+    "max_candidates_per_finder": 3,
+    "default_upstream_depth": 1,
+    "default_downstream_depth": 1,
+    "high_risk_upstream_depth": 2,
+    "high_risk_downstream_depth": 2,
+    "max_unit_nodes": 100,
+    "max_unit_paths": 30,
+    "max_context_chars": 80000
+  },
+  "agents": {
+    "candidate_verifier_parallel": 4,
+    "finder_parallel": 5,
+    "finder_timeout_seconds": 300,
+    "graph_audit_parallel": 2,
+    "graph_link_parallel": 4,
+    "graph_map_parallel": 6,
+    "graph_timeout_seconds": 480,
+    "judge_parallel": 3,
+    "judge_timeout_seconds": 300,
+    "repro_parallel": 3,
+    "repro_timeout_seconds": 900
+  },
+  "candidates": {
+    "max_per_finder_per_unit": 3,
+    "max_total_for_reproduction": 20,
+    "max_total_for_verification": 60,
+    "require_expected_behavior_source": true
+  },
+  "context": {
+    "enabled": true,
+    "timeout_seconds": 300
   },
   "codex": {
     "command": "codex",
@@ -24,5 +89,12 @@
     "max_repro": 0,
     "max_workers": 2,
     "require_red_green": false
+  },
+  "safety": {
+    "allow_production_network": false,
+    "allow_real_credentials": false,
+    "allow_source_checkout_writes": false,
+    "allow_worker_writes": true,
+    "fail_closed": true
   }
 }

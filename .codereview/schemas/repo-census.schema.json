@@ -1,0 +1,63 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "entrypoint_candidates": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "high_risk_roots": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "languages": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "packages": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "shards": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "shard_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "shard_id",
+          "files",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "languages",
+    "packages",
+    "entrypoint_candidates",
+    "high_risk_roots",
+    "shards"
+  ],
+  "type": "object"
+}

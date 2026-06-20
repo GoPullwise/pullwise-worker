@@ -35,6 +35,7 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
         return local
     output = run / "judge" / f"{safe_path_component(local['candidate_id'], default='candidate')}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
+    events = output.with_suffix(".events.jsonl")
     prompt = "\n\n".join(
         [
             prompt_file.read_text(encoding="utf-8"),
@@ -55,6 +56,7 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
         timeout_seconds=config.codex.timeout_seconds,
         config=config.codex,
         env=base_env(checkout, config.codex),
+        events_file=events,
     )
     if process.returncode != 0 or not output.is_file():
         return local

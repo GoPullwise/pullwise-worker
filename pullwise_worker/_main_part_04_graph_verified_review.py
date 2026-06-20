@@ -20,7 +20,7 @@ def graph_verified_toml_string(value: object) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, head_ref: str) -> dict:
+def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
     from codereview.main import run_review
     from codereview.utils.jsonl import read_json
 
@@ -29,13 +29,12 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     mode = graph_verified_mode(graph_config.get("mode") or "standard")
     try:
         write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
-        final_path = run_review(checkout_dir, head_ref=head_ref, mode=mode)
+        final_path = run_review(checkout_dir, mode=mode)
     except Exception as exc:
         return {
             "version": "graph-verified-code-review/1",
             "mode": mode,
-            "scope": "repository",
-            "head": head_ref,
+            "scope": "full-repository",
             "confirmedCount": 0,
             "rejectedCount": 0,
             "blockedCount": 1,
@@ -57,8 +56,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "version": "graph-verified-code-review/1",
         "runId": run_id,
         "mode": mode,
-        "scope": "repository",
-        "head": head_ref,
+        "scope": "full-repository",
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
         "blockedCount": graph_verified_count(report_counts.get("blocked")),
@@ -81,7 +79,47 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         except json.JSONDecodeError:
             current = {}
     current["mode"] = graph_verified_mode(mode)
-    current.pop("codegraph", None)
+    for stale_key in ("codegraph", "impact"):
+        current.pop(stale_key, None)
+    current["scan"] = {
+        **(current.get("scan") if isinstance(current.get("scan"), dict) else {}),
+        "mode": "full-cached",
+        "include_untracked": True,
+        "fail_on_source_change": True,
+    }
+    current["scope"] = {
+        **(current.get("scope") if isinstance(current.get("scope"), dict) else {}),
+        "exclude": [".git/**", ".codereview/**", "node_modules/**", "vendor/**", "dist/**", "build/**", "coverage/**", "target/**"],
+        "max_text_file_bytes": 1000000,
+        "inventory_excluded_files": True,
+    }
+    current["graph"] = {
+        "schema_version": "3",
+        "prompt_version": "graph-v3",
+        "full_inventory": True,
+        "incremental": graph_config.get("scanMode") != "full-strict",
+        "max_shard_files": 25,
+        "max_shard_bytes": 500000,
+        "large_file_bytes": 120000,
+        "double_map_high_risk": True,
+        "max_repair_rounds": 2,
+        "use_sqlite_index": True,
+        "codex_mappers": True,
+    }
+    current["review"] = {
+        "require_baseline_for_every_unit": True,
+        "require_boundary_review": True,
+        "require_global_review": True,
+        "max_context_repair_rounds": 1,
+        "max_candidates_per_finder": 3,
+        "default_upstream_depth": 1,
+        "default_downstream_depth": 1,
+        "high_risk_upstream_depth": 2,
+        "high_risk_downstream_depth": 2,
+        "max_unit_nodes": 100,
+        "max_unit_paths": 30,
+        "max_context_chars": 80000,
+    }
     current["context"] = {
         **(current.get("context") if isinstance(current.get("context"), dict) else {}),
         "enabled": graph_config.get("contextEnabled") is not False,
@@ -112,6 +150,12 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "timeout_seconds": graph_verified_positive_int(graph_config.get("reproTimeoutSeconds"), default=900, minimum=60, maximum=7200),
         "max_repro": graph_verified_positive_int(graph_config.get("maxRepro"), default=0, minimum=0, maximum=100),
         "require_red_green": graph_config.get("requireRedGreen") is True,
+    }
+    current["candidates"] = {
+        "max_per_finder_per_unit": 3,
+        "max_total_for_verification": 60,
+        "max_total_for_reproduction": graph_verified_positive_int(graph_config.get("maxRepro"), default=20, minimum=1, maximum=100),
+        "require_expected_behavior_source": True,
     }
     current["scoring"] = {
         **(current.get("scoring") if isinstance(current.get("scoring"), dict) else {}),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ..units.context import unit_file_stem
 from ..utils.paths import safe_path_component, safe_relative_path
 
 
@@ -21,7 +22,7 @@ REQUIRED_FIELDS = {
     "minimal_repro_idea",
     "repro_likelihood",
 }
-OPTIONAL_FIELDS = {"repository_tests", "needs_network", "notes"}
+OPTIONAL_FIELDS = {"repository_tests", "needs_network", "notes", "expected_behavior_source"}
 ALLOWED_FIELDS = REQUIRED_FIELDS | OPTIONAL_FIELDS
 DERIVED_FIELDS = {"issue_id", "source_task", "title", "code_evidence", "valid", "invalid_reasons", "score"}
 CATEGORIES = {"correctness", "security_auth_dataflow", "api_contract", "state_concurrency_resource", "test_repro"}
@@ -118,28 +119,28 @@ def validate_graph_evidence(value: object, *, checkout: Path | None = None, run:
     reasons: list[str] = []
     if not isinstance(value, dict):
         return ["graph_evidence must be an object"]
-    unexpected = sorted(set(value) - {"slice_id", "codegraph_files", "path_summary"})
+    unexpected = sorted(set(value) - {"unit_id", "context_files", "path_summary"})
     if unexpected:
         reasons.append(f"graph_evidence has unexpected fields: {', '.join(unexpected)}")
-    slice_id = str(value.get("slice_id") or "").strip()
-    codegraph_files = value.get("codegraph_files")
+    unit_id = str(value.get("unit_id") or "").strip()
+    context_files = value.get("context_files")
     path_summary = value.get("path_summary")
-    if not slice_id or not isinstance(codegraph_files, list) or not isinstance(path_summary, list):
-        reasons.append("graph_evidence requires slice_id, codegraph_files, and path_summary")
-    if run is not None and slice_id and not _slice_exists(run, slice_id):
-        reasons.append(f"graph_evidence.slice_id does not exist under run/slices: {slice_id}")
-    if not isinstance(codegraph_files, list) or not codegraph_files:
-        reasons.append("graph_evidence.codegraph_files must be a non-empty list")
-    elif not any(str(item or "").strip() for item in codegraph_files):
-        reasons.append("graph_evidence.codegraph_files must contain at least one file")
+    if not unit_id or not isinstance(context_files, list) or not isinstance(path_summary, list):
+        reasons.append("graph_evidence requires unit_id, context_files, and path_summary")
+    if run is not None and unit_id and not _unit_exists(run, unit_id):
+        reasons.append(f"graph_evidence.unit_id does not exist under run/artifacts/review-units: {unit_id}")
+    if not isinstance(context_files, list) or not context_files:
+        reasons.append("graph_evidence.context_files must be a non-empty list")
+    elif not any(str(item or "").strip() for item in context_files):
+        reasons.append("graph_evidence.context_files must contain at least one file")
     else:
-        for item in codegraph_files:
+        for item in context_files:
             rel = _safe_source_path(item)
             if not rel:
-                reasons.append(f"graph_evidence.codegraph_files contains an unsafe path: {item}")
+                reasons.append(f"graph_evidence.context_files contains an unsafe path: {item}")
                 continue
             if checkout is not None and not (checkout / rel).is_file():
-                reasons.append(f"graph_evidence.codegraph_files file does not exist: {rel}")
+                reasons.append(f"graph_evidence.context_files file does not exist: {rel}")
     if not isinstance(path_summary, list) or not path_summary or not any(str(item or "").strip() for item in path_summary):
         reasons.append("graph_evidence.path_summary must be a non-empty list")
     return reasons
@@ -248,9 +249,7 @@ def _line_count(path: Path) -> int:
         return 0
 
 
-def _slice_exists(run: Path, slice_id: str) -> bool:
-    safe_id = safe_path_component(slice_id, default="")
-    if safe_id != slice_id:
-        return False
-    slices = run / "slices"
-    return (slices / f"{slice_id}.json").is_file() or (slices / f"{slice_id}.context.md").is_file()
+def _unit_exists(run: Path, unit_id: str) -> bool:
+    stem = unit_file_stem(unit_id)
+    units = run / "artifacts" / "review-units"
+    return (units / f"{stem}.json").is_file() or (units / f"{stem}.context.md").is_file()

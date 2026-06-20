@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
 from ..config import ReviewConfig
+from ..units.context import unit_file_stem
 from ..utils.process import compact_process_output
 from .tasks import FinderTask
 
@@ -20,10 +21,12 @@ def run_finders_parallel(checkout: Path, run: Path, tasks: list[FinderTask], con
 
 def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig) -> dict:
     prompt_file = checkout / ".codereview" / "prompts" / f"finder_{task.focus}.md"
-    context_file = run / "slices" / f"{task.slice_id}.context.md"
+    stem = unit_file_stem(task.unit_id)
+    context_file = run / "artifacts" / "review-units" / f"{stem}.context.md"
     prompt = prompt_file.read_text(encoding="utf-8") + "\n\nInput context pack:\n" + context_file.read_text(encoding="utf-8")
-    output = run / "finder" / task.focus / f"{task.slice_id}.result.json"
+    output = run / "finder" / task.focus / f"{stem}.result.json"
     output.parent.mkdir(parents=True, exist_ok=True)
+    events = output.with_suffix(".events.jsonl")
     result = run_codex_exec(
         cd=checkout,
         prompt=prompt,
@@ -33,11 +36,13 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
         timeout_seconds=config.finders.timeout_seconds,
         config=config.codex,
         env=base_env(checkout, config.codex),
+        events_file=events,
     )
+    process_payload = {**result.to_dict(), "events_path": str(events)}
     if result.returncode != 0:
         return {
             "task": task.__dict__,
-            "process": result.to_dict(),
+            "process": process_payload,
             "result": {"candidates": []},
             "status": "blocked",
             "blocked_reason": process_failure_reason("finder codex exec", result),
@@ -49,7 +54,7 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
         except json.JSONDecodeError as exc:
             return {
                 "task": task.__dict__,
-                "process": result.to_dict(),
+                "process": process_payload,
                 "result": {"candidates": []},
                 "status": "blocked",
                 "blocked_reason": f"finder produced invalid JSON: {exc}",
@@ -57,12 +62,12 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
     if not output.is_file():
         return {
             "task": task.__dict__,
-            "process": result.to_dict(),
+            "process": process_payload,
             "result": {"candidates": []},
             "status": "blocked",
             "blocked_reason": "finder did not produce an output file",
         }
-    return {"task": task.__dict__, "process": result.to_dict(), "result": parsed, "status": "ok"}
+    return {"task": task.__dict__, "process": process_payload, "result": parsed, "status": "ok"}
 
 
 def process_failure_reason(stage: str, result: object) -> str:

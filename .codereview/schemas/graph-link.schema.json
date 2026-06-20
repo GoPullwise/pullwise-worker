@@ -1,0 +1,31 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "reason": {
+      "type": "string"
+    },
+    "requested_files": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "resolved",
+        "ambiguous",
+        "still_unresolved",
+        "invalid_reference",
+        "needs_context"
+      ],
+      "type": "string"
+    },
+    "target": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "type": "object"
+}

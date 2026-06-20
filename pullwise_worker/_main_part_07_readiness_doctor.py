@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import posixpath
 
-from codereview.codex_runner import build_codex_exec_command
+from codereview.codex_runner import acquire_codex_cli_lock, build_codex_exec_command, release_codex_cli_lock
 
 def result_checksum(payload: dict) -> str:
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -360,7 +360,7 @@ def codex_ready_probe_confirmed(text: str) -> bool:
 
 
 def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
-    if not _CODEX_EXEC_LOCK.acquire(blocking=False):
+    if not acquire_codex_cli_lock(blocking=False):
         return False, "ready check deferred while codex is running"
     try:
         scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
@@ -425,4 +425,4 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
                 return False, "Codex CLI failed to start; reinstall Codex CLI or verify Node.js 20+"
             return False, detail
     finally:
-        _CODEX_EXEC_LOCK.release()
+        release_codex_cli_lock()

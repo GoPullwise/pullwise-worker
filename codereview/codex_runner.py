@@ -48,6 +48,14 @@ def base_env(checkout: Path, config: CodexConfig | None = None) -> dict[str, str
     return env
 
 
+def acquire_codex_cli_lock(*, blocking: bool = True) -> bool:
+    return _CODEX_CLI_LOCK.acquire(blocking=blocking)
+
+
+def release_codex_cli_lock() -> None:
+    _CODEX_CLI_LOCK.release()
+
+
 def codex_cli_capabilities(command: str, env: dict[str, str] | None = None) -> CodexCliCapabilities:
     key = (
         str(command or ""),
@@ -156,6 +164,7 @@ def run_codex_exec(
     timeout_seconds: int,
     config: CodexConfig,
     env: dict[str, str] | None = None,
+    events_file: Path | None = None,
 ) -> ProcessResult:
     cmd, command_error = build_codex_exec_command(
         command=config.command,
@@ -178,9 +187,10 @@ def run_codex_exec(
             duration_ms=0,
         )
     queued_at = time.monotonic()
-    with _CODEX_CLI_LOCK:
+    acquire_codex_cli_lock()
+    try:
         queue_wait_ms = int((time.monotonic() - queued_at) * 1000)
-        return run_process(
+        result = run_process(
             cmd,
             cwd=cd,
             env=env,
@@ -188,6 +198,11 @@ def run_codex_exec(
             queue_wait_ms=queue_wait_ms,
             stdin_text=prompt,
         )
+    finally:
+        release_codex_cli_lock()
+    if events_file is not None:
+        _copy_events(result, events_file)
+    return result
 
 
 def _codex_help_options(command: list[str], env: dict[str, str] | None) -> tuple[frozenset[str], str]:
@@ -212,6 +227,15 @@ def _codex_help_options(command: list[str], env: dict[str, str] | None) -> tuple
         detail = output.strip().splitlines()[0] if output.strip() else f"exit {completed.returncode}"
         return options, f"{' '.join(command)} failed: {detail}"
     return options, ""
+
+
+def _copy_events(result: ProcessResult, events_file: Path) -> None:
+    events_file.parent.mkdir(parents=True, exist_ok=True)
+    source = Path(result.stdout_path) if result.stdout_path else None
+    if source is not None and source.is_file():
+        events_file.write_bytes(source.read_bytes())
+    else:
+        events_file.write_text(result.stdout or "", encoding="utf-8")
 
 
 def _fallback_codex_exec_command(

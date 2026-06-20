@@ -90,10 +90,10 @@ def snippet_window(lines: list[str], line: int, *, radius: int = 40, max_chars: 
 def context_prompt(seed: dict) -> str:
     return "\n".join(
         [
-            "You are generating repository context for a code review slice.",
+            "You are generating repository context for a full-repository review unit.",
             "Return JSON only matching context_result.schema.json.",
             "Use the repository in the current directory. Read files as needed, but do not modify files and do not use the network.",
-            "Identify the focal symbol, likely direct callers, likely direct callees, impact radius, and repository-relative files that matter.",
+            "Identify the focal review unit, likely direct callers, likely direct callees, impact radius, and repository-relative files that matter.",
             "Prefer concrete file paths and line numbers over prose. Keep the result compact.",
             "",
             "Seed context:",
@@ -157,7 +157,7 @@ def static_payload(seed: dict, *, reason: str) -> dict:
         "edges": [],
         "callers": [],
         "callees": [],
-        "impact": [{"file": file_path, "line": line, "reason": "focal slice"}] if file_path else [],
+        "impact": [{"file": file_path, "line": line, "reason": "focal review unit"}] if file_path else [],
     }
     if reason:
         payload["fallback_reason"] = reason

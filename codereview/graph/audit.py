@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from ..codex_runner import base_env, run_codex_exec
+from ..config import ReviewConfig
+from ..inventory.git_inventory import analyzable_files
+from ..utils.jsonl import write_json
+from .validate import validate_graph
+
+
+def audit_graph(graph: dict, inventory: dict, checkout: Path) -> dict:
+    analyzable = {str(item.get("path") or "") for item in analyzable_files(inventory)}
+    mapped = set(str(path) for path in (graph.get("coverage") or {}).get("mapped_files", []) if str(path))
+    review_files = set(analyzable)
+    node_ids = {str(node.get("id") or "") for node in graph.get("nodes", []) if isinstance(node, dict)}
+    dual_conflicts = graph.get("conflicts") if isinstance(graph.get("conflicts"), list) else []
+    dangling = []
+    for edge in graph.get("edges", []):
+        if isinstance(edge, dict) and (str(edge.get("from") or "") not in node_ids or str(edge.get("to") or "") not in node_ids):
+            dangling.append(edge.get("id") or edge)
+    span_violations = validate_graph(graph, checkout)
+    review_files_mapped = len(review_files & mapped)
+    missing_mapped = sorted(analyzable - mapped)
+    quality_errors = []
+    if missing_mapped:
+        quality_errors.append("not all analyzable files were mapped")
+    if dangling:
+        quality_errors.append("dangling graph edges exist")
+    if span_violations:
+        quality_errors.append("graph evidence validation failed")
+    if dual_conflicts:
+        quality_errors.append("dual mapper conflicts are unresolved")
+    quality_gate = "passed" if not quality_errors else "failed"
+    return {
+        "inventory_files": len(inventory.get("files", []) or []),
+        "analyzable_files": len(analyzable),
+        "mapped_files": len(mapped & analyzable),
+        "missing_mapped_files": missing_mapped[:100],
+        "review_scope": "full-repository",
+        "review_files": len(review_files),
+        "review_files_mapped": review_files_mapped,
+        "nodes": len(graph.get("nodes", []) or []),
+        "edges": len(graph.get("edges", []) or []),
+        "unresolved_refs": len(graph.get("unresolved_refs", []) or []),
+        "dangling_edges": len(dangling),
+        "stale_evidence": 0,
+        "dual_map_conflicts": len(dual_conflicts),
+        "dual_map_conflicts_resolved": 0 if dual_conflicts else len(dual_conflicts),
+        "span_violations": span_violations[:100],
+        "quality_errors": quality_errors,
+        "quality_gate": quality_gate,
+        "quality_gate_passed": quality_gate == "passed",
+        "repairs": _repair_tasks(missing_mapped),
+    }
+
+
+def run_agent_graph_audit(checkout: Path, run: Path, graph: dict, inventory: dict, deterministic_audit: dict, config: ReviewConfig) -> dict:
+    prompt_file = checkout / ".codereview" / "prompts" / "graph-auditor.md"
+    schema = checkout / ".codereview" / "schemas" / "graph-audit.schema.json"
+    worker = run / "workers" / "graph-audit-0001"
+    worker.mkdir(parents=True, exist_ok=True)
+    if not prompt_file.is_file() or not schema.is_file():
+        return {"status": "skipped", "reason": "graph auditor prompt or schema missing", "repairs": []}
+    prompt = "\n\n".join(
+        [
+            prompt_file.read_text(encoding="utf-8"),
+            "Deterministic audit JSON:",
+            json.dumps(deterministic_audit, ensure_ascii=False, indent=2, sort_keys=True),
+            "Full repository scan scope JSON:",
+            json.dumps({"mode": "full-repository"}, ensure_ascii=False, indent=2, sort_keys=True)[:20000],
+            "Inventory summary JSON:",
+            json.dumps(inventory.get("summary") or {}, ensure_ascii=False, indent=2, sort_keys=True),
+            "Graph summary JSON:",
+            json.dumps(_graph_audit_summary(graph), ensure_ascii=False, indent=2, sort_keys=True),
+        ]
+    )
+    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_json(worker / "task.json", {"scan": {"mode": "full-repository"}, "deterministic_audit": deterministic_audit})
+    output = worker / "result.json"
+    events = worker / "events.jsonl"
+    process = run_codex_exec(
+        cd=checkout,
+        prompt=prompt,
+        output_schema=schema,
+        output_file=output,
+        sandbox="read-only",
+        timeout_seconds=config.graph.graph_timeout_seconds,
+        config=config.codex,
+        env=base_env(checkout, config.codex),
+        events_file=events,
+    )
+    process_payload = {**process.to_dict(), "events_path": str(events)}
+    if process.returncode != 0 or not output.is_file():
+        return {"status": "blocked", "reason": f"graph auditor exited {process.returncode}", "repairs": [], "process": process_payload}
+    try:
+        parsed = json.loads(output.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {"status": "blocked", "reason": f"graph auditor produced invalid JSON: {exc}", "repairs": [], "process": process_payload}
+    if not isinstance(parsed, dict):
+        return {"status": "blocked", "reason": "graph auditor produced non-object JSON", "repairs": [], "process": process_payload}
+    parsed["status"] = "ok"
+    parsed["process"] = process_payload
+    return parsed
+
+
+def _graph_audit_summary(graph: dict) -> dict:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    unresolved = graph.get("unresolved_refs") if isinstance(graph.get("unresolved_refs"), list) else []
+    high_value_nodes = [
+        {
+            "id": node.get("id"),
+            "kind": node.get("kind"),
+            "qualified_name": node.get("qualified_name"),
+            "file": node.get("file"),
+            "span": node.get("span"),
+            "attributes": node.get("attributes"),
+        }
+        for node in nodes
+        if isinstance(node, dict) and (node.get("kind") in {"http_route", "job_handler", "test_file"} or node.get("attributes"))
+    ][:200]
+    return {
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "unresolved_count": len(unresolved),
+        "high_value_nodes": high_value_nodes,
+        "sample_unresolved_refs": unresolved[:100],
+    }
+
+
+def _repair_tasks(missing: list[str]) -> list[dict]:
+    repairs = [{"type": "remap_files", "files": missing[:50], "reason": "Analyzable files were not covered by mapper output."}] if missing else []
+    return repairs

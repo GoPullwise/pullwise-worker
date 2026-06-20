@@ -8,12 +8,6 @@
           "actual_behavior_hypothesis": {
             "type": "string"
           },
-          "affected_tests": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "candidate_id": {
             "type": "string"
           },
@@ -67,10 +61,16 @@
           "expected_behavior": {
             "type": "string"
           },
+          "expected_behavior_source": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "graph_evidence": {
             "additionalProperties": false,
             "properties": {
-              "codegraph_files": {
+              "context_files": {
                 "items": {
                   "type": "string"
                 },
@@ -82,13 +82,13 @@
                 },
                 "type": "array"
               },
-              "slice_id": {
+              "unit_id": {
                 "type": "string"
               }
             },
             "required": [
-              "slice_id",
-              "codegraph_files",
+              "unit_id",
+              "context_files",
               "path_summary"
             ],
             "type": "object"
@@ -109,6 +109,12 @@
               "low"
             ],
             "type": "string"
+          },
+          "repository_tests": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "severity": {
             "enum": [
@@ -142,15 +148,42 @@
       },
       "type": "array"
     },
+    "context_requests": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requested_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
     "focus": {
       "type": "string"
     },
-    "slice_id": {
+    "unit_id": {
       "type": "string"
     }
   },
   "required": [
-    "slice_id",
+    "unit_id",
     "focus",
     "candidates"
   ],

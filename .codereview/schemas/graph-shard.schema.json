@@ -1,0 +1,213 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "coverage": {
+      "type": "object"
+    },
+    "edges": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "confidence": {
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "content_hash": {
+                  "type": "string"
+                },
+                "end_line": {
+                  "type": "integer"
+                },
+                "evidence_kind": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "file",
+                "start_line",
+                "end_line",
+                "evidence_kind"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "evidence_kind": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "type",
+          "status",
+          "evidence_kind",
+          "confidence",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "nodes": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "evidence": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "content_hash": {
+                  "type": "string"
+                },
+                "end_line": {
+                  "type": "integer"
+                },
+                "evidence_kind": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "file",
+                "start_line",
+                "end_line",
+                "evidence_kind"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "file": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "qualified_name": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "span": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "qualified_name",
+          "file",
+          "span",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "unresolved_refs": {
+      "items": {
+        "additionalProperties": true,
+        "properties": {
+          "candidate_targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "raw_reference": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "reference_kind": {
+            "type": "string"
+          },
+          "resolution_hint": {
+            "type": "string"
+          },
+          "source_file": {
+            "type": "string"
+          },
+          "source_line": {
+            "type": "integer"
+          },
+          "source_node": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_node",
+          "reference_kind",
+          "raw_reference",
+          "source_file",
+          "source_line",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "nodes",
+    "edges",
+    "unresolved_refs",
+    "coverage",
+    "warnings"
+  ],
+  "type": "object"
+}

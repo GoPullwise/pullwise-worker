@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..utils.process import run_process
-
 
 @dataclass
 class RepositorySnapshot:
@@ -16,11 +14,12 @@ class RepositorySnapshotError(RuntimeError):
     pass
 
 
-def analyze_repository_snapshot(checkout: Path, head_ref: str) -> RepositorySnapshot:
-    names = run_process(["git", "ls-tree", "-r", "--name-only", head_ref], cwd=checkout, timeout=120)
-    if names.returncode != 0:
-        raise RepositorySnapshotError(f"git ls-tree failed: {(names.stderr or names.stdout)[-500:]}")
-    files = [line.strip().replace("\\", "/") for line in names.stdout.splitlines() if line.strip()]
+def analyze_repository_snapshot(checkout: Path, inventory: dict) -> RepositorySnapshot:
+    files = [
+        str(item.get("path") or "")
+        for item in inventory.get("files", [])
+        if isinstance(item, dict) and item.get("scope") == "analyze" and str(item.get("path") or "")
+    ]
     spans: list[dict] = []
     for file_path in files:
         path = checkout / file_path

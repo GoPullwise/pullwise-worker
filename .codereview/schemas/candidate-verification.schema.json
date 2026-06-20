@@ -1,0 +1,43 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "candidate_id": {
+      "type": "string"
+    },
+    "claim_survived": {
+      "type": "boolean"
+    },
+    "expected_behavior_supported": {
+      "type": "boolean"
+    },
+    "graph_path_valid": {
+      "type": "boolean"
+    },
+    "rejection_reason": {
+      "type": "string"
+    },
+    "reproduction": {
+      "type": "object"
+    },
+    "verdict": {
+      "enum": [
+        "reject",
+        "reproducible",
+        "blocked",
+        "unsafe",
+        "needs_graph_repair"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "candidate_id",
+    "verdict",
+    "claim_survived",
+    "graph_path_valid",
+    "expected_behavior_supported",
+    "reproduction",
+    "rejection_reason"
+  ],
+  "type": "object"
+}

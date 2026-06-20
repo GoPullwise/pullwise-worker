@@ -98,7 +98,6 @@ _CODEX_AUTH_FAILURE_MARKERS = (
     "access token could not be refreshed",
     "refresh token was already used",
 )
-_CODEX_EXEC_LOCK = Lock()
 _CODEX_AUTH_FAILURE_LOCK = Lock()
 _codex_auth_failure_until = 0.0
 _codex_auth_failure_detail = ""

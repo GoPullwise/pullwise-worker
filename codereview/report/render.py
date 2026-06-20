@@ -30,14 +30,39 @@ def collect_rejected(candidates: list[dict], repro_results: list[dict], judge_re
     return [{"candidate_id": candidate_id, "reason": reason} for candidate_id, reason in rejected_by_id.items()]
 
 
-def render_final_report(confirmed: list[dict], rejected: list[dict], *, blocked: int = 0, head_ref: str, run_id: str, mode: str) -> str:
+def render_final_report(
+    confirmed: list[dict],
+    rejected: list[dict],
+    *,
+    blocked: int = 0,
+    run_id: str,
+    mode: str,
+    graph_schema: str = "v3",
+    coverage: dict | None = None,
+    snapshot: dict | None = None,
+) -> str:
+    coverage = coverage or {}
+    snapshot = snapshot or {}
     lines = [
-        "# Graph-Verified Repository Review Report",
+        "# Full-Repository Graph-Verified Code Review",
         "",
-        "Scope: repository",
-        f"Head: {head_ref}",
+        "Scope: full-repository snapshot",
         f"Run ID: {run_id}",
         f"Mode: {mode}",
+        f"Graph schema: {graph_schema}",
+        f"Snapshot files: {snapshot.get('copied_files_count', 0)}",
+        "",
+        "## Coverage",
+        "",
+        f"Inventory files: {coverage.get('inventory_files', 0)}",
+        f"Analyzed files: {coverage.get('analyzed_files', 0)}",
+        f"Review units: {coverage.get('review_units', 0)}",
+        f"Baseline reviewed units: {coverage.get('baseline_reviewed_units', 0)}",
+        f"Production symbols covered: {coverage.get('covered_production_symbols', 0)}/{coverage.get('production_symbols', 0)}",
+        f"Cross-boundary reviews: {coverage.get('cross_boundary_reviews', 0)}",
+        f"Global invariant reviews: {coverage.get('global_invariant_reviews', 0)}",
+        "",
+        "## Findings",
         "",
         f"Confirmed findings: {len(confirmed)}",
         f"Rejected candidates: {len(rejected)}",
@@ -57,7 +82,7 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, blocked:
                 "",
                 f"Severity: {candidate.get('severity') or 'medium'}",
                 f"Category: {candidate.get('category') or 'Correctness'}",
-                f"Verification: {judge.get('level') or 'L2'} reproduced",
+                f"Verification: {_verification_label(judge.get('level'))} reproduced",
                 f"Safe to show user: {str(judge.get('safe_to_show_user')).lower()}",
                 "",
                 "### Summary",
@@ -125,7 +150,7 @@ def render_final_report(confirmed: list[dict], rejected: list[dict], *, blocked:
 
 def render_debug_report(
     snapshot: object,
-    slices: list[dict],
+    review_units: list[dict],
     raw_candidates: list[dict],
     selected: list[dict],
     repro_results: list[dict],
@@ -140,7 +165,7 @@ def render_debug_report(
         "## Pipeline Stats",
         "",
         f"- Repository files: {len(getattr(snapshot, 'files', []) or [])}",
-        f"- Slices: {len(slices)}",
+        f"- Review units: {len(review_units)}",
         f"- Finder raw results: {len(raw_candidates)}",
         f"- Selected for repro: {len(selected)}",
         f"- Repro results: {len(repro_results)}",
@@ -195,3 +220,8 @@ def _bullet_lines(value: object) -> str:
         value = [value] if value else []
     lines = [f"* `{item}`" if isinstance(item, str) else f"* `{json.dumps(item, ensure_ascii=False)}`" for item in value if item]
     return "\n".join(lines) if lines else "* None"
+
+
+def _verification_label(value: object) -> str:
+    text = str(value or "L2")
+    return {"L2": "V2", "L3": "V3", "L1": "V1", "L0": "V0"}.get(text, text)

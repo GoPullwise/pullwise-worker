@@ -91,7 +91,7 @@ cleanup IO.
   renews the claimed job lease while the final payload is being retried. They do
   not count as active Codex/job execution capacity.
 - Result upload payloads should use gzip compression for large JSON. Keep server
-  gzip JSON support and worker compression thresholds compatible.
+  gzip JSON support and worker compression thresholds aligned.
 - Do not add `time.sleep()`-based retry loops to `run_job()` or other code that
   holds the only job execution slot. Put backoff in a background path.
 - Pending result upload files live under `.pullwise-result-uploads`; keep this
@@ -138,6 +138,53 @@ scope.
   audit-only or filtered before reporting. Do not treat speculative model claims,
   source-only observations, or natural-language reproduction notes as trusted
   findings.
+
+## Graph-Verified Review Implementation Notes
+
+The graph-verified review implementation lives under `codereview/` and follows
+the v3 full-repository design in `../codex-native-full-repo-graph-review.md`:
+use Git only for file discovery/status metadata, Python standard library, and
+the Codex Agent CLI. Do not add third-party graph, static-analysis, parser, or
+database dependencies for this pipeline.
+
+- All code that starts `codex` for graph mapping, finder, verifier, repro, judge,
+  context, or fallback work must call `codereview.codex_runner.run_codex_exec`.
+  That function owns the worker-level Codex CLI lock required by the concurrency
+  rule above. It is fine for orchestrator stages to use thread pools for task
+  scheduling, but concurrent calls under one worker identity must still serialize
+  at the Codex CLI boundary.
+- `.codereview/runs/<run_id>/` is checkout-scoped run state. Keep graph JSONL,
+  review units, candidate artifacts, worker task files, reports, and debug data
+  there. Do not move repository context or review run data under `service_home`.
+- Every run is a full-repository scan of the current checkout snapshot,
+  including configured tracked, modified, and untracked files. Git metadata is
+  for file discovery, ignore rules, status metadata, and source-state checks.
+- The immutable review input is `workers/coordinator/snapshot/repo/`. Agent
+  stages should read source from that snapshot, not from the mutable source
+  checkout. Source-state hash checks must fail closed when analyzable files
+  change during a run.
+- Evidence graph JSONL artifacts are the source of truth: `nodes.jsonl`,
+  `edges.jsonl`, and `unresolved.jsonl`. Do not invent graph edges to make a
+  review path look complete. If a relationship cannot be proven from source
+  evidence or unique resolution, keep it as unresolved and let later stages
+  request repair or reject the candidate.
+- Review planning is unit-based. The planner must cover entrypoint_flow,
+  component, state, trust_boundary, config_build, test_integrity,
+  cross_boundary, global_invariant, and orphan production-symbol units.
+  Coverage reports are required even when there are no confirmed findings.
+- Finder candidates must have a review unit id, graph path, concrete file/line
+  evidence, trigger condition, expected behavior source, and a local
+  reproduction idea. Candidates without those fields stay internal and must not
+  become final findings.
+- Reproduction workers write only inside their worker directory. `repo/` is the
+  private copy of the immutable full-repository snapshot. Do not create base or
+  alternate checkout directories for reproduction.
+- User-facing reports are confirmed-only. A finding must pass reproduction and
+  judge gates with real command, exit code, log evidence, and filesystem-boundary
+  checks before it is shown.
+- When adding or changing graph/review schemas or prompts, update
+  `codereview/templates.py` so `python -m codereview init` and fresh checkouts
+  receive the same assets.
 
 ## Server-Controlled Agent Policy
 

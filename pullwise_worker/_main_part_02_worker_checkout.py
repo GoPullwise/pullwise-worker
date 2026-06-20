@@ -781,7 +781,7 @@ class Worker:
                 "Repository preflight ready",
                 config=job_config,
             )
-            graph_summary = "GraphVerified will build graph slices during review."
+            graph_summary = "GraphVerified will build full-repository review units during review."
             self.report_progress(
                 job_id,
                 "index",
@@ -801,7 +801,6 @@ class Worker:
                 job_config,
                 job,
                 checkout_dir,
-                resolved_commit or "HEAD",
             )
             projected_findings = graph_verified_summary_findings(graph_verified_report)
             summary = summarize(projected_findings)
@@ -907,8 +906,7 @@ class Worker:
             graph_verified_report = graph_verified_report or {
                 "version": "graph-verified-code-review/1",
                 "mode": graph_mode,
-                "scope": "repository",
-                "head": resolved_commit or "HEAD",
+                "scope": "full-repository",
                 "confirmedCount": 0,
                 "rejectedCount": 0,
                 "blockedCount": 1,

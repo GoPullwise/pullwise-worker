@@ -73,6 +73,9 @@ def local_judge(candidate: dict, repro: dict) -> dict:
     environment = result.get("environment") if isinstance(result.get("environment"), dict) else {}
     if environment.get("network_used") is True:
         violations = [*violations, "reproduction used network"]
+    event_precheck = repro.get("event_precheck") if isinstance(repro.get("event_precheck"), dict) else {}
+    if event_precheck.get("status") == "rejected":
+        violations = [*violations, str(event_precheck.get("reason") or "codex event precheck rejected reproduction")]
     status = "confirmed" if command and log_path and observable and not violations and reproduced and level in {"L2", "L3"} else "rejected"
     reason = "reproduction evidence satisfies the graph-verified gate" if status == "confirmed" else "missing or unsafe reproduction evidence"
     if violations:
@@ -197,12 +200,12 @@ def valid_candidate_graph_evidence(candidate: dict) -> bool:
     graph = candidate.get("graph_evidence") if isinstance(candidate, dict) else None
     if not isinstance(graph, dict):
         return False
-    slice_id = str(graph.get("slice_id") or "").strip()
-    codegraph_files = graph.get("codegraph_files")
+    unit_id = str(graph.get("unit_id") or "").strip()
+    context_files = graph.get("context_files")
     path_summary = graph.get("path_summary")
-    if not slice_id or not isinstance(codegraph_files, list) or not isinstance(path_summary, list):
+    if not unit_id or not isinstance(context_files, list) or not isinstance(path_summary, list):
         return False
-    return any(str(item or "").strip() for item in codegraph_files) and any(
+    return any(str(item or "").strip() for item in context_files) and any(
         str(item or "").strip() for item in path_summary
     )
 

@@ -1,0 +1,29 @@
+{
+  "additionalProperties": true,
+  "properties": {
+    "quality_gate": {
+      "enum": [
+        "passed",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "repairs": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "quality_gate",
+    "repairs"
+  ],
+  "type": "object"
+}
