@@ -716,7 +716,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             worker_main.mark_codex_auth_failure(cfg, "401 Unauthorized")
             self.assertGreater(worker_main._codex_auth_failure_until, 0)
 
-            def fake_run(command, **_kwargs):
+            def fake_run(command, **kwargs):
+                self.assertEqual(command[-1], "-")
+                self.assertEqual(kwargs["input"], 'Return only JSON: {"ok": true}')
                 output_path = Path(command[command.index("--output-last-message") + 1])
                 output_path.write_text('{"ok": true}', encoding="utf-8")
                 return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}\n', stderr="")

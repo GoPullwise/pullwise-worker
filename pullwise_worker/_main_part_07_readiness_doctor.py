@@ -380,10 +380,11 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "codex-ready.json"
             provider_env = provider_process_env(config)
+            ready_prompt = 'Return only JSON: {"ok": true}'
             command, command_error = build_codex_exec_command(
                 command=config.codex_command,
                 cd=Path(tmpdir),
-                prompt='Return only JSON: {"ok": true}',
+                prompt=ready_prompt,
                 output_file=output_path,
                 sandbox="read-only",
                 output_schema=None,
@@ -403,6 +404,7 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
                 completed = subprocess.run(
                     command,
                     env=provider_env,
+                    input=ready_prompt,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
