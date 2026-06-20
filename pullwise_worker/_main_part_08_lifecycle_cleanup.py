@@ -197,22 +197,51 @@ class WorkerLogStreamTailer:
             since_timestamp=log_stream_created_at(session),
         )
         self.summary = WorkerFileLogTailer(Path(getattr(config, "log_dir", None) or tempfile.gettempdir()) / "scan-summary.log")
+        self.intro_sent = False
 
     def collect(self) -> tuple[list[dict], dict]:
+        diagnostic_entries = []
+        if not self.intro_sent:
+            try:
+                summary_exists = self.summary.path.exists()
+                summary_size = self.summary.path.stat().st_size if summary_exists else 0
+            except OSError:
+                summary_exists = False
+                summary_size = 0
+            diagnostic_entries.append(
+                {
+                    "source": "worker",
+                    "stream": "diagnostic",
+                    "timestamp": int(time.time()),
+                    "line": (
+                        "log stream connected: "
+                        f"session={self.session_id} "
+                        f"service={self.journal.service_name} "
+                        f"journal_since={self.journal.since_timestamp} "
+                        f"summary={self.summary.path} "
+                        f"summary_exists={summary_exists} "
+                        f"summary_offset={self.summary.offset} "
+                        f"summary_size={summary_size}"
+                    ),
+                }
+            )
         journal_entries, journal_cursor = self.journal.collect()
         summary_entries, summary_offset, summary_partial = self.summary.collect()
-        ordered_entries = list(enumerate([*journal_entries, *summary_entries]))
+        ordered_entries = list(enumerate([*diagnostic_entries, *journal_entries, *summary_entries]))
         ordered_entries.sort(key=lambda item: (int(item[1].get("timestamp") or 0), item[0]))
         entries = [entry for _, entry in ordered_entries]
         return entries, {
             "journal_cursor": journal_cursor,
             "summary_offset": summary_offset,
             "summary_partial": summary_partial,
+            "intro_sent": self.intro_sent or bool(diagnostic_entries),
         }
 
     def commit(self, state: dict) -> None:
         self.journal.commit(str(state.get("journal_cursor") or ""))
         self.summary.commit(int(state.get("summary_offset") or self.summary.offset), str(state.get("summary_partial") or ""))
+        if state.get("intro_sent"):
+            self.intro_sent = True
 
 
 def execute_lifecycle_command(action: str, config: WorkerConfig | None = None) -> int:

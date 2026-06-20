@@ -298,6 +298,25 @@ class Worker:
         )
         self._pending_result_uploads: dict[str, tuple[concurrent.futures.Future[None], Path]] = {}
         self._pending_result_uploads_lock = Lock()
+        self.log_tailers: dict[str, WorkerLogStreamTailer] = {}
+
+    def handle_log_session(self, session: object) -> None:
+        session_id = log_stream_session_id(session if isinstance(session, dict) else None)
+        if not session_id:
+            self.log_tailers.clear()
+            return
+        if session_id not in self.log_tailers:
+            self.log_tailers = {session_id: WorkerLogStreamTailer(self.config, session)}
+        tailer = self.log_tailers[session_id]
+        entries, state = tailer.collect()
+        if not entries:
+            return
+        try:
+            self.client.log_stream_lines(session_id, entries[:500])
+        except PullwiseRequestError as exc:
+            self.last_error = f"log stream upload failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return
+        tailer.commit(state)
 
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
@@ -355,6 +374,7 @@ class Worker:
                     loop_error = True
                 worker_state = heartbeat_payload.get("worker") if isinstance(heartbeat_payload.get("worker"), dict) else {}
                 command = heartbeat_payload.get("command") if isinstance(heartbeat_payload.get("command"), dict) else None
+                self.handle_log_session(heartbeat_payload.get("logSession") or heartbeat_payload.get("log_session"))
                 if worker_state.get("status") == "disabled":
                     ready = False
                 if command:
