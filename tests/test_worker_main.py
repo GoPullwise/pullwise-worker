@@ -421,6 +421,42 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("log stream connected", lines[0]["line"])
         self.assertIn("pullwise-worker-wk_1", lines[0]["line"])
 
+    def test_worker_run_leaves_log_session_to_lifecycle_watcher_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_1",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_name="pullwise-worker-wk_1",
+                poll_seconds=1,
+                poll_jitter_seconds=0,
+                max_backoff_seconds=1,
+                machine_metrics_interval_seconds=3600,
+                cleanup_interval_seconds=3600,
+                lifecycle_watcher_enabled=True,
+            )
+            config.log_dir.mkdir()
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+
+            with patch.object(worker, "refresh_readiness_if_due", return_value=False), patch.object(
+                worker, "machine_metrics_if_due", return_value=None
+            ), patch.object(
+                worker.client,
+                "heartbeat",
+                return_value={
+                    "worker": {"status": "idle"},
+                    "logSession": {"id": "log_1", "created_at": 1781200000},
+                },
+            ), patch.object(worker, "handle_log_session") as handle_log_session:
+                worker.run(once=True)
+
+        handle_log_session.assert_not_called()
+
     def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

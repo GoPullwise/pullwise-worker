@@ -395,7 +395,8 @@ class Worker:
                     loop_error = True
                 worker_state = heartbeat_payload.get("worker") if isinstance(heartbeat_payload.get("worker"), dict) else {}
                 command = heartbeat_payload.get("command") if isinstance(heartbeat_payload.get("command"), dict) else None
-                self.handle_log_session(heartbeat_payload.get("logSession") or heartbeat_payload.get("log_session"))
+                if not getattr(self.config, "lifecycle_watcher_enabled", False):
+                    self.handle_log_session(heartbeat_payload.get("logSession") or heartbeat_payload.get("log_session"))
                 if worker_state.get("status") == "disabled":
                     ready = False
                 if command:
