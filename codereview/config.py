@@ -14,11 +14,9 @@ MODE_BUDGETS = {
 
 
 @dataclass
-class CodeGraphConfig:
-    command: str = "codegraph"
-    timeout_seconds: int = 120
-    optional_sync: bool = True
-    reindex: bool = False
+class ContextConfig:
+    enabled: bool = True
+    timeout_seconds: int = 300
 
 
 @dataclass
@@ -55,7 +53,7 @@ class ScoringConfig:
 @dataclass
 class ReviewConfig:
     mode: str = "standard"
-    codegraph: CodeGraphConfig = field(default_factory=CodeGraphConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     finders: FinderConfig = field(default_factory=FinderConfig)
     repro: ReproConfig = field(default_factory=ReproConfig)
@@ -85,7 +83,7 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
     selected_mode = mode or str(raw.get("mode") or "standard")
     if selected_mode not in MODE_BUDGETS:
         raise ValueError("mode must be one of fast, standard, deep")
-    codegraph = _section(raw, "codegraph")
+    context = _section(raw, "context")
     codex = _section(raw, "codex")
     codex_env = _string_map(codex.get("env"))
     finders = _section(raw, "finders")
@@ -96,11 +94,9 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
         always_repro = [always_repro]
     return ReviewConfig(
         mode=selected_mode,
-        codegraph=CodeGraphConfig(
-            command=resolve_command(str(codegraph.get("command") or "codegraph")),
-            timeout_seconds=int(codegraph.get("timeout_seconds") or 120),
-            optional_sync=bool(codegraph.get("optional_sync", True)),
-            reindex=bool(codegraph.get("reindex", False)),
+        context=ContextConfig(
+            enabled=bool(context.get("enabled", True)),
+            timeout_seconds=int(context.get("timeout_seconds") or 300),
         ),
         codex=CodexConfig(
             command=resolve_command(str(codex.get("command") or "codex")),

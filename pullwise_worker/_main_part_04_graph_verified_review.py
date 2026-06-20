@@ -16,68 +16,6 @@ def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
     }
 
 
-_GRAPH_VERIFIED_MCP_READY: set[tuple[str, str]] = set()
-_GRAPH_VERIFIED_MCP_LOCK = Lock()
-
-
-def ensure_graph_verified_codegraph_codex_mcp(config: WorkerConfig, checkout_dir: Path, graph_config: dict) -> None:
-    command = graph_verified_text(graph_config.get("codegraphCommand")) or "codegraph"
-    timeout = max(60, int(getattr(config, "codex_doctor_timeout_seconds", 60) or 60))
-    install_command = [command, "install", "--target=codex", "--location=global", "--yes"]
-    provider_env = provider_process_env(config)
-    codex_home = provider_env.get("CODEX_HOME") or provider_home_path(provider_env.get("HOME") or DEFAULT_SERVICE_HOME, ".codex")
-    cache_key = (str(codex_home), command)
-    with _GRAPH_VERIFIED_MCP_LOCK:
-        if cache_key in _GRAPH_VERIFIED_MCP_READY:
-            return
-        try:
-            completed = subprocess.run(
-                install_command,
-                cwd=str(checkout_dir),
-                env=provider_env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(f"CodeGraph Codex MCP install failed: {exc}") from exc
-        except subprocess.TimeoutExpired as exc:
-            output = exc.stderr or exc.stdout or ""
-            detail = compact_codex_failure_output(str(output), stream_name="timeout") or "timeout"
-            raise RuntimeError(f"CodeGraph Codex MCP install timed out after {timeout}s: {detail}") from exc
-        if completed.returncode != 0:
-            detail = compact_codex_failure_output(
-                completed.stderr or completed.stdout,
-                stream_name="stderr" if completed.stderr else "stdout",
-            )
-            raise RuntimeError(
-                f"CodeGraph Codex MCP install failed with exit code {completed.returncode}: "
-                f"{detail or 'no stderr/stdout'}"
-            )
-        upsert_graph_verified_codex_mcp_config(provider_env, command)
-        _GRAPH_VERIFIED_MCP_READY.add(cache_key)
-
-
-def upsert_graph_verified_codex_mcp_config(provider_env: dict[str, str], command: str) -> None:
-    codex_home = provider_env.get("CODEX_HOME") or provider_home_path(provider_env.get("HOME") or DEFAULT_SERVICE_HOME, ".codex")
-    path = Path(codex_home) / "config.toml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    block = (
-        "[mcp_servers.codegraph]\n"
-        f"command = {graph_verified_toml_string(command)}\n"
-        'args = ["serve", "--mcp"]\n'
-    )
-    current = path.read_text(encoding="utf-8") if path.is_file() else ""
-    pattern = re.compile(r"(?ms)^\[mcp_servers\.codegraph\]\r?\n.*?(?=^\[|\Z)")
-    if pattern.search(current):
-        updated = pattern.sub(block, current, count=1)
-    else:
-        prefix = current.rstrip()
-        updated = f"{prefix}\n\n{block}" if prefix else block
-    path.write_text(updated.rstrip() + "\n", encoding="utf-8")
-
-
 def graph_verified_toml_string(value: object) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
@@ -90,7 +28,6 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
     mode = graph_verified_mode(graph_config.get("mode") or "standard")
     try:
-        ensure_graph_verified_codegraph_codex_mcp(config, checkout_dir, graph_config)
         write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
         final_path = run_review(checkout_dir, head_ref=head_ref, mode=mode)
     except Exception as exc:
@@ -144,11 +81,16 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         except json.JSONDecodeError:
             current = {}
     current["mode"] = graph_verified_mode(mode)
-    current["codegraph"] = {
-        **(current.get("codegraph") if isinstance(current.get("codegraph"), dict) else {}),
-        "command": graph_verified_text(graph_config.get("codegraphCommand")) or "codegraph",
-        "optional_sync": graph_config.get("syncBeforeRun") is not False,
-        "reindex": graph_config.get("forceIndexOnFailure") is True,
+    current.pop("codegraph", None)
+    current["context"] = {
+        **(current.get("context") if isinstance(current.get("context"), dict) else {}),
+        "enabled": graph_config.get("contextEnabled") is not False,
+        "timeout_seconds": graph_verified_positive_int(
+            graph_config.get("contextTimeoutSeconds"),
+            default=300,
+            minimum=60,
+            maximum=1800,
+        ),
     }
     current["codex"] = {
         **(current.get("codex") if isinstance(current.get("codex"), dict) else {}),

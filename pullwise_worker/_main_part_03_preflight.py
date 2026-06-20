@@ -26,7 +26,7 @@ def collect_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Pa
         "toolVersions": tool_versions,
         "limitations": [
             "Dependency installation, build, tests, lint, and typecheck were not executed in this preflight.",
-            "Runtime reproduction is handled by the GraphVerified review after CodeGraph preflight.",
+            "Runtime reproduction is handled by the GraphVerified review after repository context generation.",
         ],
     }
 
@@ -1202,5 +1202,4 @@ def missing_dockerfile_source_finding(
         "goodCode": [],
         "references": [],
     }
-
 

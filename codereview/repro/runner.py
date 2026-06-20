@@ -27,7 +27,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     worker = run / "workers" / issue_id
     checkout_status_before = git_status_porcelain(
         checkout,
-        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/"),
+        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/"),
     )
     create_worker_dir(checkout, worker, candidate)
     copy_slice_context(run, worker, candidate)
@@ -46,7 +46,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     if process.returncode != 0:
         checkout_status_after = git_status_porcelain(
             checkout,
-            ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/"),
+            ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/"),
         )
         violations: list[str] = []
         if checkout_status_after != checkout_status_before:
@@ -74,7 +74,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     violations = [*guard_worker_result(worker, parsed), *validate_repro_result(parsed, expected_candidate_id=issue_id)]
     checkout_status_after = git_status_porcelain(
         checkout,
-        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/", ".codegraph/"),
+        ignore_prefixes=(f"{checkout_relative(run)}/", ".codereview/runs/"),
     )
     if checkout_status_after != checkout_status_before:
         violations.append("original checkout changed during repro worker execution")
@@ -116,7 +116,6 @@ def worker_env(worker: Path, codex: CodexConfig | None = None) -> dict[str, str]
     env["npm_config_cache"] = str(worker / "cache" / "npm")
     env["PIP_CACHE_DIR"] = str(worker / "cache" / "pip")
     env["PYTHONPYCACHEPREFIX"] = str(worker / "cache" / "pycache")
-    env.pop("CODEGRAPH_DIR", None)
     return env
 
 

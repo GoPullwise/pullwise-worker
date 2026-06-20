@@ -60,41 +60,22 @@ performance preference.
 - Do not add process-level Codex parallelism to a worker identity. Add more
   worker instances when more throughput is needed.
 
-Codex and CodeGraph configuration follows the same boundary:
+Codex configuration and generated review context follow the same boundary:
 
 - Different worker instances on the same server must not share Codex config,
-  Codex auth, CodeGraph MCP config, provider cache, or provider binaries. Each
-  worker's MCP config must live under that worker's `CODEX_HOME`, normally
+  Codex auth, provider cache, or provider binaries. Each worker's Codex config
+  must live under that worker's `CODEX_HOME`, normally
   `$service_home/.codex/config.toml`.
 - Different checkouts handled by the same worker may share that worker
-  instance's Codex and CodeGraph MCP configuration. This is intentional because
-  they run under the same worker identity and provider account.
-- Repository files and CodeGraph project indexes remain checkout-scoped. A
-  checkout's CodeGraph database belongs under that checkout's `.codegraph/`
-  directory, not under `service_home` and not under another checkout.
-- Reproduction workers may inherit the parent worker's Codex/MCP configuration
+  instance's Codex configuration. This is intentional because they run under the
+  same worker identity and provider account.
+- Repository files, generated review context, `.codereview/config.json`, and
+  review runs remain checkout-scoped. Do not put checkout context under
+  `service_home` or another checkout.
+- Reproduction workers may inherit the parent worker's Codex configuration
   (`HOME`, `USERPROFILE`, `CODEX_HOME`, provider `PATH`, and non-cache XDG
   config/data dirs), but their repository copy, logs, temp dirs, npm/pip caches,
   and pycache prefix must remain candidate-worker scoped.
-- Do not use `CODEGRAPH_DIR` to point multiple jobs or workers at a shared graph
-  directory. Let CodeGraph use each checkout's `.codegraph/` directory.
-
-## GraphVerified MCP Cache Boundary
-
-GraphVerified CodeGraph/Codex MCP setup is intentionally cached only at the
-worker provider-config layer.
-
-- It is safe to cache global MCP install/config readiness by
-  `CODEX_HOME + codegraph command` for one worker instance.
-- Do not share one unscoped MCP server, CodeGraph database, `.codegraph/`
-  directory, `.codereview/config.json`, or review run across multiple job
-  checkouts.
-- Readiness may eagerly ensure MCP once so jobs take the lightweight cached
-  path. Job execution must still write checkout-local GraphVerified config and
-  run against that checkout.
-- If a future change introduces a long-lived CodeGraph daemon, key it by
-  project root/check out path, matching CodeGraph's project-root sharing model.
-  Never make a worker-global daemon that can mix repositories.
 
 ## Job Slot And Upload Discipline
 

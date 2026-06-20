@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Optional
 
 codereview_main = importlib.import_module("codereview.main")
-from codereview.codegraph_adapter import CodeGraphError, preflight_codegraph
 from codereview.candidates.normalize import normalize_candidates
 from codereview.candidates.select import select_for_repro
 from codereview.codex_runner import base_env
-from codereview.config import CodeGraphConfig, ReviewConfig
+from codereview.config import ReviewConfig
+from codereview.context_adapter import preflight_context
 from codereview.finder.runner import run_finder
 from codereview.finder.tasks import FinderTask
 from codereview.judge.validate import local_judge
@@ -77,6 +77,7 @@ def test_init_writes_required_codereview_assets(tmp_path: Path) -> None:
     ensure_project_files(tmp_path)
 
     assert (tmp_path / ".codereview" / "config.json").is_file()
+    assert (tmp_path / ".codereview" / "schemas" / "context_result.schema.json").is_file()
     assert (tmp_path / ".codereview" / "schemas" / "finder_result.schema.json").is_file()
     assert (tmp_path / ".codereview" / "schemas" / "repro_result.schema.json").is_file()
     assert (tmp_path / ".codereview" / "schemas" / "judge_result.schema.json").is_file()
@@ -151,21 +152,29 @@ def test_repository_snapshot_maps_all_file_symbols(tmp_path: Path) -> None:
     assert [item["span"]["start"] for item in symbols] == [1, 4, 7]
 
 
-def test_repository_slices_limit_before_codegraph(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+def test_repository_slices_limit_before_context_generation(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     rough_symbols = [
         {"file": f"src/file_{index}.py", "symbol": f"handler_{index}", "line": index + 1, "span": {"kind": "repository"}}
         for index in range(30)
     ]
     calls = []
 
-    def fake_codegraph_symbol_context(checkout: Path, run: Path, config: object, symbol: str, file_path: str, name: str) -> dict:
-        calls.append((symbol, file_path, name))
+    def fake_symbol_context(
+        checkout: Path,
+        run: Path,
+        config: object,
+        symbol: str,
+        file_path: str,
+        line: int,
+        name: str,
+    ) -> dict:
+        calls.append((symbol, file_path, line, name))
         return {}
 
-    monkeypatch.setattr(slicing_planner, "codegraph_symbol_context", fake_codegraph_symbol_context)
+    monkeypatch.setattr(slicing_planner, "symbol_context", fake_symbol_context)
 
     config = ReviewConfig(mode="fast")
-    slices = slicing_planner.build_slices_with_codegraph(
+    slices = slicing_planner.build_slices_with_context(
         checkout=tmp_path,
         run=tmp_path / "run",
         rough_symbols=rough_symbols,
@@ -177,142 +186,19 @@ def test_repository_slices_limit_before_codegraph(tmp_path: Path, monkeypatch: _
     assert len(calls) == config.max_slices
 
 
-def test_codegraph_preflight_initializes_when_status_reports_not_initialized_with_zero_exit(
-    tmp_path: Path, monkeypatch: _MonkeyPatch
-) -> None:
-    import codereview.codegraph_adapter as codegraph_adapter
-
-    checkout = tmp_path / "repo"
-    run = tmp_path / "run"
-    checkout.mkdir()
-    calls: list[str] = []
-
-    def fake_run_codegraph(
-        checkout_arg: Path,
-        run_arg: Path,
-        config_arg: CodeGraphConfig,
-        args: list[str],
-        name: str,
-    ) -> ProcessResult:
-        del run_arg, config_arg
-        calls.append(name)
-        if name == "status":
-            return ProcessResult(
-                ["codegraph", *args],
-                str(checkout_arg),
-                0,
-                "Project: repo\nNot initialized\nRun \"codegraph init\" to initialize\n",
-                "",
-                10,
-            )
-        if name == "init":
-            (checkout_arg / ".codegraph").mkdir()
-            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "Indexed 1 files\n", "", 20)
-        if name == "status-after-init":
-            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "Index is up to date\n", "", 10)
-        if name == "sync":
-            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "Already up to date\n", "", 10)
-        raise AssertionError(f"unexpected codegraph call: {name}")
-
-    monkeypatch.setattr(codegraph_adapter, "_run_codegraph", fake_run_codegraph)
-
-    payload = preflight_codegraph(checkout, run, CodeGraphConfig(optional_sync=True))
-
-    assert calls == ["status", "init", "status-after-init", "sync"]
-    assert payload["ok"] is True
-    assert payload["status"]["stdout"] == "Index is up to date\n"
-    assert payload["sync"]["returncode"] == 0
-
-
-def test_codegraph_preflight_init_failure_includes_process_diagnostics(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
-    import codereview.codegraph_adapter as codegraph_adapter
-
+def test_context_preflight_writes_repository_context_payload(tmp_path: Path) -> None:
     checkout = tmp_path / "repo"
     run = tmp_path / "run"
     checkout.mkdir()
 
-    def fake_run_codegraph(
-        checkout_arg: Path,
-        run_arg: Path,
-        config_arg: CodeGraphConfig,
-        args: list[str],
-        name: str,
-    ) -> ProcessResult:
-        del run_arg, config_arg
-        if name == "status":
-            return ProcessResult(
-                ["codegraph", *args],
-                str(checkout_arg),
-                1,
-                "",
-                "not initialized\n",
-                12,
-            )
-        if name == "init":
-            return ProcessResult(
-                ["codegraph", *args],
-                str(checkout_arg),
-                2,
-                "",
-                "unknown option --index\nrun codegraph init -i\n",
-                34,
-            )
-        raise AssertionError(f"unexpected codegraph call: {name}")
+    payload = preflight_context(checkout, run, ReviewConfig())
 
-    monkeypatch.setattr(codegraph_adapter, "_run_codegraph", fake_run_codegraph)
-
-    try:
-        preflight_codegraph(checkout, run, CodeGraphConfig(optional_sync=False))
-        raise AssertionError("expected CodeGraphError")
-    except CodeGraphError as exc:
-        message = str(exc)
-
-    assert "CodeGraph preflight failed during init" in message
-    assert "init exited 2" in message
-    assert "stderr: unknown option --index run codegraph init -i" in message
-    assert "prior status exited 1" in message
-    payload = json.loads((run / "codegraph" / "preflight.json").read_text(encoding="utf-8"))
-    assert payload["init"]["returncode"] == 2
-    assert payload["status"]["stderr"] == "not initialized\n"
-
-
-def test_codegraph_preflight_sync_failure_includes_process_diagnostics(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
-    import codereview.codegraph_adapter as codegraph_adapter
-
-    checkout = tmp_path / "repo"
-    run = tmp_path / "run"
-    checkout.mkdir()
-    (checkout / ".codegraph").mkdir()
-
-    def fake_run_codegraph(
-        checkout_arg: Path,
-        run_arg: Path,
-        config_arg: CodeGraphConfig,
-        args: list[str],
-        name: str,
-    ) -> ProcessResult:
-        del run_arg, config_arg
-        if name == "status":
-            return ProcessResult(["codegraph", *args], str(checkout_arg), 0, "ready\n", "", 10)
-        if name == "sync":
-            return ProcessResult(["codegraph", *args], str(checkout_arg), 7, "", "database locked\n", 25, timed_out=True)
-        raise AssertionError(f"unexpected codegraph call: {name}")
-
-    monkeypatch.setattr(codegraph_adapter, "_run_codegraph", fake_run_codegraph)
-
-    try:
-        preflight_codegraph(checkout, run, CodeGraphConfig(optional_sync=True))
-        raise AssertionError("expected CodeGraphError")
-    except CodeGraphError as exc:
-        message = str(exc)
-
-    assert "CodeGraph preflight failed during sync" in message
-    assert "sync exited 7" in message
-    assert "timed out" in message
-    assert "stderr: database locked" in message
-    payload = json.loads((run / "codegraph" / "preflight.json").read_text(encoding="utf-8"))
-    assert payload["ok"] is False
-    assert payload["sync"]["returncode"] == 7
+    assert payload == {
+        "ok": True,
+        "source": "codex_repository_context",
+        "context_dir": str(run / "context"),
+    }
+    assert json.loads((run / "context" / "preflight.json").read_text(encoding="utf-8")) == payload
 
 
 def test_run_review_without_base_uses_repository_scope(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
@@ -325,11 +211,24 @@ def test_run_review_without_base_uses_repository_scope(tmp_path: Path, monkeypat
     subprocess.run(["git", "commit", "-m", "initial"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
 
-    monkeypatch.setattr(codereview_main, "preflight_codegraph", lambda checkout, run, config: {"ok": True, "codegraph_dir": str(checkout / ".codegraph")})
     monkeypatch.setattr(
         codereview_main,
-        "build_slices_with_codegraph",
-        lambda **kwargs: [{"slice_id": "slice_repo", "file": "app.py", "symbol": "handler", "line": 1, "risk_tags": []}],
+        "preflight_context",
+        lambda checkout, run, config: {"ok": True, "source": "test", "context_dir": str(run / "context")},
+    )
+    monkeypatch.setattr(
+        codereview_main,
+        "build_slices_with_context",
+        lambda **kwargs: [
+            {
+                "slice_id": "slice_repo",
+                "file": "app.py",
+                "symbol": "handler",
+                "line": 1,
+                "risk_tags": [],
+                "context": {},
+            }
+        ],
     )
     monkeypatch.setattr(codereview_main, "plan_finder_tasks", lambda slices: [])
     monkeypatch.setattr(codereview_main, "run_finders_parallel", lambda checkout, run, finder_tasks, config: [])
@@ -756,7 +655,6 @@ def test_repro_worker_env_shares_codex_config_but_keeps_runtime_dirs(tmp_path: P
         "XDG_CACHE_HOME": str(tmp_path / "worker-home" / ".cache"),
         "XDG_DATA_HOME": str(tmp_path / "worker-home" / ".local" / "share"),
         "PATH": str(tmp_path / "worker-home" / ".codex" / "bin"),
-        "CODEGRAPH_DIR": "unexpected-shared-index",
     }
 
     env = worker_env(worker, config.codex)
@@ -770,7 +668,6 @@ def test_repro_worker_env_shares_codex_config_but_keeps_runtime_dirs(tmp_path: P
     assert env["TMPDIR"] == str(worker / "tmp")
     assert env["XDG_CACHE_HOME"] == str(worker / "cache")
     assert env["npm_config_cache"] == str(worker / "cache" / "npm")
-    assert "CODEGRAPH_DIR" not in env
 
 
 def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None:
@@ -779,7 +676,6 @@ def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None
         "HOME": str(tmp_path / "home"),
         "CODEX_HOME": str(tmp_path / "home" / ".codex"),
         "PATH": str(tmp_path / "home" / ".local" / "bin"),
-        "CODEGRAPH_DIR": "unexpected-shared-index",
     }
 
     env = base_env(tmp_path, config.codex)
@@ -787,7 +683,6 @@ def test_codex_base_env_applies_configured_provider_home(tmp_path: Path) -> None
     assert env["HOME"] == str(tmp_path / "home")
     assert env["CODEX_HOME"] == str(tmp_path / "home" / ".codex")
     assert env["PATH"] == str(tmp_path / "home" / ".local" / "bin")
-    assert "CODEGRAPH_DIR" not in env
 
 
 def test_codex_exec_places_approval_flag_before_exec_when_only_top_level_supports_it(
@@ -1144,10 +1039,14 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
     subprocess.run(["git", "add", "app.py"], cwd=checkout, check=True)
     subprocess.run(["git", "commit", "-m", "head"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-    monkeypatch.setattr(codereview_main, "preflight_codegraph", lambda checkout, run, config: {"ok": True})
     monkeypatch.setattr(
         codereview_main,
-        "build_slices_with_codegraph",
+        "preflight_context",
+        lambda checkout, run, config: {"ok": True, "source": "test", "context_dir": str(run / "context")},
+    )
+    monkeypatch.setattr(
+        codereview_main,
+        "build_slices_with_context",
         lambda **kwargs: [
             {
                 "slice_id": "slice_1",
@@ -1155,7 +1054,7 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
                 "symbol": "handle",
                 "line": 1,
                 "risk_tags": ["public-entrypoint"],
-                "codegraph": {"query": {"result": [{"node": {"name": "handle"}}]}},
+                "context": {"query": {"result": {"nodes": [{"name": "handle"}]}}},
             }
         ],
     )
@@ -1265,38 +1164,9 @@ def test_run_review_writes_confirmed_only_report_with_stubbed_agents(tmp_path: P
     assert "Pipeline Summary" in debug
 
 
-def test_run_review_repository_uses_codegraph_codex_cli_pipeline(tmp_path: Path) -> None:
+def test_run_review_repository_uses_codex_context_cli_pipeline(tmp_path: Path) -> None:
     tools = tmp_path / "tools"
     tools.mkdir()
-    codegraph = write_fake_cli(
-        tools,
-        "fake_codegraph",
-        r'''
-import json
-import os
-import sys
-
-if "CODEGRAPH_DIR" in os.environ:
-    print("unexpected CODEGRAPH_DIR", file=sys.stderr)
-    sys.exit(99)
-
-args = sys.argv[1:]
-if not args:
-    sys.exit(2)
-cmd = args[0]
-if cmd in {"status", "sync", "index", "init"}:
-    print("ok")
-    sys.exit(0)
-if cmd == "query":
-    print(json.dumps([{"node": {"name": "handle", "filePath": "app.py", "startLine": 1}}]))
-    sys.exit(0)
-if cmd in {"callers", "callees", "impact"}:
-    print(json.dumps({"symbol": args[1] if len(args) > 1 else "", "nodes": []}))
-    sys.exit(0)
-print(json.dumps({}))
-sys.exit(0)
-''',
-    )
     codex = write_fake_cli(
         tools,
         "fake_codex",
@@ -1305,10 +1175,6 @@ import json
 import os
 import sys
 from pathlib import Path
-
-if "CODEGRAPH_DIR" in os.environ:
-    print("unexpected CODEGRAPH_DIR", file=sys.stderr)
-    sys.exit(99)
 
 args = sys.argv[1:]
 out = ""
@@ -1327,7 +1193,18 @@ for line in prompt.splitlines():
     if line.startswith("# Context Pack: "):
         slice_id = line.split(":", 1)[1].strip()
 payload = {}
-if schema_name == "finder_result.schema.json":
+if schema_name == "context_result.schema.json":
+    payload = {
+        "summary": ["handle strips the provided value"],
+        "files": ["app.py"],
+        "path_summary": ["app.py:1 handle -> value.strip"],
+        "nodes": [{"symbol": "handle", "file": "app.py", "line": 1, "reason": "focal symbol"}],
+        "edges": [{"from": "handle", "to": "str.strip", "kind": "call", "file": "app.py", "line": 2}],
+        "callers": [],
+        "callees": [{"symbol": "str.strip", "file": "app.py", "line": 2, "reason": "called by handle"}],
+        "impact": [{"symbol": "handle", "file": "app.py", "line": 1, "reason": "public slice"}],
+    }
+elif schema_name == "finder_result.schema.json":
     payload = {
         "slice_id": slice_id,
         "focus": "correctness",
@@ -1410,7 +1287,7 @@ print(json.dumps({"ok": True, "schema": schema_name}))
         json.dumps(
             {
                 "mode": "fast",
-                "codegraph": {"command": str(codegraph), "optional_sync": True},
+                "context": {"enabled": True, "timeout_seconds": 60},
                 "codex": {"command": str(codex), "reasoning_effort": ""},
                 "finders": {"enabled": True, "max_workers": 1},
                 "repro": {"enabled": True, "max_workers": 1},
@@ -1427,7 +1304,8 @@ print(json.dumps({"ok": True, "schema": schema_name}))
     assert "Confirmed findings: 1" in final_text
     assert "CLI confirmed bug" in final_text
     assert confirmed[0]["judge"]["safe_to_show_user"] is True
-    assert summary["preflight"]["codegraphDir"].endswith(".codegraph")
+    assert summary["preflight"]["contextSource"] == "codex_repository_context"
+    assert summary["preflight"]["contextDir"].endswith("/context")
     assert summary["repository"]["files"] == 1
     assert (final.parent.parent / "workers" / "issue_cli_1" / "logs" / "repro.log").is_file()
 

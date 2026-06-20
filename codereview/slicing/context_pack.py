@@ -14,7 +14,7 @@ def write_slices(slices_dir: Path, slices: list[dict]) -> None:
 
 
 def render_context_pack(item: dict) -> str:
-    graph = item.get("codegraph") if isinstance(item.get("codegraph"), dict) else {}
+    context = item.get("context") if isinstance(item.get("context"), dict) else {}
     span = item.get("span") if isinstance(item.get("span"), dict) else {}
     return "\n".join(
         [
@@ -25,9 +25,9 @@ def render_context_pack(item: dict) -> str:
             f"Repository span: {span.get('start')}..{span.get('end')}",
             f"Risk tags: {', '.join(item.get('risk_tags') or [])}",
             "",
-            "## CodeGraph Evidence",
+            "## Repository Context Evidence",
             "```json",
-            _compact_json(graph),
+            _compact_json(context),
             "```",
             "",
             "## Repository Tests",

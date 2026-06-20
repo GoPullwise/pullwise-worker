@@ -636,11 +636,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 cfg,
                 root,
                 {
-                    "codegraphCommand": "codegraph",
-                    "syncBeforeRun": True,
-                    "forceIndexOnFailure": True,
+                    "contextTimeoutSeconds": 240,
                     "finderMaxParallel": 7,
-                    "finderTimeoutSeconds": 240,
+                    "finderTimeoutSeconds": 300,
                     "reproMaxParallel": 3,
                     "reproTimeoutSeconds": 600,
                     "maxRepro": 20,
@@ -653,11 +651,11 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             payload = json.loads((root / ".codereview" / "config.json").read_text(encoding="utf-8"))
 
         self.assertEqual(payload["mode"], "deep")
-        self.assertEqual(payload["codegraph"]["command"], "codegraph")
-        self.assertTrue(payload["codegraph"]["optional_sync"])
-        self.assertTrue(payload["codegraph"]["reindex"])
+        self.assertNotIn("codegraph", payload)
+        self.assertTrue(payload["context"]["enabled"])
+        self.assertEqual(payload["context"]["timeout_seconds"], 240)
         self.assertEqual(payload["finders"]["max_workers"], 7)
-        self.assertEqual(payload["finders"]["timeout_seconds"], 240)
+        self.assertEqual(payload["finders"]["timeout_seconds"], 300)
         self.assertEqual(payload["repro"]["max_workers"], 3)
         self.assertEqual(payload["repro"]["timeout_seconds"], 600)
         self.assertEqual(payload["repro"]["max_repro"], 20)
@@ -665,24 +663,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["scoring"]["min_score_for_repro"], 9)
         self.assertEqual(payload["scoring"]["always_repro_severities"], ["critical", "high"])
 
-    def test_upsert_graph_verified_codex_mcp_config_replaces_existing_block(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            codex_home = Path(tmp_dir) / ".codex"
-            config_path = codex_home / "config.toml"
-            codex_home.mkdir(parents=True)
-            config_path.write_text(
-                "[mcp_servers.codegraph]\ncommand = \"old\"\nargs = [\"old\"]\n\n[agents]\nmax_threads = 6\n",
-                encoding="utf-8",
-            )
-
-            worker_main.upsert_graph_verified_codex_mcp_config({"CODEX_HOME": str(codex_home)}, "codegraph")
-            content = config_path.read_text(encoding="utf-8")
-
-        self.assertIn("[mcp_servers.codegraph]\ncommand = \"codegraph\"\nargs = [\"serve\", \"--mcp\"]", content)
-        self.assertEqual(content.count("[mcp_servers.codegraph]"), 1)
-        self.assertIn("[agents]\nmax_threads = 6", content)
-
-    def test_graph_verified_mcp_install_is_cached_but_job_state_is_per_checkout(self) -> None:
+    def test_graph_verified_job_state_is_per_checkout_without_global_mcp_setup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
@@ -706,33 +687,20 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
                 return final_md
 
-            worker_main._GRAPH_VERIFIED_MCP_READY.clear()
-            try:
-                with patch.object(
-                    worker_main.subprocess,
-                    "run",
-                    return_value=SimpleNamespace(returncode=0, stdout="installed", stderr=""),
-                ) as install_run, patch.object(
-                    worker_main,
-                    "upsert_graph_verified_codex_mcp_config",
-                ) as upsert_mcp, patch.object(codereview_main, "run_review", side_effect=fake_run_review):
-                    first_payload = worker_main.run_graph_verified_review_payload(
-                        cfg,
-                        {"agentConfig": {"graphVerified": {"mode": "fast"}}},
-                        first_checkout,
-                        "HEAD",
-                    )
-                    second_payload = worker_main.run_graph_verified_review_payload(
-                        cfg,
-                        {"agentConfig": {"graphVerified": {"mode": "deep"}}},
-                        second_checkout,
-                        "HEAD",
-                    )
-            finally:
-                worker_main._GRAPH_VERIFIED_MCP_READY.clear()
+            with patch.object(codereview_main, "run_review", side_effect=fake_run_review):
+                first_payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    first_checkout,
+                    "HEAD",
+                )
+                second_payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "deep"}}},
+                    second_checkout,
+                    "HEAD",
+                )
 
-            self.assertEqual(install_run.call_count, 1)
-            self.assertEqual(upsert_mcp.call_count, 1)
             self.assertEqual(review_calls, [(first_checkout, "HEAD", "fast"), (second_checkout, "HEAD", "deep")])
             self.assertEqual(first_payload["mode"], "fast")
             self.assertEqual(second_payload["mode"], "deep")
@@ -742,7 +710,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(second_config["mode"], "deep")
             self.assertNotEqual(first_checkout, second_checkout)
 
-    def test_readiness_state_ensures_graph_verified_mcp_when_codex_is_ready(self) -> None:
+    def test_readiness_state_marks_codex_ready_without_graph_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
@@ -777,16 +745,12 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 worker_main,
                 "codex_ready_check",
                 return_value=(True, "ready"),
-            ), patch.object(
-                worker_main,
-                "ensure_graph_verified_codegraph_codex_mcp",
-            ) as ensure_mcp:
+            ):
                 checks, provider_ready, ready_providers = worker_main.worker_readiness_state(cfg)
 
-        ensure_mcp.assert_called_once_with(cfg, Path(cfg.service_home), {})
         self.assertTrue(provider_ready)
         self.assertEqual(ready_providers, ["codex"])
-        self.assertIn(("graph_verified_mcp", True, "ready"), checks)
+        self.assertFalse(any(name == "graph_verified_mcp" for name, _ok, _detail in checks))
 
     def test_codex_ready_check_clears_auth_failure_state_on_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -846,11 +810,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 2}}), encoding="utf-8")
             codereview_main = importlib.import_module("codereview.main")
 
-            with patch.object(worker_main, "ensure_graph_verified_codegraph_codex_mcp"), patch.object(
-                codereview_main,
-                "run_review",
-                return_value=final_md,
-            ):
+            with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
                     cfg,
                     {"agentConfig": {"graphVerified": {"mode": "fast"}}},
@@ -868,15 +828,12 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["blockedCount"], 2)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["candidate_id"], "c1")
 
-    def test_run_graph_verified_review_payload_blocks_on_preflight_failure(self) -> None:
+    def test_run_graph_verified_review_payload_blocks_on_review_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
-            with patch.object(
-                worker_main,
-                "ensure_graph_verified_codegraph_codex_mcp",
-                side_effect=RuntimeError("failed with secret-token"),
-            ):
+            codereview_main = importlib.import_module("codereview.main")
+            with patch.object(codereview_main, "run_review", side_effect=RuntimeError("failed with secret-token")):
                 payload = worker_main.run_graph_verified_review_payload(
                     cfg,
                     {"agentConfig": {"graphVerified": {"mode": "invalid"}}},

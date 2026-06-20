@@ -24,7 +24,7 @@ def ensure_project_files(checkout: Path) -> None:
             json.dumps(
                 {
                     "mode": "standard",
-                    "codegraph": {"command": "codegraph", "optional_sync": True},
+                    "context": {"enabled": True, "timeout_seconds": 300},
                     "codex": {"command": "codex", "reasoning_effort": "high"},
                     "finders": {"enabled": True, "max_workers": 4},
                     "scoring": {"min_score_for_repro": 8, "always_repro_severities": ["critical", "high"]},
@@ -36,6 +36,7 @@ def ensure_project_files(checkout: Path) -> None:
         )
     schemas = {
         "finder_result.schema.json": finder_result_schema(),
+        "context_result.schema.json": context_result_schema(),
         "repro_result.schema.json": repro_result_schema(),
         "judge_result.schema.json": judge_result_schema(),
         "final_report.schema.json": final_report_schema(),
@@ -106,6 +107,7 @@ def finder_result_schema() -> dict:
                         "graph_evidence": {
                             "type": "object",
                             "required": ["slice_id", "codegraph_files", "path_summary"],
+                            "description": "codegraph_files is a legacy field name; list repository-relative files from the supplied context pack.",
                             "additionalProperties": False,
                             "properties": {
                                 "slice_id": {"type": "string"},
@@ -137,6 +139,47 @@ def finder_result_schema() -> dict:
                     },
                 },
             }
+        },
+    }
+
+
+def context_result_schema() -> dict:
+    path_location = {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "symbol": {"type": "string"},
+            "file": {"type": "string"},
+            "line": {"type": "integer"},
+            "reason": {"type": "string"},
+        },
+    }
+    return {
+        "type": "object",
+        "required": ["summary", "files", "path_summary", "nodes", "edges", "callers", "callees", "impact"],
+        "additionalProperties": False,
+        "properties": {
+            "summary": {"type": "array", "items": {"type": "string"}},
+            "files": {"type": "array", "items": {"type": "string"}},
+            "path_summary": {"type": "array", "items": {"type": "string"}},
+            "nodes": {"type": "array", "items": path_location},
+            "edges": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {
+                        "from": {"type": "string"},
+                        "to": {"type": "string"},
+                        "kind": {"type": "string"},
+                        "file": {"type": "string"},
+                        "line": {"type": "integer"},
+                    },
+                },
+            },
+            "callers": {"type": "array", "items": path_location},
+            "callees": {"type": "array", "items": path_location},
+            "impact": {"type": "array", "items": path_location},
         },
     }
 
@@ -247,9 +290,10 @@ def finder_prompt(focus: str) -> str:
     return f"""You are a graph-verified code review finder focused on {focus}.
 
 Hard gates:
-- No graph evidence, no candidate.
-- Use CodeGraph MCP tools when available; the supplied CodeGraph context pack is review input and audit evidence.
-- Every candidate must be tied to CodeGraph evidence from MCP tools or the supplied context pack.
+- No repository context evidence, no candidate.
+- Use the supplied repository context pack as review input and audit evidence.
+- Every candidate must be tied to concrete repository context from the supplied context pack or files it references.
+- Fill graph_evidence.codegraph_files with repository-relative files from the context pack; this is a legacy field name.
 - Every candidate must include file/line evidence, trigger condition, expected behavior, actual behavior hypothesis, and a local minimal repro idea.
 - Do not report style concerns or speculative risks.
 - Mark needs_network true when reproduction requires a network, credentials, production service, or external database.
@@ -268,7 +312,7 @@ Current directory:
 - ./repro is for extra reproduction scripts.
 - ./logs is for command logs.
 - ./input_candidate.json contains exactly one candidate.
-- ./slice.context.md contains the CodeGraph context when available.
+- ./slice.context.md contains the repository context when available.
 
 Hard rules:
 - Work on exactly one candidate.

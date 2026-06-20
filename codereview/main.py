@@ -10,7 +10,7 @@ from .candidates.dedupe import dedupe_candidates
 from .candidates.normalize import normalize_candidates
 from .candidates.score import score_candidates
 from .candidates.select import select_for_repro
-from .codegraph_adapter import preflight_codegraph
+from .context_adapter import preflight_context
 from .config import load_config
 from .finder.runner import run_finders_parallel
 from .finder.tasks import plan_finder_tasks
@@ -21,7 +21,7 @@ from .repository.symbols import map_repository_symbols
 from .report.render import collect_confirmed, collect_rejected, render_debug_report, render_final_report
 from .repro.runner import run_repro_workers_parallel
 from .slicing.context_pack import write_slices
-from .slicing.planner import build_slices_with_codegraph
+from .slicing.planner import build_slices_with_context
 from .templates import ensure_project_files
 from .utils.jsonl import write_json, write_jsonl
 
@@ -37,7 +37,7 @@ def run_review(checkout: Path, head_ref: str, mode: str = "") -> Path:
 
     repo_state = inspect_repo(checkout, head_ref)
     write_json(run / "repo_state.json", repo_state)
-    preflight = preflight_codegraph(checkout, run, config.codegraph)
+    preflight = preflight_context(checkout, run, config)
 
     snapshot = analyze_repository_snapshot(checkout, head_ref)
     write_json(run / "repository" / "files.json", snapshot.files)
@@ -46,7 +46,7 @@ def run_review(checkout: Path, head_ref: str, mode: str = "") -> Path:
     repository_symbols = map_repository_symbols(checkout, snapshot)
     write_json(run / "repository" / "symbols.json", repository_symbols)
 
-    slices = build_slices_with_codegraph(
+    slices = build_slices_with_context(
         checkout=checkout,
         run=run,
         rough_symbols=repository_symbols,
@@ -142,7 +142,8 @@ def build_pipeline_summary(
     return {
         "preflight": {
             "ok": preflight.get("ok") is True,
-            "codegraphDir": preflight.get("codegraph_dir"),
+            "contextSource": preflight.get("source"),
+            "contextDir": preflight.get("context_dir"),
         },
         "repository": {
             "files": len(getattr(snapshot, "files", []) or []),
@@ -268,9 +269,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except Exception as exc:
         message = str(exc)
-        if "CodeGraph" in message or "codegraph" in message:
-            print(message, file=sys.stderr)
-            return 3
         print(message, file=sys.stderr)
         return 5
     print(final)

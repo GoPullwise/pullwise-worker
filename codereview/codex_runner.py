@@ -45,7 +45,6 @@ def base_env(checkout: Path, config: CodexConfig | None = None) -> dict[str, str
     env = os.environ.copy()
     if config is not None and config.env:
         env.update(config.env)
-    env.pop("CODEGRAPH_DIR", None)
     return env
 
 
