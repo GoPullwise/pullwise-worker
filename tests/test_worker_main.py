@@ -6,6 +6,7 @@ import io
 import json
 import hashlib
 import subprocess
+import sys
 import tempfile
 import unittest
 import importlib
@@ -28,6 +29,19 @@ def config_for(tmp: Path) -> SimpleNamespace:
 
 
 class GraphVerifiedWorkerTest(unittest.TestCase):
+    def test_package_module_entrypoint_shows_cli_help(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-m", "pullwise_worker", "--help"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Run the Pullwise pull worker.", completed.stdout)
+
     def git(self, repo: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", *args],
