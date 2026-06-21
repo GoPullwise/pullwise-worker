@@ -27,7 +27,7 @@ def apply_cross_shard_linking(checkout: Path, run: Path, graph: dict, config: Re
             remaining.append(ref)
             continue
         result = _run_linker(checkout, run, prompt_file, schema, ref, candidates, nodes_by_id, config, index)
-        if result.get("status") == "resolved" and result.get("target") in candidates:
+        if _valid_link_result(result, candidates):
             target = str(result["target"])
             source = str(ref.get("source_node") or "")
             edge = {
@@ -156,3 +156,11 @@ def _run_linker(
         return {"status": "still_unresolved", "reason": "non-object linker JSON", "process": process_payload}
     parsed["process"] = process_payload
     return parsed
+
+
+def _valid_link_result(result: dict, candidates: list[str]) -> bool:
+    if result.get("status") != "resolved":
+        return False
+    if result.get("target") not in candidates:
+        return False
+    return bool(str(result.get("reason") or "").strip())

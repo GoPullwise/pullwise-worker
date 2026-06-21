@@ -54,10 +54,9 @@ class CodexCliCapabilities:
 
 def base_env(checkout: Path, config: CodexConfig | None = None) -> dict[str, str]:
     del checkout
-    env = os.environ.copy()
     if config is not None and config.env:
-        env.update(config.env)
-    return env
+        return dict(config.env)
+    return os.environ.copy()
 
 
 def acquire_codex_cli_lock(*, blocking: bool = True) -> bool:
@@ -181,30 +180,31 @@ def run_codex_exec(
 ) -> ProcessResult:
     exec_output_file = workspace_local_output_file(cd, output_file)
     exec_output_file.parent.mkdir(parents=True, exist_ok=True)
-    cmd, command_error = build_codex_exec_command(
-        command=config.command,
-        cd=cd,
-        prompt=prompt,
-        output_schema=output_schema,
-        output_file=exec_output_file,
-        sandbox=sandbox,
-        model=config.model,
-        reasoning_effort=config.reasoning_effort,
-        env=env,
-    )
-    if command_error:
-        return ProcessResult(
-            command=cmd,
-            cwd=str(cd),
-            returncode=2,
-            stdout="",
-            stderr=command_error,
-            duration_ms=0,
-        )
     queued_at = time.monotonic()
     acquire_codex_cli_lock()
     try:
         queue_wait_ms = int((time.monotonic() - queued_at) * 1000)
+        cmd, command_error = build_codex_exec_command(
+            command=config.command,
+            cd=cd,
+            prompt=prompt,
+            output_schema=output_schema,
+            output_file=exec_output_file,
+            sandbox=sandbox,
+            model=config.model,
+            reasoning_effort=config.reasoning_effort,
+            env=env,
+        )
+        if command_error:
+            return ProcessResult(
+                command=cmd,
+                cwd=str(cd),
+                returncode=2,
+                stdout="",
+                stderr=command_error,
+                duration_ms=0,
+                queue_wait_ms=queue_wait_ms,
+            )
         result = run_process(
             cmd,
             cwd=cd,

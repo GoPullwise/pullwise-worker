@@ -122,5 +122,6 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
     if violations:
         return local
     if parsed.get("safe_to_show_user") is True and parsed.get("status") == "confirmed":
+        parsed["evidence_summary"] = local.get("evidence_summary") if isinstance(local.get("evidence_summary"), dict) else parsed.get("evidence_summary")
         return parsed
     return parsed if isinstance(parsed, dict) else local

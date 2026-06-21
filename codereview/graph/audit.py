@@ -62,8 +62,6 @@ def audit_graph(graph: dict, inventory: dict, checkout: Path) -> dict:
         quality_errors.append("dangling graph edges exist")
     if span_violations:
         quality_errors.append("graph evidence validation failed")
-    if dual_conflicts:
-        quality_errors.append("dual mapper conflicts are unresolved")
     if critical_unresolved:
         quality_errors.append("critical unresolved graph references exist")
     quality_gate = "passed" if not quality_errors else "failed"

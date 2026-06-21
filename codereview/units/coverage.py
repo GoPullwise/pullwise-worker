@@ -9,7 +9,7 @@ def build_unit_coverage(graph: dict, inventory: dict, units: list[dict], review_
     baseline_reviewed = {
         str((item.get("task") or {}).get("unit_id") or "")
         for item in review_results
-        if isinstance(item, dict) and (item.get("task") or {}).get("focus") == "correctness"
+        if _successful_review_result(item) and (item.get("task") or {}).get("focus") == "correctness"
     }
     production = _production_symbol_ids(graph)
     unit_node_ids = {str(node_id) for unit in units for node_id in unit.get("node_ids", [])}
@@ -17,7 +17,7 @@ def build_unit_coverage(graph: dict, inventory: dict, units: list[dict], review_
     specialist_reviewed = {
         str((item.get("task") or {}).get("unit_id") or "")
         for item in review_results
-        if isinstance(item, dict) and (item.get("task") or {}).get("focus") not in {"", "correctness"}
+        if _successful_review_result(item) and (item.get("task") or {}).get("focus") not in {"", "correctness"}
     }
     boundary_units = [unit for unit in units if unit.get("unit_type") == "cross_boundary"]
     global_units = [unit for unit in units if unit.get("unit_type") == "global_invariant"]
@@ -56,6 +56,10 @@ def _production_symbol_ids(graph: dict) -> set[str]:
         and node.get("kind") in PRODUCTION_SYMBOL_KINDS
         and not _is_test_file(str(node.get("file") or ""))
     }
+
+
+def _successful_review_result(item: object) -> bool:
+    return isinstance(item, dict) and item.get("status") == "ok" and isinstance(item.get("task"), dict)
 
 
 def _high_risk(unit: dict) -> bool:

@@ -17,12 +17,15 @@ from codereview.codex_runner import base_env
 from codereview.config import ReviewConfig
 from codereview.finder.runner import run_finder
 from codereview.finder.tasks import FinderTask, plan_finder_tasks
+from codereview.graph.audit import audit_graph
 from codereview.graph.census import run_repository_census
+from codereview.graph.link import _valid_link_result
+from codereview.graph.merge import merge_graph_results, normalize_graph_for_inventory
 from codereview.inventory.git_inventory import build_git_inventory
 from codereview.judge.runner import run_judge
 from codereview.judge.precheck import verify_repro_events_and_paths
 from codereview.judge.validate import local_judge
-from codereview.report.render import collect_confirmed, render_final_report
+from codereview.report.render import collect_confirmed, collect_rejected, render_final_report
 from codereview.repository.snapshot import analyze_repository_snapshot
 from codereview.repository.symbols import map_repository_symbols
 from codereview.repro.filesystem_guard import guard_worker_result
@@ -184,6 +187,108 @@ def test_finder_assignment_uses_review_unit_risk_tags() -> None:
     tasks = plan_finder_tasks([{"unit_id": "component:1", "unit_type": "component", "risk_tags": ["auth"]}])
     assert tasks[0] == FinderTask(unit_id="component:1", focus="correctness", unit_type="component", review_pass="baseline", risk_tags=["auth"])
     assert {task.focus for task in tasks} >= {"correctness", "security_auth_dataflow", "test_repro"}
+
+
+def test_git_inventory_reads_full_large_git_file_lists(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    subprocess.run(["git", "init"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    total = 2200
+    for index in range(total):
+        path = checkout / "src" / f"very_long_module_path_{index:04d}_abcdefghijklmnopqrstuvwxyz.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"VALUE_{index} = {index}\n", encoding="utf-8")
+
+    inventory = build_git_inventory(checkout, include_untracked=True)
+    paths = {str(item.get("path") or "") for item in inventory.get("files", []) if isinstance(item, dict)}
+
+    assert len(paths) == total
+    assert "ijklmnopqrstuvwxyz.py" not in paths
+
+
+def test_unit_coverage_does_not_count_blocked_baseline_review() -> None:
+    coverage = build_unit_coverage(
+        {},
+        {},
+        [{"unit_id": "component:1"}],
+        [{"task": {"unit_id": "component:1", "focus": "correctness"}, "status": "blocked"}],
+    )
+
+    assert coverage["review_units"] == 1
+    assert coverage["baseline_reviewed_units"] == 0
+
+
+def test_collect_rejected_keeps_unsafe_confirmed_judge_visible() -> None:
+    rejected = collect_rejected(
+        [{"issue_id": "issue_1"}],
+        [{"candidate_id": "issue_1"}],
+        [{"candidate_id": "issue_1", "status": "confirmed", "safe_to_show_user": False, "reason": "not safe"}],
+    )
+
+    assert rejected == [{"candidate_id": "issue_1", "reason": "not safe"}]
+
+
+def test_graph_normalizer_repairs_live_quality_gate_failures(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    app = checkout / "app.py"
+    app.write_text("def handle(value):\n    return value\n", encoding="utf-8")
+    inventory = {
+        "files": [
+            {
+                "path": "app.py",
+                "scope": "analyze",
+                "size_bytes": app.stat().st_size,
+                "line_count": 2,
+                "content_hash": "",
+                "extension": ".py",
+            }
+        ]
+    }
+    graph = merge_graph_results(
+        [
+            {
+                "task_id": "graph-map-0001",
+                "shard_id": "shard-0001",
+                "nodes": [
+                    {
+                        "id": "sym:handle",
+                        "kind": "function",
+                        "name": "handle",
+                        "qualified_name": "handle",
+                        "file": "app.py",
+                        "span": {"start_line": 1, "end_line": 2},
+                        "evidence": [],
+                    }
+                ],
+                "edges": [
+                    {
+                        "from": "sym:handle",
+                        "to": "sym:missing",
+                        "type": "calls",
+                        "evidence": [{"file": "app.py", "start_line": 2, "end_line": 2, "evidence_kind": "direct_syntax"}],
+                    }
+                ],
+                "unresolved_refs": [],
+                "coverage": {"assigned_files": ["app.py"], "mapped_files": ["app.py"]},
+            }
+        ]
+    )
+    graph["conflicts"] = [{"shard_id": "shard-0001", "missing_nodes": ["sym:other"]}]
+
+    normalized = normalize_graph_for_inventory(graph, inventory, checkout)
+    audit = audit_graph(normalized, inventory, checkout)
+    node_ids = {str(node.get("id") or "") for node in normalized["nodes"]}
+
+    assert "file:app.py" in node_ids
+    assert not normalized["edges"]
+    assert audit["dual_map_conflicts"] == 1
+    assert audit["quality_gate_passed"] is True
+
+
+def test_graph_linker_requires_resolution_reason() -> None:
+    assert _valid_link_result({"status": "resolved", "target": "sym:handle", "reason": "import binding matches"}, ["sym:handle"])
+    assert not _valid_link_result({"status": "resolved", "target": "sym:handle"}, ["sym:handle"])
 
 
 def test_fast_profile_does_not_cap_full_review_unit_coverage() -> None:
@@ -556,18 +661,69 @@ def test_repro_worker_dir_uses_snapshot_repo_without_extra_checkouts(tmp_path: P
 
 
 def test_worker_env_and_codex_base_env_are_isolated(tmp_path: Path) -> None:
+    previous_api_key = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = "global-secret"
     worker = tmp_path / "worker"
-    env = worker_env(worker)
+    try:
+        env = worker_env(worker)
 
-    assert env["HOME"] == str(worker / "home")
-    assert env["TMPDIR"] == str(worker / "tmp")
-    assert env["XDG_CACHE_HOME"] == str(worker / "cache")
+        assert env["HOME"] == str(worker / "home")
+        assert env["TMPDIR"] == str(worker / "tmp")
+        assert env["XDG_CACHE_HOME"] == str(worker / "cache")
 
-    config = ReviewConfig()
-    config.codex.env = {"HOME": str(tmp_path / "home"), "CODEX_HOME": str(tmp_path / "home" / ".codex")}
-    provider_env = base_env(tmp_path, config.codex)
-    assert provider_env["HOME"] == str(tmp_path / "home")
-    assert provider_env["CODEX_HOME"] == str(tmp_path / "home" / ".codex")
+        config = ReviewConfig()
+        config.codex.env = {"HOME": str(tmp_path / "home"), "CODEX_HOME": str(tmp_path / "home" / ".codex")}
+        provider_env = base_env(tmp_path, config.codex)
+        repro_env = worker_env(worker, config.codex)
+        assert provider_env["HOME"] == str(tmp_path / "home")
+        assert provider_env["CODEX_HOME"] == str(tmp_path / "home" / ".codex")
+        assert "OPENAI_API_KEY" not in provider_env
+        assert "OPENAI_API_KEY" not in repro_env
+    finally:
+        if previous_api_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = previous_api_key
+
+
+def test_codex_exec_builds_command_while_cli_lock_is_held(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    from codereview import codex_runner
+
+    observed = {"capability_lookup_had_lock": False}
+
+    def fake_capabilities(command, env=None):
+        del command, env
+        acquired = codex_runner.acquire_codex_cli_lock(blocking=False)
+        if acquired:
+            codex_runner.release_codex_cli_lock()
+        observed["capability_lookup_had_lock"] = not acquired
+        return codex_runner.CodexCliCapabilities(
+            frozenset(),
+            frozenset({"--cd", "--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "--json"}),
+        )
+
+    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
+        del env, timeout, queue_wait_ms, kwargs
+        output_arg = Path(command[command.index("--output-last-message") + 1])
+        output_arg.write_text("{}", encoding="utf-8")
+        return ProcessResult(command, str(cwd), 0, "{}", "", 1)
+
+    monkeypatch.setattr(codex_runner, "codex_cli_capabilities", fake_capabilities)
+    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+
+    codex_runner.run_codex_exec(
+        cd=tmp_path,
+        prompt="review",
+        output_schema=schema,
+        output_file=tmp_path / "result.json",
+        sandbox="read-only",
+        timeout_seconds=30,
+        config=ReviewConfig().codex,
+    )
+
+    assert observed["capability_lookup_had_lock"] is True
 
 
 def test_codex_exec_places_approval_flag_before_exec_when_only_top_level_supports_it(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
@@ -826,6 +982,66 @@ Path(out).write_text(json.dumps(payload), encoding="utf-8")
     assert judge["status"] == "rejected"
     assert judge["safe_to_show_user"] is False
     assert "missing" in judge["reason"]
+
+
+def test_codex_judge_confirmed_result_uses_local_verified_evidence(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    fake_codex = write_fake_cli(
+        tmp_path,
+        "fake_codex_judge_evidence",
+        r'''
+import json
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+out = ""
+for index, arg in enumerate(args):
+    if arg == "--output-last-message" and index + 1 < len(args):
+        out = args[index + 1]
+payload = {
+    "candidate_id": "issue_1",
+    "status": "confirmed",
+    "level": "L2",
+    "safe_to_show_user": True,
+    "reason": "agent confirmed",
+    "evidence_summary": {"command": "fake command", "log_path": "logs/fake.log", "observable": "fake output"},
+    "limitations": [],
+}
+Path(out).parent.mkdir(parents=True, exist_ok=True)
+Path(out).write_text(json.dumps(payload), encoding="utf-8")
+''',
+    )
+    config = ReviewConfig()
+    config.codex.command = str(fake_codex)
+    worker = tmp_path / "worker"
+    (worker / "logs").mkdir(parents=True)
+    (worker / "logs" / "repro.log").write_text("AttributeError", encoding="utf-8")
+    repro = {
+        "candidate_id": "issue_1",
+        "worker": str(worker),
+        "result": {
+            "candidate_id": "issue_1",
+            "status": "reproduced",
+            "level": "L2",
+            "summary": "AttributeError",
+            "commands_run": [{"cmd": "python repro.py", "cwd": str(worker), "exit_code": 1, "log_path": "logs/repro.log"}],
+            "files_written": ["logs/repro.log"],
+            "proof": {"type": "runtime_output", "expected": "safe", "actual": "AttributeError", "log_excerpt": "AttributeError"},
+            "graph_path_exercised": True,
+            "why_valid": "ran command",
+            "why_not_reproduced": "",
+            "safety_notes": "",
+        },
+        "filesystem_violations": [],
+    }
+
+    judge = run_judge(tmp_path / "run", {"candidate_id": "issue_1", "issue_id": "issue_1", "graph_evidence": {"unit_id": "u1", "context_files": ["app.py"], "path_summary": ["handle"]}}, repro, checkout, config)
+
+    assert judge["status"] == "confirmed"
+    assert judge["evidence_summary"] == {"command": "python repro.py", "log_path": "logs/repro.log", "observable": "AttributeError"}
 
 
 def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: Path) -> None:

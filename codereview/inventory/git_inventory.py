@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 from ..utils.paths import safe_relative_path
-from ..utils.process import run_process
 from .file_hashes import line_count, looks_binary, sha256_file
 
 
@@ -90,10 +90,10 @@ def _git_files(checkout: Path, *, include_untracked: bool) -> list[str]:
     command = ["git", "ls-files", "-z"]
     if include_untracked:
         command = ["git", "ls-files", "-c", "-o", "--exclude-standard", "-z"]
-    result = run_process(command, cwd=checkout, timeout=120)
-    if result.returncode != 0:
+    output = _run_git_capture(command, cwd=checkout, timeout=120)
+    if output is None:
         return []
-    return sorted(_safe_paths(result.stdout.split("\x00")))
+    return sorted(_safe_paths(output.split("\x00")))
 
 
 def _walk_files(checkout: Path) -> list[str]:
@@ -116,11 +116,11 @@ def _walk_files(checkout: Path) -> list[str]:
 def _git_status(checkout: Path) -> dict[str, str]:
     if not (checkout / ".git").exists():
         return {}
-    result = run_process(["git", "status", "--porcelain=v1"], cwd=checkout, timeout=60)
-    if result.returncode != 0:
+    output = _run_git_capture(["git", "status", "--porcelain=v1"], cwd=checkout, timeout=60)
+    if output is None:
         return {}
     statuses: dict[str, str] = {}
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         if len(line) < 4:
             continue
         status = line[:2].strip()
@@ -131,6 +131,24 @@ def _git_status(checkout: Path) -> dict[str, str]:
         if safe:
             statuses[safe] = status
     return statuses
+
+
+def _run_git_capture(command: list[str], *, cwd: Path, timeout: int) -> str | None:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout or ""
 
 
 def _file_entry(checkout: Path, rel: str, status: str) -> dict:

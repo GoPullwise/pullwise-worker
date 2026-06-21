@@ -151,7 +151,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
 def worker_env(worker: Path, codex: CodexConfig | None = None) -> dict[str, str]:
     import os
 
-    env = os.environ.copy()
+    env = dict(codex.env) if codex is not None and codex.env else os.environ.copy()
     for child in ("home", "tmp", "cache", "cache/npm", "cache/pip", "cache/pycache"):
         (worker / child).mkdir(parents=True, exist_ok=True)
     shared_keys = set()

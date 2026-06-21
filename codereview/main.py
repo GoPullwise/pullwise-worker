@@ -20,7 +20,7 @@ from .graph.census import run_repository_census, validate_census_coverage
 from .graph.index_sqlite import rebuild_sqlite_index
 from .graph.link import apply_cross_shard_linking
 from .graph.mapper import map_graph_tasks
-from .graph.merge import merge_graph_results, write_graph_artifacts
+from .graph.merge import merge_graph_results, normalize_graph_for_inventory, write_graph_artifacts
 from .graph.repair import plan_repairs
 from .graph.scheduler import plan_graph_tasks
 from .inventory.git_inventory import build_git_inventory
@@ -66,6 +66,8 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     snapshot_manifest = create_immutable_snapshot(checkout, inventory, run)
     write_json(run / "artifacts" / "inventory" / "snapshot.json", snapshot_manifest)
     snapshot_repo = Path(str(snapshot_manifest["snapshot_repo"]))
+    snapshot_state_before = capture_source_state(snapshot_repo, include_untracked=True)
+    write_json(run / "snapshot_source_state_before.json", snapshot_state_before)
     preflight = preflight_context(snapshot_repo, run, config)
 
     _emit_progress(progress, "census", "Graph: repository census", run_id=run_id)
@@ -83,7 +85,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     write_jsonl(run / "artifacts" / "graph" / "shard-results.jsonl", shard_results)
     _emit_progress(progress, "graph", "Graph: merging shard results", run_id=run_id)
     graph = merge_graph_results(shard_results)
-    graph = apply_cross_shard_linking(snapshot_repo, run, graph, config)
+    graph = normalize_graph_for_inventory(apply_cross_shard_linking(snapshot_repo, run, graph, config), inventory, snapshot_repo)
     graph_dir = run / "artifacts" / "graph"
     _emit_progress(progress, "graph", "Graph: auditing evidence quality", run_id=run_id)
     audit = audit_graph(graph, inventory, snapshot_repo)
@@ -115,7 +117,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         repair_history.append({"round": round_index + 1, "tasks": repair_tasks, "results": repair_results})
         shard_results.extend(repair_results)
         graph = merge_graph_results(shard_results)
-        graph = apply_cross_shard_linking(snapshot_repo, run, graph, config)
+        graph = normalize_graph_for_inventory(apply_cross_shard_linking(snapshot_repo, run, graph, config), inventory, snapshot_repo)
         audit = audit_graph(graph, inventory, snapshot_repo)
     write_graph_artifacts(graph_dir, graph)
     if config.graph.use_sqlite_index:
@@ -172,7 +174,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         context_repair_history.append({"round": 1, "tasks": context_repair_tasks, "results": context_repair_results})
         shard_results.extend(context_repair_results)
         graph = merge_graph_results(shard_results)
-        graph = apply_cross_shard_linking(snapshot_repo, run, graph, config)
+        graph = normalize_graph_for_inventory(apply_cross_shard_linking(snapshot_repo, run, graph, config), inventory, snapshot_repo)
         audit = audit_graph(graph, inventory, snapshot_repo)
         write_graph_artifacts(graph_dir, graph)
         write_json(graph_dir / "audit.json", audit)
@@ -233,6 +235,12 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     _emit_progress(progress, "judge", f"Judge: candidates 0/{len(repro_results)}", current=0, total=len(repro_results), run_id=run_id)
     judge_results = _run_judges_with_progress(run, selected, repro_results, snapshot_repo, config, progress)
     write_jsonl(run / "judge" / "results.jsonl", judge_results)
+
+    snapshot_state_after = capture_source_state(snapshot_repo, include_untracked=True)
+    stale_snapshot = source_state_changed(snapshot_state_before, snapshot_state_after)
+    write_json(run / "snapshot_source_state_after.json", {**snapshot_state_after, "changed_during_scan": stale_snapshot})
+    if stale_snapshot:
+        raise RuntimeError("immutable snapshot changed during graph-verified read-only stages")
 
     _emit_progress(progress, "report", "Report: rendering confirmed findings", run_id=run_id)
     confirmed = collect_confirmed(selected, repro_results, judge_results)
@@ -418,7 +426,7 @@ def build_pipeline_summary(
         for item in repro_results
         if item.get("status") == "blocked" or _nested_status(item, "result") == "blocked"
     ]
-    judge_confirmed = [item for item in judge_results if item.get("status") == "confirmed"]
+    judge_confirmed = [item for item in judge_results if item.get("status") == "confirmed" and item.get("safe_to_show_user") is True]
     judge_rejected = [item for item in judge_results if item.get("status") == "rejected"]
     judge_blocked = [item for item in judge_results if item.get("status") == "blocked"]
     return {

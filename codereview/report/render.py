@@ -15,10 +15,14 @@ def collect_confirmed(candidates: list[dict], repro_results: list[dict], judge_r
 
 
 def collect_rejected(candidates: list[dict], repro_results: list[dict], judge_results: list[dict]) -> list[dict]:
-    confirmed_ids = {str(item.get("candidate_id") or "") for item in judge_results if item.get("status") == "confirmed"}
+    confirmed_ids = {
+        str(item.get("candidate_id") or "")
+        for item in judge_results
+        if item.get("status") == "confirmed" and item.get("safe_to_show_user") is True
+    }
     rejected_by_id: dict[str, str] = {}
     for judge in judge_results:
-        if judge.get("status") == "confirmed":
+        if judge.get("status") == "confirmed" and judge.get("safe_to_show_user") is True:
             continue
         candidate_id = str(judge.get("candidate_id") or "")
         if candidate_id:
