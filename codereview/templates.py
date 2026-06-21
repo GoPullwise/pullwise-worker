@@ -97,16 +97,16 @@ def ensure_project_files(checkout: Path) -> None:
             encoding="utf-8",
         )
     schemas = {
-        "finder_result.schema.json": finder_result_schema(),
-        "context_result.schema.json": context_result_schema(),
-        "repo-census.schema.json": repo_census_schema(),
-        "graph-shard.schema.json": graph_shard_schema(),
-        "graph-link.schema.json": graph_link_schema(),
-        "graph-audit.schema.json": graph_audit_schema(),
-        "candidate-verification.schema.json": candidate_verification_schema(),
-        "repro_result.schema.json": repro_result_schema(),
-        "judge_result.schema.json": judge_result_schema(),
-        "final_report.schema.json": final_report_schema(),
+        "finder_result.schema.json": codex_output_schema(finder_result_schema()),
+        "context_result.schema.json": codex_output_schema(context_result_schema()),
+        "repo-census.schema.json": codex_output_schema(repo_census_schema()),
+        "graph-shard.schema.json": codex_output_schema(graph_shard_schema()),
+        "graph-link.schema.json": codex_output_schema(graph_link_schema()),
+        "graph-audit.schema.json": codex_output_schema(graph_audit_schema()),
+        "candidate-verification.schema.json": codex_output_schema(candidate_verification_schema()),
+        "repro_result.schema.json": codex_output_schema(repro_result_schema()),
+        "judge_result.schema.json": codex_output_schema(judge_result_schema()),
+        "final_report.schema.json": codex_output_schema(final_report_schema()),
     }
     for name, schema in schemas.items():
         path = root / "schemas" / name
@@ -131,6 +131,29 @@ def ensure_project_files(checkout: Path) -> None:
         path = root / "prompts" / name
         if not path.is_file():
             path.write_text(prompt, encoding="utf-8")
+
+
+def codex_output_schema(schema: dict) -> dict:
+    return _codex_output_schema_value(schema)
+
+
+def _codex_output_schema_value(value: object) -> object:
+    if isinstance(value, list):
+        return [_codex_output_schema_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    normalized = {str(key): _codex_output_schema_value(item) for key, item in value.items()}
+    if "object" in _schema_type_names(normalized.get("type")):
+        normalized["additionalProperties"] = False
+    return normalized
+
+
+def _schema_type_names(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return {item for item in value if isinstance(item, str)}
+    return set()
 
 
 def finder_result_schema() -> dict:

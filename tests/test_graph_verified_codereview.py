@@ -91,6 +91,36 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert set(graph_props) == {"unit_id", "context_files", "path_summary"}
 
 
+def test_generated_codex_schemas_are_strict_objects(tmp_path: Path) -> None:
+    ensure_project_files(tmp_path)
+
+    schema_dir = tmp_path / ".codereview" / "schemas"
+    for path in schema_dir.glob("*.schema.json"):
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        assert_strict_object_schema(schema, path.name)
+
+
+def assert_strict_object_schema(value: object, location: str) -> None:
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            assert_strict_object_schema(item, f"{location}[{index}]")
+        return
+    if not isinstance(value, dict):
+        return
+    if "object" in schema_type_names(value.get("type")):
+        assert value.get("additionalProperties") is False, location
+    for key, item in value.items():
+        assert_strict_object_schema(item, f"{location}.{key}")
+
+
+def schema_type_names(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return {item for item in value if isinstance(item, str)}
+    return set()
+
+
 def test_inventory_uses_current_full_repository_scope(tmp_path: Path) -> None:
     checkout = tmp_path
     subprocess.run(["git", "init"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
