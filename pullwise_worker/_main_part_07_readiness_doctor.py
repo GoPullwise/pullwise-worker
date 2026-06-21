@@ -52,6 +52,39 @@ def write_scan_summary(
     trim_file_to_last_bytes(path, config.scan_summary_log_max_bytes)
 
 
+def write_scan_progress_summary(
+    config: WorkerConfig,
+    job_id: str,
+    phase: str,
+    progress: int,
+    message: str = "",
+    logs_summary: str = "",
+) -> None:
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    path = config.log_dir / "scan-summary.log"
+    try:
+        safe_progress = max(0, min(100, int(progress or 0)))
+    except (TypeError, ValueError):
+        safe_progress = 0
+    payload = {
+        "time": int(time.time()),
+        "job_id": job_id,
+        "status": "progress",
+        "phase": clean_protocol_text(phase, 80),
+        "progress": safe_progress,
+    }
+    safe_message = clean_protocol_text(redact_secrets(message, config), 500)
+    if safe_message:
+        payload["message"] = safe_message
+    safe_logs_summary = clean_protocol_text(redact_secrets(logs_summary, config), 1000)
+    if safe_logs_summary:
+        payload["logs_summary"] = safe_logs_summary
+    line = json.dumps(payload, sort_keys=True)
+    with path.open("a", encoding="utf-8") as log_file:
+        log_file.write(line + "\n")
+    trim_file_to_last_bytes(path, config.scan_summary_log_max_bytes)
+
+
 def provider_command_scope_check(command: str, config: WorkerConfig, label: str) -> tuple[bool, str]:
     raw = str(command or "").strip()
     if not raw:

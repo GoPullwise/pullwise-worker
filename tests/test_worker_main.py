@@ -274,7 +274,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             upload.assert_called_once()
             summary_log = config.log_dir / "scan-summary.log"
             self.assertTrue(summary_log.is_file())
-            self.assertIn('"status": "done"', summary_log.read_text(encoding="utf-8"))
+            summary_text = summary_log.read_text(encoding="utf-8")
+            self.assertIn('"status": "progress"', summary_text)
+            self.assertIn("Running GraphVerified review", summary_text)
+            self.assertIn('"status": "done"', summary_text)
 
     def test_run_job_marks_all_blocked_graph_verified_report_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -523,6 +526,16 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         )
         self.assertNotIn("ghs_secret", command)
         self.assertIn("https://example.com/owner/repo.git", command)
+
+    def test_resolve_git_head_uses_logged_git_capture(self) -> None:
+        checkout = Path("/tmp/pullwise-checkout")
+        stdout = "ABCDEFabcdef1234567890abcdefABCDEF123456\n"
+
+        with patch.object(worker_main, "run_git_capture", return_value=stdout) as capture:
+            commit = worker_main.resolve_git_head(checkout)
+
+        self.assertEqual(commit, "abcdefabcdef1234567890abcdefabcdef123456")
+        capture.assert_called_once_with(["git", "-C", str(checkout), "rev-parse", "HEAD"], phase="resolve-head")
 
     def test_worker_logs_dry_run_prints_journal_and_scan_summary_commands(self) -> None:
         config = SimpleNamespace(

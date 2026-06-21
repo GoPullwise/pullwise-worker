@@ -714,11 +714,15 @@ class Worker:
         *,
         config: WorkerConfig | None = None,
     ) -> bool:
+        active_config = config or self.config
+        try:
+            write_scan_progress_summary(active_config, job_id, phase, progress, message, logs_summary)
+        except Exception:
+            pass
         try:
             self.client.progress(job_id, phase, progress, message, logs_summary)
             return True
         except Exception as exc:
-            active_config = config or self.config
             self.last_error = (
                 f"progress update failed for {job_id} at {phase}: "
                 f"{redact_secrets(str(exc), active_config)}"
@@ -1159,34 +1163,14 @@ def clone_checkout_from_mirror(mirror_dir: Path, checkout_dir: Path, *, clone_ur
 
 
 def resolve_git_ref(git_dir: Path, ref: str) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(git_dir), "rev-parse", ref],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(git_error_message("rev-parse", exc)) from exc
-    commit = (completed.stdout or "").strip()
+    commit = run_git_capture(["git", "-C", str(git_dir), "rev-parse", ref], phase="resolve-ref").strip()
     if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
         raise RuntimeError("git rev-parse did not return a commit SHA")
     return commit.lower()
 
 
 def resolve_git_head(checkout_dir: Path) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(checkout_dir), "rev-parse", "HEAD"],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(git_error_message("rev-parse", exc)) from exc
-    commit = (completed.stdout or "").strip()
+    commit = run_git_capture(["git", "-C", str(checkout_dir), "rev-parse", "HEAD"], phase="resolve-head").strip()
     if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
         raise RuntimeError("git rev-parse HEAD did not return a commit SHA")
     return commit.lower()
@@ -1223,10 +1207,14 @@ def log_worker_git_event(phase: str, event: str, *, command: list[str] | None = 
 
 
 def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | None = None) -> None:
+    run_git_capture(command, phase=phase, env=env)
+
+
+def run_git_capture(command: list[str], *, phase: str, env: dict[str, str] | None = None) -> str:
     timeout_seconds = env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600)
     log_worker_git_event(phase, "start", command=command, detail=f"timeout={timeout_seconds}s")
     try:
-        subprocess.run(
+        completed = subprocess.run(
             command,
             check=True,
             text=True,
@@ -1236,6 +1224,7 @@ def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | Non
             env=env,
         )
         log_worker_git_event(phase, "done", command=command)
+        return completed.stdout or ""
     except subprocess.TimeoutExpired as exc:
         log_worker_git_event(phase, "timeout", command=command, detail=f"timeout={timeout_seconds}s")
         raise RuntimeError(f"git {phase} timed out after {timeout_seconds}s") from exc
