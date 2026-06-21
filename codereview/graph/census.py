@@ -7,6 +7,7 @@ from ..codex_runner import base_env, run_codex_exec
 from ..config import ReviewConfig
 from ..inventory.git_inventory import analyzable_files
 from ..utils.jsonl import write_json
+from ..utils.process import compact_process_output
 from .contracts import language_for_path, risk_tags_for_path
 
 
@@ -69,8 +70,10 @@ def run_repository_census(checkout: Path, run: Path, inventory: dict, config: Re
         events_file=events,
     )
     process_payload = {**process.to_dict(), "events_path": str(events)}
+    write_json(worker / "process.json", process_payload)
     if process.returncode != 0 or not output.is_file():
-        raise RuntimeError(f"repository census agent failed with exit code {process.returncode}")
+        detail = compact_process_output(process)
+        raise RuntimeError(f"repository census agent failed with exit code {process.returncode}: {detail}")
     try:
         parsed = json.loads(output.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

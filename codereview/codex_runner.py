@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -31,6 +33,15 @@ _CODEX_KNOWN_OPTIONS = frozenset(
         "--skip-git-repo-check",
     }
 )
+
+
+def codex_exec_runtime_sandbox(sandbox: str) -> str:
+    if sandbox == "read-only":
+        # `codex exec` still needs to initialize runtime state and write
+        # --output-last-message. Stage prompts and post-run checks enforce the
+        # read-only review contract; the process sandbox must be writable.
+        return "workspace-write"
+    return sandbox
 
 
 @dataclass(frozen=True)
@@ -94,6 +105,7 @@ def build_codex_exec_command(
     ephemeral: bool = False,
     json_events: bool = True,
 ) -> tuple[list[str], str]:
+    runtime_sandbox = codex_exec_runtime_sandbox(sandbox)
     capabilities = codex_cli_capabilities(command, env)
     if capabilities.lookup_error:
         return _fallback_codex_exec_command(
@@ -101,7 +113,7 @@ def build_codex_exec_command(
             cd=cd,
             prompt=prompt,
             output_file=output_file,
-            sandbox=sandbox,
+            sandbox=runtime_sandbox,
             output_schema=output_schema,
             model=model,
             reasoning_effort=reasoning_effort,
@@ -130,7 +142,7 @@ def build_codex_exec_command(
     add_supported("--cd", str(cd))
     if skip_git_repo_check:
         add_supported("--skip-git-repo-check")
-    add_supported("--sandbox", sandbox, required=True)
+    add_supported("--sandbox", runtime_sandbox, required=True)
     if ignore_user_config:
         add_supported("--ignore-user-config")
     if ignore_rules:
@@ -166,12 +178,13 @@ def run_codex_exec(
     env: dict[str, str] | None = None,
     events_file: Path | None = None,
 ) -> ProcessResult:
+    exec_output_file = workspace_local_output_file(cd, output_file)
     cmd, command_error = build_codex_exec_command(
         command=config.command,
         cd=cd,
         prompt=prompt,
         output_schema=output_schema,
-        output_file=output_file,
+        output_file=exec_output_file,
         sandbox=sandbox,
         model=config.model,
         reasoning_effort=config.reasoning_effort,
@@ -200,6 +213,7 @@ def run_codex_exec(
         )
     finally:
         release_codex_cli_lock()
+    copy_workspace_output(exec_output_file, output_file)
     if events_file is not None:
         _copy_events(result, events_file)
     return result
@@ -236,6 +250,24 @@ def _copy_events(result: ProcessResult, events_file: Path) -> None:
         events_file.write_bytes(source.read_bytes())
     else:
         events_file.write_text(result.stdout or "", encoding="utf-8")
+
+
+def workspace_local_output_file(cd: Path, output_file: Path) -> Path:
+    cd_root = cd.resolve(strict=False)
+    target = output_file.resolve(strict=False)
+    try:
+        target.relative_to(cd_root)
+        return output_file
+    except ValueError:
+        digest = hashlib.sha256(str(target).encode("utf-8", errors="ignore")).hexdigest()[:16]
+        return cd_root / ".codereview" / "codex-output" / f"{digest}-{output_file.name}"
+
+
+def copy_workspace_output(source: Path, target: Path) -> None:
+    if source == target or not source.is_file():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
 
 
 def _fallback_codex_exec_command(

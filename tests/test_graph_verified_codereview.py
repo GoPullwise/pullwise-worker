@@ -17,6 +17,7 @@ from codereview.codex_runner import base_env
 from codereview.config import ReviewConfig
 from codereview.finder.runner import run_finder
 from codereview.finder.tasks import FinderTask, plan_finder_tasks
+from codereview.graph.census import run_repository_census
 from codereview.inventory.git_inventory import build_git_inventory
 from codereview.judge.runner import run_judge
 from codereview.judge.precheck import verify_repro_events_and_paths
@@ -557,8 +558,94 @@ def test_codex_exec_places_approval_flag_before_exec_when_only_top_level_support
     assert result.returncode == 0
     command = captured["command"]
     assert command[:4] == ["codex", "--ask-for-approval", "never", "exec"]
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
     assert command[-1] == "-"
     assert captured["stdin_text"] == "review"
+
+
+def test_codex_exec_copies_workspace_local_output_to_requested_path(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    from codereview import codex_runner
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    schema = checkout / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    requested_output = tmp_path / "run" / "workers" / "result.json"
+    captured = {}
+
+    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
+        del env, timeout, queue_wait_ms, kwargs
+        output_arg = Path(command[command.index("--output-last-message") + 1])
+        captured["output_arg"] = output_arg
+        assert output_arg.resolve(strict=False).relative_to(Path(cwd).resolve(strict=False))
+        output_arg.parent.mkdir(parents=True, exist_ok=True)
+        output_arg.write_text('{"ok": true}', encoding="utf-8")
+        return ProcessResult(command, str(cwd), 0, "{}", "", 1)
+
+    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    monkeypatch.setattr(
+        codex_runner,
+        "codex_cli_capabilities",
+        lambda command, env=None: codex_runner.CodexCliCapabilities(
+            frozenset(),
+            frozenset({"--cd", "--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "--json"}),
+        ),
+    )
+
+    result = codex_runner.run_codex_exec(
+        cd=checkout,
+        prompt="review",
+        output_schema=schema,
+        output_file=requested_output,
+        sandbox="read-only",
+        timeout_seconds=30,
+        config=ReviewConfig().codex,
+    )
+
+    assert result.returncode == 0
+    assert captured["output_arg"] != requested_output
+    assert json.loads(requested_output.read_text(encoding="utf-8")) == {"ok": True}
+
+
+def test_repository_census_failure_includes_process_output(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    from codereview.graph import census as census_module
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    (checkout / "app.py").write_text("def handle(value):\n    return value\n", encoding="utf-8")
+    run = tmp_path / "run"
+    inventory = {
+        "summary": {"inventory_mode": "test"},
+        "files": [
+            {
+                "path": "app.py",
+                "scope": "analyze",
+                "size_bytes": 36,
+                "line_count": 2,
+                "content_hash": "sha256:test",
+                "extension": ".py",
+            }
+        ],
+    }
+    stderr = "Error: failed to initialize in-process app-server client: Read-only file system (os error 30)"
+
+    def fake_run_codex_exec(**kwargs):
+        del kwargs
+        return ProcessResult(["codex", "exec"], str(checkout), 1, "", stderr, 12)
+
+    monkeypatch.setattr(census_module, "run_codex_exec", fake_run_codex_exec)
+    try:
+        run_repository_census(checkout, run, inventory, ReviewConfig())
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected repository census to fail")
+
+    assert "repository census agent failed with exit code 1" in message
+    assert "failed to initialize in-process app-server client" in message
+    process_payload = json.loads((run / "workers" / "census-0001" / "process.json").read_text(encoding="utf-8"))
+    assert process_payload["stderr"] == stderr
 
 
 def test_filesystem_guard_rejects_missing_or_outside_logs(tmp_path: Path) -> None:
