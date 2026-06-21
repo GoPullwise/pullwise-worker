@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from .codex_runner import base_env, run_codex_exec
-from .config import ReviewConfig
+from .config import ReviewConfig, auxiliary_codex_config
 from .utils.jsonl import write_json
 from .utils.paths import safe_relative_path
 from .utils.process import ProcessResult
@@ -36,6 +36,7 @@ def symbol_context(
 
     output = run / "context" / f"{name}.result.json"
     output.parent.mkdir(parents=True, exist_ok=True)
+    codex_config = auxiliary_codex_config(config)
     process = run_codex_exec(
         cd=checkout,
         prompt=context_prompt(seed),
@@ -43,8 +44,8 @@ def symbol_context(
         output_file=output,
         sandbox="read-only",
         timeout_seconds=config.context.timeout_seconds,
-        config=config.codex,
-        env=base_env(checkout, config.codex),
+        config=codex_config,
+        env=base_env(checkout, codex_config),
     )
     write_json(run / "context" / "raw" / f"{name}.json", process.to_dict())
     generated, parse_error = read_context_output(output)

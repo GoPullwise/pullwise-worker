@@ -32,6 +32,7 @@ from codereview.repository.symbols import map_repository_symbols
 from codereview.repro.filesystem_guard import guard_worker_result
 from codereview.repro.runner import git_status_porcelain, worker_env
 from codereview.repro.worker_dir import create_worker_dir
+from codereview.review import candidate_verifier as candidate_verifier_module
 from codereview.snapshot import create_immutable_snapshot
 from codereview.templates import ensure_project_files
 from codereview.units.coverage import build_unit_coverage
@@ -344,6 +345,7 @@ def test_codex_graph_mapper_uses_one_cli_coordinator_for_many_tasks(tmp_path: Pa
     config.graph.codex_mappers = True
     config.graph.mapper_subagent_limit = 6
     config.graph.graph_timeout_seconds = 120
+    config.codex.reasoning_effort = "xhigh"
     inventory = {
         "files": [
             {"path": "one.py", "scope": "analyze", "content_hash": "hash-one", "line_count": 2, "size_bytes": 24},
@@ -359,6 +361,7 @@ def test_codex_graph_mapper_uses_one_cli_coordinator_for_many_tasks(tmp_path: Pa
     def fake_run_codex_exec(**kwargs):
         calls.append(kwargs)
         assert kwargs["output_schema"].name == "graph-shard-batch.schema.json"
+        assert kwargs["config"].reasoning_effort == "medium"
         assert "Use at most mapper_subagent_limit subagents at one time" in kwargs["prompt"]
         output = Path(kwargs["output_file"])
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -406,6 +409,7 @@ def test_codex_graph_mapper_coordinator_scales_timeout_by_internal_waves(tmp_pat
     config.graph.codex_mappers = True
     config.graph.mapper_subagent_limit = 6
     config.graph.graph_timeout_seconds = 100
+    config.codex.reasoning_effort = "xhigh"
     inventory = {"files": []}
     tasks = [
         {"task_id": f"graph-map-{index + 1:04d}", "shard_id": f"shard-{index + 1:04d}", "mapper_index": 1, "files": []}
@@ -415,6 +419,7 @@ def test_codex_graph_mapper_coordinator_scales_timeout_by_internal_waves(tmp_pat
 
     def fake_run_codex_exec(**kwargs):
         observed["timeout_seconds"] = kwargs["timeout_seconds"]
+        observed["reasoning_effort"] = kwargs["config"].reasoning_effort
         Path(kwargs["output_file"]).write_text(
             json.dumps(
                 {
@@ -445,6 +450,60 @@ def test_codex_graph_mapper_coordinator_scales_timeout_by_internal_waves(tmp_pat
     graph_mapper_module.map_graph_tasks(checkout, tasks, inventory, config, run=tmp_path / "run")
 
     assert observed["timeout_seconds"] == 200
+    assert observed["reasoning_effort"] == "medium"
+
+
+def test_core_candidate_verifier_keeps_plan_reasoning_effort(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    run = tmp_path / "run"
+    config = ReviewConfig()
+    config.codex.reasoning_effort = "xhigh"
+    candidate = {
+        "candidate_id": "issue_1",
+        "claim": "Bug survives local checks",
+        "graph_evidence": {"context_files": ["app.py"], "path_summary": ["app.py -> handle"]},
+        "expected_behavior_source": ["test documents behavior"],
+        "minimal_repro_idea": "call handle(None)",
+        "actual_behavior_hypothesis": "raises AttributeError",
+    }
+    graph = {"nodes": [], "edges": [], "unresolved_refs": []}
+    observed = {}
+
+    def fake_run_codex_exec(**kwargs):
+        observed["reasoning_effort"] = kwargs["config"].reasoning_effort
+        output = Path(kwargs["output_file"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(
+                {
+                    "candidate_id": "issue_1",
+                    "verdict": "reproducible",
+                    "claim_survived": True,
+                    "graph_path_valid": True,
+                    "expected_behavior_supported": True,
+                    "reproduction": {
+                        "harness": "local",
+                        "target_test": "",
+                        "commands": [],
+                        "expected_signal": "AttributeError",
+                        "needs_network": False,
+                        "estimated_scope": "targeted",
+                    },
+                    "rejection_reason": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ProcessResult(["codex", "exec"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(candidate_verifier_module, "run_codex_exec", fake_run_codex_exec)
+
+    result = candidate_verifier_module.verify_candidate(candidate, graph, config, checkout, run)
+
+    assert observed["reasoning_effort"] == "xhigh"
+    assert result["verifier_source"] == "codex"
 
 
 def test_fast_profile_does_not_cap_full_review_unit_coverage() -> None:

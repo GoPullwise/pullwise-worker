@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -143,6 +143,13 @@ class ReviewConfig:
         if self.repro.max_repro > 0:
             return self.repro.max_repro
         return MODE_BUDGETS.get(self.mode, MODE_BUDGETS["standard"])["max_repro"]
+
+
+AUXILIARY_CODEX_REASONING_EFFORT = "medium"
+
+
+def auxiliary_codex_config(config: ReviewConfig) -> CodexConfig:
+    return replace(config.codex, reasoning_effort=AUXILIARY_CODEX_REASONING_EFFORT)
 
 
 def _section(source: dict, key: str) -> dict:

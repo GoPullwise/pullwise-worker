@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
-from ..config import ReviewConfig
+from ..config import ReviewConfig, auxiliary_codex_config
 from ..utils.jsonl import read_json, write_json
 from .cache import graph_cache_key
 from .contracts import confidence_for_evidence, language_for_path, risk_tags_for_path
@@ -178,6 +178,7 @@ def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_p
     (worker / "prompt.md").write_text(prompt, encoding="utf-8")
     output = worker / "result.json"
     events = worker / "events.jsonl"
+    codex_config = auxiliary_codex_config(config)
     process = run_codex_exec(
         cd=checkout,
         prompt=prompt,
@@ -185,8 +186,8 @@ def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_p
         output_file=output,
         sandbox="read-only",
         timeout_seconds=config.graph.graph_timeout_seconds,
-        config=config.codex,
-        env=base_env(checkout, config.codex),
+        config=codex_config,
+        env=base_env(checkout, codex_config),
         events_file=events,
     )
     process_payload = {**process.to_dict(), "events_path": str(events)}
@@ -258,6 +259,7 @@ def run_codex_graph_mapper_coordinator(
     (worker / "prompt.md").write_text(prompt, encoding="utf-8")
     output = worker / "result.json"
     events = worker / "events.jsonl"
+    codex_config = auxiliary_codex_config(config)
     process = run_codex_exec(
         cd=checkout,
         prompt=prompt,
@@ -265,8 +267,8 @@ def run_codex_graph_mapper_coordinator(
         output_file=output,
         sandbox="read-only",
         timeout_seconds=_coordinator_timeout_seconds(tasks, config),
-        config=config.codex,
-        env=base_env(checkout, config.codex),
+        config=codex_config,
+        env=base_env(checkout, codex_config),
         events_file=events,
     )
     process_payload = {**process.to_dict(), "events_path": str(events)}

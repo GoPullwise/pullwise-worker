@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
-from ..config import ReviewConfig
+from ..config import ReviewConfig, auxiliary_codex_config
 from ..utils.jsonl import write_json
 from .ids import stable_edge_id
 from .merge import build_inline_indexes
@@ -134,6 +134,7 @@ def _run_linker(
     (worker / "prompt.md").write_text(prompt, encoding="utf-8")
     output = worker / "result.json"
     events = worker / "events.jsonl"
+    codex_config = auxiliary_codex_config(config)
     process = run_codex_exec(
         cd=checkout,
         prompt=prompt,
@@ -141,8 +142,8 @@ def _run_linker(
         output_file=output,
         sandbox="read-only",
         timeout_seconds=config.graph.graph_timeout_seconds,
-        config=config.codex,
-        env=base_env(checkout, config.codex),
+        config=codex_config,
+        env=base_env(checkout, codex_config),
         events_file=events,
     )
     process_payload = {**process.to_dict(), "events_path": str(events)}
