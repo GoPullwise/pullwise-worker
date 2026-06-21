@@ -2,10 +2,16 @@ from __future__ import annotations
 
 # Loaded by main.py; definitions are executed in that module's globals.
 
+from codereview.utils.process import ProcessCancelled, clear_process_cancel_event, set_process_cancel_event
+
 AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
 PROTOCOL_TEXT_MAX_LENGTH = 4000
 PROTOCOL_SINGLE_LINE_TEXT_MAX_LENGTH = 500
+
+
+class WorkerJobCancelled(RuntimeError):
+    pass
 
 
 def protocol_multiline_text(value: object, max_length: int = PROTOCOL_TEXT_MAX_LENGTH) -> str:
@@ -319,6 +325,8 @@ class Worker:
         )
         self._pending_result_uploads: dict[str, tuple[concurrent.futures.Future[None], Path]] = {}
         self._pending_result_uploads_lock = Lock()
+        self._job_cancel_events: dict[str, threading.Event] = {}
+        self._job_cancel_events_lock = Lock()
         self.log_tailers: dict[str, WorkerLogStreamTailer] = {}
 
     def handle_log_session(self, session: object) -> None:
@@ -338,6 +346,46 @@ class Worker:
             self.last_error = f"log stream upload failed: {redact_secrets(str(exc), self.config)}"[:500]
             return
         tailer.commit(state)
+
+    def job_cancel_event(self, job_id: str) -> threading.Event:
+        job_id = safe_job_id(job_id)
+        with self._job_cancel_events_lock:
+            event = self._job_cancel_events.get(job_id)
+            if event is None:
+                event = threading.Event()
+                self._job_cancel_events[job_id] = event
+            return event
+
+    def cancel_server_jobs(self, job_ids: object) -> None:
+        if not isinstance(job_ids, list):
+            return
+        with self._job_cancel_events_lock:
+            for value in job_ids:
+                try:
+                    job_id = safe_job_id(value)
+                except ValueError:
+                    continue
+                event = self._job_cancel_events.get(job_id)
+                if event is not None:
+                    event.set()
+
+    def clear_job_cancel_event(self, job_id: str, event: threading.Event) -> None:
+        try:
+            job_id = safe_job_id(job_id)
+        except ValueError:
+            return
+        with self._job_cancel_events_lock:
+            if self._job_cancel_events.get(job_id) is event:
+                self._job_cancel_events.pop(job_id, None)
+
+    def job_cancel_requested(self, job_id: str) -> bool:
+        try:
+            job_id = safe_job_id(job_id)
+        except ValueError:
+            return False
+        with self._job_cancel_events_lock:
+            event = self._job_cancel_events.get(job_id)
+        return bool(event is not None and event.is_set())
 
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
@@ -393,6 +441,11 @@ class Worker:
                 except PullwiseRequestError as exc:
                     self.last_error = f"heartbeat failed: {redact_secrets(str(exc), self.config)}"[:500]
                     loop_error = True
+                self.cancel_server_jobs(
+                    heartbeat_payload.get("cancelled_job_ids")
+                    if "cancelled_job_ids" in heartbeat_payload
+                    else heartbeat_payload.get("cancelledJobIds")
+                )
                 worker_state = heartbeat_payload.get("worker") if isinstance(heartbeat_payload.get("worker"), dict) else {}
                 command = heartbeat_payload.get("command") if isinstance(heartbeat_payload.get("command"), dict) else None
                 if not getattr(self.config, "lifecycle_watcher_enabled", False):
@@ -715,6 +768,8 @@ class Worker:
         config: WorkerConfig | None = None,
     ) -> bool:
         active_config = config or self.config
+        if self.job_cancel_requested(job_id):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
         try:
             write_scan_progress_summary(active_config, job_id, phase, progress, message, logs_summary)
         except Exception:
@@ -722,12 +777,34 @@ class Worker:
         try:
             self.client.progress(job_id, phase, progress, message, logs_summary)
             return True
+        except PullwiseHTTPError as exc:
+            if exc.status_code == 409:
+                raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates") from exc
+            self.last_error = (
+                f"progress update failed for {job_id} at {phase}: "
+                f"{redact_secrets(str(exc), active_config)}"
+            )[:500]
+            return False
         except Exception as exc:
             self.last_error = (
                 f"progress update failed for {job_id} at {phase}: "
                 f"{redact_secrets(str(exc), active_config)}"
             )[:500]
             return False
+
+    def record_server_cancelled_job(
+        self,
+        config: WorkerConfig,
+        job_id: str,
+        duration_ms: int,
+        review_execution: dict | None = None,
+        message: str = "",
+    ) -> None:
+        self.last_error = redact_secrets(
+            message or f"job {job_id} is no longer accepting worker updates",
+            config,
+        )[:500]
+        write_scan_summary(config, job_id, "cancelled", duration_ms, self.last_error, review_execution)
 
     def run_job(self, job: dict) -> None:
         job_id = safe_job_id(job.get("job_id"))
@@ -743,6 +820,8 @@ class Worker:
         graph_verified_report: dict = {}
         review_execution: dict = {}
         logs_summary = ""
+        cancel_event = self.job_cancel_event(job_id)
+        set_process_cancel_event(cancel_event)
 
         def scan_summary_review_execution() -> dict:
             return review_execution if isinstance(review_execution, dict) else {}
@@ -869,6 +948,26 @@ class Worker:
             )
             try:
                 uploaded = self.upload_result_once_or_defer(job_id, payload)
+            except PullwiseHTTPError as exc:
+                if exc.status_code == 409:
+                    self.record_server_cancelled_job(
+                        job_config,
+                        job_id,
+                        duration_ms,
+                        scan_summary_review_execution(),
+                    )
+                    return
+                self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), job_config)}"[:500]
+                job_error = self.last_error
+                write_scan_summary(
+                    job_config,
+                    job_id,
+                    "upload_failed",
+                    duration_ms,
+                    self.last_error,
+                    scan_summary_review_execution(),
+                )
+                return
             except Exception as exc:
                 self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), job_config)}"[:500]
                 job_error = self.last_error
@@ -905,6 +1004,26 @@ class Worker:
             else:
                 write_scan_summary(job_config, job_id, "done", duration_ms, "", scan_summary_review_execution())
                 self.last_error = None
+        except WorkerJobCancelled as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            self.record_server_cancelled_job(
+                job_config,
+                job_id,
+                duration_ms,
+                scan_summary_review_execution(),
+                str(exc),
+            )
+            return
+        except ProcessCancelled as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            self.record_server_cancelled_job(
+                job_config,
+                job_id,
+                duration_ms,
+                scan_summary_review_execution(),
+                str(exc),
+            )
+            return
         except Exception as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             raw_review_execution = getattr(exc, "review_execution", None)
@@ -959,6 +1078,35 @@ class Worker:
                     config=job_config,
                 )
                 uploaded = self.upload_result_once_or_defer(job_id, error_payload)
+            except WorkerJobCancelled as cancel_exc:
+                self.record_server_cancelled_job(
+                    job_config,
+                    job_id,
+                    duration_ms,
+                    scan_summary_review_execution(),
+                    str(cancel_exc),
+                )
+                return
+            except PullwiseHTTPError as upload_exc:
+                if upload_exc.status_code == 409:
+                    self.record_server_cancelled_job(
+                        job_config,
+                        job_id,
+                        duration_ms,
+                        scan_summary_review_execution(),
+                    )
+                    return
+                self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), job_config)}"[:500]
+                job_error = self.last_error
+                write_scan_summary(
+                    job_config,
+                    job_id,
+                    "upload_failed",
+                    duration_ms,
+                    self.last_error,
+                    scan_summary_review_execution(),
+                )
+                return
             except Exception as upload_exc:
                 self.last_error = f"failed result upload failed for {job_id}: {redact_secrets(str(upload_exc), job_config)}"[:500]
                 job_error = self.last_error
@@ -985,6 +1133,8 @@ class Worker:
             self.last_error = error
             job_error = error
         finally:
+            clear_process_cancel_event()
+            self.clear_job_cancel_event(job_id, cancel_event)
             if job_error and job_config.failed_checkout_retention_seconds > 0:
                 marker = failed_checkout_marker(checkout_dir)
                 marker.write_text(str(int(time.time()) + job_config.failed_checkout_retention_seconds), encoding="utf-8")

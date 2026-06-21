@@ -8,11 +8,14 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from codereview.utils.process import ProcessCancelled, clear_process_cancel_event, run_process, set_process_cancel_event
 
 worker_main = importlib.import_module("pullwise_worker.main")
 
@@ -278,6 +281,94 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn('"status": "progress"', summary_text)
             self.assertIn("Running GraphVerified review", summary_text)
             self.assertIn('"status": "done"', summary_text)
+
+    def test_run_job_stops_without_result_when_progress_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_cancelled",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_cancelled_progress",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+
+            with patch.object(
+                worker.client,
+                "progress",
+                side_effect=worker_main.PullwiseHTTPError("HTTP 409: conflict", 409),
+            ), patch.object(worker_main, "clone_repository") as clone_repository, patch.object(
+                worker,
+                "upload_result_once_or_defer",
+            ) as upload:
+                worker.run_job(job)
+
+            clone_repository.assert_not_called()
+            upload.assert_not_called()
+            self.assertIn("no longer accepting worker updates", worker.last_error or "")
+            summary_text = (config.log_dir / "scan-summary.log").read_text(encoding="utf-8")
+            self.assertIn('"status": "cancelled"', summary_text)
+            self.assertNotIn('"status": "failed"', summary_text)
+
+    def test_report_progress_stops_when_heartbeat_cancelled_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_cancel_event",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                scan_summary_log_max_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker.job_cancel_event("job_cancel_event")
+            worker.cancel_server_jobs(["job_cancel_event"])
+
+            with patch.object(worker.client, "progress") as progress:
+                with self.assertRaises(worker_main.WorkerJobCancelled):
+                    worker.report_progress("job_cancel_event", "ai", 80, "still running")
+
+            progress.assert_not_called()
+
+    def test_process_runner_stops_when_cancel_event_is_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cancel_event = threading.Event()
+            cancel_event.set()
+            set_process_cancel_event(cancel_event)
+            try:
+                with self.assertRaises(ProcessCancelled):
+                    run_process(
+                        [sys.executable, "-c", "import time; time.sleep(30)"],
+                        cwd=Path(tmp_dir),
+                        timeout=60,
+                    )
+            finally:
+                clear_process_cancel_event()
 
     def test_run_job_marks_all_blocked_graph_verified_report_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

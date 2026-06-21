@@ -3,10 +3,18 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+
+_PROCESS_CANCEL_STATE = threading.local()
+
+
+class ProcessCancelled(RuntimeError):
+    pass
 
 
 @dataclass
@@ -62,6 +70,24 @@ def compact_process_output(result: object, *, limit: int = 700) -> str:
     return detail or "no stderr/stdout"
 
 
+def set_process_cancel_event(event: object | None) -> None:
+    _PROCESS_CANCEL_STATE.event = event
+
+
+def clear_process_cancel_event() -> None:
+    if hasattr(_PROCESS_CANCEL_STATE, "event"):
+        delattr(_PROCESS_CANCEL_STATE, "event")
+
+
+def process_cancel_event() -> object | None:
+    return getattr(_PROCESS_CANCEL_STATE, "event", None)
+
+
+def process_cancel_requested() -> bool:
+    event = process_cancel_event()
+    return bool(event is not None and getattr(event, "is_set", lambda: False)())
+
+
 def run_process(
     command: list[str],
     *,
@@ -92,21 +118,50 @@ def run_process(
                 stdout=stdout_file,
                 stderr=stderr_file,
             )
-            try:
-                if stdin_text is not None:
-                    process.communicate(stdin_text.encode("utf-8"), timeout=timeout)
-                    returncode = process.returncode
-                else:
-                    returncode = process.wait(timeout=timeout)
+            if process_cancel_event() is None:
+                try:
+                    if stdin_text is not None:
+                        process.communicate(stdin_text.encode("utf-8"), timeout=timeout)
+                        returncode = process.returncode
+                    else:
+                        returncode = process.wait(timeout=timeout)
+                    timed_out = False
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    if stdin_text is not None:
+                        process.communicate()
+                        returncode = process.returncode
+                    else:
+                        returncode = process.wait()
+                    timed_out = True
+            else:
+                if stdin_text is not None and process.stdin is not None:
+                    try:
+                        process.stdin.write(stdin_text.encode("utf-8"))
+                        process.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
+                deadline = started + max(1, int(timeout or 600))
                 timed_out = False
-            except subprocess.TimeoutExpired:
-                process.kill()
-                if stdin_text is not None:
-                    process.communicate()
-                    returncode = process.returncode
-                else:
-                    returncode = process.wait()
-                timed_out = True
+                cancelled = False
+                while True:
+                    returncode = process.poll()
+                    if returncode is not None:
+                        break
+                    if process_cancel_requested():
+                        cancelled = True
+                        process.kill()
+                        returncode = process.wait()
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        process.kill()
+                        returncode = process.wait()
+                        break
+                    time.sleep(min(0.2, max(0.01, remaining)))
+                if cancelled:
+                    raise ProcessCancelled(f"{command[0] if command else 'process'} cancelled")
         result = ProcessResult(
             command=command,
             cwd=str(cwd),

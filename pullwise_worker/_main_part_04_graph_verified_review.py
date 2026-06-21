@@ -34,6 +34,8 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
             final_path = run_review(checkout_dir, mode=mode, scan_mode=scan_mode)
         else:
             final_path = run_review(checkout_dir, mode=mode, scan_mode=scan_mode, progress=progress_callback)
+    except ProcessCancelled as exc:
+        raise WorkerJobCancelled(str(exc)) from exc
     except Exception as exc:
         return {
             "version": "graph-verified-code-review/1",
