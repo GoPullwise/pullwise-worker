@@ -60,7 +60,7 @@ def risk_tags_for_path(path: str, name: str = "") -> list[str]:
 
 
 def confidence_for_evidence(evidence_kind: str) -> str:
-    if evidence_kind in {"direct_syntax", "unique_resolution"}:
+    if evidence_kind in {"direct_syntax", "agent_link_resolution"}:
         return "high"
     if evidence_kind in {"repository_convention", "dynamic_dispatch"}:
         return "medium"

@@ -63,8 +63,10 @@
           },
           "expected_behavior_source": {
             "items": {
+              "minLength": 1,
               "type": "string"
             },
+            "minItems": 1,
             "type": "array"
           },
           "graph_evidence": {
@@ -140,6 +142,7 @@
           "evidence",
           "trigger_condition",
           "expected_behavior",
+          "expected_behavior_source",
           "actual_behavior_hypothesis",
           "minimal_repro_idea",
           "repro_likelihood"

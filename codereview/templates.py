@@ -50,6 +50,7 @@ def ensure_project_files(checkout: Path) -> None:
                         "double_map_high_risk": True,
                         "max_repair_rounds": 2,
                         "use_sqlite_index": True,
+                        "codex_census": True,
                         "codex_mappers": True,
                     },
                     "agents": {
@@ -168,6 +169,7 @@ def finder_result_schema() -> dict:
                         "evidence",
                         "trigger_condition",
                         "expected_behavior",
+                        "expected_behavior_source",
                         "actual_behavior_hypothesis",
                         "minimal_repro_idea",
                         "repro_likelihood",
@@ -218,7 +220,7 @@ def finder_result_schema() -> dict:
                         "actual_behavior_hypothesis": {"type": "string"},
                         "minimal_repro_idea": {"type": "string"},
                         "repository_tests": {"type": "array", "items": {"type": "string"}},
-                        "expected_behavior_source": {"type": "array", "items": {"type": "string"}},
+                        "expected_behavior_source": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
                         "repro_likelihood": {"type": "string", "enum": ["high", "medium", "low"]},
                         "needs_network": {"type": "boolean"},
                         "notes": {"type": "string"},
@@ -534,14 +536,14 @@ Hard gates:
 - Every candidate must be tied to concrete repository context from the supplied context pack or files it references.
 - Fill graph_evidence.context_files with repository-relative files from the context pack.
 - Every candidate must include file/line evidence, trigger condition, expected behavior, actual behavior hypothesis, and a local minimal repro idea.
-- When possible, include expected_behavior_source with tests, contracts, callers, or repository invariants that support the expected behavior.
+- Include expected_behavior_source with tests, contracts, callers, or repository invariants that support the expected behavior.
 - Do not report style concerns or speculative risks.
 - Mark needs_network true when reproduction requires a network, credentials, production service, or external database.
 
 Output JSON only matching finder_result.schema.json.
 Top-level JSON must include unit_id, focus, and candidates.
 Each candidate must use candidate_id, dedupe_key, claim, graph_evidence, evidence, trigger_condition,
-expected_behavior, actual_behavior_hypothesis, minimal_repro_idea, and repro_likelihood.
+expected_behavior, expected_behavior_source, actual_behavior_hypothesis, minimal_repro_idea, and repro_likelihood.
 """
 
 

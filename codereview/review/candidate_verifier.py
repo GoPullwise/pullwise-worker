@@ -86,9 +86,8 @@ def local_verify_candidate(candidate: dict, graph: dict, config: ReviewConfig) -
     graph_evidence = candidate.get("graph_evidence") if isinstance(candidate.get("graph_evidence"), dict) else {}
     path_summary = graph_evidence.get("path_summary") if isinstance(graph_evidence.get("path_summary"), list) else []
     context_files = graph_evidence.get("context_files") if isinstance(graph_evidence.get("context_files"), list) else []
-    expected = str(candidate.get("expected_behavior") or "").strip()
     expected_source = candidate.get("expected_behavior_source")
-    has_expected_source = bool(expected) or (isinstance(expected_source, list) and any(str(item).strip() for item in expected_source))
+    has_expected_source = isinstance(expected_source, list) and any(str(item).strip() for item in expected_source)
     repro = str(candidate.get("minimal_repro_idea") or "").strip()
     network = candidate.get("needs_network") is True
     reasons = []
@@ -97,7 +96,7 @@ def local_verify_candidate(candidate: dict, graph: dict, config: ReviewConfig) -
     if not context_files:
         reasons.append("missing graph code files")
     if config.candidates.require_expected_behavior_source and not has_expected_source:
-        reasons.append("missing expected behavior")
+        reasons.append("missing expected behavior source")
     if not repro:
         reasons.append("missing local reproduction idea")
     if network:

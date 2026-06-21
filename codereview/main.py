@@ -15,7 +15,7 @@ from .config import load_config
 from .finder.runner import run_finders_parallel
 from .finder.tasks import plan_finder_tasks
 from .graph.audit import audit_graph, run_agent_graph_audit
-from .graph.census import build_repository_census, validate_census_coverage
+from .graph.census import run_repository_census, validate_census_coverage
 from .graph.index_sqlite import rebuild_sqlite_index
 from .graph.link import apply_cross_shard_linking
 from .graph.mapper import map_graph_tasks
@@ -39,14 +39,14 @@ from .utils.jsonl import write_json, write_jsonl
 from .utils.paths import safe_relative_path
 
 
-def run_review(checkout: Path, mode: str = "") -> Path:
+def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
     checkout = checkout.resolve(strict=False)
     ensure_project_files(checkout)
-    config = load_config(checkout, mode=mode)
+    config = load_config(checkout, mode=mode, scan_mode=scan_mode)
     run_id = time.strftime("%Y%m%d-%H%M%S")
     run = checkout / ".codereview" / "runs" / run_id
     run.mkdir(parents=True, exist_ok=True)
-    write_json(run / "meta.json", {"run_id": run_id, "mode": config.mode, "scope": "full-repository"})
+    write_json(run / "meta.json", {"run_id": run_id, "mode": config.mode, "scan_mode": config.scan.mode, "scope": "full-repository"})
 
     source_state_before = capture_source_state(checkout, include_untracked=config.scan.include_untracked)
     write_json(run / "source_state_before.json", source_state_before)
@@ -61,7 +61,7 @@ def run_review(checkout: Path, mode: str = "") -> Path:
     snapshot_repo = Path(str(snapshot_manifest["snapshot_repo"]))
     preflight = preflight_context(snapshot_repo, run, config)
 
-    census = build_repository_census(inventory, config)
+    census = run_repository_census(snapshot_repo, run, inventory, config)
     census_errors = validate_census_coverage(census, inventory)
     write_json(run / "artifacts" / "graph" / "census.json", census)
     write_json(run / "artifacts" / "graph" / "census-validation.json", {"errors": census_errors})
@@ -110,6 +110,7 @@ def run_review(checkout: Path, mode: str = "") -> Path:
     review_units = build_all_review_units(graph, inventory, census, config)
     write_review_units(run, review_units)
     planned_coverage = build_unit_coverage(graph, inventory, review_units)
+    planned_coverage["critical_unresolved_graph_edges"] = audit.get("critical_unresolved", 0)
     require_full_unit_coverage(planned_coverage)
     write_json(run / "artifacts" / "review-units" / "coverage-planned.json", planned_coverage)
 
@@ -134,6 +135,7 @@ def run_review(checkout: Path, mode: str = "") -> Path:
         review_units = build_all_review_units(graph, inventory, census, config)
         write_review_units(run, review_units)
         planned_coverage = build_unit_coverage(graph, inventory, review_units)
+        planned_coverage["critical_unresolved_graph_edges"] = audit.get("critical_unresolved", 0)
         require_full_unit_coverage(planned_coverage)
         write_json(run / "artifacts" / "review-units" / "coverage-planned.json", planned_coverage)
         finder_tasks = plan_finder_tasks(review_units)
@@ -141,6 +143,7 @@ def run_review(checkout: Path, mode: str = "") -> Path:
     write_jsonl(run / "candidates" / "raw.jsonl", raw_candidates)
 
     executed_coverage = build_unit_coverage(graph, inventory, review_units, raw_candidates)
+    executed_coverage["critical_unresolved_graph_edges"] = audit.get("critical_unresolved", 0)
     require_full_unit_coverage(executed_coverage, require_baseline_review=config.units.require_baseline_for_every_unit)
     write_json(run / "artifacts" / "review-units" / "coverage-executed.json", executed_coverage)
 
@@ -435,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--checkout", default=".")
     run_parser.add_argument("--mode", choices=["fast", "standard", "deep"], default="")
+    run_parser.add_argument("--scan-mode", choices=["full-cached", "full-strict"], default="")
     args = parser.parse_args(argv)
     checkout = Path(args.checkout)
     if args.command == "init":
@@ -442,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
         print(checkout / ".codereview")
         return 0
     try:
-        final = run_review(checkout, mode=args.mode)
+        final = run_review(checkout, mode=args.mode, scan_mode=getattr(args, "scan_mode", ""))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2

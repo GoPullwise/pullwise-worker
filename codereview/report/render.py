@@ -61,6 +61,7 @@ def render_final_report(
         f"Production symbols covered: {coverage.get('covered_production_symbols', 0)}/{coverage.get('production_symbols', 0)}",
         f"Cross-boundary reviews: {coverage.get('cross_boundary_reviews', 0)}",
         f"Global invariant reviews: {coverage.get('global_invariant_reviews', 0)}",
+        f"Critical unresolved graph edges: {coverage.get('critical_unresolved_graph_edges', 0)}",
         "",
         "## Findings",
         "",
@@ -71,6 +72,14 @@ def render_final_report(
         "---",
         "",
     ]
+    if not confirmed:
+        lines.extend(
+            [
+                "No confirmed findings.",
+                _coverage_status_line(coverage),
+                "",
+            ]
+        )
     for index, item in enumerate(confirmed, start=1):
         candidate = item.get("candidate") or {}
         judge = item.get("judge") or {}
@@ -225,3 +234,14 @@ def _bullet_lines(value: object) -> str:
 def _verification_label(value: object) -> str:
     text = str(value or "L2")
     return {"L2": "V2", "L3": "V3", "L1": "V1", "L0": "V0"}.get(text, text)
+
+
+def _coverage_status_line(coverage: dict) -> str:
+    review_units = int(coverage.get("review_units") or 0)
+    baseline = int(coverage.get("baseline_reviewed_units") or 0)
+    production = int(coverage.get("production_symbols") or 0)
+    covered = int(coverage.get("covered_production_symbols") or 0)
+    critical_unresolved = int(coverage.get("critical_unresolved_graph_edges") or 0)
+    if review_units == baseline and production == covered and critical_unresolved == 0:
+        return "Full-repository coverage: passed."
+    return "Full-repository coverage: incomplete."

@@ -30,6 +30,7 @@
     "double_map_high_risk": true,
     "max_repair_rounds": 2,
     "use_sqlite_index": true,
+    "codex_census": true,
     "codex_mappers": true
   },
   "review": {

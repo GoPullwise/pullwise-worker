@@ -27,7 +27,7 @@ def build_all_review_units(graph: dict, inventory: dict, census: dict, config: R
     units.extend(_orphan_units(index, graph, config, covered_symbols))
     units.extend(_cross_boundary_units(index, graph, config))
     units.extend(_global_invariant_units(graph, inventory, census, config))
-    return _dedupe_units(units)[: config.max_review_units]
+    return _dedupe_units(units)
 
 
 def _entrypoint_flow_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig, covered: set[str]) -> list[dict]:
@@ -122,8 +122,6 @@ def _cross_boundary_units(index: MemoryGraphIndex, graph: dict, config: ReviewCo
         if _package(source_node.get("file")) == _package(target_node.get("file")):
             continue
         units.append(_unit(index, graph, "cross_boundary", f"boundary:{source}:{target}", [source, target], ["cross-boundary"]))
-        if len(units) >= config.units.max_unit_paths:
-            break
     return units
 
 

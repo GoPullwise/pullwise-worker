@@ -18,11 +18,12 @@ REQUIRED_FIELDS = {
     "evidence",
     "trigger_condition",
     "expected_behavior",
+    "expected_behavior_source",
     "actual_behavior_hypothesis",
     "minimal_repro_idea",
     "repro_likelihood",
 }
-OPTIONAL_FIELDS = {"repository_tests", "needs_network", "notes", "expected_behavior_source"}
+OPTIONAL_FIELDS = {"repository_tests", "needs_network", "notes"}
 ALLOWED_FIELDS = REQUIRED_FIELDS | OPTIONAL_FIELDS
 DERIVED_FIELDS = {"issue_id", "source_task", "title", "code_evidence", "valid", "invalid_reasons", "score"}
 CATEGORIES = {"correctness", "security_auth_dataflow", "api_contract", "state_concurrency_resource", "test_repro"}
@@ -104,6 +105,11 @@ def validate_candidate(candidate: dict, *, checkout: Path | None = None, run: Pa
     for field in ("claim", "dedupe_key", "trigger_condition", "expected_behavior", "actual_behavior_hypothesis", "minimal_repro_idea"):
         if field in candidate and not str(candidate.get(field) or "").strip():
             reasons.append(f"{field} must be non-empty")
+    expected_source = candidate.get("expected_behavior_source")
+    if "expected_behavior_source" in candidate and (
+        not isinstance(expected_source, list) or not any(str(item or "").strip() for item in expected_source)
+    ):
+        reasons.append("expected_behavior_source must be a non-empty list")
     return reasons
 
 

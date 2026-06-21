@@ -52,12 +52,7 @@ def _map_task_with_policy(checkout: Path, task: dict, inventory_by_path: dict[st
         result = run_codex_graph_mapper(checkout, run, task, inventory_by_path, config)
         if result.get("status") == "ok":
             _save_cached_task_result(checkout, task, inventory_by_path, config, result)
-            return result
-        fallback = map_graph_task(checkout, task, inventory_by_path)
-        fallback.setdefault("warnings", []).append(f"codex mapper fallback: {result.get('blocked_reason') or 'invalid output'}")
-        fallback["codex_process"] = result.get("process") or {}
-        _save_cached_task_result(checkout, task, inventory_by_path, config, fallback)
-        return fallback
+        return result
     result = map_graph_task(checkout, task, inventory_by_path)
     _save_cached_task_result(checkout, task, inventory_by_path, config, result)
     return result

@@ -1,13 +1,88 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from ..codex_runner import base_env, run_codex_exec
 from ..config import ReviewConfig
 from ..inventory.git_inventory import analyzable_files
+from ..utils.jsonl import write_json
 from .contracts import language_for_path, risk_tags_for_path
 
 
 MANIFEST_NAMES = {"package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mod", "pom.xml", "build.gradle"}
+
+
+def run_repository_census(checkout: Path, run: Path, inventory: dict, config: ReviewConfig) -> dict:
+    deterministic = build_repository_census(inventory, config)
+    if not config.graph.codex_census:
+        return {**deterministic, "census_source": "deterministic"}
+
+    prompt_file = checkout / ".codereview" / "prompts" / "repo-census.md"
+    schema = checkout / ".codereview" / "schemas" / "repo-census.schema.json"
+    if not prompt_file.is_file() or not schema.is_file():
+        raise RuntimeError("repository census prompt or schema missing")
+
+    worker = run / "workers" / "census-0001"
+    worker.mkdir(parents=True, exist_ok=True)
+    task = {
+        "inventory_summary": inventory.get("summary") or {},
+        "files": [
+            {
+                "path": item.get("path"),
+                "size_bytes": item.get("size_bytes"),
+                "line_count": item.get("line_count"),
+                "content_hash": item.get("content_hash"),
+                "extension": item.get("extension"),
+                "scope": item.get("scope"),
+                "reason": item.get("reason"),
+                "git_status": item.get("git_status"),
+            }
+            for item in inventory.get("files", [])
+            if isinstance(item, dict)
+        ],
+        "deterministic_seed": deterministic,
+        "manifest_previews": _manifest_previews(checkout, inventory),
+    }
+    prompt = "\n\n".join(
+        [
+            prompt_file.read_text(encoding="utf-8"),
+            "Repository census input JSON:",
+            "```json",
+            json.dumps(task, ensure_ascii=False, indent=2, sort_keys=True),
+            "```",
+        ]
+    )
+    write_json(worker / "task.json", task)
+    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    output = worker / "result.json"
+    events = worker / "events.jsonl"
+    process = run_codex_exec(
+        cd=checkout,
+        prompt=prompt,
+        output_schema=schema,
+        output_file=output,
+        sandbox="read-only",
+        timeout_seconds=config.graph.graph_timeout_seconds,
+        config=config.codex,
+        env=base_env(checkout, config.codex),
+        events_file=events,
+    )
+    process_payload = {**process.to_dict(), "events_path": str(events)}
+    if process.returncode != 0 or not output.is_file():
+        raise RuntimeError(f"repository census agent failed with exit code {process.returncode}")
+    try:
+        parsed = json.loads(output.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"repository census agent produced invalid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("repository census agent produced non-object JSON")
+    errors = validate_census_coverage(parsed, inventory)
+    if errors:
+        raise RuntimeError(f"repository census agent failed coverage validation: {'; '.join(errors)}")
+    parsed["census_source"] = "codex"
+    parsed["process"] = process_payload
+    return parsed
 
 
 def build_repository_census(inventory: dict, config: ReviewConfig) -> dict:
@@ -128,3 +203,19 @@ def _shard_coverage(files: list[dict], shards: list[dict]) -> dict:
         "missing_files": sorted(expected - assigned),
         "extra_files": sorted(assigned - expected),
     }
+
+
+def _manifest_previews(checkout: Path, inventory: dict) -> list[dict]:
+    previews = []
+    for item in inventory.get("files", []):
+        if not isinstance(item, dict):
+            continue
+        rel = str(item.get("path") or "")
+        if Path(rel).name not in MANIFEST_NAMES:
+            continue
+        path = checkout / rel
+        text = path.read_text(encoding="utf-8", errors="replace")[:12000] if path.is_file() else ""
+        previews.append({"path": rel, "content": text})
+        if len(previews) >= 50:
+            break
+    return previews

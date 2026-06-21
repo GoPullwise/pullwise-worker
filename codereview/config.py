@@ -7,9 +7,9 @@ from pathlib import Path
 
 
 MODE_BUDGETS = {
-    "fast": {"max_review_units": 12, "max_repro": 8},
-    "standard": {"max_review_units": 30, "max_repro": 20},
-    "deep": {"max_review_units": 80, "max_repro": 50},
+    "fast": {"max_repro": 8},
+    "standard": {"max_repro": 20},
+    "deep": {"max_repro": 50},
 }
 
 
@@ -86,6 +86,7 @@ class GraphConfig:
     double_map_high_risk: bool = True
     max_repair_rounds: int = 2
     use_sqlite_index: bool = True
+    codex_census: bool = True
     codex_mappers: bool = True
     map_parallel: int = 6
     graph_timeout_seconds: int = 480
@@ -131,7 +132,9 @@ class ReviewConfig:
 
     @property
     def max_review_units(self) -> int:
-        return MODE_BUDGETS.get(self.mode, MODE_BUDGETS["standard"])["max_review_units"]
+        # Full-repository review profiles must not cap review unit coverage.
+        # Keep this property for older callers; 0 means unlimited.
+        return 0
 
     @property
     def max_repro(self) -> int:
@@ -145,7 +148,7 @@ def _section(source: dict, key: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
+def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewConfig:
     path = checkout / ".codereview" / "config.json"
     raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     if not isinstance(raw, dict):
@@ -169,10 +172,14 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
     always_repro = scoring.get("always_repro_severities", ["critical", "high"])
     if isinstance(always_repro, str):
         always_repro = [always_repro]
+    selected_scan_mode = str(scan_mode or scan.get("mode") or "full-cached")
+    if selected_scan_mode not in {"full-cached", "full-strict"}:
+        raise ValueError("scan mode must be one of full-cached, full-strict")
+    codex_mappers_enabled = bool(graph.get("codex_mappers", True))
     return ReviewConfig(
         mode=selected_mode,
         scan=ScanConfig(
-            mode=str(scan.get("mode") or "full-cached"),
+            mode=selected_scan_mode,
             include_untracked=bool(scan.get("include_untracked", True)),
             fail_on_source_change=bool(scan.get("fail_on_source_change", True)),
             confirmed_only=bool(scan.get("confirmed_only", True)),
@@ -186,14 +193,15 @@ def load_config(checkout: Path, mode: str = "") -> ReviewConfig:
             schema_version=str(graph.get("schema_version") or "3"),
             prompt_version=str(graph.get("prompt_version") or "graph-v3"),
             full_inventory=bool(graph.get("full_inventory", True)),
-            incremental=str(scan.get("mode") or "full-cached") != "full-strict" and bool(graph.get("incremental", True)),
+            incremental=selected_scan_mode != "full-strict" and bool(graph.get("incremental", True)),
             max_shard_files=max(1, int(graph.get("max_shard_files") or 25)),
             max_shard_bytes=max(1, int(graph.get("max_shard_bytes") or 500000)),
             large_file_bytes=max(1, int(graph.get("large_file_bytes") or graph.get("max_large_file_bytes") or 120000)),
             double_map_high_risk=bool(graph.get("double_map_high_risk", True)),
             max_repair_rounds=max(0, int(graph.get("max_repair_rounds") or 2)),
             use_sqlite_index=bool(graph.get("use_sqlite_index", True)),
-            codex_mappers=bool(graph.get("codex_mappers", True)),
+            codex_census=bool(graph.get("codex_census", codex_mappers_enabled)),
+            codex_mappers=codex_mappers_enabled,
             map_parallel=max(1, int(agents.get("graph_map_parallel") or graph.get("map_parallel") or 6)),
             graph_timeout_seconds=max(30, int(agents.get("graph_timeout_seconds") or graph.get("graph_timeout_seconds") or 480)),
         ),

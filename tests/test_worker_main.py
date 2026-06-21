@@ -671,11 +671,11 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             second_checkout = root / "checkout_2"
             first_checkout.mkdir()
             second_checkout.mkdir()
-            review_calls: list[tuple[Path, str]] = []
+            review_calls: list[tuple[Path, str, str]] = []
             codereview_main = importlib.import_module("codereview.main")
 
-            def fake_run_review(checkout_dir: Path, *, mode: str) -> Path:
-                review_calls.append((Path(checkout_dir), mode))
+            def fake_run_review(checkout_dir: Path, *, mode: str, scan_mode: str = "") -> Path:
+                review_calls.append((Path(checkout_dir), mode, scan_mode))
                 reports = Path(checkout_dir) / ".codereview" / "runs" / f"run_{len(review_calls)}" / "reports"
                 reports.mkdir(parents=True, exist_ok=True)
                 final_md = reports / "final.md"
@@ -695,17 +695,20 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 )
                 second_payload = worker_main.run_graph_verified_review_payload(
                     cfg,
-                    {"agentConfig": {"graphVerified": {"mode": "deep"}}},
+                    {"agentConfig": {"graphVerified": {"mode": "deep", "scanMode": "FULL-STRICT"}}},
                     second_checkout,
                 )
 
-            self.assertEqual(review_calls, [(first_checkout, "fast"), (second_checkout, "deep")])
+            self.assertEqual(review_calls, [(first_checkout, "fast", "full-cached"), (second_checkout, "deep", "full-strict")])
             self.assertEqual(first_payload["mode"], "fast")
             self.assertEqual(second_payload["mode"], "deep")
+            self.assertEqual(second_payload["scanMode"], "full-strict")
             first_config = json.loads((first_checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
             second_config = json.loads((second_checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(first_config["mode"], "fast")
             self.assertEqual(second_config["mode"], "deep")
+            self.assertEqual(second_config["scan"]["mode"], "full-strict")
+            self.assertFalse(second_config["graph"]["incremental"])
             self.assertNotEqual(first_checkout, second_checkout)
 
     def test_readiness_state_marks_codex_ready_without_graph_mcp(self) -> None:

@@ -19,6 +19,7 @@ from codereview.finder.runner import run_finder
 from codereview.finder.tasks import FinderTask, plan_finder_tasks
 from codereview.inventory.git_inventory import build_git_inventory
 from codereview.judge.runner import run_judge
+from codereview.judge.precheck import verify_repro_events_and_paths
 from codereview.judge.validate import local_judge
 from codereview.report.render import collect_confirmed, render_final_report
 from codereview.repository.snapshot import analyze_repository_snapshot
@@ -27,7 +28,9 @@ from codereview.repro.filesystem_guard import guard_worker_result
 from codereview.repro.runner import git_status_porcelain, worker_env
 from codereview.repro.worker_dir import create_worker_dir
 from codereview.templates import ensure_project_files
+from codereview.units.coverage import build_unit_coverage
 from codereview.units.context import write_review_units
+from codereview.units.planner import build_all_review_units
 from codereview.units.risk_tags import choose_finders
 from codereview.utils.process import ProcessResult
 
@@ -133,6 +136,31 @@ def test_finder_assignment_uses_review_unit_risk_tags() -> None:
     assert {task.focus for task in tasks} >= {"correctness", "security_auth_dataflow", "test_repro"}
 
 
+def test_fast_profile_does_not_cap_full_review_unit_coverage() -> None:
+    config = ReviewConfig(mode="fast")
+    nodes = [
+        {
+            "id": f"sym:python:src/app.py::func_{index}::function::{index}",
+            "kind": "function",
+            "name": f"func_{index}",
+            "qualified_name": f"func_{index}",
+            "file": "src/app.py",
+            "span": {"start_line": index + 1, "end_line": index + 1},
+            "attributes": ["source"],
+        }
+        for index in range(20)
+    ]
+    graph = {"nodes": nodes, "edges": [], "unresolved_refs": []}
+    inventory = {"files": [{"path": "src/app.py", "scope": "analyze"}]}
+
+    units = build_all_review_units(graph, inventory, {"packages": []}, config)
+    coverage = build_unit_coverage(graph, inventory, units)
+
+    assert coverage["production_symbols"] == 20
+    assert coverage["covered_production_symbols"] == 20
+    assert coverage["review_units"] >= 20
+
+
 def test_candidate_pipeline_requires_unit_graph_evidence(tmp_path: Path) -> None:
     checkout = tmp_path / "repo"
     run = checkout / ".codereview" / "runs" / "run_1"
@@ -174,6 +202,7 @@ def test_candidate_pipeline_requires_unit_graph_evidence(tmp_path: Path) -> None
                         "evidence": [{"file": "src/app.py", "lines": "1-2", "why_it_matters": "repository path"}],
                         "trigger_condition": "None input",
                         "expected_behavior": "rejects input",
+                        "expected_behavior_source": ["component:handle repository invariant"],
                         "actual_behavior_hypothesis": "raises AttributeError",
                         "minimal_repro_idea": "call handle(None)",
                         "repro_likelihood": "high",
@@ -194,6 +223,27 @@ def test_candidate_pipeline_requires_unit_graph_evidence(tmp_path: Path) -> None
                         "evidence": [{"file": "src/app.py", "lines": "1", "why_it_matters": "repository path"}],
                         "trigger_condition": "input",
                         "expected_behavior": "rejects input",
+                        "expected_behavior_source": ["component:handle repository invariant"],
+                        "actual_behavior_hypothesis": "fails",
+                        "minimal_repro_idea": "call function",
+                        "repro_likelihood": "high",
+                    },
+                    {
+                        "candidate_id": "issue_3",
+                        "dedupe_key": "correctness|component:handle|src/app.py|empty-source",
+                        "severity": "high",
+                        "category": "correctness",
+                        "confidence": "high",
+                        "claim": "Invalid expected source",
+                        "graph_evidence": {
+                            "unit_id": "component:handle",
+                            "context_files": ["src/app.py"],
+                            "path_summary": ["handle"],
+                        },
+                        "evidence": [{"file": "src/app.py", "lines": "1", "why_it_matters": "repository path"}],
+                        "trigger_condition": "input",
+                        "expected_behavior": "rejects input",
+                        "expected_behavior_source": [],
                         "actual_behavior_hypothesis": "fails",
                         "minimal_repro_idea": "call function",
                         "repro_likelihood": "high",
@@ -207,6 +257,7 @@ def test_candidate_pipeline_requires_unit_graph_evidence(tmp_path: Path) -> None
 
     assert [item["issue_id"] for item in normalized if item["valid"]] == ["issue_1"]
     assert any("graph_evidence has unexpected fields" in "; ".join(item["invalid_reasons"]) for item in normalized)
+    assert any("expected_behavior_source must be a non-empty list" in "; ".join(item["invalid_reasons"]) for item in normalized)
 
 
 def test_finder_codex_failure_is_blocked_not_silent_empty(tmp_path: Path) -> None:
@@ -345,6 +396,83 @@ def test_judge_and_report_are_confirmed_only(tmp_path: Path) -> None:
     assert "# Full-Repository Graph-Verified Code Review" in report
     assert "Confirmed bug" in report
     assert "issue_2" not in report
+
+
+def test_final_report_states_no_confirmed_findings_with_passed_coverage() -> None:
+    report = render_final_report(
+        [],
+        [],
+        run_id="run",
+        mode="standard",
+        coverage={
+            "review_units": 2,
+            "baseline_reviewed_units": 2,
+            "production_symbols": 4,
+            "covered_production_symbols": 4,
+            "critical_unresolved_graph_edges": 0,
+        },
+        snapshot={"copied_files_count": 1},
+    )
+
+    assert "No confirmed findings." in report
+    assert "Full-repository coverage: passed." in report
+
+
+def test_repro_event_precheck_requires_log_path_and_excerpt_in_events(tmp_path: Path) -> None:
+    worker = tmp_path / "worker"
+    (worker / "logs").mkdir(parents=True)
+    (worker / "logs" / "repro.log").write_text("observable failure", encoding="utf-8")
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        json.dumps({"cmd": "python repro.py", "cwd": str(worker), "exit_code": 1}) + "\n",
+        encoding="utf-8",
+    )
+    repro = {
+        "worker": str(worker),
+        "process": {"events_path": str(events)},
+        "result": {
+            "commands_run": [{"cmd": "python repro.py", "cwd": str(worker), "exit_code": 1, "log_path": "logs/repro.log"}],
+            "proof": {"actual": "observable failure", "log_excerpt": "observable failure"},
+        },
+    }
+
+    result = verify_repro_events_and_paths(repro)
+
+    assert result["status"] == "rejected"
+    assert "command log path not found" in result["reason"]
+
+
+def test_repro_event_precheck_accepts_complete_event_evidence(tmp_path: Path) -> None:
+    worker = tmp_path / "worker"
+    (worker / "logs").mkdir(parents=True)
+    (worker / "logs" / "repro.log").write_text("observable failure", encoding="utf-8")
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        json.dumps(
+            {
+                "type": "exec_command",
+                "cmd": "python repro.py",
+                "cwd": str(worker),
+                "exit_code": 1,
+                "log_path": "logs/repro.log",
+                "stderr": "observable failure",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    repro = {
+        "worker": str(worker),
+        "process": {"events_path": str(events)},
+        "result": {
+            "commands_run": [{"cmd": "python repro.py", "cwd": str(worker), "exit_code": 1, "log_path": "logs/repro.log"}],
+            "proof": {"actual": "observable failure", "log_excerpt": "observable failure"},
+        },
+    }
+
+    result = verify_repro_events_and_paths(repro)
+
+    assert result["status"] == "passed"
 
 
 def test_repro_worker_dir_uses_snapshot_repo_without_extra_checkouts(tmp_path: Path) -> None:
@@ -516,6 +644,7 @@ def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: P
     subprocess.run(["git", "commit", "-m", "snapshot"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     ensure_project_files(checkout)
     config = json.loads((checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
+    config["graph"]["codex_census"] = False
     config["graph"]["codex_mappers"] = False
     config["graph"]["use_sqlite_index"] = False
     config["finders"]["enabled"] = True
@@ -545,6 +674,7 @@ def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: P
                         "evidence": [{"file": "app.py", "lines": "1-2", "why_it_matters": "repository behavior"}],
                         "trigger_condition": "value is None",
                         "expected_behavior": "rejects None",
+                        "expected_behavior_source": ["function contract should reject invalid input"],
                         "actual_behavior_hypothesis": "raises AttributeError",
                         "minimal_repro_idea": "call handle(None)",
                         "repro_likelihood": "high",

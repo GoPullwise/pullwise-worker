@@ -27,13 +27,15 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
     graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
     mode = graph_verified_mode(graph_config.get("mode") or "standard")
+    scan_mode = graph_verified_scan_mode(graph_config.get("scanMode") or "full-cached")
     try:
         write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
-        final_path = run_review(checkout_dir, mode=mode)
+        final_path = run_review(checkout_dir, mode=mode, scan_mode=scan_mode)
     except Exception as exc:
         return {
             "version": "graph-verified-code-review/1",
             "mode": mode,
+            "scanMode": scan_mode,
             "scope": "full-repository",
             "confirmedCount": 0,
             "rejectedCount": 0,
@@ -56,6 +58,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "version": "graph-verified-code-review/1",
         "runId": run_id,
         "mode": mode,
+        "scanMode": scan_mode,
         "scope": "full-repository",
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
@@ -81,9 +84,10 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
     current["mode"] = graph_verified_mode(mode)
     for stale_key in ("codegraph", "impact"):
         current.pop(stale_key, None)
+    scan_mode = graph_verified_scan_mode(graph_config.get("scanMode") or "full-cached")
     current["scan"] = {
         **(current.get("scan") if isinstance(current.get("scan"), dict) else {}),
-        "mode": "full-cached",
+        "mode": scan_mode,
         "include_untracked": True,
         "fail_on_source_change": True,
     }
@@ -97,13 +101,14 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "schema_version": "3",
         "prompt_version": "graph-v3",
         "full_inventory": True,
-        "incremental": graph_config.get("scanMode") != "full-strict",
+        "incremental": scan_mode != "full-strict",
         "max_shard_files": 25,
         "max_shard_bytes": 500000,
         "large_file_bytes": 120000,
         "double_map_high_risk": True,
         "max_repair_rounds": 2,
         "use_sqlite_index": True,
+        "codex_census": True,
         "codex_mappers": True,
     }
     current["review"] = {
@@ -168,6 +173,11 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
 def graph_verified_mode(value: object) -> str:
     text = graph_verified_text(value).lower()
     return text if text in {"fast", "standard", "deep"} else "standard"
+
+
+def graph_verified_scan_mode(value: object) -> str:
+    text = graph_verified_text(value).lower()
+    return text if text in {"full-cached", "full-strict"} else "full-cached"
 
 
 def graph_verified_text(value: object) -> str:

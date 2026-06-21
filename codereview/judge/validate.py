@@ -74,7 +74,7 @@ def local_judge(candidate: dict, repro: dict) -> dict:
     if environment.get("network_used") is True:
         violations = [*violations, "reproduction used network"]
     event_precheck = repro.get("event_precheck") if isinstance(repro.get("event_precheck"), dict) else {}
-    if event_precheck.get("status") == "rejected":
+    if event_precheck.get("status") in {"rejected", "unverified"}:
         violations = [*violations, str(event_precheck.get("reason") or "codex event precheck rejected reproduction")]
     status = "confirmed" if command and log_path and observable and not violations and reproduced and level in {"L2", "L3"} else "rejected"
     reason = "reproduction evidence satisfies the graph-verified gate" if status == "confirmed" else "missing or unsafe reproduction evidence"

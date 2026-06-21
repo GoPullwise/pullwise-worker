@@ -11,7 +11,7 @@ from .merge import build_inline_indexes
 
 
 def apply_cross_shard_linking(checkout: Path, run: Path, graph: dict, config: ReviewConfig) -> dict:
-    linked = apply_unique_link_results(graph)
+    linked = attach_link_candidates(graph)
     prompt_file = checkout / ".codereview" / "prompts" / "graph-linker.md"
     schema = checkout / ".codereview" / "schemas" / "graph-link.schema.json"
     if not prompt_file.is_file() or not schema.is_file():
@@ -35,14 +35,14 @@ def apply_cross_shard_linking(checkout: Path, run: Path, graph: dict, config: Re
                 "to": target,
                 "type": "calls" if ref.get("reference_kind") == "call" else "references",
                 "status": "resolved",
-                "evidence_kind": "unique_resolution",
+                "evidence_kind": "agent_link_resolution",
                 "confidence": "high",
                 "evidence": [
                     {
                         "file": ref.get("source_file"),
                         "start_line": ref.get("source_line"),
                         "end_line": ref.get("source_line"),
-                        "evidence_kind": "unique_resolution",
+                        "evidence_kind": "agent_link_resolution",
                     }
                 ],
                 "generated_by": {"worker_id": "graph-link-agent", "prompt_version": "graph-link-v3"},
@@ -64,53 +64,34 @@ def apply_cross_shard_linking(checkout: Path, run: Path, graph: dict, config: Re
     return updated
 
 
-def apply_unique_link_results(graph: dict) -> dict:
+def attach_link_candidates(graph: dict) -> dict:
     nodes_by_name: dict[str, list[str]] = {}
     for node in graph.get("nodes", []):
         if isinstance(node, dict):
             nodes_by_name.setdefault(str(node.get("name") or ""), []).append(str(node.get("id") or ""))
-    edges = list(graph.get("edges") or [])
     remaining = []
     for ref in graph.get("unresolved_refs", []):
         if not isinstance(ref, dict):
             continue
         raw = str(ref.get("raw_reference") or "").split(".")[-1]
         candidates = [node_id for node_id in nodes_by_name.get(raw, []) if node_id]
-        if len(candidates) == 1:
-            edge = {
-                "from": ref.get("source_node"),
-                "to": candidates[0],
-                "type": "calls" if ref.get("reference_kind") == "call" else "references",
-                "status": "resolved",
-                "evidence_kind": "unique_resolution",
-                "confidence": "high",
-                "evidence": [
-                    {
-                        "file": ref.get("source_file"),
-                        "start_line": ref.get("source_line"),
-                        "end_line": ref.get("source_line"),
-                        "evidence_kind": "unique_resolution",
-                    }
-                ],
-                "generated_by": {"worker_id": "graph-link-local", "prompt_version": "graph-link-v3"},
-                "verification": {"independent_mappers": 1, "audited": False},
-            }
-            edge["id"] = stable_edge_id(str(edge["from"]), str(edge["to"]), str(edge["type"]), edge.get("evidence"))
-            edges.append(edge)
-        else:
-            ref = dict(ref)
-            ref["candidate_targets"] = candidates[:20]
-            if len(candidates) > 1:
-                ref["reason"] = "Multiple candidate targets remain after symbol-index lookup."
-            remaining.append(ref)
-    updated = {**graph, "edges": edges, "unresolved_refs": remaining}
+        ref = dict(ref)
+        ref["candidate_targets"] = candidates[:20]
+        if candidates:
+            ref["reason"] = "Candidate targets were generated from the symbol index and require linker proof."
+        remaining.append(ref)
+    updated = {**graph, "unresolved_refs": remaining}
     updated["indexes"] = build_inline_indexes(updated)
     updated["manifest"] = {
         **(updated.get("manifest") or {}),
-        "edge_count": len(edges),
+        "edge_count": len(updated.get("edges") or []),
         "unresolved_count": len(remaining),
     }
     return updated
+
+
+def apply_unique_link_results(graph: dict) -> dict:
+    return attach_link_candidates(graph)
 
 
 def _run_linker(
