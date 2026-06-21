@@ -110,8 +110,7 @@ def ensure_project_files(checkout: Path) -> None:
     }
     for name, schema in schemas.items():
         path = root / "schemas" / name
-        if not path.is_file():
-            path.write_text(json.dumps(schema, indent=2, sort_keys=True), encoding="utf-8")
+        path.write_text(json.dumps(schema, indent=2, sort_keys=True), encoding="utf-8")
     for focus in FINDER_FOCI:
         path = root / "prompts" / f"finder_{focus}.md"
         if not path.is_file():
@@ -145,6 +144,9 @@ def _codex_output_schema_value(value: object) -> object:
     normalized = {str(key): _codex_output_schema_value(item) for key, item in value.items()}
     if "object" in _schema_type_names(normalized.get("type")):
         normalized["additionalProperties"] = False
+        properties = normalized.get("properties")
+        if isinstance(properties, dict):
+            normalized["required"] = list(properties.keys())
     return normalized
 
 
@@ -296,15 +298,32 @@ def context_result_schema() -> dict:
 
 
 def repo_census_schema() -> dict:
+    package = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "root": {"type": "string"},
+            "source_roots": {"type": "array", "items": {"type": "string"}},
+            "test_roots": {"type": "array", "items": {"type": "string"}},
+            "manifest_files": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    high_risk_root = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+    }
     return {
         "type": "object",
         "required": ["languages", "packages", "entrypoint_candidates", "high_risk_roots", "shards"],
         "additionalProperties": True,
         "properties": {
             "languages": {"type": "array", "items": {"type": "string"}},
-            "packages": {"type": "array", "items": {"type": "object"}},
+            "packages": {"type": "array", "items": package},
             "entrypoint_candidates": {"type": "array", "items": {"type": "string"}},
-            "high_risk_roots": {"type": "array", "items": {"type": "object"}},
+            "high_risk_roots": {"type": "array", "items": high_risk_root},
             "shards": {
                 "type": "array",
                 "items": {
@@ -323,6 +342,13 @@ def repo_census_schema() -> dict:
 
 
 def graph_shard_schema() -> dict:
+    span = {
+        "type": "object",
+        "properties": {
+            "start_line": {"type": "integer"},
+            "end_line": {"type": "integer"},
+        },
+    }
     evidence = {
         "type": "object",
         "required": ["file", "start_line", "end_line", "evidence_kind"],
@@ -347,8 +373,9 @@ def graph_shard_schema() -> dict:
             "qualified_name": {"type": "string"},
             "language": {"type": "string"},
             "file": {"type": "string"},
-            "span": {"type": "object"},
+            "span": span,
             "signature": {"type": "string"},
+            "attributes": {"type": "array", "items": {"type": "string"}},
             "evidence": {"type": "array", "items": evidence},
         },
     }
@@ -390,7 +417,13 @@ def graph_shard_schema() -> dict:
             "nodes": {"type": "array", "items": node},
             "edges": {"type": "array", "items": edge},
             "unresolved_refs": {"type": "array", "items": unresolved},
-            "coverage": {"type": "object"},
+            "coverage": {
+                "type": "object",
+                "properties": {
+                    "assigned_files": {"type": "array", "items": {"type": "string"}},
+                    "mapped_files": {"type": "array", "items": {"type": "string"}},
+                },
+            },
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
     }
@@ -411,19 +444,38 @@ def graph_link_schema() -> dict:
 
 
 def graph_audit_schema() -> dict:
+    repair = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string"},
+            "files": {"type": "array", "items": {"type": "string"}},
+            "reason": {"type": "string"},
+        },
+    }
     return {
         "type": "object",
         "required": ["quality_gate", "repairs"],
         "additionalProperties": True,
         "properties": {
             "quality_gate": {"type": "string", "enum": ["passed", "failed"]},
-            "repairs": {"type": "array", "items": {"type": "object"}},
+            "repairs": {"type": "array", "items": repair},
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
     }
 
 
 def candidate_verification_schema() -> dict:
+    reproduction = {
+        "type": "object",
+        "properties": {
+            "harness": {"type": "string"},
+            "target_test": {"type": "string"},
+            "commands": {"type": "array", "items": {"type": "string"}},
+            "expected_signal": {"type": "string"},
+            "needs_network": {"type": "boolean"},
+            "estimated_scope": {"type": "string"},
+        },
+    }
     return {
         "type": "object",
         "required": [
@@ -442,7 +494,7 @@ def candidate_verification_schema() -> dict:
             "claim_survived": {"type": "boolean"},
             "graph_path_valid": {"type": "boolean"},
             "expected_behavior_supported": {"type": "boolean"},
-            "reproduction": {"type": "object"},
+            "reproduction": reproduction,
             "rejection_reason": {"type": "string"},
         },
     }

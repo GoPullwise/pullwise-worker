@@ -3,7 +3,7 @@
   "properties": {
     "callees": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "file": {
             "type": "string"
@@ -18,13 +18,19 @@
             "type": "string"
           }
         },
+        "required": [
+          "symbol",
+          "file",
+          "line",
+          "reason"
+        ],
         "type": "object"
       },
       "type": "array"
     },
     "callers": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "file": {
             "type": "string"
@@ -39,13 +45,19 @@
             "type": "string"
           }
         },
+        "required": [
+          "symbol",
+          "file",
+          "line",
+          "reason"
+        ],
         "type": "object"
       },
       "type": "array"
     },
     "edges": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "file": {
             "type": "string"
@@ -63,6 +75,13 @@
             "type": "string"
           }
         },
+        "required": [
+          "from",
+          "to",
+          "kind",
+          "file",
+          "line"
+        ],
         "type": "object"
       },
       "type": "array"
@@ -75,7 +94,7 @@
     },
     "impact": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "file": {
             "type": "string"
@@ -90,13 +109,19 @@
             "type": "string"
           }
         },
+        "required": [
+          "symbol",
+          "file",
+          "line",
+          "reason"
+        ],
         "type": "object"
       },
       "type": "array"
     },
     "nodes": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "file": {
             "type": "string"
@@ -111,6 +136,12 @@
             "type": "string"
           }
         },
+        "required": [
+          "symbol",
+          "file",
+          "line",
+          "reason"
+        ],
         "type": "object"
       },
       "type": "array"

@@ -28,14 +28,15 @@
           "cmd",
           "cwd",
           "exit_code",
-          "log_path"
+          "log_path",
+          "duration_ms"
         ],
         "type": "object"
       },
       "type": "array"
     },
     "environment": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "dependencies_installed": {
           "type": "boolean"
@@ -44,6 +45,10 @@
           "type": "boolean"
         }
       },
+      "required": [
+        "network_used",
+        "dependencies_installed"
+      ],
       "type": "object"
     },
     "files_written": {
@@ -137,6 +142,8 @@
     "files_written",
     "proof",
     "graph_path_exercised",
+    "touched_symbols",
+    "environment",
     "why_valid",
     "why_not_reproduced",
     "safety_notes"

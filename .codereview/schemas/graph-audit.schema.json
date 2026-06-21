@@ -1,5 +1,5 @@
 {
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "quality_gate": {
       "enum": [
@@ -10,6 +10,26 @@
     },
     "repairs": {
       "items": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "files",
+          "reason"
+        ],
         "type": "object"
       },
       "type": "array"
@@ -23,7 +43,8 @@
   },
   "required": [
     "quality_gate",
-    "repairs"
+    "repairs",
+    "warnings"
   ],
   "type": "object"
 }

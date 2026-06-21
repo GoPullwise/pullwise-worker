@@ -1,19 +1,38 @@
 {
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "assigned_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mapped_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "assigned_files",
+        "mapped_files"
+      ],
       "type": "object"
     },
     "edges": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "confidence": {
             "type": "string"
           },
           "evidence": {
             "items": {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "properties": {
                 "content_hash": {
                   "type": "string"
@@ -38,7 +57,9 @@
                 "file",
                 "start_line",
                 "end_line",
-                "evidence_kind"
+                "evidence_kind",
+                "reason",
+                "content_hash"
               ],
               "type": "object"
             },
@@ -64,6 +85,7 @@
           }
         },
         "required": [
+          "id",
           "from",
           "to",
           "type",
@@ -78,11 +100,17 @@
     },
     "nodes": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
+          "attributes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "evidence": {
             "items": {
-              "additionalProperties": true,
+              "additionalProperties": false,
               "properties": {
                 "content_hash": {
                   "type": "string"
@@ -107,7 +135,9 @@
                 "file",
                 "start_line",
                 "end_line",
-                "evidence_kind"
+                "evidence_kind",
+                "reason",
+                "content_hash"
               ],
               "type": "object"
             },
@@ -135,6 +165,19 @@
             "type": "string"
           },
           "span": {
+            "additionalProperties": false,
+            "properties": {
+              "end_line": {
+                "type": "integer"
+              },
+              "start_line": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start_line",
+              "end_line"
+            ],
             "type": "object"
           }
         },
@@ -143,8 +186,11 @@
           "kind",
           "name",
           "qualified_name",
+          "language",
           "file",
           "span",
+          "signature",
+          "attributes",
           "evidence"
         ],
         "type": "object"
@@ -153,7 +199,7 @@
     },
     "unresolved_refs": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "candidate_targets": {
             "items": {
@@ -189,7 +235,9 @@
           "raw_reference",
           "source_file",
           "source_line",
-          "reason"
+          "candidate_targets",
+          "reason",
+          "resolution_hint"
         ],
         "type": "object"
       },

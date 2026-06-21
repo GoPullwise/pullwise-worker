@@ -1,5 +1,5 @@
 {
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "reason": {
       "type": "string"
@@ -25,7 +25,10 @@
     }
   },
   "required": [
-    "status"
+    "status",
+    "target",
+    "requested_files",
+    "reason"
   ],
   "type": "object"
 }

@@ -1,5 +1,5 @@
 {
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "entrypoint_candidates": {
       "items": {
@@ -9,6 +9,22 @@
     },
     "high_risk_roots": {
       "items": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "tags"
+        ],
         "type": "object"
       },
       "type": "array"
@@ -21,13 +37,47 @@
     },
     "packages": {
       "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "manifest_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root": {
+            "type": "string"
+          },
+          "source_roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "test_roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "root",
+          "source_roots",
+          "test_roots",
+          "manifest_files"
+        ],
         "type": "object"
       },
       "type": "array"
     },
     "shards": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "files": {
             "items": {

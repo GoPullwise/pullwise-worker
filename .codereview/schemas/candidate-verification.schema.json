@@ -1,5 +1,5 @@
 {
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "candidate_id": {
       "type": "string"
@@ -17,6 +17,38 @@
       "type": "string"
     },
     "reproduction": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "estimated_scope": {
+          "type": "string"
+        },
+        "expected_signal": {
+          "type": "string"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "needs_network": {
+          "type": "boolean"
+        },
+        "target_test": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "harness",
+        "target_test",
+        "commands",
+        "expected_signal",
+        "needs_network",
+        "estimated_scope"
+      ],
       "type": "object"
     },
     "verdict": {

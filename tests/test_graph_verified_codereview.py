@@ -86,7 +86,7 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert config["scan"]["mode"] == "full-cached"
     assert config["graph"]["schema_version"] == "3"
     assert "impact" not in config
-    assert schema["required"] == ["unit_id", "focus", "candidates"]
+    assert set(schema["required"]) == set(schema["properties"])
     graph_props = schema["properties"]["candidates"]["items"]["properties"]["graph_evidence"]["properties"]
     assert set(graph_props) == {"unit_id", "context_files", "path_summary"}
 
@@ -100,6 +100,22 @@ def test_generated_codex_schemas_are_strict_objects(tmp_path: Path) -> None:
         assert_strict_object_schema(schema, path.name)
 
 
+def test_init_refreshes_existing_managed_codex_schemas(tmp_path: Path) -> None:
+    schema_dir = tmp_path / ".codereview" / "schemas"
+    schema_dir.mkdir(parents=True)
+    stale = schema_dir / "repo-census.schema.json"
+    stale.write_text(
+        json.dumps({"type": "object", "additionalProperties": True, "properties": {}}),
+        encoding="utf-8",
+    )
+
+    ensure_project_files(tmp_path)
+
+    schema = json.loads(stale.read_text(encoding="utf-8"))
+    assert schema["additionalProperties"] is False
+    assert "languages" in schema["properties"]
+
+
 def assert_strict_object_schema(value: object, location: str) -> None:
     if isinstance(value, list):
         for index, item in enumerate(value):
@@ -109,6 +125,9 @@ def assert_strict_object_schema(value: object, location: str) -> None:
         return
     if "object" in schema_type_names(value.get("type")):
         assert value.get("additionalProperties") is False, location
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            assert set(value.get("required") or []) == set(properties), location
     for key, item in value.items():
         assert_strict_object_schema(item, f"{location}.{key}")
 

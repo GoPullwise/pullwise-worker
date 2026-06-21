@@ -71,6 +71,7 @@
           },
           "graph_evidence": {
             "additionalProperties": false,
+            "description": "List the reviewed unit id and repository-relative files from the supplied context pack.",
             "properties": {
               "context_files": {
                 "items": {
@@ -104,6 +105,12 @@
           "notes": {
             "type": "string"
           },
+          "repository_tests": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "repro_likelihood": {
             "enum": [
               "high",
@@ -111,12 +118,6 @@
               "low"
             ],
             "type": "string"
-          },
-          "repository_tests": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           },
           "severity": {
             "enum": [
@@ -134,18 +135,21 @@
         "required": [
           "candidate_id",
           "dedupe_key",
-          "severity",
           "category",
+          "severity",
           "confidence",
           "claim",
           "graph_evidence",
           "evidence",
           "trigger_condition",
           "expected_behavior",
-          "expected_behavior_source",
           "actual_behavior_hypothesis",
           "minimal_repro_idea",
-          "repro_likelihood"
+          "repository_tests",
+          "expected_behavior_source",
+          "repro_likelihood",
+          "needs_network",
+          "notes"
         ],
         "type": "object"
       },
@@ -153,7 +157,7 @@
     },
     "context_requests": {
       "items": {
-        "additionalProperties": true,
+        "additionalProperties": false,
         "properties": {
           "files": {
             "items": {
@@ -174,6 +178,12 @@
             "type": "string"
           }
         },
+        "required": [
+          "type",
+          "files",
+          "requested_files",
+          "reason"
+        ],
         "type": "object"
       },
       "type": "array"
@@ -188,6 +198,7 @@
   "required": [
     "unit_id",
     "focus",
+    "context_requests",
     "candidates"
   ],
   "type": "object"
