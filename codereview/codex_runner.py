@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -179,6 +180,7 @@ def run_codex_exec(
     events_file: Path | None = None,
 ) -> ProcessResult:
     exec_output_file = workspace_local_output_file(cd, output_file)
+    exec_output_file.parent.mkdir(parents=True, exist_ok=True)
     cmd, command_error = build_codex_exec_command(
         command=config.command,
         cd=cd,
@@ -214,6 +216,7 @@ def run_codex_exec(
     finally:
         release_codex_cli_lock()
     copy_workspace_output(exec_output_file, output_file)
+    recover_codex_output_from_events(result, output_file)
     if events_file is not None:
         _copy_events(result, events_file)
     return result
@@ -268,6 +271,85 @@ def copy_workspace_output(source: Path, target: Path) -> None:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
+
+
+def recover_codex_output_from_events(result: ProcessResult, output_file: Path) -> bool:
+    if result.returncode != 0 or output_file.is_file():
+        return False
+    message = codex_last_message_from_events(result)
+    if not message:
+        return False
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(message, encoding="utf-8")
+    return True
+
+
+def codex_last_message_from_events(result: ProcessResult) -> str:
+    last_message = ""
+    for line in _codex_stdout_lines(result):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = _codex_event_message_text(event)
+        if message:
+            last_message = message
+    return last_message
+
+
+def _codex_stdout_lines(result: ProcessResult) -> list[str]:
+    stdout_path = Path(result.stdout_path) if result.stdout_path else None
+    if stdout_path is not None and stdout_path.is_file():
+        try:
+            return stdout_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            pass
+    return str(result.stdout or "").splitlines()
+
+
+def _codex_event_message_text(event: object) -> str:
+    if not isinstance(event, dict):
+        return ""
+    event_type = str(event.get("type") or "")
+    item = event.get("item")
+    if isinstance(item, dict) and _is_assistant_message(item):
+        return _collect_codex_text(item.get("content") or item.get("message") or item.get("text"))
+    message = event.get("message")
+    if isinstance(message, dict) and _is_assistant_message(message):
+        return _collect_codex_text(message.get("content") or message.get("text"))
+    if event.get("role") == "assistant":
+        return _collect_codex_text(event.get("content") or event.get("message") or event.get("text"))
+    if event_type in {"agent_message", "assistant_message"}:
+        return _collect_codex_text(event.get("message") or event.get("content") or event.get("text"))
+    return ""
+
+
+def _is_assistant_message(value: dict) -> bool:
+    value_type = str(value.get("type") or "")
+    role = str(value.get("role") or "")
+    return value_type in {"message", "assistant_message"} and role in {"", "assistant"}
+
+
+def _collect_codex_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n".join(text for item in value for text in [_collect_codex_text(item)] if text).strip()
+    if isinstance(value, dict):
+        parts = []
+        for key in ("text", "output_text"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        for key in ("content", "message"):
+            text = _collect_codex_text(value.get(key))
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    return ""
 
 
 def _fallback_codex_exec_command(

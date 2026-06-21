@@ -71,9 +71,12 @@ def run_repository_census(checkout: Path, run: Path, inventory: dict, config: Re
     )
     process_payload = {**process.to_dict(), "events_path": str(events)}
     write_json(worker / "process.json", process_payload)
-    if process.returncode != 0 or not output.is_file():
+    if process.returncode != 0:
         detail = compact_process_output(process)
         raise RuntimeError(f"repository census agent failed with exit code {process.returncode}: {detail}")
+    if not output.is_file():
+        detail = compact_process_output(process)
+        raise RuntimeError(f"repository census agent did not produce an output file: {detail}")
     try:
         parsed = json.loads(output.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

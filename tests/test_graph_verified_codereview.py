@@ -627,7 +627,7 @@ def test_codex_exec_copies_workspace_local_output_to_requested_path(tmp_path: Pa
         output_arg = Path(command[command.index("--output-last-message") + 1])
         captured["output_arg"] = output_arg
         assert output_arg.resolve(strict=False).relative_to(Path(cwd).resolve(strict=False))
-        output_arg.parent.mkdir(parents=True, exist_ok=True)
+        assert output_arg.parent.is_dir()
         output_arg.write_text('{"ok": true}', encoding="utf-8")
         return ProcessResult(command, str(cwd), 0, "{}", "", 1)
 
@@ -654,6 +654,65 @@ def test_codex_exec_copies_workspace_local_output_to_requested_path(tmp_path: Pa
     assert result.returncode == 0
     assert captured["output_arg"] != requested_output
     assert json.loads(requested_output.read_text(encoding="utf-8")) == {"ok": True}
+
+
+def test_codex_exec_recovers_workspace_output_from_json_events(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    from codereview import codex_runner
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    schema = checkout / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    requested_output = tmp_path / "run" / "workers" / "result.json"
+    event_log = tmp_path / "codex-events.jsonl"
+    payload = {"languages": ["python"], "shards": []}
+    event_log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": json.dumps(payload)}],
+                        },
+                    }
+                ),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1}}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
+        del env, timeout, queue_wait_ms, kwargs
+        output_arg = Path(command[command.index("--output-last-message") + 1])
+        assert output_arg.parent.is_dir()
+        return ProcessResult(command, str(cwd), 0, "truncated event tail", "", 1, stdout_path=str(event_log))
+
+    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    monkeypatch.setattr(
+        codex_runner,
+        "codex_cli_capabilities",
+        lambda command, env=None: codex_runner.CodexCliCapabilities(
+            frozenset(),
+            frozenset({"--cd", "--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "--json"}),
+        ),
+    )
+
+    result = codex_runner.run_codex_exec(
+        cd=checkout,
+        prompt="review",
+        output_schema=schema,
+        output_file=requested_output,
+        sandbox="read-only",
+        timeout_seconds=30,
+        config=ReviewConfig().codex,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(requested_output.read_text(encoding="utf-8")) == payload
 
 
 def test_repository_census_failure_includes_process_output(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
