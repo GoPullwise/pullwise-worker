@@ -24,6 +24,7 @@
     "prompt_version": "graph-v3",
     "full_inventory": true,
     "incremental": true,
+    "target_shards": 6,
     "max_shard_files": 25,
     "max_shard_bytes": 500000,
     "large_file_bytes": 120000,
@@ -31,7 +32,8 @@
     "max_repair_rounds": 2,
     "use_sqlite_index": true,
     "codex_census": true,
-    "codex_mappers": true
+    "codex_mappers": true,
+    "mapper_subagent_limit": 6
   },
   "review": {
     "require_baseline_for_every_unit": true,

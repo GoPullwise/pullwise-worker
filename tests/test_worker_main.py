@@ -735,6 +735,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
+            cfg.codex_reasoning_effort = "medium"
 
             worker_main.write_graph_verified_codereview_config(
                 cfg,
@@ -756,6 +757,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertEqual(payload["mode"], "deep")
         self.assertNotIn("codegraph", payload)
+        self.assertEqual(payload["graph"]["target_shards"], 6)
+        self.assertEqual(payload["graph"]["mapper_subagent_limit"], 6)
+        self.assertEqual(payload["codex"]["reasoning_effort"], "medium")
         self.assertTrue(payload["context"]["enabled"])
         self.assertEqual(payload["context"]["timeout_seconds"], 240)
         self.assertEqual(payload["finders"]["max_workers"], 7)

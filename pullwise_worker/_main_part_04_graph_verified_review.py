@@ -141,6 +141,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "prompt_version": "graph-v3",
         "full_inventory": True,
         "incremental": scan_mode != "full-strict",
+        "target_shards": 6,
         "max_shard_files": 25,
         "max_shard_bytes": 500000,
         "large_file_bytes": 120000,
@@ -149,6 +150,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "use_sqlite_index": True,
         "codex_census": True,
         "codex_mappers": True,
+        "mapper_subagent_limit": 6,
     }
     current["review"] = {
         "require_baseline_for_every_unit": True,

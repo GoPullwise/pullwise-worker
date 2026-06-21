@@ -44,6 +44,8 @@ def map_graph_tasks(
     progress_label: str = "Graph: mapping shards",
 ) -> list[dict]:
     by_path = {str(item.get("path") or ""): item for item in inventory.get("files", []) if isinstance(item, dict)}
+    if getattr(config.graph, "codex_mappers", False) and run is not None:
+        return map_codex_graph_tasks_with_coordinator(checkout, tasks, by_path, config, run, progress, progress_label)
     max_workers = max(1, int(getattr(config.graph, "map_parallel", 1)))
     results: list[dict | None] = [None] * len(tasks)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -56,6 +58,62 @@ def map_graph_tasks(
         for future in concurrent.futures.as_completed(futures):
             index, task = futures[future]
             results[index] = future.result()
+            completed += 1
+            _emit_task_progress(
+                progress,
+                stage="graph",
+                message=f"{progress_label} {completed}/{total}",
+                current=completed,
+                total=total,
+                task_id=task.get("task_id") or task.get("shard_id"),
+            )
+    return [result for result in results if result is not None]
+
+
+def map_codex_graph_tasks_with_coordinator(
+    checkout: Path,
+    tasks: list[dict],
+    inventory_by_path: dict[str, dict],
+    config: ReviewConfig,
+    run: Path,
+    progress: Callable[[dict], None] | None,
+    progress_label: str,
+) -> list[dict]:
+    results: list[dict | None] = [None] * len(tasks)
+    pending: list[tuple[int, dict]] = []
+    completed = 0
+    total = len(tasks)
+    for index, task in enumerate(tasks):
+        cached = _load_cached_task_result(checkout, task, inventory_by_path, config)
+        if cached is None:
+            pending.append((index, task))
+            continue
+        results[index] = cached
+        completed += 1
+        _emit_task_progress(
+            progress,
+            stage="graph",
+            message=f"{progress_label} {completed}/{total}",
+            current=completed,
+            total=total,
+            task_id=task.get("task_id") or task.get("shard_id"),
+        )
+    if pending:
+        mapped = run_codex_graph_mapper_coordinator(
+            checkout,
+            run,
+            [task for _, task in pending],
+            inventory_by_path,
+            config,
+        )
+        mapped_by_task = {_task_result_key(result): result for result in mapped if isinstance(result, dict)}
+        for index, task in pending:
+            result = mapped_by_task.get(_task_key(task))
+            if result is None:
+                result = _blocked_task_result(task, "codex graph mapper coordinator did not return a result for this task")
+            results[index] = result
+            if result.get("status") == "ok":
+                _save_cached_task_result(checkout, task, inventory_by_path, config, result)
             completed += 1
             _emit_task_progress(
                 progress,
@@ -176,6 +234,74 @@ def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_p
     return parsed
 
 
+def run_codex_graph_mapper_coordinator(
+    checkout: Path,
+    run: Path,
+    tasks: list[dict],
+    inventory_by_path: dict[str, dict],
+    config: ReviewConfig,
+) -> list[dict]:
+    worker = run / "workers" / _coordinator_worker_name(tasks)
+    worker.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "mapper_subagent_limit": max(1, int(getattr(config.graph, "mapper_subagent_limit", 6))),
+        "jobs": [
+            {
+                **task,
+                "files_metadata": [inventory_by_path.get(str(path), {"path": str(path)}) for path in task.get("files", [])],
+            }
+            for task in tasks
+        ],
+    }
+    prompt = _graph_mapper_coordinator_prompt(checkout, payload)
+    write_json(worker / "task.json", payload)
+    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    output = worker / "result.json"
+    events = worker / "events.jsonl"
+    process = run_codex_exec(
+        cd=checkout,
+        prompt=prompt,
+        output_schema=checkout / ".codereview" / "schemas" / "graph-shard-batch.schema.json",
+        output_file=output,
+        sandbox="read-only",
+        timeout_seconds=_coordinator_timeout_seconds(tasks, config),
+        config=config.codex,
+        env=base_env(checkout, config.codex),
+        events_file=events,
+    )
+    process_payload = {**process.to_dict(), "events_path": str(events)}
+    write_json(worker / "process.json", process_payload)
+    if process.returncode != 0:
+        return [
+            _blocked_task_result(task, f"codex graph mapper coordinator exited {process.returncode}", process=process_payload)
+            for task in tasks
+        ]
+    try:
+        parsed = json.loads(output.read_text(encoding="utf-8")) if output.is_file() else {}
+    except json.JSONDecodeError as exc:
+        return [
+            _blocked_task_result(task, f"codex graph mapper coordinator produced invalid JSON: {exc}", process=process_payload)
+            for task in tasks
+        ]
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
+        return [
+            _blocked_task_result(task, "codex graph mapper coordinator did not produce graph-shard-batch JSON", process=process_payload)
+            for task in tasks
+        ]
+    normalized: list[dict] = []
+    task_by_key = {_task_key(task): task for task in tasks}
+    for item in parsed.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        task = task_by_key.get(_task_result_key(item))
+        if task is None:
+            continue
+        result = _normalize_coordinator_task_result(item, task)
+        result["process"] = process_payload
+        normalized.append(result)
+    return normalized
+
+
 def _graph_mapper_prompt(checkout: Path, task_payload: dict) -> str:
     prompt_path = checkout / ".codereview" / "prompts" / "graph-mapper.md"
     prefix = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else "You are a code evidence graph mapper."
@@ -188,6 +314,100 @@ def _graph_mapper_prompt(checkout: Path, task_payload: dict) -> str:
             "```",
         ]
     )
+
+
+def _graph_mapper_coordinator_prompt(checkout: Path, payload: dict) -> str:
+    prompt_path = checkout / ".codereview" / "prompts" / "graph-mapper-coordinator.md"
+    prefix = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else "You are a graph mapper coordinator."
+    return "\n\n".join(
+        [
+            prefix,
+            "Assigned graph mapper coordinator JSON:",
+            "```json",
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            "```",
+        ]
+    )
+
+
+def _coordinator_worker_name(tasks: list[dict]) -> str:
+    task_ids = [str(task.get("task_id") or task.get("shard_id") or "task") for task in tasks]
+    if not task_ids:
+        return "graph-map-coordinator-empty"
+    first = _worker_name_token(task_ids[0])
+    last = _worker_name_token(task_ids[-1])
+    return f"graph-map-coordinator-{first}-{last}"
+
+
+def _worker_name_token(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")[:48] or "task"
+
+
+def _coordinator_timeout_seconds(tasks: list[dict], config: ReviewConfig) -> int:
+    limit = max(1, int(getattr(config.graph, "mapper_subagent_limit", 6)))
+    waves = max(1, (len(tasks) + limit - 1) // limit)
+    return max(30, int(getattr(config.graph, "graph_timeout_seconds", 480))) * waves
+
+
+def _normalize_coordinator_task_result(item: dict, task: dict) -> dict:
+    result = dict(item)
+    result["task_id"] = str(task.get("task_id") or result.get("task_id") or "")
+    result["shard_id"] = str(task.get("shard_id") or result.get("shard_id") or "")
+    result["mapper_index"] = _safe_int(task.get("mapper_index") or result.get("mapper_index"), default=1)
+    result["files"] = [str(path) for path in (task.get("files") or result.get("files") or []) if str(path)]
+    result.setdefault("nodes", [])
+    result.setdefault("edges", [])
+    result.setdefault("unresolved_refs", [])
+    result.setdefault("warnings", [])
+    result.setdefault("status", "ok")
+    coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
+    result["coverage"] = {
+        "assigned_files": [str(path) for path in (coverage.get("assigned_files") or task.get("files") or []) if str(path)],
+        "mapped_files": [str(path) for path in (coverage.get("mapped_files") or []) if str(path)],
+    }
+    return result
+
+
+def _task_key(task: dict) -> tuple[str, str, int]:
+    return (
+        str(task.get("task_id") or ""),
+        str(task.get("shard_id") or ""),
+        _safe_int(task.get("mapper_index"), default=1),
+    )
+
+
+def _task_result_key(result: dict) -> tuple[str, str, int]:
+    return (
+        str(result.get("task_id") or ""),
+        str(result.get("shard_id") or ""),
+        _safe_int(result.get("mapper_index"), default=1),
+    )
+
+
+def _safe_int(value: object, *, default: int) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _blocked_task_result(task: dict, reason: str, process: dict | None = None) -> dict:
+    result = {
+        "task_id": str(task.get("task_id") or ""),
+        "shard_id": task.get("shard_id"),
+        "mapper_index": task.get("mapper_index"),
+        "files": task.get("files") or [],
+        "nodes": [],
+        "edges": [],
+        "unresolved_refs": [],
+        "coverage": {"assigned_files": task.get("files") or [], "mapped_files": []},
+        "warnings": [],
+        "status": "blocked",
+        "blocked_reason": reason,
+    }
+    if process is not None:
+        result["process"] = process
+    return result
 
 
 def _load_cached_task_result(checkout: Path, task: dict, inventory_by_path: dict[str, dict], config: ReviewConfig) -> dict | None:

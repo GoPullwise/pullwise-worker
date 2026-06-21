@@ -10,6 +10,9 @@ Tasks:
    generated roots, high-risk roots, and entrypoint candidates.
 2. Plan graph shards so every analyzable source file is assigned exactly once.
 3. Keep shards bounded by related package/domain and configured file/byte budgets.
+4. Use shard_policy.target_shards as the soft target. Keep primary shard count at
+   or below shard_policy.mapper_subagent_limit when the file/byte budgets and
+   large-file isolation allow it.
 
 Hard rules:
 - Do not modify files.

@@ -43,6 +43,7 @@ def run_repository_census(checkout: Path, run: Path, inventory: dict, config: Re
             if isinstance(item, dict)
         ],
         "deterministic_seed": deterministic,
+        "shard_policy": _shard_policy(config),
         "manifest_previews": _manifest_previews(checkout, inventory),
     }
     prompt = "\n\n".join(
@@ -102,6 +103,7 @@ def build_repository_census(inventory: dict, config: ReviewConfig) -> dict:
     return {
         "languages": languages,
         "packages": packages,
+        "shard_policy": _shard_policy(config),
         "source_roots": sorted({root for pkg in packages for root in pkg.get("source_roots", [])}),
         "test_roots": sorted({root for pkg in packages for root in pkg.get("test_roots", [])}),
         "manifest_files": manifests,
@@ -176,8 +178,8 @@ def _shards(files: list[dict], config: ReviewConfig) -> list[dict]:
     shards: list[dict] = []
     current: list[str] = []
     current_bytes = 0
-    max_files = config.graph.max_shard_files
-    max_bytes = config.graph.max_shard_bytes
+    max_files = _effective_max_shard_files(files, config)
+    max_bytes = _effective_max_shard_bytes(files, config)
     for item in sorted(files, key=lambda row: str(row.get("path") or "")):
         path = str(item.get("path") or "")
         size = int(item.get("size_bytes") or 0)
@@ -194,6 +196,30 @@ def _shards(files: list[dict], config: ReviewConfig) -> list[dict]:
     if current:
         shards.append(_shard(len(shards) + 1, current))
     return shards
+
+
+def _shard_policy(config: ReviewConfig) -> dict:
+    return {
+        "target_shards": config.graph.target_shards,
+        "mapper_subagent_limit": config.graph.mapper_subagent_limit,
+        "max_shard_files": config.graph.max_shard_files,
+        "max_shard_bytes": config.graph.max_shard_bytes,
+        "large_file_bytes": config.graph.large_file_bytes,
+        "note": "Target primary shards at the mapper subagent limit when file and byte budgets allow.",
+    }
+
+
+def _effective_max_shard_files(files: list[dict], config: ReviewConfig) -> int:
+    target = max(1, int(getattr(config.graph, "target_shards", 1)))
+    target_files = (len(files) + target - 1) // target if files else 1
+    return max(config.graph.max_shard_files, target_files)
+
+
+def _effective_max_shard_bytes(files: list[dict], config: ReviewConfig) -> int:
+    target = max(1, int(getattr(config.graph, "target_shards", 1)))
+    total_bytes = sum(max(0, int(item.get("size_bytes") or 0)) for item in files)
+    target_bytes = (total_bytes + target - 1) // target if files else 1
+    return max(config.graph.max_shard_bytes, target_bytes)
 
 
 def _shard(index: int, files: list[str], reason: str = "bounded file and byte budget") -> dict:

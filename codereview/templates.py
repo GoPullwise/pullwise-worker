@@ -44,6 +44,7 @@ def ensure_project_files(checkout: Path) -> None:
                         "prompt_version": "graph-v3",
                         "full_inventory": True,
                         "incremental": True,
+                        "target_shards": 6,
                         "max_shard_files": 25,
                         "max_shard_bytes": 500000,
                         "large_file_bytes": 120000,
@@ -52,6 +53,7 @@ def ensure_project_files(checkout: Path) -> None:
                         "use_sqlite_index": True,
                         "codex_census": True,
                         "codex_mappers": True,
+                        "mapper_subagent_limit": 6,
                     },
                     "agents": {
                         "graph_map_parallel": 6,
@@ -101,6 +103,7 @@ def ensure_project_files(checkout: Path) -> None:
         "context_result.schema.json": codex_output_schema(context_result_schema()),
         "repo-census.schema.json": codex_output_schema(repo_census_schema()),
         "graph-shard.schema.json": codex_output_schema(graph_shard_schema()),
+        "graph-shard-batch.schema.json": codex_output_schema(graph_shard_batch_schema()),
         "graph-link.schema.json": codex_output_schema(graph_link_schema()),
         "graph-audit.schema.json": codex_output_schema(graph_audit_schema()),
         "candidate-verification.schema.json": codex_output_schema(candidate_verification_schema()),
@@ -118,6 +121,7 @@ def ensure_project_files(checkout: Path) -> None:
     prompts = {
         "repo-census.md": REPO_CENSUS_PROMPT,
         "graph-mapper.md": GRAPH_MAPPER_PROMPT,
+        "graph-mapper-coordinator.md": GRAPH_MAPPER_COORDINATOR_PROMPT,
         "graph-linker.md": GRAPH_LINKER_PROMPT,
         "graph-auditor.md": GRAPH_AUDITOR_PROMPT,
         "graph-repair.md": GRAPH_REPAIR_PROMPT,
@@ -342,6 +346,22 @@ def repo_census_schema() -> dict:
 
 
 def graph_shard_schema() -> dict:
+    return graph_shard_result_schema(include_identity=False)
+
+
+def graph_shard_batch_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["results", "warnings"],
+        "additionalProperties": True,
+        "properties": {
+            "results": {"type": "array", "items": graph_shard_result_schema(include_identity=True)},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+def graph_shard_result_schema(*, include_identity: bool) -> dict:
     span = {
         "type": "object",
         "properties": {
@@ -409,23 +429,35 @@ def graph_shard_schema() -> dict:
             "resolution_hint": {"type": "string"},
         },
     }
+    properties = {
+        "nodes": {"type": "array", "items": node},
+        "edges": {"type": "array", "items": edge},
+        "unresolved_refs": {"type": "array", "items": unresolved},
+        "coverage": {
+            "type": "object",
+            "properties": {
+                "assigned_files": {"type": "array", "items": {"type": "string"}},
+                "mapped_files": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+    }
+    required = ["nodes", "edges", "unresolved_refs", "coverage", "warnings"]
+    if include_identity:
+        identity = {
+            "task_id": {"type": "string"},
+            "shard_id": {"type": "string"},
+            "mapper_index": {"type": "integer"},
+            "files": {"type": "array", "items": {"type": "string"}},
+            "status": {"type": "string"},
+        }
+        properties = {**identity, **properties}
+        required = [*identity, *required]
     return {
         "type": "object",
-        "required": ["nodes", "edges", "unresolved_refs", "coverage", "warnings"],
+        "required": required,
         "additionalProperties": True,
-        "properties": {
-            "nodes": {"type": "array", "items": node},
-            "edges": {"type": "array", "items": edge},
-            "unresolved_refs": {"type": "array", "items": unresolved},
-            "coverage": {
-                "type": "object",
-                "properties": {
-                    "assigned_files": {"type": "array", "items": {"type": "string"}},
-                    "mapped_files": {"type": "array", "items": {"type": "string"}},
-                },
-            },
-            "warnings": {"type": "array", "items": {"type": "string"}},
-        },
+        "properties": properties,
     }
 
 
@@ -634,6 +666,9 @@ Tasks:
    generated roots, high-risk roots, and entrypoint candidates.
 2. Plan graph shards so every analyzable source file is assigned exactly once.
 3. Keep shards bounded by related package/domain and configured file/byte budgets.
+4. Use shard_policy.target_shards as the soft target. Keep primary shard count at
+   or below shard_policy.mapper_subagent_limit when the file/byte budgets and
+   large-file isolation allow it.
 
 Hard rules:
 - Do not modify files.
@@ -666,6 +701,49 @@ Hard rules:
 - Use only paths relative to repository root.
 
 Output JSON only, matching graph-shard.schema.json.
+"""
+
+
+GRAPH_MAPPER_COORDINATOR_PROMPT = """You are a graph mapper coordinator for a full-repository GraphVerified review.
+
+You are running inside exactly one Codex CLI exec. Do not ask the caller to start
+another Codex CLI process.
+
+You will receive several independent mapper jobs. Each job has task_id, shard_id,
+mapper_index, files, reason, double_mapped, and files_metadata.
+
+Your task:
+1. Spawn subagents inside this Codex session to map the jobs concurrently.
+2. Use at most mapper_subagent_limit subagents at one time.
+3. Assign one mapper job to each subagent.
+4. If there are more jobs than mapper_subagent_limit, run additional waves inside
+   this same Codex session.
+5. Wait for all subagents to finish.
+6. Return one graph shard result per input job, preserving task_id identity.
+
+Each subagent must:
+- Read every file assigned to its job.
+- Stay within its assigned files except for direct import/export evidence needed
+  to avoid inventing an edge.
+- Identify meaningful symbols, entrypoints, tests, configuration keys, state
+  stores, and external dependencies.
+- Produce graph nodes and graph edges with source evidence for every node and edge.
+- Return unresolved_refs instead of guessing.
+
+Hard rules:
+- Do not modify repository files.
+- Do not write files directly.
+- Do not scan unrelated repository areas.
+- Do not invent a symbol or relationship.
+- Every resolved edge must cite a source file and line range.
+- If a target cannot be uniquely resolved, return unresolved_refs.
+- Do not treat naming similarity as proof.
+- Use only paths relative to repository root.
+- Every result must echo task_id, shard_id, mapper_index, files, and status.
+- Every result coverage.assigned_files must match the job files.
+- Every mapped file must appear in coverage.mapped_files.
+
+Output JSON only, matching graph-shard-batch.schema.json.
 """
 
 
