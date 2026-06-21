@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .candidates.dedupe import dedupe_candidates
@@ -39,7 +40,10 @@ from .utils.jsonl import write_json, write_jsonl
 from .utils.paths import safe_relative_path
 
 
-def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
+ProgressCallback = Callable[[dict], None]
+
+
+def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: ProgressCallback | None = None) -> Path:
     checkout = checkout.resolve(strict=False)
     ensure_project_files(checkout)
     config = load_config(checkout, mode=mode, scan_mode=scan_mode)
@@ -47,20 +51,24 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
     run = checkout / ".codereview" / "runs" / run_id
     run.mkdir(parents=True, exist_ok=True)
     write_json(run / "meta.json", {"run_id": run_id, "mode": config.mode, "scan_mode": config.scan.mode, "scope": "full-repository"})
+    _emit_progress(progress, "setup", "GraphVerified: preparing run", run_id=run_id)
 
     source_state_before = capture_source_state(checkout, include_untracked=config.scan.include_untracked)
     write_json(run / "source_state_before.json", source_state_before)
     repo_state = inspect_repo(checkout)
     write_json(run / "repo_state.json", repo_state)
 
+    _emit_progress(progress, "inventory", "GraphVerified: building repository inventory", run_id=run_id)
     inventory = build_git_inventory(checkout, include_untracked=config.scan.include_untracked)
     write_json(run / "artifacts" / "inventory" / "inventory.json", inventory)
 
+    _emit_progress(progress, "snapshot", "GraphVerified: creating immutable snapshot", run_id=run_id)
     snapshot_manifest = create_immutable_snapshot(checkout, inventory, run)
     write_json(run / "artifacts" / "inventory" / "snapshot.json", snapshot_manifest)
     snapshot_repo = Path(str(snapshot_manifest["snapshot_repo"]))
     preflight = preflight_context(snapshot_repo, run, config)
 
+    _emit_progress(progress, "census", "Graph: repository census", run_id=run_id)
     census = run_repository_census(snapshot_repo, run, inventory, config)
     census_errors = validate_census_coverage(census, inventory)
     write_json(run / "artifacts" / "graph" / "census.json", census)
@@ -70,11 +78,14 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
 
     graph_tasks = plan_graph_tasks(census, inventory, config)
     write_jsonl(run / "artifacts" / "graph" / "tasks.jsonl", graph_tasks)
-    shard_results = map_graph_tasks(snapshot_repo, graph_tasks, inventory, config, run=run)
+    _emit_progress(progress, "graph", f"Graph: mapping shards 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
+    shard_results = _map_graph_tasks_with_progress(snapshot_repo, graph_tasks, inventory, config, run=run, progress=progress)
     write_jsonl(run / "artifacts" / "graph" / "shard-results.jsonl", shard_results)
+    _emit_progress(progress, "graph", "Graph: merging shard results", run_id=run_id)
     graph = merge_graph_results(shard_results)
     graph = apply_cross_shard_linking(snapshot_repo, run, graph, config)
     graph_dir = run / "artifacts" / "graph"
+    _emit_progress(progress, "graph", "Graph: auditing evidence quality", run_id=run_id)
     audit = audit_graph(graph, inventory, snapshot_repo)
     repair_history: list[dict] = []
     for round_index in range(config.graph.max_repair_rounds):
@@ -84,7 +95,23 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
         repair_tasks = _graph_repair_tasks(repairs, start_index=len(graph_tasks) + len(repair_history) + 1)
         if not repair_tasks:
             break
-        repair_results = map_graph_tasks(snapshot_repo, repair_tasks, inventory, config, run=run)
+        _emit_progress(
+            progress,
+            "graph",
+            f"Graph: repair round {round_index + 1} 0/{len(repair_tasks)}",
+            current=0,
+            total=len(repair_tasks),
+            run_id=run_id,
+        )
+        repair_results = _map_graph_tasks_with_progress(
+            snapshot_repo,
+            repair_tasks,
+            inventory,
+            config,
+            run=run,
+            progress=progress,
+            progress_label=f"Graph: repair round {round_index + 1}",
+        )
         repair_history.append({"round": round_index + 1, "tasks": repair_tasks, "results": repair_results})
         shard_results.extend(repair_results)
         graph = merge_graph_results(shard_results)
@@ -92,7 +119,9 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
         audit = audit_graph(graph, inventory, snapshot_repo)
     write_graph_artifacts(graph_dir, graph)
     if config.graph.use_sqlite_index:
+        _emit_progress(progress, "graph", "Graph: rebuilding query index", run_id=run_id)
         rebuild_sqlite_index(graph, graph_dir / "graph.sqlite3")
+    _emit_progress(progress, "graph", "Graph: agent audit", run_id=run_id)
     agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
     write_json(graph_dir / "audit.json", audit)
     write_json(graph_dir / "agent-audit.json", agent_audit)
@@ -100,13 +129,16 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
     if not audit.get("quality_gate_passed"):
         raise RuntimeError(f"graph quality gate failed: {'; '.join(audit.get('quality_errors') or [])}")
 
+    _emit_progress(progress, "repository", "Repository: analyzing snapshot", run_id=run_id)
     snapshot = analyze_repository_snapshot(snapshot_repo, inventory)
     write_json(run / "repository" / "files.json", snapshot.files)
     write_json(run / "repository" / "spans.json", snapshot.spans)
 
+    _emit_progress(progress, "repository", "Repository: mapping symbols", run_id=run_id)
     repository_symbols = map_repository_symbols(snapshot_repo, snapshot)
     write_json(run / "repository" / "symbols.json", repository_symbols)
 
+    _emit_progress(progress, "review_units", "Review units: planning coverage", run_id=run_id)
     review_units = build_all_review_units(graph, inventory, census, config)
     write_review_units(run, review_units)
     planned_coverage = build_unit_coverage(graph, inventory, review_units)
@@ -115,11 +147,28 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
     write_json(run / "artifacts" / "review-units" / "coverage-planned.json", planned_coverage)
 
     finder_tasks = plan_finder_tasks(review_units)
-    raw_candidates = run_finders_parallel(snapshot_repo, run, finder_tasks, config)
+    _emit_progress(progress, "finder", f"Finder: review tasks 0/{len(finder_tasks)}", current=0, total=len(finder_tasks), run_id=run_id)
+    raw_candidates = _run_finders_with_progress(snapshot_repo, run, finder_tasks, config, progress)
     context_repair_tasks = _finder_context_repair_tasks(raw_candidates, start_index=len(graph_tasks) + len(repair_history) + 1)
     context_repair_history: list[dict] = []
     if context_repair_tasks:
-        context_repair_results = map_graph_tasks(snapshot_repo, context_repair_tasks, inventory, config, run=run)
+        _emit_progress(
+            progress,
+            "graph",
+            f"Graph: context repair 0/{len(context_repair_tasks)}",
+            current=0,
+            total=len(context_repair_tasks),
+            run_id=run_id,
+        )
+        context_repair_results = _map_graph_tasks_with_progress(
+            snapshot_repo,
+            context_repair_tasks,
+            inventory,
+            config,
+            run=run,
+            progress=progress,
+            progress_label="Graph: context repair",
+        )
         context_repair_history.append({"round": 1, "tasks": context_repair_tasks, "results": context_repair_results})
         shard_results.extend(context_repair_results)
         graph = merge_graph_results(shard_results)
@@ -139,9 +188,11 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
         require_full_unit_coverage(planned_coverage)
         write_json(run / "artifacts" / "review-units" / "coverage-planned.json", planned_coverage)
         finder_tasks = plan_finder_tasks(review_units)
-        raw_candidates = run_finders_parallel(snapshot_repo, run, finder_tasks, config)
+        _emit_progress(progress, "finder", f"Finder: review tasks 0/{len(finder_tasks)}", current=0, total=len(finder_tasks), run_id=run_id)
+        raw_candidates = _run_finders_with_progress(snapshot_repo, run, finder_tasks, config, progress)
     write_jsonl(run / "candidates" / "raw.jsonl", raw_candidates)
 
+    _emit_progress(progress, "candidates", "Candidates: normalizing and scoring", run_id=run_id)
     executed_coverage = build_unit_coverage(graph, inventory, review_units, raw_candidates)
     executed_coverage["critical_unresolved_graph_edges"] = audit.get("critical_unresolved", 0)
     require_full_unit_coverage(executed_coverage, require_baseline_review=config.units.require_baseline_for_every_unit)
@@ -151,7 +202,22 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
     deduped = dedupe_candidates(normalized)
     scored = score_candidates(deduped)
     selected_for_verification = select_for_repro(scored, config)
-    verification_results = run_candidate_verifiers_parallel(selected_for_verification, graph, config, checkout=snapshot_repo, run=run)
+    _emit_progress(
+        progress,
+        "verification",
+        f"Verification: candidates 0/{min(len(selected_for_verification), config.candidates.max_total_for_verification)}",
+        current=0,
+        total=min(len(selected_for_verification), config.candidates.max_total_for_verification),
+        run_id=run_id,
+    )
+    verification_results = _run_candidate_verifiers_with_progress(
+        selected_for_verification,
+        graph,
+        config,
+        checkout=snapshot_repo,
+        run=run,
+        progress=progress,
+    )
     selected = select_reproducible_candidates(selected_for_verification, verification_results, config)
     write_jsonl(run / "candidates" / "normalized.jsonl", normalized)
     write_json(run / "candidates" / "deduped.json", deduped)
@@ -160,12 +226,15 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
     write_jsonl(run / "candidates" / "verification.jsonl", verification_results)
     write_jsonl(run / "candidates" / "selected_for_repro.jsonl", selected)
 
-    repro_results = run_repro_workers_parallel(snapshot_repo, run, selected, config)
+    _emit_progress(progress, "reproduction", f"Reproduction: candidates 0/{len(selected)}", current=0, total=len(selected), run_id=run_id)
+    repro_results = _run_repro_workers_with_progress(snapshot_repo, run, selected, config, progress)
     write_jsonl(run / "repro" / "results.jsonl", repro_results)
 
-    judge_results = run_judges_parallel(run, selected, repro_results, snapshot_repo, config)
+    _emit_progress(progress, "judge", f"Judge: candidates 0/{len(repro_results)}", current=0, total=len(repro_results), run_id=run_id)
+    judge_results = _run_judges_with_progress(run, selected, repro_results, snapshot_repo, config, progress)
     write_jsonl(run / "judge" / "results.jsonl", judge_results)
 
+    _emit_progress(progress, "report", "Report: rendering confirmed findings", run_id=run_id)
     confirmed = collect_confirmed(selected, repro_results, judge_results)
     rejected = collect_rejected(selected, repro_results, judge_results)
     pipeline_summary = build_pipeline_summary(
@@ -217,6 +286,103 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "") -> Path:
         encoding="utf-8",
     )
     return run / "reports" / "final.md"
+
+
+def _emit_progress(
+    progress: ProgressCallback | None,
+    stage: str,
+    message: str,
+    *,
+    current: int | None = None,
+    total: int | None = None,
+    run_id: str = "",
+) -> None:
+    if progress is None:
+        return
+    payload: dict[str, object] = {"stage": stage, "message": message}
+    if current is not None:
+        payload["current"] = current
+    if total is not None:
+        payload["total"] = total
+    if run_id:
+        payload["runId"] = run_id
+    try:
+        progress(payload)
+    except Exception:
+        return
+
+
+def _map_graph_tasks_with_progress(
+    checkout: Path,
+    tasks: list[dict],
+    inventory: dict,
+    config: object,
+    *,
+    run: Path,
+    progress: ProgressCallback | None,
+    progress_label: str = "Graph: mapping shards",
+) -> list[dict]:
+    if progress is None:
+        return map_graph_tasks(checkout, tasks, inventory, config, run=run)
+    return map_graph_tasks(
+        checkout,
+        tasks,
+        inventory,
+        config,
+        run=run,
+        progress=_progress_with_run_id(progress, run),
+        progress_label=progress_label,
+    )
+
+
+def _run_finders_with_progress(checkout: Path, run: Path, tasks: list[object], config: object, progress: ProgressCallback | None) -> list[dict]:
+    if progress is None:
+        return run_finders_parallel(checkout, run, tasks, config)
+    return run_finders_parallel(checkout, run, tasks, config, progress=_progress_with_run_id(progress, run))
+
+
+def _run_candidate_verifiers_with_progress(
+    candidates: list[dict],
+    graph: dict,
+    config: object,
+    *,
+    checkout: Path,
+    run: Path,
+    progress: ProgressCallback | None,
+) -> list[dict]:
+    if progress is None:
+        return run_candidate_verifiers_parallel(candidates, graph, config, checkout=checkout, run=run)
+    return run_candidate_verifiers_parallel(candidates, graph, config, checkout=checkout, run=run, progress=_progress_with_run_id(progress, run))
+
+
+def _run_repro_workers_with_progress(checkout: Path, run: Path, selected: list[dict], config: object, progress: ProgressCallback | None) -> list[dict]:
+    if progress is None:
+        return run_repro_workers_parallel(checkout, run, selected, config)
+    return run_repro_workers_parallel(checkout, run, selected, config, progress=_progress_with_run_id(progress, run))
+
+
+def _run_judges_with_progress(
+    run: Path,
+    selected: list[dict],
+    repro_results: list[dict],
+    checkout: Path,
+    config: object,
+    progress: ProgressCallback | None,
+) -> list[dict]:
+    if progress is None:
+        return run_judges_parallel(run, selected, repro_results, checkout, config)
+    return run_judges_parallel(run, selected, repro_results, checkout, config, progress=_progress_with_run_id(progress, run))
+
+
+def _progress_with_run_id(progress: ProgressCallback, run: Path) -> ProgressCallback:
+    run_id = run.name
+
+    def emit(value: dict) -> None:
+        payload = dict(value) if isinstance(value, dict) else {"message": str(value)}
+        payload.setdefault("runId", run_id)
+        progress(payload)
+
+    return emit
 
 
 def build_pipeline_summary(

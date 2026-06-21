@@ -4,6 +4,7 @@ import ast
 import concurrent.futures
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
@@ -33,15 +34,63 @@ _CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
 _SQL_TABLE_RE = re.compile(r"\b(?:from|into|update|join)\s+([A-Za-z_][\w.]*)", re.IGNORECASE)
 
 
-def map_graph_tasks(checkout: Path, tasks: list[dict], inventory: dict, config: ReviewConfig, run: Path | None = None) -> list[dict]:
+def map_graph_tasks(
+    checkout: Path,
+    tasks: list[dict],
+    inventory: dict,
+    config: ReviewConfig,
+    run: Path | None = None,
+    progress: Callable[[dict], None] | None = None,
+    progress_label: str = "Graph: mapping shards",
+) -> list[dict]:
     by_path = {str(item.get("path") or ""): item for item in inventory.get("files", []) if isinstance(item, dict)}
     max_workers = max(1, int(getattr(config.graph, "map_parallel", 1)))
+    results: list[dict | None] = [None] * len(tasks)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(_map_task_with_policy, checkout, task, by_path, config, run)
-            for task in tasks
-        ]
-        return [future.result() for future in futures]
+        futures = {
+            executor.submit(_map_task_with_policy, checkout, task, by_path, config, run): (index, task)
+            for index, task in enumerate(tasks)
+        }
+        completed = 0
+        total = len(futures)
+        for future in concurrent.futures.as_completed(futures):
+            index, task = futures[future]
+            results[index] = future.result()
+            completed += 1
+            _emit_task_progress(
+                progress,
+                stage="graph",
+                message=f"{progress_label} {completed}/{total}",
+                current=completed,
+                total=total,
+                task_id=task.get("task_id") or task.get("shard_id"),
+            )
+    return [result for result in results if result is not None]
+
+
+def _emit_task_progress(
+    progress: Callable[[dict], None] | None,
+    *,
+    stage: str,
+    message: str,
+    current: int,
+    total: int,
+    task_id: object,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(
+            {
+                "stage": stage,
+                "message": message,
+                "current": current,
+                "total": total,
+                "taskId": str(task_id or ""),
+            }
+        )
+    except Exception:
+        return
 
 
 def _map_task_with_policy(checkout: Path, task: dict, inventory_by_path: dict[str, dict], config: ReviewConfig, run: Path | None) -> dict:

@@ -844,6 +844,37 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["blockedCount"], 2)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["candidate_id"], "c1")
 
+    def test_run_graph_verified_review_payload_forwards_progress_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            reports = root / ".codereview" / "runs" / "run_1" / "reports"
+            reports.mkdir(parents=True)
+            final_md = reports / "final.md"
+            final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
+            (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
+            (reports / "confirmed.json").write_text("[]", encoding="utf-8")
+            (reports / "rejected.json").write_text("[]", encoding="utf-8")
+            (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
+            (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
+            codereview_main = importlib.import_module("codereview.main")
+            events: list[dict] = []
+
+            def fake_run_review(checkout_dir: Path, *, mode: str, scan_mode: str = "", progress=None) -> Path:
+                del checkout_dir, mode, scan_mode
+                progress({"stage": "graph", "message": "Graph: mapping shards 1/2", "current": 1, "total": 2})
+                return final_md
+
+            with patch.object(codereview_main, "run_review", side_effect=fake_run_review):
+                worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    root,
+                    progress_callback=events.append,
+                )
+
+        self.assertEqual(events, [{"stage": "graph", "message": "Graph: mapping shards 1/2", "current": 1, "total": 2}])
+
     def test_run_graph_verified_review_payload_blocks_on_review_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

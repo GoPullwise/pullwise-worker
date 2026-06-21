@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
@@ -16,13 +17,57 @@ def run_candidate_verifiers_parallel(
     config: ReviewConfig,
     checkout: Path | None = None,
     run: Path | None = None,
+    progress: Callable[[dict], None] | None = None,
 ) -> list[dict]:
     limit = min(len(candidates), config.candidates.max_total_for_verification)
     selected = candidates[:limit]
     max_workers = max(1, min(4, getattr(config.finders, "max_workers", 1)))
+    results: list[dict | None] = [None] * len(selected)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(verify_candidate, candidate, graph, config, checkout, run) for candidate in selected]
-        return [future.result() for future in futures]
+        futures = {
+            executor.submit(verify_candidate, candidate, graph, config, checkout, run): (index, candidate)
+            for index, candidate in enumerate(selected)
+        }
+        completed = 0
+        total = len(futures)
+        for future in concurrent.futures.as_completed(futures):
+            index, candidate = futures[future]
+            results[index] = future.result()
+            completed += 1
+            _emit_task_progress(
+                progress,
+                stage="verification",
+                message=f"Verification: candidates {completed}/{total}",
+                current=completed,
+                total=total,
+                task_id=candidate.get("issue_id") or candidate.get("candidate_id"),
+            )
+    return [result for result in results if result is not None]
+
+
+def _emit_task_progress(
+    progress: Callable[[dict], None] | None,
+    *,
+    stage: str,
+    message: str,
+    current: int,
+    total: int,
+    task_id: object,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(
+            {
+                "stage": stage,
+                "message": message,
+                "current": current,
+                "total": total,
+                "taskId": str(task_id or ""),
+            }
+        )
+    except Exception:
+        return
 
 
 def verify_candidate(

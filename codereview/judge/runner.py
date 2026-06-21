@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
@@ -10,11 +11,64 @@ from ..utils.paths import safe_path_component
 from .validate import local_judge, validate_judge_result
 
 
-def run_judges_parallel(run: Path, candidates: list[dict], repro_results: list[dict], checkout: Path, config: ReviewConfig) -> list[dict]:
+def run_judges_parallel(
+    run: Path,
+    candidates: list[dict],
+    repro_results: list[dict],
+    checkout: Path,
+    config: ReviewConfig,
+    progress: Callable[[dict], None] | None = None,
+) -> list[dict]:
     by_id = {str(item.get("issue_id") or ""): item for item in candidates}
+    results: list[dict | None] = [None] * len(repro_results)
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.repro.max_workers) as executor:
-        futures = [executor.submit(run_judge, run, by_id.get(str(repro.get("candidate_id") or ""), {}), repro, checkout, config) for repro in repro_results]
-        return [future.result() for future in futures]
+        futures = {
+            executor.submit(run_judge, run, by_id.get(str(repro.get("candidate_id") or ""), {}), repro, checkout, config): (
+                index,
+                repro,
+            )
+            for index, repro in enumerate(repro_results)
+        }
+        completed = 0
+        total = len(futures)
+        for future in concurrent.futures.as_completed(futures):
+            index, repro = futures[future]
+            results[index] = future.result()
+            completed += 1
+            _emit_task_progress(
+                progress,
+                stage="judge",
+                message=f"Judge: candidates {completed}/{total}",
+                current=completed,
+                total=total,
+                task_id=repro.get("candidate_id"),
+            )
+    return [result for result in results if result is not None]
+
+
+def _emit_task_progress(
+    progress: Callable[[dict], None] | None,
+    *,
+    stage: str,
+    message: str,
+    current: int,
+    total: int,
+    task_id: object,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(
+            {
+                "stage": stage,
+                "message": message,
+                "current": current,
+                "total": total,
+                "taskId": str(task_id or ""),
+            }
+        )
+    except Exception:
+        return
 
 
 def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: ReviewConfig) -> dict:

@@ -20,7 +20,7 @@ def graph_verified_toml_string(value: object) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
+def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, progress_callback=None) -> dict:
     from codereview.main import run_review
     from codereview.utils.jsonl import read_json
 
@@ -30,7 +30,10 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     scan_mode = graph_verified_scan_mode(graph_config.get("scanMode") or "full-cached")
     try:
         write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
-        final_path = run_review(checkout_dir, mode=mode, scan_mode=scan_mode)
+        if progress_callback is None:
+            final_path = run_review(checkout_dir, mode=mode, scan_mode=scan_mode)
+        else:
+            final_path = run_review(checkout_dir, mode=mode, scan_mode=scan_mode, progress=progress_callback)
     except Exception as exc:
         return {
             "version": "graph-verified-code-review/1",
@@ -68,6 +71,40 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
         "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
+
+
+def graph_verified_progress_message(value: object) -> str:
+    source = value if isinstance(value, dict) else {}
+    message = clean_protocol_text(source.get("message"), 300)
+    if message:
+        return message
+    stage = clean_protocol_text(source.get("stage"), 80)
+    current = source.get("current")
+    total = source.get("total")
+    if stage and current is not None and total is not None:
+        return f"GraphVerified: {stage} {graph_verified_count(current)}/{graph_verified_count(total)}"
+    if stage:
+        return f"GraphVerified: {stage}"
+    return "Running GraphVerified review"
+
+
+def graph_verified_progress_logs_summary(value: object) -> str:
+    source = value if isinstance(value, dict) else {}
+    stage = clean_protocol_text(source.get("stage"), 80)
+    task_id = clean_protocol_text(source.get("taskId") or source.get("task_id"), 160)
+    run_id = clean_protocol_text(source.get("runId") or source.get("run_id"), 80)
+    current = source.get("current")
+    total = source.get("total")
+    parts = []
+    if run_id:
+        parts.append(f"run={run_id}")
+    if stage:
+        parts.append(f"stage={stage}")
+    if current is not None and total is not None:
+        parts.append(f"progress={graph_verified_count(current)}/{graph_verified_count(total)}")
+    if task_id:
+        parts.append(f"task={task_id}")
+    return " ".join(parts)
 
 
 def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: Path, graph_config: dict, mode: str) -> None:

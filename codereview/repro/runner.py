@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 from ..codex_runner import run_codex_exec
@@ -16,12 +17,61 @@ from .filesystem_guard import guard_worker_result
 from .worker_dir import create_worker_dir
 
 
-def run_repro_workers_parallel(checkout: Path, run: Path, candidates: list[dict], config: ReviewConfig) -> list[dict]:
+def run_repro_workers_parallel(
+    checkout: Path,
+    run: Path,
+    candidates: list[dict],
+    config: ReviewConfig,
+    progress: Callable[[dict], None] | None = None,
+) -> list[dict]:
     if not config.repro.enabled:
         return []
+    results: list[dict | None] = [None] * len(candidates)
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.repro.max_workers) as executor:
-        futures = [executor.submit(run_repro_worker, checkout, run, candidate, config) for candidate in candidates]
-        return [future.result() for future in futures]
+        futures = {
+            executor.submit(run_repro_worker, checkout, run, candidate, config): (index, candidate)
+            for index, candidate in enumerate(candidates)
+        }
+        completed = 0
+        total = len(futures)
+        for future in concurrent.futures.as_completed(futures):
+            index, candidate = futures[future]
+            results[index] = future.result()
+            completed += 1
+            _emit_task_progress(
+                progress,
+                stage="reproduction",
+                message=f"Reproduction: candidates {completed}/{total}",
+                current=completed,
+                total=total,
+                task_id=candidate.get("issue_id") or candidate.get("candidate_id"),
+            )
+    return [result for result in results if result is not None]
+
+
+def _emit_task_progress(
+    progress: Callable[[dict], None] | None,
+    *,
+    stage: str,
+    message: str,
+    current: int,
+    total: int,
+    task_id: object,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(
+            {
+                "stage": stage,
+                "message": message,
+                "current": current,
+                "total": total,
+                "taskId": str(task_id or ""),
+            }
+        )
+    except Exception:
+        return
 
 
 def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewConfig) -> dict:

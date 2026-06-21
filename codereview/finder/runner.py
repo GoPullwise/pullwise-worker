@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_exec
@@ -11,12 +12,61 @@ from ..utils.process import compact_process_output
 from .tasks import FinderTask
 
 
-def run_finders_parallel(checkout: Path, run: Path, tasks: list[FinderTask], config: ReviewConfig) -> list[dict]:
+def run_finders_parallel(
+    checkout: Path,
+    run: Path,
+    tasks: list[FinderTask],
+    config: ReviewConfig,
+    progress: Callable[[dict], None] | None = None,
+) -> list[dict]:
     if not config.finders.enabled:
         return []
+    results: list[dict | None] = [None] * len(tasks)
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.finders.max_workers) as executor:
-        futures = [executor.submit(run_finder, checkout, run, task, config) for task in tasks]
-        return [future.result() for future in futures]
+        futures = {
+            executor.submit(run_finder, checkout, run, task, config): (index, task)
+            for index, task in enumerate(tasks)
+        }
+        completed = 0
+        total = len(futures)
+        for future in concurrent.futures.as_completed(futures):
+            index, task = futures[future]
+            results[index] = future.result()
+            completed += 1
+            _emit_task_progress(
+                progress,
+                stage="finder",
+                message=f"Finder: review tasks {completed}/{total}",
+                current=completed,
+                total=total,
+                task_id=f"{task.focus}:{task.unit_id}",
+            )
+    return [result for result in results if result is not None]
+
+
+def _emit_task_progress(
+    progress: Callable[[dict], None] | None,
+    *,
+    stage: str,
+    message: str,
+    current: int,
+    total: int,
+    task_id: object,
+) -> None:
+    if progress is None:
+        return
+    try:
+        progress(
+            {
+                "stage": stage,
+                "message": message,
+                "current": current,
+                "total": total,
+                "taskId": str(task_id or ""),
+            }
+        )
+    except Exception:
+        return
 
 
 def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig) -> dict:

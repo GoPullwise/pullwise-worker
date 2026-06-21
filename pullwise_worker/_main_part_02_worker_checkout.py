@@ -797,10 +797,22 @@ class Worker:
                 protocol_multiline_text(preflight.get("summary")),
                 config=job_config,
             )
+
+            def report_graph_verified_progress(event: object) -> None:
+                self.report_progress(
+                    job_id,
+                    "ai",
+                    PHASE_PROGRESS["ai"],
+                    graph_verified_progress_message(event),
+                    graph_verified_progress_logs_summary(event),
+                    config=job_config,
+                )
+
             graph_verified_report = run_graph_verified_review_payload(
                 job_config,
                 job,
                 checkout_dir,
+                progress_callback=report_graph_verified_progress,
             )
             projected_findings = graph_verified_summary_findings(graph_verified_report)
             summary = summarize(projected_findings)
