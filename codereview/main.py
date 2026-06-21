@@ -129,6 +129,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     write_json(graph_dir / "agent-audit.json", agent_audit)
     write_json(graph_dir / "repair-history.json", repair_history)
     if not audit.get("quality_gate_passed"):
+        _emit_progress(progress, "graph", _graph_quality_gate_failure_message(audit), run_id=run_id)
         raise RuntimeError(f"graph quality gate failed: {'; '.join(audit.get('quality_errors') or [])}")
 
     _emit_progress(progress, "repository", "Repository: analyzing snapshot", run_id=run_id)
@@ -180,6 +181,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         write_json(graph_dir / "audit.json", audit)
         write_json(graph_dir / "context-repair-history.json", context_repair_history)
         if not audit.get("quality_gate_passed"):
+            _emit_progress(progress, "graph", _graph_quality_gate_failure_message(audit), run_id=run_id)
             raise RuntimeError(f"graph quality gate failed after context repair: {'; '.join(audit.get('quality_errors') or [])}")
         agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
         write_json(graph_dir / "agent-audit.json", agent_audit)
@@ -318,6 +320,23 @@ def _emit_progress(
         progress(payload)
     except Exception:
         return
+
+
+def _graph_quality_gate_failure_message(audit: dict) -> str:
+    errors = [str(item) for item in audit.get("quality_errors", []) if str(item)]
+    missing_mapped = len(audit.get("missing_mapped_files") or [])
+    missing_file_nodes = len(audit.get("missing_file_nodes") or [])
+    parts = ["Graph: quality gate failed"]
+    if errors:
+        parts.append("; ".join(errors))
+    details = []
+    if missing_mapped:
+        details.append(f"missing_mapped_files={missing_mapped}")
+    if missing_file_nodes:
+        details.append(f"missing_file_nodes={missing_file_nodes}")
+    if details:
+        parts.append(f"({', '.join(details)})")
+    return " ".join(parts)
 
 
 def _map_graph_tasks_with_progress(

@@ -21,7 +21,7 @@ from codereview.graph.audit import audit_graph
 from codereview.graph.census import run_repository_census
 from codereview.graph.link import _valid_link_result
 from codereview.graph.merge import merge_graph_results, normalize_graph_for_inventory
-from codereview.inventory.git_inventory import build_git_inventory
+from codereview.inventory.git_inventory import analyzable_files, build_git_inventory
 from codereview.judge.runner import run_judge
 from codereview.judge.precheck import verify_repro_events_and_paths
 from codereview.judge.validate import local_judge
@@ -31,6 +31,7 @@ from codereview.repository.symbols import map_repository_symbols
 from codereview.repro.filesystem_guard import guard_worker_result
 from codereview.repro.runner import git_status_porcelain, worker_env
 from codereview.repro.worker_dir import create_worker_dir
+from codereview.snapshot import create_immutable_snapshot
 from codereview.templates import ensure_project_files
 from codereview.units.coverage import build_unit_coverage
 from codereview.units.context import write_review_units
@@ -161,6 +162,42 @@ def test_inventory_uses_current_full_repository_scope(tmp_path: Path) -> None:
     assert paths["untracked.py"]["scope"] == "analyze"
     assert paths[".codereview/config.json"]["scope"] == "excluded"
     assert inventory["summary"]["inventory_mode"] == "full-repository-snapshot"
+
+
+def test_inventory_excludes_tracked_paths_missing_from_worktree(tmp_path: Path) -> None:
+    checkout = tmp_path
+    subprocess.run(["git", "init"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=checkout, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=checkout, check=True)
+    removed = checkout / "removed.py"
+    removed.write_text("def removed():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "removed.py"], cwd=checkout, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    removed.unlink()
+
+    inventory = build_git_inventory(checkout, include_untracked=True)
+    paths = {item["path"]: item for item in inventory["files"]}
+
+    assert paths["removed.py"]["scope"] == "excluded"
+    assert paths["removed.py"]["reason"] == "missing-or-non-file"
+    assert "removed.py" not in {str(item.get("path") or "") for item in analyzable_files(inventory)}
+
+
+def test_snapshot_fails_before_graph_when_analyzable_inventory_file_is_missing(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    inventory = {"files": [{"path": "missing.py", "scope": "analyze"}]}
+
+    try:
+        create_immutable_snapshot(checkout, inventory, run)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected immutable snapshot creation to fail")
+
+    assert "immutable snapshot missing analyzable inventory files" in message
+    assert "missing.py" in message
 
 
 def test_repository_snapshot_uses_inventory_not_git_ref(tmp_path: Path) -> None:

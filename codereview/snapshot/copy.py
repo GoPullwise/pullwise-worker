@@ -13,6 +13,7 @@ def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dic
         shutil.rmtree(repo)
     repo.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
+    missing: list[str] = []
     for item in inventory.get("files", []):
         if not isinstance(item, dict) or item.get("scope") != "analyze":
             continue
@@ -22,10 +23,15 @@ def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dic
         source = checkout / rel
         target = repo / rel
         if not source.is_file():
+            missing.append(rel)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         copied.append(rel)
+    if missing:
+        sample = ", ".join(missing[:20])
+        more = f" and {len(missing) - 20} more" if len(missing) > 20 else ""
+        raise RuntimeError(f"immutable snapshot missing analyzable inventory files: {sample}{more}")
     copied_assets = _copy_codereview_assets(checkout, repo)
     manifest = {
         "snapshot_repo": str(repo),

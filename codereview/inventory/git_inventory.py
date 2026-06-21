@@ -161,6 +161,9 @@ def _file_entry(checkout: Path, rel: str, status: str) -> dict:
     if _is_excluded_path(rel):
         scope = "excluded"
         reason = "excluded-path"
+    elif not path.is_file():
+        scope = "excluded"
+        reason = "missing-or-non-file"
     elif binary:
         scope = "excluded"
         reason = "binary-file"

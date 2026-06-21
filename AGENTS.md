@@ -1,5 +1,13 @@
 # Pullwise Worker Agent Notes
 
+## Problem Solving Discipline
+
+When resolving failures or regressions, do not default to adding diagnostic
+patches or surface-level workarounds first. Identify the root cause from the
+current code and available evidence, then fix that root cause. Add diagnostics
+only when they directly support root-cause isolation or make a verified fix
+safer to operate.
+
 ## Worker Host Platform
 
 Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,
