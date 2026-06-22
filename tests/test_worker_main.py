@@ -398,6 +398,31 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             with self.assertRaises(worker_main.PullwiseRequestError):
                 client.claim()
 
+    def test_client_rejects_non_object_json_response(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b'["not", "an", "object"]'
+
+        with patch.object(worker_main.urllib.request, "urlopen", return_value=Response()):
+            with self.assertRaisesRegex(worker_main.PullwiseRequestError, "JSON response must be an object"):
+                client.claim()
+
     def test_worker_once_does_not_start_non_object_claimed_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -709,7 +709,9 @@ class PullwiseResponse:
             parsed = json.loads(self.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PullwiseRequestError(f"invalid JSON response: {exc}") from exc
-        return parsed if isinstance(parsed, dict) else {}
+        if not isinstance(parsed, dict):
+            raise PullwiseRequestError("JSON response must be an object")
+        return parsed
 
 
 class PullwiseClient:
