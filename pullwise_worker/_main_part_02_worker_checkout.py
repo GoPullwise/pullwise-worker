@@ -798,6 +798,8 @@ class Worker:
         path.unlink(missing_ok=True)
 
     def pending_result_upload_record(self, path: Path) -> tuple[str, dict]:
+        if path.parent.is_symlink():
+            raise PendingResultUploadRecordError("pending result upload directory must not be a symlink")
         if path.is_symlink():
             raise PendingResultUploadRecordError("pending result upload record must not be a symlink")
         try:

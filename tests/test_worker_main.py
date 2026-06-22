@@ -432,6 +432,36 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue((outside_spool / "job_spool.json").exists())
             self.assertIn("directory must not be a symlink", worker.last_error or "")
 
+    def test_pending_result_upload_record_rejects_symlinked_spool_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            outside_spool = root / "outside-spool"
+            outside_spool.mkdir()
+            (outside_spool / "job_spool.json").write_text(
+                json.dumps({"job_id": "job_spool", "payload": {"status": "done"}}),
+                encoding="utf-8",
+            )
+            (work_dir / ".pullwise-result-uploads").symlink_to(outside_spool, target_is_directory=True)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_spool")
+
+            with self.assertRaisesRegex(
+                worker_main.PendingResultUploadRecordError,
+                "directory must not be a symlink",
+            ):
+                worker.pending_result_upload_record(pending_path)
+
     def test_done_pending_result_upload_still_renews_job_until_collected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
