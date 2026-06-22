@@ -213,10 +213,12 @@ class WorkerFileLogTailer:
 
 
 def regular_log_file(path: Path) -> bool:
-    return path.is_file() and not path.is_symlink()
+    return not path.parent.is_symlink() and path.is_file() and not path.is_symlink()
 
 
 def open_log_file_no_follow(path: Path, mode: str, **kwargs):
+    if path.parent.is_symlink():
+        raise OSError(f"refusing to open log through symlinked directory: {path.parent}")
     if "w" in mode:
         flags = os.O_WRONLY | os.O_TRUNC
     elif "a" in mode:

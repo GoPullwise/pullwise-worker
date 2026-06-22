@@ -1683,6 +1683,22 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(offset, 0)
         self.assertEqual(partial, "")
 
+    def test_file_log_tailer_does_not_read_through_symlinked_log_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside_logs = root / "outside-logs"
+            outside_logs.mkdir()
+            (outside_logs / "scan-summary.log").write_text("outside secret\n", encoding="utf-8")
+            log_dir = root / "logs"
+            log_dir.symlink_to(outside_logs, target_is_directory=True)
+            tailer = worker_main.WorkerFileLogTailer(log_dir / "scan-summary.log")
+
+            entries, offset, partial = tailer.collect()
+
+        self.assertEqual(entries, [])
+        self.assertEqual(offset, 0)
+        self.assertEqual(partial, "")
+
     def test_file_log_tailer_read_does_not_follow_symlink_after_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1936,6 +1952,25 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             outside = root / "outside-summary.log"
             outside.write_text("outside secret\n", encoding="utf-8")
             (log_dir / "scan-summary.log").symlink_to(outside)
+            config = SimpleNamespace(service_name="pullwise-worker-wk_1", log_dir=log_dir)
+            output = io.StringIO()
+
+            with patch.object(worker_main.subprocess, "run", return_value=SimpleNamespace(returncode=0)), patch("sys.stdout", output):
+                code = worker_main.worker_logs(config, lines=5)
+
+            self.assertEqual(code, 0)
+            text = output.getvalue()
+            self.assertIn("scan summary log not found or empty", text)
+            self.assertNotIn("outside secret", text)
+
+    def test_worker_logs_does_not_read_through_symlinked_log_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside_logs = root / "outside-logs"
+            outside_logs.mkdir()
+            (outside_logs / "scan-summary.log").write_text("outside secret\n", encoding="utf-8")
+            log_dir = root / "logs"
+            log_dir.symlink_to(outside_logs, target_is_directory=True)
             config = SimpleNamespace(service_name="pullwise-worker-wk_1", log_dir=log_dir)
             output = io.StringIO()
 
