@@ -154,7 +154,7 @@ def graph_verified_severity(value: object) -> str:
     return text if text in {"critical", "high", "medium", "low", "info"} else "info"
 
 
-def graph_verified_completion_error(report: dict | None) -> str:
+def graph_verified_completion_error(report: dict | None, projected_findings: list[dict] | None = None) -> str:
     if not isinstance(report, dict) or not report:
         return "GraphVerified review did not produce a report."
     blocked_count = graph_verified_report_int(report.get("blockedCount"))
@@ -176,6 +176,9 @@ def graph_verified_completion_error(report: dict | None) -> str:
     confirmed = graph_verified_report_int(report.get("confirmedCount")) or graph_verified_report_int(reports.get("confirmed"))
     rejected = graph_verified_report_int(report.get("rejectedCount")) or graph_verified_report_int(reports.get("rejected"))
     blocked_total = blocked_count or graph_verified_report_int(reports.get("blocked"))
+    visible_findings = len(projected_findings) if isinstance(projected_findings, list) else 0
+    if confirmed > 0 and visible_findings == 0:
+        return "GraphVerified confirmed findings, but none were safe to show in the worker result payload."
 
     no_reportable_work = (
         confirmed == 0
@@ -953,7 +956,7 @@ class Worker:
             )
             summary = summarize(projected_findings)
             duration_ms = int((time.monotonic() - started) * 1000)
-            completion_error = graph_verified_completion_error(graph_verified_report)
+            completion_error = graph_verified_completion_error(graph_verified_report, projected_findings)
             result_status = "failed" if completion_error else "done"
             if completion_error:
                 logs_summary = completion_error[-1000:]

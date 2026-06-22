@@ -864,6 +864,77 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn('"status": "failed"', summary_text)
             self.assertIn("codex app-server request thread/start timed out", summary_text)
 
+    def test_run_job_fails_when_confirmed_graph_verified_items_are_not_reportable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_unreportable",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_unreportable",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+            unreportable_report = {
+                "version": "graph-verified-code-review/1",
+                "runId": "20260619-115900",
+                "confirmedCount": 1,
+                "rejectedCount": 0,
+                "blockedCount": 0,
+                "debugMarkdown": "Confirmed item lacked graph evidence.",
+                "finalJson": {"confirmed": [{"candidate": {"candidate_id": "c1", "severity": "high"}}]},
+                "summary": {
+                    "finder": {"results": 1, "blocked": 0, "candidates": 1},
+                    "candidates": {"valid": 1, "selectedForRepro": 0},
+                    "reports": {"confirmed": 1, "rejected": 0, "blocked": 0},
+                },
+            }
+
+            with patch.object(worker_main, "clone_repository", return_value="abc123"), patch.object(
+                worker_main,
+                "enforce_repository_limits",
+            ), patch.object(
+                worker_main,
+                "collect_preflight_metadata",
+                return_value={"summary": "preflight ok"},
+            ), patch.object(
+                worker_main,
+                "run_graph_verified_review_payload",
+                return_value=unreportable_report,
+            ), patch.object(
+                worker,
+                "upload_result_once_or_defer",
+                return_value=True,
+            ) as upload:
+                worker.run_job(job)
+
+            upload.assert_called_once()
+            payload = upload.call_args.args[1]
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["summary"], {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0})
+            self.assertIn("none were safe to show", payload["error"])
+
     def test_worker_run_once_claims_and_runs_one_job_without_capacity_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config = SimpleNamespace(
