@@ -37,7 +37,7 @@ from .templates import ensure_project_files
 from .units.context import write_review_units
 from .units.coverage import build_unit_coverage, require_full_unit_coverage
 from .units.planner import build_all_review_units
-from .utils.jsonl import write_json, write_jsonl
+from .utils.jsonl import write_json, write_jsonl, write_text
 from .utils.paths import safe_relative_path
 from .utils.process import raise_if_cancelled_callback_exception
 
@@ -339,7 +339,8 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     if stale_source and config.scan.fail_on_source_change:
         raise RuntimeError("source checkout changed during full-repository scan")
     (run / "reports").mkdir(parents=True, exist_ok=True)
-    (run / "reports" / "final.md").write_text(
+    write_text(
+        run / "reports" / "final.md",
         render_final_report(
             confirmed,
             rejected,
@@ -350,11 +351,10 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
             coverage=executed_coverage,
             snapshot=snapshot_manifest,
         ),
-        encoding="utf-8",
     )
-    (run / "reports" / "debug.md").write_text(
+    write_text(
+        run / "reports" / "debug.md",
         render_debug_report(snapshot, review_units, raw_candidates, selected, repro_results, judge_results, pipeline_summary),
-        encoding="utf-8",
     )
     return run / "reports" / "final.md"
 
