@@ -7,6 +7,7 @@ from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..inventory.git_inventory import analyzable_files
 from ..utils.jsonl import write_json, write_text
+from ..utils.paths import ensure_dir
 from .validate import validate_graph
 
 
@@ -101,7 +102,7 @@ def run_agent_graph_audit(checkout: Path, run: Path, graph: dict, inventory: dic
     prompt_file = checkout / ".codereview" / "prompts" / "graph-auditor.md"
     schema = checkout / ".codereview" / "schemas" / "graph-audit.schema.json"
     worker = run / "workers" / "graph-audit-0001"
-    worker.mkdir(parents=True, exist_ok=True)
+    ensure_dir(worker)
     if not prompt_file.is_file() or not schema.is_file():
         return {"status": "skipped", "reason": "graph auditor prompt or schema missing", "repairs": []}
     prompt = "\n\n".join(

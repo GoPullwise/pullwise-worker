@@ -4,9 +4,11 @@ import json
 import sqlite3
 from pathlib import Path
 
+from ..utils.paths import ensure_dir
+
 
 def rebuild_sqlite_index(graph: dict, db_path: Path) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(db_path.parent)
     with sqlite3.connect(db_path) as db:
         db.executescript(
             """

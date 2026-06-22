@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from ..utils.jsonl import write_json, write_text
+from ..utils.paths import ensure_dir
 from ..utils.paths import safe_path_component
 
 
@@ -13,7 +14,7 @@ def unit_file_stem(unit_id: object) -> str:
 
 def write_review_units(run: Path, units: list[dict]) -> None:
     units_dir = run / "artifacts" / "review-units"
-    units_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(units_dir)
     for unit in units:
         unit_id = str(unit.get("unit_id") or "")
         stem = unit_file_stem(unit_id)

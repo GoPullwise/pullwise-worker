@@ -333,6 +333,26 @@ def test_snapshot_fails_before_graph_when_analyzable_inventory_file_is_missing(t
     assert "missing.py" in message
 
 
+def test_snapshot_replaces_symlinked_snapshot_repo_without_touching_target(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    (checkout / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    outside = tmp_path / "outside-snapshot"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+    snapshot_repo = run / "workers" / "coordinator" / "snapshot" / "repo"
+    snapshot_repo.parent.mkdir(parents=True)
+    snapshot_repo.symlink_to(outside, target_is_directory=True)
+
+    manifest = create_immutable_snapshot(checkout, {"files": [{"path": "app.py", "scope": "analyze"}]}, run)
+
+    assert not snapshot_repo.is_symlink()
+    assert Path(str(manifest["snapshot_repo"])) == snapshot_repo
+    assert (snapshot_repo / "app.py").read_text(encoding="utf-8") == "print('ok')\n"
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
 def test_repository_snapshot_uses_inventory_not_git_ref(tmp_path: Path) -> None:
     checkout = tmp_path
     (checkout / "app.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
@@ -2009,6 +2029,29 @@ def test_app_server_state_lock_reports_busy_process_on_posix(tmp_path: Path) -> 
             raise AssertionError("second app-server state lock unexpectedly succeeded")
     finally:
         first_lock.release()
+
+
+def test_app_server_state_lock_does_not_follow_symlinked_lock_file(tmp_path: Path) -> None:
+    if not app_server_runner.app_server_state_lock_supported():
+        raise unittest.SkipTest("POSIX fcntl locks are not available on this platform.")
+
+    lock_dir = tmp_path / ".codex"
+    lock_dir.mkdir()
+    outside = tmp_path / "outside.lock"
+    outside.write_text("outside\n", encoding="utf-8")
+    lock_path = lock_dir / ".pullwise-app-server.lock"
+    lock_path.symlink_to(outside)
+    lock = app_server_runner.AppServerStateLock(lock_path, timeout_seconds=0)
+
+    try:
+        lock.acquire()
+    except OSError as exc:
+        assert "symlink" in str(exc).lower() or getattr(exc, "errno", None) is not None
+    else:
+        lock.release()
+        raise AssertionError("expected symlinked app-server lock file to be rejected")
+
+    assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
 def test_app_server_client_recycles_after_age_or_turn_limit(tmp_path: Path) -> None:

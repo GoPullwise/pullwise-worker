@@ -8,7 +8,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..utils.jsonl import write_json, write_text
-from ..utils.paths import safe_path_component
+from ..utils.paths import ensure_dir, safe_path_component
 from ..utils.process import raise_if_cancelled_callback_exception
 
 
@@ -115,7 +115,7 @@ def verify_candidate(
         return local
     candidate_id = str(candidate.get("issue_id") or candidate.get("candidate_id") or "candidate")
     worker = run / "candidate-verifier" / safe_path_component(candidate_id, default="candidate")
-    worker.mkdir(parents=True, exist_ok=True)
+    ensure_dir(worker)
     write_json(worker / "candidate.json", candidate)
     prompt = "\n\n".join(
         [

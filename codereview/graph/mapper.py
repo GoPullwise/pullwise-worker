@@ -10,6 +10,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..utils.jsonl import read_json, write_json, write_text
+from ..utils.paths import ensure_dir
 from ..utils.process import raise_if_cancelled_callback_exception
 from .cache import graph_cache_key
 from .contracts import confidence_for_evidence, language_for_path, risk_tags_for_path
@@ -188,7 +189,7 @@ def _map_task_with_policy(checkout: Path, task: dict, inventory_by_path: dict[st
 def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_path: dict[str, dict], config: ReviewConfig) -> dict:
     task_id = str(task.get("task_id") or "graph-map")
     worker = run / "workers" / task_id
-    worker.mkdir(parents=True, exist_ok=True)
+    ensure_dir(worker)
     task_payload = {
         **task,
         "files_metadata": [inventory_by_path.get(str(path), {"path": str(path)}) for path in task.get("files", [])],
@@ -263,7 +264,7 @@ def run_codex_graph_mapper_coordinator(
     config: ReviewConfig,
 ) -> list[dict]:
     worker = run / "workers" / _coordinator_worker_name(tasks)
-    worker.mkdir(parents=True, exist_ok=True)
+    ensure_dir(worker)
     payload = {
         "mapper_subagent_limit": max(1, int(getattr(config.graph, "mapper_subagent_limit", 6))),
         "jobs": [

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .config import CodexConfig
 from .utils.jsonl import write_text
+from .utils.paths import ensure_dir
 from .utils.process import ProcessCancelled, ProcessResult, process_cancel_requested
 
 try:
@@ -63,8 +64,8 @@ class AppServerStateLock:
     def acquire(self) -> None:
         if self.path is None or _fcntl is None:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8")
+        ensure_dir(self.path.parent)
+        handle = _open_lock_file(self.path)
         deadline = time.monotonic() + self.timeout_seconds
         while True:
             try:
@@ -100,6 +101,14 @@ def app_server_state_lock_supported() -> bool:
     return _fcntl is not None
 
 
+def _open_lock_file(path: Path):
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, "a+", encoding="utf-8")
+
+
 def prepare_app_server_state(env: dict[str, str] | None) -> None:
     source = env or {}
     for key in (
@@ -113,7 +122,7 @@ def prepare_app_server_state(env: dict[str, str] | None) -> None:
     ):
         value = str(source.get(key) or "").strip()
         if value:
-            Path(value).mkdir(parents=True, exist_ok=True)
+            ensure_dir(Path(value))
     codex_home = str(source.get("CODEX_HOME") or "").strip()
     if not codex_home:
         return

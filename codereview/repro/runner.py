@@ -11,7 +11,7 @@ from ..config import CodexConfig, ReviewConfig
 from ..judge.precheck import verify_repro_events_and_paths
 from ..judge.validate import validate_repro_result
 from ..units.context import unit_file_stem
-from ..utils.paths import safe_path_component
+from ..utils.paths import ensure_dir, safe_path_component
 from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception, run_process
 from .filesystem_guard import guard_worker_result
 from .worker_dir import create_worker_dir
@@ -176,7 +176,7 @@ def worker_env(worker: Path, codex: CodexConfig | None = None) -> dict[str, str]
 
     env = dict(codex.env) if codex is not None and codex.env else os.environ.copy()
     for child in ("home", "tmp", "cache", "cache/npm", "cache/pip", "cache/pycache"):
-        (worker / child).mkdir(parents=True, exist_ok=True)
+        ensure_dir(worker / child)
     shared_keys = set()
     if codex is not None and codex.env:
         for key in ("HOME", "USERPROFILE", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "PATH"):

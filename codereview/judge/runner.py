@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
-from ..utils.paths import safe_path_component
+from ..utils.paths import ensure_dir, safe_path_component
 from ..utils.process import raise_if_cancelled_callback_exception
 from .validate import local_judge, validate_judge_result
 
@@ -107,7 +107,7 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
     if not prompt_file.is_file() or not schema.is_file():
         return local
     output = run / "judge" / f"{safe_path_component(local['candidate_id'], default='candidate')}.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(output.parent)
     events = output.with_suffix(".events.jsonl")
     prompt = "\n\n".join(
         [

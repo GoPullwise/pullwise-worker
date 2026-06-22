@@ -4,14 +4,17 @@ import shutil
 from pathlib import Path
 
 from ..utils.jsonl import write_json
+from ..utils.paths import ensure_dir
 
 
 def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dict:
     snapshot_root = run / "workers" / "coordinator" / "snapshot"
     repo = snapshot_root / "repo"
-    if repo.exists():
+    if repo.is_symlink():
+        repo.unlink()
+    elif repo.exists():
         shutil.rmtree(repo)
-    repo.mkdir(parents=True, exist_ok=True)
+    ensure_dir(repo)
     copied: list[str] = []
     missing: list[str] = []
     for item in inventory.get("files", []):
@@ -25,7 +28,7 @@ def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dic
         if not source.is_file():
             missing.append(rel)
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_dir(target.parent)
         shutil.copy2(source, target)
         copied.append(rel)
     if missing:
@@ -49,7 +52,7 @@ def _copy_codereview_assets(checkout: Path, repo: Path) -> list[str]:
     if not source.is_dir():
         return []
     target = repo / ".codereview"
-    target.mkdir(parents=True, exist_ok=True)
+    ensure_dir(target)
     copied: list[str] = []
     for name in ("config.json",):
         source_file = source / name

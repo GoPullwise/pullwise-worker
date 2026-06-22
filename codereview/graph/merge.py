@@ -5,6 +5,7 @@ from pathlib import Path
 from ..inventory.file_hashes import sha256_file
 from ..inventory.git_inventory import analyzable_files
 from ..utils.jsonl import write_json, write_jsonl
+from ..utils.paths import ensure_dir
 from .contracts import language_for_path, risk_tags_for_path
 from .ids import file_node_id, stable_edge_id
 
@@ -180,7 +181,7 @@ def build_inline_indexes(graph: dict) -> dict:
 
 
 def write_graph_artifacts(graph_dir: Path, graph: dict) -> None:
-    graph_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(graph_dir)
     write_json(graph_dir / "manifest.json", graph.get("manifest") or {})
     write_jsonl(graph_dir / "nodes.jsonl", graph.get("nodes") or [])
     write_jsonl(graph_dir / "edges.jsonl", graph.get("edges") or [])

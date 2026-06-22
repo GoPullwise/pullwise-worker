@@ -6,6 +6,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..utils.jsonl import write_json, write_text
+from ..utils.paths import ensure_dir
 from .ids import stable_edge_id
 from .merge import build_inline_indexes
 
@@ -106,7 +107,7 @@ def _run_linker(
     index: int,
 ) -> dict:
     worker = run / "workers" / f"graph-link-{index + 1:04d}"
-    worker.mkdir(parents=True, exist_ok=True)
+    ensure_dir(worker)
     payload = {
         "unresolved_reference": ref,
         "candidate_targets": [

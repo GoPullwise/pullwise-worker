@@ -7,6 +7,7 @@ from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..inventory.git_inventory import analyzable_files
 from ..utils.jsonl import write_json, write_text
+from ..utils.paths import ensure_dir
 from ..utils.process import compact_process_output
 from .contracts import language_for_path, risk_tags_for_path
 
@@ -25,7 +26,7 @@ def run_repository_census(checkout: Path, run: Path, inventory: dict, config: Re
         raise RuntimeError("repository census prompt or schema missing")
 
     worker = run / "workers" / "census-0001"
-    worker.mkdir(parents=True, exist_ok=True)
+    ensure_dir(worker)
     task = {
         "inventory_summary": inventory.get("summary") or {},
         "files": [

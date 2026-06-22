@@ -10,6 +10,7 @@ from ..config import ReviewConfig
 from ..graph.ids import short_hash
 from ..units.context import unit_file_stem
 from ..utils.jsonl import write_json, write_text
+from ..utils.paths import ensure_dir
 from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception
 from .tasks import FinderTask
 
@@ -209,7 +210,7 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
     if not tasks:
         return []
     worker = run / "finder-batches" / finder_batch_id(tasks, batch_index=batch_index)
-    worker.mkdir(parents=True, exist_ok=True)
+    ensure_dir(worker)
     payload = finder_batch_payload(checkout, run, tasks, config)
     prompt = finder_batch_prompt(checkout, payload)
     write_json(worker / "task.json", payload)
@@ -361,7 +362,7 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
     context_file = run / "artifacts" / "review-units" / f"{stem}.context.md"
     prompt = prompt_file.read_text(encoding="utf-8") + "\n\nInput context pack:\n" + context_file.read_text(encoding="utf-8")
     output = run / "finder" / task.focus / f"{stem}.result.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(output.parent)
     events = output.with_suffix(".events.jsonl")
     result = run_codex_turn(
         cd=checkout,

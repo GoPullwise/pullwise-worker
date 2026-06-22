@@ -38,7 +38,7 @@ from .units.context import write_review_units
 from .units.coverage import build_unit_coverage, require_full_unit_coverage
 from .units.planner import build_all_review_units
 from .utils.jsonl import write_json, write_jsonl, write_text
-from .utils.paths import safe_relative_path
+from .utils.paths import ensure_dir, safe_relative_path
 from .utils.process import raise_if_cancelled_callback_exception
 
 
@@ -51,7 +51,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     config = load_config(checkout, mode=mode, scan_mode=scan_mode)
     run_id = time.strftime("%Y%m%d-%H%M%S")
     run = checkout / ".codereview" / "runs" / run_id
-    run.mkdir(parents=True, exist_ok=True)
+    ensure_dir(run)
     write_json(run / "meta.json", {"run_id": run_id, "mode": config.mode, "scan_mode": config.scan.mode, "scope": "full-repository"})
     _emit_progress(progress, "setup", "GraphVerified: preparing run", run_id=run_id)
 
@@ -338,7 +338,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     write_json(run / "source_state_after.json", {**source_state_after, "changed_during_scan": stale_source})
     if stale_source and config.scan.fail_on_source_change:
         raise RuntimeError("source checkout changed during full-repository scan")
-    (run / "reports").mkdir(parents=True, exist_ok=True)
+    ensure_dir(run / "reports")
     write_text(
         run / "reports" / "final.md",
         render_final_report(

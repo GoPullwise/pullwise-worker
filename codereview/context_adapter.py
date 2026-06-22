@@ -6,7 +6,7 @@ from pathlib import Path
 from .codex_runner import base_env, run_codex_turn
 from .config import ReviewConfig, auxiliary_codex_config
 from .utils.jsonl import write_json
-from .utils.paths import safe_relative_path
+from .utils.paths import ensure_dir, safe_relative_path
 from .utils.process import ProcessResult
 
 
@@ -35,7 +35,7 @@ def symbol_context(
         return wrap_context(seed, static_payload(seed, reason="context generation disabled"), process=None)
 
     output = run / "context" / f"{name}.result.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(output.parent)
     codex_config = auxiliary_codex_config(config)
     process = run_codex_turn(
         cd=checkout,
