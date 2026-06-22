@@ -2427,6 +2427,57 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["blockedCount"], 1)
         self.assertIn("must not be a symlink: confirmed.json", payload["debugMarkdown"])
 
+    def test_run_graph_verified_review_payload_read_does_not_follow_symlink_after_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            reports = root / ".codereview" / "runs" / "run_1" / "reports"
+            reports.mkdir(parents=True)
+            outside = root / "outside"
+            outside.mkdir()
+            outside_final = outside / "final.md"
+            outside_final.write_text("# Outside Final\n", encoding="utf-8")
+            outside_debug = outside / "debug.md"
+            outside_debug.write_text("# Outside Debug\n", encoding="utf-8")
+            outside_confirmed = outside / "confirmed.json"
+            outside_confirmed.write_text(json.dumps([{"candidate": {"candidate_id": "outside"}}]), encoding="utf-8")
+            outside_rejected = outside / "rejected.json"
+            outside_rejected.write_text(json.dumps([{"candidate_id": "outside-rejected"}]), encoding="utf-8")
+            outside_final_json = outside / "final.json"
+            outside_final_json.write_text(
+                json.dumps({"confirmed": [{"candidate": {"candidate_id": "outside"}}]}),
+                encoding="utf-8",
+            )
+            outside_summary = outside / "summary.json"
+            outside_summary.write_text(json.dumps({"reports": {"blocked": 7}}), encoding="utf-8")
+            final_md = reports / "final.md"
+            final_md.symlink_to(outside_final)
+            (reports / "debug.md").symlink_to(outside_debug)
+            (reports / "confirmed.json").symlink_to(outside_confirmed)
+            (reports / "rejected.json").symlink_to(outside_rejected)
+            (reports / "final.json").symlink_to(outside_final_json)
+            (reports / "summary.json").symlink_to(outside_summary)
+            codereview_main = importlib.import_module("codereview.main")
+
+            with patch.object(codereview_main, "run_review", return_value=final_md), patch.object(
+                worker_main,
+                "graph_verified_report_artifact_error",
+                return_value="",
+            ), patch.object(worker_main, "graph_verified_regular_file", return_value=True):
+                payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    root,
+                )
+
+        self.assertEqual(payload["confirmedCount"], 0)
+        self.assertEqual(payload["rejectedCount"], 0)
+        self.assertEqual(payload["blockedCount"], 0)
+        self.assertEqual(payload["finalMarkdown"], "")
+        self.assertEqual(payload["debugMarkdown"], "")
+        self.assertEqual(payload["finalJson"], {"confirmed": []})
+        self.assertEqual(payload["summary"], {})
+
     def test_run_graph_verified_review_payload_rejects_report_outside_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

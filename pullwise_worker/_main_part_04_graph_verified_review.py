@@ -27,7 +27,6 @@ def graph_verified_toml_string(value: object) -> str:
 
 def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, progress_callback=None) -> dict:
     from codereview.main import run_review
-    from codereview.utils.jsonl import read_json
 
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
     graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
@@ -47,10 +46,10 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     report_error = graph_verified_report_artifact_error(final_path, checkout_dir)
     if report_error:
         return graph_verified_failed_report(mode, scan_mode, report_error)
-    confirmed = read_json(reports / "confirmed.json", [])
-    rejected = read_json(reports / "rejected.json", [])
-    final_json = read_json(reports / "final.json", {"confirmed": []})
-    pipeline_summary = read_json(reports / "summary.json", {})
+    confirmed = graph_verified_read_json_artifact(reports / "confirmed.json", [])
+    rejected = graph_verified_read_json_artifact(reports / "rejected.json", [])
+    final_json = graph_verified_read_json_artifact(reports / "final.json", {"confirmed": []})
+    pipeline_summary = graph_verified_read_json_artifact(reports / "summary.json", {})
     report_counts = (
         pipeline_summary.get("reports")
         if isinstance(pipeline_summary, dict) and isinstance(pipeline_summary.get("reports"), dict)
@@ -66,8 +65,8 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
         "blockedCount": graph_verified_count(report_counts.get("blocked")),
-        "finalMarkdown": final_path.read_text(encoding="utf-8") if graph_verified_regular_file(final_path) else "",
-        "debugMarkdown": (reports / "debug.md").read_text(encoding="utf-8") if graph_verified_regular_file(reports / "debug.md") else "",
+        "finalMarkdown": graph_verified_read_text_artifact(final_path),
+        "debugMarkdown": graph_verified_read_text_artifact(reports / "debug.md"),
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
         "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
@@ -111,7 +110,7 @@ def graph_verified_report_artifact_error(final_path: Path, checkout_dir: Path | 
         if not path.is_file():
             return f"GraphVerified report artifact is missing: {filename}."
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(read_no_follow_text_file(path))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return f"GraphVerified report artifact is unreadable: {filename}: {exc}."
         if not isinstance(payload, expected_type):
@@ -135,6 +134,24 @@ def graph_verified_report_location_error(final_path: Path, checkout_dir: Path) -
 
 def graph_verified_regular_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
+
+
+def graph_verified_read_text_artifact(path: Path) -> str:
+    if not graph_verified_regular_file(path):
+        return ""
+    try:
+        return read_no_follow_text_file(path)
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def graph_verified_read_json_artifact(path: Path, default: object) -> object:
+    if not graph_verified_regular_file(path):
+        return default
+    try:
+        return json.loads(read_no_follow_text_file(path))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return default
 
 
 def graph_verified_progress_message(value: object) -> str:
@@ -178,9 +195,9 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
     current: dict = {}
     if path.is_file():
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(read_no_follow_text_file(path))
             current = loaded if isinstance(loaded, dict) else {}
-        except json.JSONDecodeError:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             current = {}
     current["mode"] = graph_verified_mode(mode)
     for stale_key in ("codegraph", "impact"):
