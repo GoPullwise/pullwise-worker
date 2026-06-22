@@ -1067,6 +1067,21 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(batch_sizes, [500, 500, 201])
             self.assertEqual(tailer.committed, {"journal_cursor": "cursor-final", "summary_offset": 1201})
 
+    def test_file_log_tailer_drops_partial_after_truncate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "scan-summary.log"
+            path.write_text("old partial", encoding="utf-8")
+            tailer = worker_main.WorkerFileLogTailer(path)
+            tailer.partial = "stale partial "
+            tailer.offset = 999
+            path.write_text("new line\n", encoding="utf-8")
+
+            entries, offset, partial = tailer.collect()
+
+        self.assertEqual([entry["line"] for entry in entries], ["new line"])
+        self.assertEqual(offset, len("new line\n"))
+        self.assertEqual(partial, "")
+
     def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

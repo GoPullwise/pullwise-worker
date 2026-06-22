@@ -179,7 +179,9 @@ class WorkerFileLogTailer:
             size = self.path.stat().st_size
         except OSError:
             return [], self.offset, self.partial
-        start = self.offset if 0 <= self.offset <= size else 0
+        truncated = not (0 <= self.offset <= size)
+        start = 0 if truncated else self.offset
+        partial = "" if truncated else self.partial
         try:
             with self.path.open("rb") as stream:
                 stream.seek(start)
@@ -188,8 +190,8 @@ class WorkerFileLogTailer:
         except OSError:
             return [], self.offset, self.partial
         if not chunk:
-            return [], next_offset, self.partial
-        text = self.partial + chunk.decode("utf-8", errors="replace")
+            return [], next_offset, partial
+        text = partial + chunk.decode("utf-8", errors="replace")
         parts = text.splitlines(keepends=True)
         next_partial = ""
         if parts and not parts[-1].endswith(("\n", "\r")):
