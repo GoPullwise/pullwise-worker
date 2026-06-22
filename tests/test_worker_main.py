@@ -259,6 +259,76 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertNotIn("max_concurrent_jobs", captured["payload"])
         self.assertNotIn("free_slots", captured["payload"])
 
+    def test_claim_rejects_non_object_job_payload(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"job": "not-an-object"}'
+
+        with patch.object(worker_main.urllib.request, "urlopen", return_value=Response()):
+            with self.assertRaises(worker_main.PullwiseRequestError):
+                client.claim()
+
+    def test_worker_once_does_not_start_non_object_claimed_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_claim",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024,
+                machine_metrics_interval_seconds=10**9,
+                cleanup_interval_seconds=10**9,
+                readiness_check_seconds=10**9,
+                poll_seconds=0,
+                max_backoff_seconds=1,
+                poll_jitter_seconds=0,
+                lifecycle_watcher_enabled=False,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker._doctor_status = "ok"
+
+            with patch.object(worker, "refresh_readiness_if_due", return_value=True), patch.object(
+                worker.client,
+                "heartbeat",
+                return_value={"worker": {"status": "idle"}},
+            ), patch.object(
+                worker.client,
+                "claim",
+                side_effect=worker_main.PullwiseRequestError("claim response job must be an object"),
+            ), patch.object(worker, "run_job") as run_job:
+                worker.run(once=True)
+
+            run_job.assert_not_called()
+            self.assertIn("job claim failed", worker.last_error or "")
+
     def test_run_job_uploads_result_when_progress_updates_fail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

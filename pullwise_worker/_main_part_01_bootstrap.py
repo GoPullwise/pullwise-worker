@@ -821,7 +821,12 @@ class PullwiseClient:
 
     def claim(self) -> dict | None:
         response = self.post("/worker/jobs/claim", {"worker_id": self.config.worker_id})
-        return response.json().get("job")
+        job = response.json().get("job")
+        if job is None:
+            return None
+        if not isinstance(job, dict):
+            raise PullwiseRequestError("claim response job must be an object")
+        return job
 
     def progress(
         self,
