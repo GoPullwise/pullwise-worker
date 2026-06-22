@@ -15,7 +15,11 @@ def write_json(path: Path, value: object) -> None:
 def read_json(path: Path, default: object = None) -> object:
     if not path.is_file():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        text = read_text(path)
+    except OSError:
+        return default
+    return json.loads(text)
 
 
 def write_jsonl(path: Path, rows: list[object]) -> None:
@@ -29,11 +33,24 @@ def read_jsonl(path: Path) -> list[object]:
     if not path.is_file():
         return []
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = read_text(path)
+    except OSError:
+        return []
+    for line in text.splitlines():
         line = line.strip()
         if line:
             rows.append(json.loads(line))
     return rows
+
+
+def read_text(path: Path) -> str:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read()
 
 
 def write_text(path: Path, text: str) -> None:
