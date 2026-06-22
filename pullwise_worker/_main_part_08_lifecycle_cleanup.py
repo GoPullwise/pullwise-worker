@@ -940,9 +940,9 @@ def cleanup_logs(config: WorkerConfig, *, active_job_ids: set[str] | None = None
     files: list[tuple[float, Path]] = []
     for path in config.log_dir.rglob("*"):
         try:
-            if not path.is_file() or log_path_has_active_job_id(path, config.log_dir, active):
+            if path.is_symlink() or not path.is_file() or log_path_has_active_job_id(path, config.log_dir, active):
                 continue
-            stat = path.stat()
+            stat = path.lstat()
         except OSError:
             continue
         if config.log_retention_seconds and stat.st_mtime < now_ts - config.log_retention_seconds:
@@ -972,7 +972,7 @@ def log_path_has_active_job_id(path: Path, log_dir: Path, active_job_ids: set[st
 
 def prune_empty_directories(root: Path) -> None:
     directories = sorted(
-        [item for item in root.rglob("*") if item.is_dir()],
+        [item for item in root.rglob("*") if item.is_dir() and not item.is_symlink()],
         key=lambda item: len(item.parts),
         reverse=True,
     )

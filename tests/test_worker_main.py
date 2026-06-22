@@ -5,10 +5,12 @@ import gzip
 import io
 import json
 import hashlib
+import os
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import importlib
 from pathlib import Path
@@ -1435,6 +1437,27 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertIn("log stream collection failed", watcher.last_error or "")
         self.assertIn("tailer broke", watcher.last_error or "")
+
+    def test_cleanup_logs_ignores_symlinked_log_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            outside = root / "outside.log"
+            outside.write_text("outside", encoding="utf-8")
+            symlinked = log_dir / "linked.log"
+            symlinked.symlink_to(outside)
+            expired = log_dir / "expired.log"
+            expired.write_text("expired", encoding="utf-8")
+            old_ts = time.time() - 3600
+            os.utime(expired, (old_ts, old_ts))
+            config = SimpleNamespace(log_dir=log_dir, log_retention_seconds=1, max_log_bytes=1024 * 1024)
+
+            worker_main.cleanup_logs(config)
+
+            self.assertFalse(expired.exists())
+            self.assertTrue(symlinked.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
 
     def test_journal_log_tailer_reports_unavailable_once_and_backs_off(self) -> None:
         tailer = worker_main.WorkerJournalLogTailer("pullwise-worker-wk_1", since_timestamp=1781200000)
