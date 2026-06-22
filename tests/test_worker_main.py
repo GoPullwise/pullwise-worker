@@ -1374,6 +1374,22 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_directory_size_does_not_follow_symlinked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            measured = root / "measured"
+            outside = root / "outside"
+            measured.mkdir()
+            outside.mkdir()
+            (measured / "small.log").write_text("small", encoding="utf-8")
+            large = outside / "large.log"
+            large.write_bytes(b"x" * 4096)
+            (measured / "linked.log").symlink_to(large)
+
+            size = worker_main.directory_size(measured)
+
+        self.assertEqual(size, len("small"))
+
     def test_service_user_doctor_command_exports_codex_sqlite_home(self) -> None:
         cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")
 

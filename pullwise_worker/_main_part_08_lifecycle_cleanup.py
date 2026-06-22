@@ -1032,10 +1032,11 @@ def directory_size(path: Path) -> int:
     total = 0
     for item in path.rglob("*"):
         try:
-            if item.is_file():
-                total += item.stat().st_size
+            stat_result = item.lstat()
         except OSError:
             continue
+        if stat.S_ISREG(stat_result.st_mode):
+            total += stat_result.st_size
     return total
 
 
