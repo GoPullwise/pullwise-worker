@@ -1669,6 +1669,51 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         run_job.assert_called_once_with({"job_id": "job_inline"})
 
+    def test_worker_run_once_ignores_lifecycle_command_with_invalid_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                work_dir=Path(tmp_dir),
+                poll_seconds=1,
+                poll_jitter_seconds=0,
+                max_backoff_seconds=1,
+                machine_metrics_interval_seconds=3600,
+                cleanup_interval_seconds=3600,
+                lifecycle_watcher_enabled=False,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+
+            with patch.object(worker, "refresh_readiness_if_due", return_value=True), patch.object(
+                worker, "machine_metrics_if_due", return_value=None
+            ), patch.object(
+                worker.client,
+                "heartbeat",
+                return_value={"worker": {"status": "idle"}, "command": {"id": "cmd_bad\nnext", "command": "stop"}},
+            ), patch.object(worker.client, "command_status") as command_status, patch.object(
+                worker.client,
+                "claim",
+                return_value={"job_id": "job_inline"},
+            ), patch.object(
+                worker,
+                "run_job",
+            ) as run_job:
+                worker.run(once=True)
+
+        command_status.assert_not_called()
+        run_job.assert_called_once_with({"job_id": "job_inline"})
+
+    def test_lifecycle_command_parts_rejects_unsafe_command_ids(self) -> None:
+        self.assertIsNone(worker_main.lifecycle_command_parts({"id": "cmd_bad\nnext", "command": "stop"}))
+        self.assertIsNone(worker_main.lifecycle_command_parts({"id": "cmd_bad\x00next", "command": "stop"}))
+        self.assertIsNone(worker_main.lifecycle_command_parts({"id": "x" * 129, "command": "stop"}))
+        self.assertEqual(
+            worker_main.lifecycle_command_parts({"id": "cmd/a?b", "command": " STOP "}),
+            ("cmd/a?b", "stop"),
+        )
+
     def test_worker_run_once_schedules_cleanup_when_idle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config = SimpleNamespace(

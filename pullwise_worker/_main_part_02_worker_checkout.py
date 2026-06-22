@@ -1282,8 +1282,10 @@ def lifecycle_command_parts(command: object) -> tuple[str, str] | None:
     if not isinstance(command, dict):
         return None
     command_id = str(command.get("id") or "").strip()
+    if not command_id or len(command_id) > 128 or any(char in command_id for char in "\r\n\x00"):
+        return None
     action = str(command.get("command") or "").strip().lower()
-    if not command_id or action not in {"stop", "uninstall"}:
+    if action not in {"stop", "uninstall"}:
         return None
     return command_id, action
 
