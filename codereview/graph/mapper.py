@@ -450,7 +450,7 @@ def _blocked_task_result(task: dict, reason: str, process: dict | None = None) -
 
 
 def _load_cached_task_result(checkout: Path, task: dict, inventory_by_path: dict[str, dict], config: ReviewConfig) -> dict | None:
-    if not getattr(config.graph, "incremental", True) or task.get("double_mapped"):
+    if not _task_cache_enabled(task, config):
         return None
     path = _task_cache_path(checkout, task, inventory_by_path, config)
     cached = read_json(path, default=None)
@@ -462,7 +462,7 @@ def _load_cached_task_result(checkout: Path, task: dict, inventory_by_path: dict
 
 
 def _save_cached_task_result(checkout: Path, task: dict, inventory_by_path: dict[str, dict], config: ReviewConfig, result: dict) -> None:
-    if not getattr(config.graph, "incremental", True) or task.get("double_mapped"):
+    if not _task_cache_enabled(task, config):
         return
     path = _task_cache_path(checkout, task, inventory_by_path, config)
     payload = dict(result)
@@ -470,6 +470,19 @@ def _save_cached_task_result(checkout: Path, task: dict, inventory_by_path: dict
     payload.pop("codex_process", None)
     payload["cache_key"] = path.stem
     write_json(path, payload)
+
+
+def _task_cache_enabled(task: dict, config: ReviewConfig) -> bool:
+    if not getattr(config.graph, "incremental", True) or task.get("double_mapped"):
+        return False
+    task_id = str(task.get("task_id") or "")
+    shard_id = str(task.get("shard_id") or "")
+    reason = str(task.get("reason") or "").lower()
+    if task_id.startswith(("graph-repair-", "context-repair-")) or shard_id.startswith(("repair-", "context-repair-")):
+        return False
+    if "repair" in reason:
+        return False
+    return True
 
 
 def _task_cache_path(checkout: Path, task: dict, inventory_by_path: dict[str, dict], config: ReviewConfig) -> Path:

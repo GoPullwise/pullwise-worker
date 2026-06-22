@@ -768,6 +768,51 @@ def test_dual_map_conflicts_ignore_blocked_shards() -> None:
     assert merge_graph_results([ok_result, other_ok_result])["conflicts"]
 
 
+def test_graph_repair_tasks_bypass_mapper_cache(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    app = checkout / "app.py"
+    app.write_text("def app():\n    return 1\n", encoding="utf-8")
+    inventory_by_path = {
+        "app.py": {
+            "path": "app.py",
+            "scope": "analyze",
+            "size_bytes": app.stat().st_size,
+            "line_count": 2,
+            "content_hash": "hash-app",
+            "extension": ".py",
+        }
+    }
+    config = ReviewConfig()
+    config.graph.incremental = True
+    config.graph.codex_mappers = False
+    normal_task = {"task_id": "graph-map-0001", "shard_id": "shard-0001", "mapper_index": 1, "files": ["app.py"]}
+    repair_task = {
+        "task_id": "graph-repair-0002",
+        "shard_id": "repair-0002",
+        "mapper_index": 1,
+        "files": ["app.py"],
+        "reason": "graph audit repair",
+    }
+    cached_result = {
+        "task_id": "graph-map-0001",
+        "shard_id": "shard-0001",
+        "mapper_index": 1,
+        "files": ["app.py"],
+        "nodes": [],
+        "edges": [],
+        "unresolved_refs": [],
+        "coverage": {"assigned_files": ["app.py"], "mapped_files": ["app.py"]},
+        "status": "ok",
+    }
+
+    graph_mapper_module._save_cached_task_result(checkout, normal_task, inventory_by_path, config, cached_result)
+
+    assert graph_mapper_module._load_cached_task_result(checkout, normal_task, inventory_by_path, config)["cache_hit"] is True
+    assert graph_mapper_module._load_cached_task_result(checkout, repair_task, inventory_by_path, config) is None
+
+
 def test_deterministic_graph_config_does_not_disable_codex_enrichment() -> None:
     config = ReviewConfig()
     config.graph.codex_mappers = True
