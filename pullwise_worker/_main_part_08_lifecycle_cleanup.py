@@ -463,7 +463,11 @@ def safe_remote_service_home_target(service_home: Path, work_dir: Path) -> bool:
         return False
     if path_is_root(service_home):
         return False
-    return service_home.resolve(strict=False).name not in {"", "pullwise-worker"}
+    resolved_home = service_home.resolve(strict=False)
+    resolved_work = work_dir.resolve(strict=False)
+    if resolved_home.name in {"", "pullwise-worker"}:
+        return False
+    return resolved_work == resolved_home or resolved_work.parent == resolved_home
 
 
 def safe_worker_instance_log_target(log_dir: Path, config: WorkerConfig | None = None) -> bool:

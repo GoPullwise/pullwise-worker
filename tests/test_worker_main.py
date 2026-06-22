@@ -1390,6 +1390,24 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertEqual(size, len("small"))
 
+    def test_remote_service_home_target_rejects_broad_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            broad_home = root / "var-lib"
+            work_dir = broad_home / "pullwise-worker" / "wk_1"
+            work_dir.mkdir(parents=True)
+
+            self.assertFalse(worker_main.safe_remote_service_home_target(broad_home, work_dir))
+
+    def test_remote_service_home_target_allows_instance_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            service_home = root / "wk_1"
+            work_dir = service_home / "work"
+            work_dir.mkdir(parents=True)
+
+            self.assertTrue(worker_main.safe_remote_service_home_target(service_home, work_dir))
+
     def test_service_user_doctor_command_exports_codex_sqlite_home(self) -> None:
         cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")
 
