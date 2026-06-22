@@ -3,12 +3,25 @@ from __future__ import annotations
 import json
 
 
+def _candidate_id(item: dict) -> str:
+    return str(item.get("issue_id") or item.get("candidate_id") or "").strip()
+
+
+def _index_by_candidate_id(items: list[dict]) -> dict[str, dict]:
+    indexed = {}
+    for item in items:
+        candidate_id = _candidate_id(item)
+        if candidate_id:
+            indexed[candidate_id] = item
+    return indexed
+
+
 def collect_confirmed(candidates: list[dict], repro_results: list[dict], judge_results: list[dict]) -> list[dict]:
-    by_id = {str(item.get("issue_id") or ""): item for item in candidates}
-    repro_by_id = {str(item.get("candidate_id") or ""): item for item in repro_results}
+    by_id = _index_by_candidate_id(candidates)
+    repro_by_id = _index_by_candidate_id(repro_results)
     confirmed = []
     for judge in judge_results:
-        candidate_id = str(judge.get("candidate_id") or "")
+        candidate_id = _candidate_id(judge)
         if judge.get("status") == "confirmed" and judge.get("safe_to_show_user") is True:
             confirmed.append({"candidate": by_id.get(candidate_id, {}), "repro": repro_by_id.get(candidate_id, {}), "judge": judge})
     return confirmed
@@ -16,7 +29,7 @@ def collect_confirmed(candidates: list[dict], repro_results: list[dict], judge_r
 
 def collect_rejected(candidates: list[dict], repro_results: list[dict], judge_results: list[dict]) -> list[dict]:
     confirmed_ids = {
-        str(item.get("candidate_id") or "")
+        _candidate_id(item)
         for item in judge_results
         if item.get("status") == "confirmed" and item.get("safe_to_show_user") is True
     }
@@ -24,11 +37,11 @@ def collect_rejected(candidates: list[dict], repro_results: list[dict], judge_re
     for judge in judge_results:
         if judge.get("status") == "confirmed" and judge.get("safe_to_show_user") is True:
             continue
-        candidate_id = str(judge.get("candidate_id") or "")
+        candidate_id = _candidate_id(judge)
         if candidate_id:
             rejected_by_id[candidate_id] = str(judge.get("reason") or "not confirmed by judge")
     for candidate in candidates:
-        issue_id = str(candidate.get("issue_id") or "")
+        issue_id = _candidate_id(candidate)
         if issue_id and issue_id not in confirmed_ids and issue_id not in rejected_by_id:
             rejected_by_id[issue_id] = "not confirmed by judge"
     return [{"candidate_id": candidate_id, "reason": reason} for candidate_id, reason in rejected_by_id.items()]

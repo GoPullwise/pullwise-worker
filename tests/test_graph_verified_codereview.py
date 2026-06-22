@@ -489,6 +489,27 @@ def test_collect_rejected_keeps_unsafe_confirmed_judge_visible() -> None:
     assert rejected == [{"candidate_id": "issue_1", "reason": "not safe"}]
 
 
+def test_collect_confirmed_resolves_candidate_id_without_issue_id() -> None:
+    confirmed = collect_confirmed(
+        [{"candidate_id": "issue_1", "claim": "Confirmed candidate"}],
+        [{"candidate_id": "issue_1", "worker": "/tmp/worker"}],
+        [{"candidate_id": "issue_1", "status": "confirmed", "safe_to_show_user": True}],
+    )
+
+    assert confirmed[0]["candidate"]["claim"] == "Confirmed candidate"
+    assert confirmed[0]["repro"]["worker"] == "/tmp/worker"
+
+
+def test_collect_rejected_resolves_candidate_id_without_issue_id() -> None:
+    rejected = collect_rejected(
+        [{"candidate_id": "issue_1"}],
+        [],
+        [],
+    )
+
+    assert rejected == [{"candidate_id": "issue_1", "reason": "not confirmed by judge"}]
+
+
 def test_graph_normalizer_repairs_live_quality_gate_failures(tmp_path: Path) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
