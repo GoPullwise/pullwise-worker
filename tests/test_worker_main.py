@@ -1198,7 +1198,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 "commit": first_commit,
             }
 
-            with patch.object(worker_main, "run_git_command", wraps=worker_main.run_git_command) as run_git:
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+                worker_main, "run_git_command", wraps=worker_main.run_git_command
+            ) as run_git:
                 resolved_first = worker_main.clone_repository(job, first_checkout)
                 resolved_second = worker_main.clone_repository({**job, "commit": second_commit}, second_checkout)
 
@@ -1235,12 +1237,39 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 "commit": first_commit,
             }
 
-            with patch.object(worker_main, "run_git_command") as run_git:
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+                worker_main, "run_git_command"
+            ) as run_git:
                 with self.assertRaisesRegex(RuntimeError, "cache root must not be a symlink"):
                     worker_main.clone_repository(job, checkout)
 
             run_git.assert_not_called()
             self.assertEqual(list(outside_cache.iterdir()), [])
+
+    def test_clone_repository_rejects_untrusted_clone_urls_before_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            checkout = root / "work" / "job_1"
+            local_job = {
+                "repo": "owner/repo",
+                "clone_url": str(root / "source"),
+                "branch": "main",
+                "commit": "pending",
+            }
+            mismatched_repo_job = {
+                "repo": "owner/repo",
+                "clone_url": "https://github.com/other/repo.git",
+                "branch": "main",
+                "commit": "pending",
+            }
+
+            with patch.object(worker_main, "run_git_command") as run_git:
+                with self.assertRaisesRegex(RuntimeError, "HTTP\\(S\\) GitHub URL"):
+                    worker_main.clone_repository(local_job, checkout)
+                with self.assertRaisesRegex(RuntimeError, "path does not match"):
+                    worker_main.clone_repository(mismatched_repo_job, checkout)
+
+            run_git.assert_not_called()
 
     def test_clone_repository_rejects_invalid_git_ref_inputs_before_fetch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

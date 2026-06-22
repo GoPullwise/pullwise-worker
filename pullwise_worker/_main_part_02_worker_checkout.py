@@ -1341,6 +1341,7 @@ def clone_repository(job: dict, checkout_dir: Path) -> str:
     if not clone_url:
         repo = str(job.get("repo") or "")
         clone_url = f"{worker_github_web_url()}/{repo}.git"
+    clone_url = trusted_or_local_clone_url(job, clone_url, clone_token)
     if clone_token_value(clone_token):
         clone_url = trusted_clone_url_for_token(job, clone_url, clone_token)
     git_env = git_auth_env(clone_token, clone_url, job.get("repo"))
@@ -1613,6 +1614,20 @@ def trusted_clone_url_for_repo(repo: object, clone_url: object) -> str:
 
 def trusted_clone_url_for_token(job: dict | None, clone_url: object, clone_token: object) -> str:
     return trusted_clone_url_for_repo(expected_clone_repo(job, clone_token), clone_url)
+
+
+def trusted_or_local_clone_url(job: dict | None, clone_url: object, clone_token: object = None) -> str:
+    text = str(clone_url or "").strip()
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme in {"http", "https"}:
+        return trusted_clone_url_for_token(job, text, clone_token)
+    if clone_token_value(clone_token):
+        return trusted_clone_url_for_token(job, text, clone_token)
+    if env_bool("PULLWISE_ALLOW_LOCAL_CLONE_URLS", False):
+        if not text or any(char in text for char in "\r\n"):
+            raise RuntimeError("Repository clone URL must not be empty or contain newlines.")
+        return text
+    raise RuntimeError("Repository clone URL must be an HTTP(S) GitHub URL.")
 
 
 def git_extra_header_key(clone_url: str) -> str:
