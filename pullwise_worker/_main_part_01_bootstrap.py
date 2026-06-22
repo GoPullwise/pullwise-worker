@@ -741,7 +741,7 @@ class PullwiseClient:
             with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(response.read())
         except urllib.error.HTTPError as exc:
-            raise PullwiseHTTPError(http_error_message(exc), exc.code) from exc
+            raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
@@ -755,7 +755,7 @@ class PullwiseClient:
             with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(response.read())
         except urllib.error.HTTPError as exc:
-            raise PullwiseHTTPError(http_error_message(exc), exc.code) from exc
+            raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
@@ -853,7 +853,7 @@ def url_path_segment(value: object) -> str:
     return urllib.parse.quote(text, safe="")
 
 
-def http_error_message(exc: urllib.error.HTTPError) -> str:
+def http_error_message(exc: urllib.error.HTTPError, config: WorkerConfig | None = None) -> str:
     reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
     detail = ""
     try:
@@ -879,7 +879,7 @@ def http_error_message(exc: urllib.error.HTTPError) -> str:
     message = f"HTTP {exc.code}: {reason}"
     if detail:
         message = f"{message}: {detail}"
-    return message
+    return redact_secrets(message, config)
 
 
 def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False) -> bool:

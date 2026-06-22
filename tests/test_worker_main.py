@@ -710,6 +710,36 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             ):
                 client.claim()
 
+    def test_client_http_error_redacts_secrets_from_server_body(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        error = worker_main.urllib.error.HTTPError(
+            "https://pullwise.example/worker/jobs/claim",
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(
+                b'{"error":"failed with secret-token and https://x-access-token:ghs_secret@example.com/owner/repo.git"}'
+            ),
+        )
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(worker_main.PullwiseHTTPError) as raised:
+                client.claim()
+
+        message = str(raised.exception)
+        self.assertIn("HTTP 500: Internal Server Error", message)
+        self.assertIn("[redacted]", message)
+        self.assertNotIn("secret-token", message)
+        self.assertNotIn("ghs_secret", message)
+
     def test_worker_once_does_not_start_non_object_claimed_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
