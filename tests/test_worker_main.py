@@ -316,6 +316,37 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(pending_path.exists())
             self.assertIn("filename does not match job_id", worker.last_error or "")
 
+    def test_pending_result_upload_rejects_symlink_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            outside_record = work_dir / "outside.json"
+            outside_record.write_text(
+                json.dumps({"job_id": "job_symlink", "payload": {"status": "done"}}),
+                encoding="utf-8",
+            )
+            pending_path = worker_main.result_upload_file(work_dir, "job_symlink")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.symlink_to(outside_record)
+
+            with patch.object(worker.client, "result") as upload:
+                worker.load_pending_result_uploads()
+
+            upload.assert_not_called()
+            self.assertEqual(worker.pending_result_job_ids(), [])
+            self.assertFalse(pending_path.exists())
+            self.assertTrue(outside_record.exists())
+            self.assertIn("must not be a symlink", worker.last_error or "")
+
     def test_done_pending_result_upload_still_renews_job_until_collected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)

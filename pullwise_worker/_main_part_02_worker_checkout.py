@@ -749,6 +749,8 @@ class Worker:
         path.unlink(missing_ok=True)
 
     def pending_result_upload_record(self, path: Path) -> tuple[str, dict]:
+        if path.is_symlink():
+            raise PendingResultUploadRecordError("pending result upload record must not be a symlink")
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -767,24 +769,42 @@ class Worker:
             raise PendingResultUploadRecordError("pending result upload payload must be an object")
         return job_id, payload
 
+    def write_pending_result_upload_record(self, path: Path, record: dict) -> None:
+        payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = -1
+        try:
+            fd = os.open(temp_path, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                handle.write(payload)
+            temp_path.replace(path)
+        except Exception:
+            try:
+                if fd >= 0:
+                    os.close(fd)
+            finally:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
     def defer_result_upload(self, job_id: str, payload: dict) -> Path:
         pending_dir = result_upload_dir(self.config.work_dir)
         pending_dir.mkdir(parents=True, exist_ok=True)
         path = result_upload_file(self.config.work_dir, job_id)
-        temp_path = path.with_suffix(".tmp")
-        temp_path.write_text(
-            json.dumps(
-                {
-                    "job_id": safe_job_id(job_id),
-                    "created_at": int(time.time()),
-                    "payload": payload,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        self.write_pending_result_upload_record(
+            path,
+            {
+                "job_id": safe_job_id(job_id),
+                "created_at": int(time.time()),
+                "payload": payload,
+            },
         )
-        temp_path.replace(path)
         self.schedule_pending_result_upload(job_id, path)
         return path
 
