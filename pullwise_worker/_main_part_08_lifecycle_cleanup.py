@@ -68,7 +68,14 @@ def log_stream_text(value: object, limit: int = 4000) -> str:
 def log_stream_session_id(session: dict | None) -> str:
     if not isinstance(session, dict):
         return ""
-    return log_stream_text(session.get("id"), 128)
+    text = str(session.get("id") or "").strip()
+    if not text:
+        return ""
+    try:
+        url_path_segment(text)
+    except PullwiseRequestError:
+        return ""
+    return text
 
 
 def log_stream_created_at(session: dict | None) -> int:

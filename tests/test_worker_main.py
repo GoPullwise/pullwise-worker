@@ -2118,6 +2118,37 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("log stream collection failed", worker.last_error or "")
             self.assertIn("tailer broke", worker.last_error or "")
 
+    def test_worker_log_session_rejects_invalid_session_id_before_collection(self) -> None:
+        class BrokenTailer:
+            def collect(self):
+                raise AssertionError("invalid session id should not collect logs")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_1",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_name="pullwise-worker-wk_1",
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker.log_tailers["log_1"] = BrokenTailer()
+
+            with patch.object(worker.client, "log_stream_lines") as upload:
+                worker.handle_log_session({"id": "log_1\nbad"})
+
+            upload.assert_not_called()
+            self.assertEqual(worker.log_tailers, {})
+
+    def test_log_stream_session_id_rejects_invalid_url_segments(self) -> None:
+        self.assertEqual(worker_main.log_stream_session_id({"id": "log_1"}), "log_1")
+        self.assertEqual(worker_main.log_stream_session_id({"id": "log_1\nbad"}), "")
+        self.assertEqual(worker_main.log_stream_session_id({"id": "x" * 129}), "")
+
     def test_worker_log_session_uploads_all_entries_before_checkpoint(self) -> None:
         class FakeTailer:
             def __init__(self) -> None:
