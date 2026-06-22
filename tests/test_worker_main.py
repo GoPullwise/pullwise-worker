@@ -1218,6 +1218,30 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             )
             self.assertNotIn(["git", "clone", str(source), str(first_checkout)], commands)
 
+    def test_clone_repository_rejects_symlinked_mirror_cache_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source, first_commit, _second_commit = self.make_git_repo(root)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            outside_cache = root / "outside-cache"
+            outside_cache.mkdir()
+            (work_dir / ".pullwise-repo-cache").symlink_to(outside_cache, target_is_directory=True)
+            checkout = work_dir / "job_1"
+            job = {
+                "repo": "owner/repo",
+                "clone_url": str(source),
+                "branch": "master",
+                "commit": first_commit,
+            }
+
+            with patch.object(worker_main, "run_git_command") as run_git:
+                with self.assertRaisesRegex(RuntimeError, "cache root must not be a symlink"):
+                    worker_main.clone_repository(job, checkout)
+
+            run_git.assert_not_called()
+            self.assertEqual(list(outside_cache.iterdir()), [])
+
     def test_clone_repository_rejects_invalid_git_ref_inputs_before_fetch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

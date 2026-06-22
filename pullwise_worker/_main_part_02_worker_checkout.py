@@ -1370,8 +1370,9 @@ def repository_mirror_dir(work_dir: Path, job: dict, clone_url: str) -> Path:
     except RuntimeError:
         slug = "repository"
     digest = hashlib.sha256(f"{repo}\n{clone_url}".encode("utf-8")).hexdigest()[:16]
-    cache_root = (work_dir / _REPO_CACHE_DIR_NAME).resolve(strict=False)
-    mirror_dir = (cache_root / f"{slug}-{digest}.git").resolve(strict=False)
+    root = work_dir.resolve(strict=False)
+    cache_root = root / _REPO_CACHE_DIR_NAME
+    mirror_dir = cache_root / f"{slug}-{digest}.git"
     try:
         common = os.path.commonpath([str(cache_root), str(mirror_dir)])
     except ValueError as exc:
@@ -1382,7 +1383,12 @@ def repository_mirror_dir(work_dir: Path, job: dict, clone_url: str) -> Path:
 
 
 def ensure_repository_mirror(mirror_dir: Path, clone_url: str, env: dict[str, str] | None) -> None:
-    mirror_dir.parent.mkdir(parents=True, exist_ok=True)
+    cache_root = mirror_dir.parent
+    if cache_root.is_symlink():
+        raise RuntimeError("repository mirror cache root must not be a symlink")
+    if cache_root.exists() and not cache_root.is_dir():
+        raise RuntimeError("repository mirror cache root must be a directory")
+    cache_root.mkdir(parents=True, exist_ok=True)
     if not (mirror_dir / "HEAD").exists():
         run_git_command(["git", "init", "--bare", str(mirror_dir)], phase="mirror-init")
         run_git_command(["git", "-C", str(mirror_dir), "remote", "add", "origin", clone_url], phase="mirror-remote")
