@@ -431,6 +431,14 @@ class Worker:
                 except Exception as exc:
                     self.last_error = f"job {job.get('job_id')} failed unexpectedly: {exc}"[:500]
 
+            def collect_once_background_work(active_job_ids: list[str], *, claimed_jobs: int, loop_error: bool) -> None:
+                self.collect_result_uploads()
+                if running_future is None and not claimed_jobs and not loop_error:
+                    self.schedule_cleanup_resources_if_due(active_job_ids)
+                    if self._cleanup_future is not None:
+                        concurrent.futures.wait([self._cleanup_future])
+                        self.collect_cleanup()
+
             while True:
                 collect_finished_job()
                 self.collect_result_uploads()
@@ -504,13 +512,13 @@ class Worker:
                         if running_future is not None:
                             concurrent.futures.wait([running_future])
                         collect_finished_job()
-                        self.collect_result_uploads()
+                        collect_once_background_work(active_job_ids, claimed_jobs=claimed_jobs, loop_error=loop_error)
                         return
                 elif once:
                     if running_future is not None:
                         concurrent.futures.wait([running_future])
                     collect_finished_job()
-                    self.collect_result_uploads()
+                    collect_once_background_work(active_job_ids, claimed_jobs=claimed_jobs, loop_error=loop_error)
                     return
                 if running_future is None and not claimed_jobs and not loop_error:
                     self.schedule_cleanup_resources_if_due(active_job_ids)
