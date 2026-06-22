@@ -347,6 +347,30 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(outside_record.exists())
             self.assertIn("must not be a symlink", worker.last_error or "")
 
+    def test_pending_result_upload_rejects_symlinked_spool_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            outside_spool = root / "outside-spool"
+            outside_spool.mkdir()
+            (work_dir / ".pullwise-result-uploads").symlink_to(outside_spool, target_is_directory=True)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+
+            with self.assertRaisesRegex(RuntimeError, "symlinked directory"):
+                worker.defer_result_upload("job_spool", {"status": "done"})
+
+            self.assertEqual(list(outside_spool.iterdir()), [])
+
     def test_done_pending_result_upload_still_renews_job_until_collected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
@@ -1618,6 +1642,22 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(checkout.exists())
             self.assertFalse(marker.exists())
             self.assertEqual(outside.read_text(encoding="utf-8"), "0")
+
+    def test_remote_uninstall_marker_write_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            marker = root / "uninstall.marker"
+            outside = root / "outside-marker"
+            outside.write_text("outside", encoding="utf-8")
+            marker.symlink_to(outside)
+            config = SimpleNamespace(uninstall_marker_file=str(marker), worker_id="wk_123")
+
+            written = worker_main.write_remote_uninstall_marker(config)
+
+            self.assertEqual(written, marker)
+            self.assertFalse(marker.is_symlink())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "wk_123\n")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
 
     def test_directory_size_does_not_follow_symlinked_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

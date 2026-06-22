@@ -422,7 +422,7 @@ def remote_uninstall_marker_path(config: WorkerConfig) -> Path:
 def write_remote_uninstall_marker(config: WorkerConfig) -> Path:
     marker = remote_uninstall_marker_path(config)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(f"{getattr(config, 'worker_id', '')}\n", encoding="utf-8")
+    write_no_follow_text_file(marker, f"{getattr(config, 'worker_id', '')}\n")
     return marker
 
 

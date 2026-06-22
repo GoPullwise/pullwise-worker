@@ -771,27 +771,7 @@ class Worker:
 
     def write_pending_result_upload_record(self, path: Path, record: dict) -> None:
         payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
-        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = -1
-        try:
-            fd = os.open(temp_path, flags, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                fd = -1
-                handle.write(payload)
-            temp_path.replace(path)
-        except Exception:
-            try:
-                if fd >= 0:
-                    os.close(fd)
-            finally:
-                try:
-                    temp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise
+        write_no_follow_text_file(path, payload)
 
     def defer_result_upload(self, job_id: str, payload: dict) -> Path:
         pending_dir = result_upload_dir(self.config.work_dir)
@@ -1259,8 +1239,13 @@ def failed_checkout_marker(checkout_dir: Path) -> Path:
 
 
 def write_failed_checkout_marker(marker: Path, expires_at: int) -> None:
-    payload = str(int(expires_at))
-    temp_path = marker.with_name(f".{marker.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    write_no_follow_text_file(marker, str(int(expires_at)))
+
+
+def write_no_follow_text_file(path: Path, text: str) -> None:
+    if path.parent.is_symlink():
+        raise RuntimeError(f"refusing to write through symlinked directory: {path.parent}")
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -1269,8 +1254,8 @@ def write_failed_checkout_marker(marker: Path, expires_at: int) -> None:
         fd = os.open(temp_path, flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = -1
-            handle.write(payload)
-        temp_path.replace(marker)
+            handle.write(text)
+        temp_path.replace(path)
     except Exception:
         try:
             if fd >= 0:
