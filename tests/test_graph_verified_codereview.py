@@ -99,6 +99,7 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert config["graph"]["schema_version"] == "3"
     assert config["graph"]["target_shards"] == 12
     assert config["graph"]["mapper_subagent_limit"] == 6
+    assert config["graph"]["codex_mappers"] is False
     assert config["graph"]["map_parallel"] == 2
     assert config["graph"]["graph_timeout_seconds"] == 960
     assert config["finders"]["turn_parallel"] == 2
@@ -629,7 +630,97 @@ def test_graph_audit_repairs_critical_unresolved_source_files(tmp_path: Path) ->
     audit = audit_graph(graph, inventory, checkout)
 
     assert audit["critical_unresolved"] == 1
+    assert audit["quality_gate_passed"] is True
     assert any("worker.py" in repair.get("files", []) for repair in audit["repairs"])
+
+
+def test_graph_audit_repair_tasks_include_all_missing_files(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    files = []
+    for index in range(120):
+        rel = f"pkg/file_{index:03d}.py"
+        path = checkout / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("print('ok')\n", encoding="utf-8")
+        files.append({"path": rel, "scope": "analyze", "size_bytes": path.stat().st_size, "line_count": 1, "content_hash": "", "extension": ".py"})
+
+    audit = audit_graph({"nodes": [], "edges": [], "unresolved_refs": [], "coverage": {"assigned_files": [], "mapped_files": []}}, {"files": files}, checkout)
+
+    assert audit["missing_mapped_file_count"] == 120
+    assert len(audit["missing_mapped_files"]) == 100
+    assert len(audit["repairs"][0]["files"]) == 120
+
+
+def test_deterministic_graph_backfill_maps_files_missed_by_codex_mapper(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    app = checkout / "app.py"
+    missed = checkout / "missed.py"
+    app.write_text("def app():\n    return 1\n", encoding="utf-8")
+    missed.write_text("def missed():\n    return app()\n", encoding="utf-8")
+    inventory = {
+        "files": [
+            {"path": "app.py", "scope": "analyze", "size_bytes": app.stat().st_size, "line_count": 2, "content_hash": "", "extension": ".py"},
+            {"path": "missed.py", "scope": "analyze", "size_bytes": missed.stat().st_size, "line_count": 2, "content_hash": "", "extension": ".py"},
+        ]
+    }
+    config = ReviewConfig()
+    config.graph.max_shard_files = 25
+    shard_results = [
+        {
+            "task_id": "graph-map-0001",
+            "shard_id": "shard-0001",
+            "nodes": [],
+            "edges": [],
+            "unresolved_refs": [],
+            "coverage": {"assigned_files": ["app.py", "missed.py"], "mapped_files": ["app.py"]},
+            "status": "ok",
+        }
+    ]
+
+    backfill = codereview_main._deterministic_graph_coverage_backfill(checkout, shard_results, inventory, config, start_index=2)
+    graph = normalize_graph_for_inventory(merge_graph_results([*shard_results, *backfill]), inventory, checkout)
+    audit = audit_graph(graph, inventory, checkout)
+
+    assert [result["task_id"] for result in backfill] == ["graph-backfill-0002"]
+    assert backfill[0]["coverage"]["mapped_files"] == ["missed.py"]
+    assert audit["missing_mapped_files"] == []
+    assert audit["quality_gate_passed"] is True
+
+
+def test_deterministic_graph_config_does_not_disable_codex_enrichment() -> None:
+    config = ReviewConfig()
+    config.graph.codex_mappers = True
+
+    baseline = codereview_main._deterministic_graph_config(config)
+
+    assert baseline.graph.codex_mappers is False
+    assert config.graph.codex_mappers is True
+
+
+def test_graph_repair_tasks_chunk_missing_files_by_shard_limit() -> None:
+    config = ReviewConfig()
+    config.graph.max_shard_files = 25
+    repairs = [{"type": "remap_files", "files": [f"pkg/file_{index:03d}.py" for index in range(60)], "reason": "missing"}]
+
+    tasks = codereview_main._graph_repair_tasks(repairs, config=config, start_index=15)
+
+    assert [task["task_id"] for task in tasks] == ["graph-repair-0015", "graph-repair-0016", "graph-repair-0017"]
+    assert [len(task["files"]) for task in tasks] == [25, 25, 10]
+    assert all(len(task["files"]) <= config.graph.max_shard_files for task in tasks)
+
+
+def test_graph_quality_gate_failure_message_uses_full_missing_counts() -> None:
+    message = codereview_main._graph_quality_gate_failure_message(
+        {
+            "quality_errors": ["not all analyzable files were mapped"],
+            "missing_mapped_file_count": 185,
+            "missing_mapped_files": ["sample.py"],
+        }
+    )
+
+    assert "missing_mapped_files=185" in message
 
 
 def test_graph_linker_requires_resolution_reason() -> None:

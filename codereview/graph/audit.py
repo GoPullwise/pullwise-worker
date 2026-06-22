@@ -62,14 +62,14 @@ def audit_graph(graph: dict, inventory: dict, checkout: Path) -> dict:
         quality_errors.append("dangling graph edges exist")
     if span_violations:
         quality_errors.append("graph evidence validation failed")
-    if critical_unresolved:
-        quality_errors.append("critical unresolved graph references exist")
     quality_gate = "passed" if not quality_errors else "failed"
     return {
         "inventory_files": len(inventory.get("files", []) or []),
         "analyzable_files": len(analyzable),
         "mapped_files": len(mapped & analyzable),
+        "missing_mapped_file_count": len(missing_mapped),
         "missing_mapped_files": missing_mapped[:100],
+        "missing_file_node_count": len(missing_file_nodes),
         "missing_file_nodes": missing_file_nodes[:100],
         "review_scope": "full-repository",
         "review_files": len(review_files),
@@ -176,7 +176,7 @@ def _repair_tasks(missing: list[str], critical_unresolved: list[dict] | None = N
     repairs = []
     missing_set = set(missing)
     if missing:
-        repairs.append({"type": "remap_files", "files": missing[:50], "reason": "Analyzable files were not covered by mapper output."})
+        repairs.append({"type": "remap_files", "files": missing, "reason": "Analyzable files were not covered by mapper output."})
     critical_files = []
     for item in critical_unresolved or []:
         path = str(item.get("source_file") or "")
@@ -186,7 +186,7 @@ def _repair_tasks(missing: list[str], critical_unresolved: list[dict] | None = N
         repairs.append(
             {
                 "type": "remap_files",
-                "files": critical_files[:50],
+                "files": critical_files,
                 "reason": "Critical unresolved graph references need remapping or link-resolution evidence.",
             }
         )

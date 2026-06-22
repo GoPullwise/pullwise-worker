@@ -5,6 +5,7 @@ import json
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from .candidates.dedupe import dedupe_candidates
@@ -19,11 +20,11 @@ from .graph.audit import audit_graph, run_agent_graph_audit
 from .graph.census import run_repository_census, validate_census_coverage
 from .graph.index_sqlite import rebuild_sqlite_index
 from .graph.link import apply_cross_shard_linking
-from .graph.mapper import map_graph_tasks
+from .graph.mapper import map_graph_task, map_graph_tasks
 from .graph.merge import merge_graph_results, normalize_graph_for_inventory, write_graph_artifacts
 from .graph.repair import plan_repairs
 from .graph.scheduler import plan_graph_tasks
-from .inventory.git_inventory import build_git_inventory
+from .inventory.git_inventory import analyzable_files, build_git_inventory
 from .judge.runner import run_judges_parallel
 from .repo import inspect_repo
 from .repository.snapshot import analyze_repository_snapshot
@@ -81,8 +82,50 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
 
     graph_tasks = plan_graph_tasks(census, inventory, config)
     write_jsonl(run / "artifacts" / "graph" / "tasks.jsonl", graph_tasks)
-    _emit_progress(progress, "graph", f"Graph: mapping shards 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
-    shard_results = _map_graph_tasks_with_progress(snapshot_repo, graph_tasks, inventory, config, run=run, progress=progress)
+    baseline_config = _deterministic_graph_config(config)
+    _emit_progress(progress, "graph", f"Graph: deterministic baseline 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
+    shard_results = _map_graph_tasks_with_progress(
+        snapshot_repo,
+        graph_tasks,
+        inventory,
+        baseline_config,
+        run=run,
+        progress=progress,
+        progress_label="Graph: deterministic baseline",
+    )
+    enrichment_history: list[dict] = []
+    if config.graph.codex_mappers:
+        _emit_progress(progress, "graph", f"Graph: Codex enrichment 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
+        enrichment_results = _map_graph_tasks_with_progress(
+            snapshot_repo,
+            graph_tasks,
+            inventory,
+            config,
+            run=run,
+            progress=progress,
+            progress_label="Graph: Codex enrichment",
+        )
+        enrichment_history.append({"round": 1, "results": enrichment_results})
+        shard_results.extend(enrichment_results)
+    backfill_history: list[dict] = []
+    backfill_results = _deterministic_graph_coverage_backfill(
+        snapshot_repo,
+        shard_results,
+        inventory,
+        config,
+        start_index=len(graph_tasks) + 1,
+    )
+    if backfill_results:
+        _emit_progress(
+            progress,
+            "graph",
+            f"Graph: deterministic coverage backfill {len(backfill_results)} task(s)",
+            current=len(backfill_results),
+            total=len(backfill_results),
+            run_id=run_id,
+        )
+        backfill_history.append({"round": 1, "results": backfill_results})
+        shard_results.extend(backfill_results)
     write_jsonl(run / "artifacts" / "graph" / "shard-results.jsonl", shard_results)
     _emit_progress(progress, "graph", "Graph: merging shard results", run_id=run_id)
     graph = merge_graph_results(shard_results)
@@ -95,7 +138,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         if audit.get("quality_gate_passed"):
             break
         repairs = plan_repairs(audit)
-        repair_tasks = _graph_repair_tasks(repairs, start_index=len(graph_tasks) + _repair_task_count(repair_history) + 1)
+        repair_tasks = _graph_repair_tasks(repairs, config=config, start_index=len(graph_tasks) + _repair_task_count(repair_history) + 1)
         if not repair_tasks:
             break
         _emit_progress(
@@ -128,6 +171,8 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
     write_json(graph_dir / "audit.json", audit)
     write_json(graph_dir / "agent-audit.json", agent_audit)
+    write_json(graph_dir / "coverage-backfill-history.json", backfill_history)
+    write_json(graph_dir / "codex-enrichment-history.json", enrichment_history)
     write_json(graph_dir / "repair-history.json", repair_history)
     if not audit.get("quality_gate_passed"):
         _emit_progress(progress, "graph", _graph_quality_gate_failure_message(audit), run_id=run_id)
@@ -341,8 +386,8 @@ def _emit_progress(
 
 def _graph_quality_gate_failure_message(audit: dict) -> str:
     errors = [str(item) for item in audit.get("quality_errors", []) if str(item)]
-    missing_mapped = len(audit.get("missing_mapped_files") or [])
-    missing_file_nodes = len(audit.get("missing_file_nodes") or [])
+    missing_mapped = int(audit.get("missing_mapped_file_count") or len(audit.get("missing_mapped_files") or []))
+    missing_file_nodes = int(audit.get("missing_file_node_count") or len(audit.get("missing_file_nodes") or []))
     critical_unresolved = int(audit.get("critical_unresolved") or 0)
     parts = ["Graph: quality gate failed"]
     if errors:
@@ -357,6 +402,17 @@ def _graph_quality_gate_failure_message(audit: dict) -> str:
     if details:
         parts.append(f"({', '.join(details)})")
     return " ".join(parts)
+
+
+def _deterministic_graph_config(config: object) -> object:
+    graph = getattr(config, "graph", None)
+    if graph is None:
+        return config
+    try:
+        return replace(config, graph=replace(graph, codex_mappers=False))
+    except TypeError:
+        graph.codex_mappers = False
+        return config
 
 
 def _map_graph_tasks_with_progress(
@@ -380,6 +436,47 @@ def _map_graph_tasks_with_progress(
         progress=_progress_with_run_id(progress, run),
         progress_label=progress_label,
     )
+
+
+def _deterministic_graph_coverage_backfill(
+    checkout: Path,
+    shard_results: list[dict],
+    inventory: dict,
+    config: object,
+    *,
+    start_index: int,
+) -> list[dict]:
+    graph = merge_graph_results(shard_results)
+    mapped = {str(path) for path in (graph.get("coverage") or {}).get("mapped_files", []) if str(path)}
+    missing = [
+        str(item.get("path") or "")
+        for item in analyzable_files(inventory)
+        if str(item.get("path") or "") and str(item.get("path") or "") not in mapped
+    ]
+    if not missing:
+        return []
+
+    inventory_by_path = {str(item.get("path") or ""): item for item in inventory.get("files", []) if isinstance(item, dict)}
+    max_files = max(1, int(getattr(getattr(config, "graph", object()), "max_shard_files", 25) or 25))
+    results: list[dict] = []
+    for offset in range(0, len(missing), max_files):
+        task_index = start_index + len(results)
+        files = missing[offset : offset + max_files]
+        task = {
+            "task_id": f"graph-backfill-{task_index:04d}",
+            "shard_id": f"backfill-{task_index:04d}",
+            "mapper_index": 1,
+            "files": files,
+            "reason": "deterministic coverage backfill for files not mapped by Codex graph mapper",
+            "double_mapped": False,
+        }
+        result = map_graph_task(checkout, task, inventory_by_path)
+        result["status"] = "ok"
+        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+        warnings.append("deterministic coverage backfill used because Codex graph mapper did not map these files")
+        result["warnings"] = warnings
+        results.append(result)
+    return results
 
 
 def _run_finders_with_progress(checkout: Path, run: Path, tasks: list[object], config: object, progress: ProgressCallback | None) -> list[dict]:
@@ -537,24 +634,27 @@ def build_pipeline_summary(
     }
 
 
-def _graph_repair_tasks(repairs: list[dict], *, start_index: int) -> list[dict]:
+def _graph_repair_tasks(repairs: list[dict], *, config: object, start_index: int) -> list[dict]:
     tasks: list[dict] = []
+    max_files = max(1, int(getattr(getattr(config, "graph", object()), "max_shard_files", 25) or 25))
     for repair in repairs:
         if not isinstance(repair, dict) or repair.get("type") != "remap_files":
             continue
         files = [str(path) for path in repair.get("files", []) if str(path)]
         if not files:
             continue
-        tasks.append(
-            {
-                "task_id": f"graph-repair-{start_index + len(tasks):04d}",
-                "shard_id": f"repair-{start_index + len(tasks):04d}",
-                "mapper_index": 1,
-                "files": files,
-                "reason": str(repair.get("reason") or "graph audit repair"),
-                "double_mapped": False,
-            }
-        )
+        for offset in range(0, len(files), max_files):
+            chunk = files[offset : offset + max_files]
+            tasks.append(
+                {
+                    "task_id": f"graph-repair-{start_index + len(tasks):04d}",
+                    "shard_id": f"repair-{start_index + len(tasks):04d}",
+                    "mapper_index": 1,
+                    "files": chunk,
+                    "reason": str(repair.get("reason") or "graph audit repair"),
+                    "double_mapped": False,
+                }
+            )
     return tasks
 
 

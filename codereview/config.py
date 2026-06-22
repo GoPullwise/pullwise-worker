@@ -89,7 +89,7 @@ class GraphConfig:
     max_repair_rounds: int = 2
     use_sqlite_index: bool = True
     codex_census: bool = True
-    codex_mappers: bool = True
+    codex_mappers: bool = False
     mapper_subagent_limit: int = 6
     map_parallel: int = 2
     graph_timeout_seconds: int = 960
@@ -185,7 +185,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
     selected_scan_mode = str(scan_mode or scan.get("mode") or "full-cached")
     if selected_scan_mode not in {"full-cached", "full-strict"}:
         raise ValueError("scan mode must be one of full-cached, full-strict")
-    codex_mappers_enabled = bool(graph.get("codex_mappers", True))
+    codex_mappers_enabled = bool(graph.get("codex_mappers", False))
     mapper_subagent_limit = max(1, int(agents.get("graph_mapper_subagents") or graph.get("mapper_subagent_limit") or 6))
     return ReviewConfig(
         mode=selected_mode,

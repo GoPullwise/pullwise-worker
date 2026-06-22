@@ -154,7 +154,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "max_repair_rounds": 2,
         "use_sqlite_index": True,
         "codex_census": True,
-        "codex_mappers": True,
+        "codex_mappers": False,
         "mapper_subagent_limit": 6,
         "map_parallel": 2,
         "graph_timeout_seconds": 960,
