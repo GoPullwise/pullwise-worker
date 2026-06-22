@@ -690,6 +690,56 @@ def test_deterministic_graph_backfill_maps_files_missed_by_codex_mapper(tmp_path
     assert audit["quality_gate_passed"] is True
 
 
+def test_graph_merge_ignores_mapped_coverage_from_blocked_shards(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    app = checkout / "app.py"
+    app.write_text("def app():\n    return 1\n", encoding="utf-8")
+    inventory = {
+        "files": [
+            {"path": "app.py", "scope": "analyze", "size_bytes": app.stat().st_size, "line_count": 2, "content_hash": "", "extension": ".py"},
+        ]
+    }
+
+    graph = normalize_graph_for_inventory(
+        merge_graph_results(
+            [
+                {
+                    "task_id": "graph-map-0001",
+                    "shard_id": "shard-0001",
+                    "status": "blocked",
+                    "blocked_reason": "codex graph mapper timed out",
+                    "nodes": [
+                        {
+                            "id": "sym:app",
+                            "kind": "function",
+                            "name": "app",
+                            "qualified_name": "app",
+                            "file": "app.py",
+                            "span": {"start_line": 1, "end_line": 2},
+                            "evidence": [{"file": "app.py", "start_line": 1, "end_line": 2, "evidence_kind": "direct_syntax"}],
+                        }
+                    ],
+                    "edges": [],
+                    "unresolved_refs": [],
+                    "coverage": {"assigned_files": ["app.py"], "mapped_files": ["app.py"]},
+                    "warnings": [],
+                }
+            ]
+        ),
+        inventory,
+        checkout,
+    )
+    audit = audit_graph(graph, inventory, checkout)
+
+    assert graph["coverage"]["assigned_files"] == ["app.py"]
+    assert graph["coverage"]["mapped_files"] == []
+    assert "sym:app" not in {str(node.get("id") or "") for node in graph["nodes"]}
+    assert any("ignored non-ok graph shard graph-map-0001" in warning for warning in graph["warnings"])
+    assert audit["missing_mapped_files"] == ["app.py"]
+    assert audit["quality_gate_passed"] is False
+
+
 def test_deterministic_graph_config_does_not_disable_codex_enrichment() -> None:
     config = ReviewConfig()
     config.graph.codex_mappers = True

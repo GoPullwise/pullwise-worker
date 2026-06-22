@@ -16,6 +16,15 @@ def merge_graph_results(shard_results: list[dict]) -> dict:
     coverage = {"assigned_files": set(), "mapped_files": set()}
     warnings: list[str] = []
     for result in shard_results:
+        status = str(result.get("status") or "ok").lower()
+        result_coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
+        coverage["assigned_files"].update(str(path) for path in result_coverage.get("assigned_files", []) if str(path))
+        warnings.extend(str(item) for item in result.get("warnings", []) if str(item))
+        if status != "ok":
+            reason = str(result.get("blocked_reason") or result.get("error") or "non-ok graph shard result")
+            task_id = str(result.get("task_id") or result.get("shard_id") or "unknown")
+            warnings.append(f"ignored non-ok graph shard {task_id}: {reason}")
+            continue
         for node in result.get("nodes", []):
             if not isinstance(node, dict) or not node.get("id"):
                 continue
@@ -32,10 +41,7 @@ def merge_graph_results(shard_results: list[dict]) -> dict:
                 edge["id"] = stable_edge_id(source, target, edge_type, edge.get("evidence"))
             edges.setdefault(str(edge["id"]), edge)
         unresolved.extend(item for item in result.get("unresolved_refs", []) if isinstance(item, dict))
-        result_coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
-        coverage["assigned_files"].update(str(path) for path in result_coverage.get("assigned_files", []) if str(path))
         coverage["mapped_files"].update(str(path) for path in result_coverage.get("mapped_files", []) if str(path))
-        warnings.extend(str(item) for item in result.get("warnings", []) if str(item))
     conflicts = detect_dual_map_conflicts(shard_results)
     graph = {
         "manifest": {
