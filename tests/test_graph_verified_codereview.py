@@ -45,6 +45,7 @@ from codereview.units.coverage import build_unit_coverage
 from codereview.units.context import write_review_units
 from codereview.units.planner import build_all_review_units
 from codereview.units.risk_tags import choose_finders
+from codereview.utils.jsonl import write_json, write_jsonl
 from codereview.utils.process import ProcessCancelled, ProcessResult, clear_process_cancel_event, set_process_cancel_event
 
 
@@ -112,6 +113,32 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert (tmp_path / ".codereview" / "prompts" / "finder-batch-coordinator.md").is_file()
     graph_props = schema["properties"]["candidates"]["items"]["properties"]["graph_evidence"]["properties"]
     assert set(graph_props) == {"unit_id", "context_files", "path_summary"}
+
+
+def test_write_json_does_not_follow_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"outside": true}', encoding="utf-8")
+    target = tmp_path / "artifact.json"
+    target.symlink_to(outside)
+
+    write_json(target, {"ok": True})
+
+    assert not target.is_symlink()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+    assert outside.read_text(encoding="utf-8") == '{"outside": true}'
+
+
+def test_write_jsonl_does_not_follow_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text('{"outside": true}\n', encoding="utf-8")
+    target = tmp_path / "artifact.jsonl"
+    target.symlink_to(outside)
+
+    write_jsonl(target, [{"ok": True}])
+
+    assert not target.is_symlink()
+    assert target.read_text(encoding="utf-8") == '{"ok": true}\n'
+    assert outside.read_text(encoding="utf-8") == '{"outside": true}\n'
 
 
 def test_generated_codex_schemas_are_strict_objects(tmp_path: Path) -> None:
