@@ -714,6 +714,10 @@ class PullwiseResponse:
         return parsed
 
 
+def client_protocol_text(value: object, config: WorkerConfig | None = None, max_length: int = 500) -> str:
+    return clean_protocol_text(redact_secrets(value, config), max_length)
+
+
 class PullwiseClient:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
@@ -780,8 +784,8 @@ class PullwiseClient:
             "providerChain": list(self.config.provider_chain),
             "running_jobs": reported_running_jobs,
             "hostname": socket.gethostname(),
-            "last_error": last_error,
-            "doctor_status": doctor_status,
+            "last_error": client_protocol_text(last_error, self.config, 500) if last_error else None,
+            "doctor_status": client_protocol_text(doctor_status, self.config, 80) if doctor_status else None,
             "codex_ready": codex_ready,
             "systemd_active": systemd_active,
             "doctor_checked_at": doctor_checked_at,
@@ -800,9 +804,9 @@ class PullwiseClient:
         return response.json()
 
     def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:
-        payload = {"worker_id": self.config.worker_id, "status": status}
+        payload = {"worker_id": self.config.worker_id, "status": client_protocol_text(status, self.config, 80)}
         if error:
-            payload["error"] = error
+            payload["error"] = client_protocol_text(error, self.config, 500)
         self.post(f"/worker/commands/{url_path_segment(command_id)}/status", payload)
 
     def command_poll(self) -> dict:
@@ -834,11 +838,11 @@ class PullwiseClient:
         logs_summary: str = "",
     ) -> None:
         payload = {
-            "phase": phase,
+            "phase": client_protocol_text(phase, self.config, 80),
             "progress": progress,
-            "message": message,
+            "message": client_protocol_text(message, self.config, 500),
             "started_at": int(time.time()),
-            "logs_summary": logs_summary,
+            "logs_summary": client_protocol_text(logs_summary, self.config, 1000),
         }
         self.post(f"/worker/jobs/{url_path_segment(job_id)}/progress", payload)
 

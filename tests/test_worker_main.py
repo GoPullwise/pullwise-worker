@@ -635,6 +635,106 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertNotIn("max_concurrent_jobs", captured["payload"])
         self.assertNotIn("free_slots", captured["payload"])
 
+    def test_heartbeat_payload_redacts_and_bounds_error_text(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return Response()
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            client.heartbeat(last_error=f"first line secret-token\nsecond line {'x' * 1000}")
+
+        last_error = captured["payload"]["last_error"]
+        self.assertEqual(last_error, "first line [redacted]")
+        self.assertNotIn("secret-token", last_error)
+        self.assertNotIn("\n", last_error)
+
+    def test_progress_payload_redacts_and_bounds_protocol_text(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return Response()
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            client.progress("job_1", "ai\nbad", 80, f"secret-token\n{'x' * 1000}", f"secret-token {'y' * 2000}")
+
+        payload = captured["payload"]
+        self.assertEqual(payload["phase"], "ai")
+        self.assertEqual(payload["message"], "[redacted]")
+        self.assertLessEqual(len(payload["logs_summary"]), 1000)
+        self.assertNotIn("secret-token", payload["logs_summary"])
+
+    def test_command_status_payload_redacts_error_text(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return Response()
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            client.command_status("cmd_1", "failed\nignored", error="secret-token\nmore")
+
+        self.assertEqual(captured["payload"]["status"], "failed")
+        self.assertEqual(captured["payload"]["error"], "[redacted]")
+
     def test_claim_rejects_non_object_job_payload(self) -> None:
         config = SimpleNamespace(
             server_url="https://pullwise.example",
