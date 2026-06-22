@@ -3,10 +3,6 @@ from __future__ import annotations
 # Loaded by main.py; definitions are executed in that module's globals.
 
 
-def graph_verified_review_enabled(config: WorkerConfig, job: dict) -> bool:
-    return True
-
-
 def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
     provider_env = provider_process_env(config)
     return {
@@ -199,18 +195,19 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "turn_parallel": graph_verified_positive_int(graph_config.get("finderTurnParallel"), default=2, minimum=1, maximum=6),
         "timeout_seconds": graph_verified_positive_int(graph_config.get("finderTimeoutSeconds"), default=600, minimum=60, maximum=3600),
     }
+    repro_limit = graph_verified_repro_limit(graph_config.get("maxRepro"), mode)
     current["repro"] = {
         **(current.get("repro") if isinstance(current.get("repro"), dict) else {}),
         "enabled": True,
         "max_workers": graph_verified_positive_int(graph_config.get("reproMaxParallel"), default=2, minimum=1, maximum=8),
         "timeout_seconds": graph_verified_positive_int(graph_config.get("reproTimeoutSeconds"), default=900, minimum=60, maximum=7200),
-        "max_repro": graph_verified_positive_int(graph_config.get("maxRepro"), default=0, minimum=0, maximum=100),
+        "max_repro": repro_limit,
         "require_red_green": graph_config.get("requireRedGreen") is True,
     }
     current["candidates"] = {
         "max_per_finder_per_unit": 3,
         "max_total_for_verification": 60,
-        "max_total_for_reproduction": graph_verified_positive_int(graph_config.get("maxRepro"), default=20, minimum=1, maximum=100),
+        "max_total_for_reproduction": repro_limit,
         "require_expected_behavior_source": True,
     }
     current["scoring"] = {
@@ -229,6 +226,16 @@ def graph_verified_mode(value: object) -> str:
 def graph_verified_scan_mode(value: object) -> str:
     text = graph_verified_text(value).lower()
     return text if text in {"full-cached", "full-strict"} else "full-cached"
+
+
+def graph_verified_repro_limit(value: object, mode: object) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = 0
+    if number > 0:
+        return min(100, number)
+    return {"fast": 8, "standard": 20, "deep": 50}.get(graph_verified_mode(mode), 20)
 
 
 def graph_verified_text(value: object) -> str:

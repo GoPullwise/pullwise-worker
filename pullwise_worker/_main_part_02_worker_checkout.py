@@ -829,7 +829,6 @@ class Worker:
         try:
             job_config = worker_config_for_job(self.config, job)
             configured_agent = effective_agent_config_payload(job_config)
-            graph_verified_review_enabled(job_config, job)
             checkout_dir = checkout_dir_for_job(job_config.work_dir, job_id)
             self.report_progress(
                 job_id,

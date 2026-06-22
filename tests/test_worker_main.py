@@ -720,16 +720,12 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 15)
 
     def test_graph_verified_review_is_the_only_review_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            cfg = config_for(Path(tmp_dir))
-
-            self.assertTrue(worker_main.graph_verified_review_enabled(cfg, {"agentConfig": {}}))
-            self.assertFalse(hasattr(worker_main, "run_codex_review"))
-            self.assertFalse(hasattr(worker_main, "build_repository_graph_bundle"))
-            self.assertFalse(hasattr(worker_main, "apply_review_calibration_decisions"))
-            self.assertFalse(hasattr(worker_main, "apply_convergence_gate"))
-            self.assertFalse(hasattr(worker_main, "convergence_context_for_job"))
-            self.assertFalse(hasattr(worker_main, "reportability_rejection_reason"))
+        self.assertFalse(hasattr(worker_main, "run_codex_review"))
+        self.assertFalse(hasattr(worker_main, "build_repository_graph_bundle"))
+        self.assertFalse(hasattr(worker_main, "apply_review_calibration_decisions"))
+        self.assertFalse(hasattr(worker_main, "apply_convergence_gate"))
+        self.assertFalse(hasattr(worker_main, "convergence_context_for_job"))
+        self.assertFalse(hasattr(worker_main, "reportability_rejection_reason"))
 
     def test_write_graph_verified_codereview_config_uses_plan_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -771,8 +767,21 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["repro"]["timeout_seconds"], 600)
         self.assertEqual(payload["repro"]["max_repro"], 20)
         self.assertTrue(payload["repro"]["require_red_green"])
+        self.assertEqual(payload["candidates"]["max_total_for_reproduction"], 20)
         self.assertEqual(payload["scoring"]["min_score_for_repro"], 9)
         self.assertEqual(payload["scoring"]["always_repro_severities"], ["critical", "high"])
+
+    def test_write_graph_verified_codereview_config_uses_standard_repro_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+
+            worker_main.write_graph_verified_codereview_config(cfg, root, {"maxRepro": 0}, "standard")
+
+            payload = json.loads((root / ".codereview" / "config.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["repro"]["max_repro"], 20)
+        self.assertEqual(payload["candidates"]["max_total_for_reproduction"], 20)
 
     def test_worker_wrapper_exports_codex_sqlite_home(self) -> None:
         script = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk/worker.env"))
