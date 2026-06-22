@@ -1651,7 +1651,10 @@ def git_error_message(phase: str, exc: subprocess.CalledProcessError) -> str:
 
 def clone_token_value(clone_token: object) -> str:
     token = clone_token.get("token") if isinstance(clone_token, dict) else None
-    return str(token or "")
+    value = str(token or "").strip()
+    if any(char in value for char in "\r\n\x00") or len(value) > 4096:
+        raise RuntimeError("Clone token is invalid.")
+    return value
 
 
 _REPO_FULL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
