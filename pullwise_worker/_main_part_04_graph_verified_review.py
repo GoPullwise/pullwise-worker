@@ -2,6 +2,9 @@ from __future__ import annotations
 
 # Loaded by main.py; definitions are executed in that module's globals.
 
+GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES = 200_000
+GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES = 50_000
+
 
 def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
     provider_env = provider_process_env(config)
@@ -65,8 +68,8 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
         "blockedCount": graph_verified_count(report_counts.get("blocked")),
-        "finalMarkdown": graph_verified_read_text_artifact(final_path),
-        "debugMarkdown": graph_verified_read_text_artifact(reports / "debug.md"),
+        "finalMarkdown": graph_verified_read_text_artifact(final_path, GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES),
+        "debugMarkdown": graph_verified_read_text_artifact(reports / "debug.md", GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES),
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
         "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
@@ -136,13 +139,29 @@ def graph_verified_regular_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
 
 
-def graph_verified_read_text_artifact(path: Path) -> str:
+def graph_verified_read_text_artifact(path: Path, max_bytes: int) -> str:
     if not graph_verified_regular_file(path):
         return ""
     try:
-        return read_no_follow_text_file(path)
+        limit = max(0, int(max_bytes or 0))
+    except (TypeError, ValueError, OverflowError):
+        limit = 0
+    if limit <= 0:
+        return ""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return handle.read(limit + 1)[:limit].decode("utf-8", errors="replace")
     except (OSError, UnicodeDecodeError):
         return ""
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def graph_verified_read_json_artifact(path: Path, default: object) -> object:
