@@ -81,6 +81,20 @@ def normalized_positive_int(value: object) -> int:
         return 0
 
 
+def normalize_job_attempt(value: object) -> int:
+    if value is None or value == "":
+        return 1
+    if isinstance(value, bool):
+        raise ValueError("Worker job attempt must be a positive integer.")
+    try:
+        attempt = int(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("Worker job attempt must be a positive integer.") from exc
+    if attempt < 1 or attempt > 1_000_000:
+        raise ValueError("Worker job attempt must be between 1 and 1000000.")
+    return attempt
+
+
 def effective_agent_config_value(value: object) -> str:
     if not isinstance(value, str):
         return ""
@@ -914,7 +928,7 @@ class Worker:
         job_id = safe_job_id(job.get("job_id"))
         job_config = self.config
         configured_agent = {}
-        attempt_id = f"{self.config.worker_id}-{job.get('attempt') or 1}"
+        attempt_id = f"{self.config.worker_id}-{normalize_job_attempt(job.get('attempt'))}"
         checkout_dir = checkout_dir_for_job(self.config.work_dir, job_id)
         started = time.monotonic()
         duration_ms = 0
@@ -1261,6 +1275,8 @@ def validate_claimed_job(job: object) -> dict:
         raise ValueError("claim response job must be an object")
     try:
         safe_job_id(job.get("job_id"))
+        if "attempt" in job:
+            job["attempt"] = normalize_job_attempt(job.get("attempt"))
         if "commit" in job:
             normalize_git_commit_or_pending(job.get("commit"))
         if "branch" in job:

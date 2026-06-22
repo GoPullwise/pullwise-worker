@@ -849,6 +849,17 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe path characters"):
             worker_main.validate_claimed_job({"job_id": oversized})
 
+    def test_validate_claimed_job_normalizes_and_rejects_attempts(self) -> None:
+        job = {"job_id": "job_attempt", "attempt": "3"}
+
+        self.assertIs(worker_main.validate_claimed_job(job), job)
+        self.assertEqual(job["attempt"], 3)
+
+        for attempt in (0, -1, True, "bad", 1_000_001):
+            with self.subTest(attempt=attempt):
+                with self.assertRaisesRegex(ValueError, "Worker job attempt"):
+                    worker_main.validate_claimed_job({"job_id": "job_attempt", "attempt": attempt})
+
     def test_heartbeat_payload_filters_invalid_ready_providers(self) -> None:
         config = SimpleNamespace(
             server_url="https://pullwise.example",
@@ -1203,6 +1214,50 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             run_job.assert_not_called()
             self.assertIn("job claim failed", worker.last_error or "")
             self.assertIn("unsafe path characters", worker.last_error or "")
+
+    def test_worker_once_does_not_start_claimed_job_with_invalid_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_claim",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024,
+                machine_metrics_interval_seconds=10**9,
+                cleanup_interval_seconds=10**9,
+                readiness_check_seconds=10**9,
+                poll_seconds=0,
+                max_backoff_seconds=1,
+                poll_jitter_seconds=0,
+                lifecycle_watcher_enabled=False,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker._doctor_status = "ok"
+
+            with patch.object(worker, "refresh_readiness_if_due", return_value=True), patch.object(
+                worker.client,
+                "heartbeat",
+                return_value={"worker": {"status": "idle"}},
+            ), patch.object(worker.client, "claim", return_value={"job_id": "job_bad_attempt", "attempt": "bad"}), patch.object(
+                worker, "run_job"
+            ) as run_job:
+                worker.run(once=True)
+
+            run_job.assert_not_called()
+            self.assertIn("job claim failed", worker.last_error or "")
+            self.assertIn("Worker job attempt", worker.last_error or "")
 
     def test_worker_once_does_not_start_claimed_job_with_invalid_git_ref(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
