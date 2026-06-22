@@ -290,6 +290,31 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(pending_path.exists())
             self.assertIn("permanently invalid", worker.last_error or "")
 
+    def test_oversized_pending_result_upload_record_is_not_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_huge")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_bytes(b"{" + (b"x" * (worker_main._PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES + 1)))
+
+            with patch.object(worker.client, "result") as upload:
+                worker.load_pending_result_uploads()
+
+            upload.assert_not_called()
+            self.assertEqual(worker.pending_result_job_ids(), [])
+            self.assertFalse(pending_path.exists())
+            self.assertIn("text file too large", worker.last_error or "")
+
     def test_pending_result_upload_rejects_filename_job_id_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
@@ -376,6 +401,14 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     worker.pending_result_upload_record(pending_path)
 
             self.assertEqual(outside_record.read_text(encoding="utf-8"), json.dumps({"job_id": "job_race", "payload": {"status": "done"}}))
+
+    def test_read_no_follow_text_file_rejects_oversized_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "large.txt"
+            path.write_text("abcdef", encoding="utf-8")
+
+            with self.assertRaisesRegex(OSError, "text file too large"):
+                worker_main.read_no_follow_text_file(path, max_bytes=5)
 
     def test_pending_result_upload_rejects_symlinked_spool_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

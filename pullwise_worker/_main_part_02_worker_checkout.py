@@ -805,7 +805,7 @@ class Worker:
         if path.is_symlink():
             raise PendingResultUploadRecordError("pending result upload record must not be a symlink")
         try:
-            record = json.loads(read_no_follow_text_file(path))
+            record = json.loads(read_no_follow_text_file(path, max_bytes=_PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PendingResultUploadRecordError(f"pending result upload record is unreadable: {exc}") from exc
         if not isinstance(record, dict):
@@ -824,6 +824,8 @@ class Worker:
 
     def write_pending_result_upload_record(self, path: Path, record: dict) -> None:
         payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        if len(payload.encode("utf-8")) > _PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES:
+            raise RuntimeError("pending result upload record is too large")
         write_no_follow_text_file(path, payload)
 
     def defer_result_upload(self, job_id: str, payload: dict) -> Path:
@@ -1344,15 +1346,33 @@ def write_no_follow_text_file(path: Path, text: str) -> None:
         raise
 
 
-def read_no_follow_text_file(path: Path) -> str:
+def read_no_follow_text_file(path: Path, max_bytes: int | None = None) -> str:
+    default_limit = _LOCAL_TEXT_FILE_MAX_BYTES
+    if max_bytes is None:
+        max_bytes = default_limit
+    byte_limit = positive_limit_int(max_bytes, default_limit, minimum=1)
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags)
     try:
-        with os.fdopen(fd, "r", encoding="utf-8") as handle:
-            fd = -1
-            return handle.read()
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise OSError(f"not a regular file: {path}")
+        if stat_result.st_size > byte_limit:
+            raise OSError(f"text file too large: {path}")
+        chunks = []
+        remaining = byte_limit + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > byte_limit:
+            raise OSError(f"text file too large: {path}")
+        return data.decode("utf-8")
     finally:
         if fd >= 0:
             os.close(fd)
@@ -1772,6 +1792,8 @@ _REPO_CACHE_DIR_NAME = ".pullwise-repo-cache"
 _RESULT_UPLOAD_DIR_NAME = ".pullwise-result-uploads"
 _CHECKOUT_RUNTIME_DIR_NAMES.add(_REPO_CACHE_DIR_NAME)
 _CHECKOUT_RUNTIME_DIR_NAMES.add(_RESULT_UPLOAD_DIR_NAME)
+_LOCAL_TEXT_FILE_MAX_BYTES = 2 * 1024 * 1024
+_PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES = _LOCAL_TEXT_FILE_MAX_BYTES
 _LOCKFILE_PACKAGE_MANAGERS = {
     "bun.lock": "bun",
     "bun.lockb": "bun",
