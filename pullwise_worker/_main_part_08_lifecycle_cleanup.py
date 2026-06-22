@@ -382,7 +382,7 @@ class WorkerLifecycleWatcher:
         if not entries:
             return
         try:
-            self.client.log_stream_lines(session_id, entries[:500])
+            upload_log_stream_entries(self.client, session_id, entries)
         except PullwiseRequestError as exc:
             self.last_error = f"log stream upload failed: {redact_secrets(str(exc), self.config)}"[:500]
             return
@@ -390,6 +390,11 @@ class WorkerLifecycleWatcher:
             tailer.commit(state)
         except Exception as exc:
             self.last_error = f"log stream checkpoint failed: {redact_secrets(str(exc), self.config)}"[:500]
+
+
+def upload_log_stream_entries(client: PullwiseClient, session_id: str, entries: list[dict]) -> None:
+    for start in range(0, len(entries), 500):
+        client.log_stream_lines(session_id, entries[start : start + 500])
 
 
 def run_lifecycle_watcher(config: WorkerConfig, *, once: bool = False) -> int:

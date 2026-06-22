@@ -349,7 +349,7 @@ class Worker:
         if not entries:
             return
         try:
-            self.client.log_stream_lines(session_id, entries[:500])
+            upload_log_stream_entries(self.client, session_id, entries)
         except PullwiseRequestError as exc:
             self.last_error = f"log stream upload failed: {redact_secrets(str(exc), self.config)}"[:500]
             return

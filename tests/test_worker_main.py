@@ -1029,6 +1029,44 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("log stream collection failed", worker.last_error or "")
             self.assertIn("tailer broke", worker.last_error or "")
 
+    def test_worker_log_session_uploads_all_entries_before_checkpoint(self) -> None:
+        class FakeTailer:
+            def __init__(self) -> None:
+                self.committed = None
+
+            def collect(self):
+                entries = [
+                    {"source": "worker", "stream": "journal", "timestamp": 1781200000 + index, "line": f"line {index}"}
+                    for index in range(1201)
+                ]
+                return entries, {"journal_cursor": "cursor-final", "summary_offset": 1201}
+
+            def commit(self, state):
+                self.committed = state
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_1",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_name="pullwise-worker-wk_1",
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            tailer = FakeTailer()
+            worker.log_tailers["log_1"] = tailer
+
+            with patch.object(worker.client, "log_stream_lines", return_value={"ok": True}) as upload:
+                worker.handle_log_session({"id": "log_1"})
+
+            batch_sizes = [len(call.args[1]) for call in upload.call_args_list]
+            self.assertEqual(batch_sizes, [500, 500, 201])
+            self.assertEqual(tailer.committed, {"journal_cursor": "cursor-final", "summary_offset": 1201})
+
     def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
