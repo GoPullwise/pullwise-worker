@@ -718,6 +718,19 @@ def client_protocol_text(value: object, config: WorkerConfig | None = None, max_
     return clean_protocol_text(redact_secrets(value, config), max_length)
 
 
+def client_active_job_ids(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    job_ids: list[str] = []
+    for value in values:
+        job_id = str(value or "").strip()
+        if not job_id or job_id in {".", ".."} or not _SAFE_JOB_ID_RE.match(job_id):
+            continue
+        if job_id not in job_ids:
+            job_ids.append(job_id)
+    return job_ids
+
+
 class PullwiseClient:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
@@ -793,7 +806,7 @@ class PullwiseClient:
         if ready_providers is not None:
             payload["readyProviders"] = [str(provider) for provider in ready_providers if str(provider or "").strip()]
         if active_job_ids is not None:
-            payload["active_job_ids"] = [str(job_id) for job_id in active_job_ids if str(job_id or "").strip()]
+            payload["active_job_ids"] = client_active_job_ids(active_job_ids)
         if isinstance(machine_metrics, dict):
             payload["machine_metrics"] = machine_metrics
         response = self.post("/worker/heartbeat", payload)

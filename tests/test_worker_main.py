@@ -677,6 +677,49 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertNotIn("max_concurrent_jobs", captured["payload"])
         self.assertNotIn("free_slots", captured["payload"])
 
+    def test_heartbeat_payload_filters_invalid_active_job_ids(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return Response()
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            client.heartbeat(
+                active_job_ids=[
+                    "job_one",
+                    "../escape",
+                    "bad\njob",
+                    ".",
+                    "",
+                    None,
+                    "job_one",
+                    "job-two.3",
+                ],
+            )
+
+        self.assertEqual(captured["payload"]["active_job_ids"], ["job_one", "job-two.3"])
+
     def test_heartbeat_payload_redacts_and_bounds_error_text(self) -> None:
         config = SimpleNamespace(
             server_url="https://pullwise.example",
