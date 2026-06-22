@@ -316,6 +316,24 @@ def test_inventory_excludes_tracked_paths_missing_from_worktree(tmp_path: Path) 
     assert "removed.py" not in {str(item.get("path") or "") for item in analyzable_files(inventory)}
 
 
+def test_inventory_excludes_symlinked_files_without_reading_target(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("def outside():\n    return 1\n", encoding="utf-8")
+    link = checkout / "linked.py"
+    link.symlink_to(outside)
+
+    inventory = build_git_inventory(checkout, include_untracked=True)
+    paths = {item["path"]: item for item in inventory["files"]}
+
+    assert paths["linked.py"]["scope"] == "excluded"
+    assert paths["linked.py"]["reason"] == "symlink"
+    assert paths["linked.py"]["line_count"] == 0
+    assert paths["linked.py"]["content_hash"] == ""
+    assert "linked.py" not in {str(item.get("path") or "") for item in analyzable_files(inventory)}
+
+
 def test_snapshot_fails_before_graph_when_analyzable_inventory_file_is_missing(tmp_path: Path) -> None:
     checkout = tmp_path / "repo"
     run = checkout / ".codereview" / "runs" / "run_1"
@@ -331,6 +349,28 @@ def test_snapshot_fails_before_graph_when_analyzable_inventory_file_is_missing(t
 
     assert "immutable snapshot missing analyzable inventory files" in message
     assert "missing.py" in message
+
+
+def test_snapshot_refuses_symlinked_analyzable_source(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('outside')\n", encoding="utf-8")
+    (checkout / "linked.py").symlink_to(outside)
+
+    try:
+        create_immutable_snapshot(checkout, {"files": [{"path": "linked.py", "scope": "analyze"}]}, run)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected symlinked analyzable source to be rejected")
+
+    assert "immutable snapshot missing analyzable inventory files" in message
+    assert "linked.py" in message
+    snapshot_repo = run / "workers" / "coordinator" / "snapshot" / "repo"
+    assert not (snapshot_repo / "linked.py").exists()
+    assert outside.read_text(encoding="utf-8") == "print('outside')\n"
 
 
 def test_snapshot_replaces_symlinked_snapshot_repo_without_touching_target(tmp_path: Path) -> None:

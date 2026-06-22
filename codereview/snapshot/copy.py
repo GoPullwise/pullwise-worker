@@ -25,7 +25,7 @@ def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dic
             continue
         source = checkout / rel
         target = repo / rel
-        if not source.is_file():
+        if source.is_symlink() or not source.is_file():
             missing.append(rel)
             continue
         ensure_dir(target.parent)
@@ -56,13 +56,13 @@ def _copy_codereview_assets(checkout: Path, repo: Path) -> list[str]:
     copied: list[str] = []
     for name in ("config.json",):
         source_file = source / name
-        if source_file.is_file():
+        if not source_file.is_symlink() and source_file.is_file():
             shutil.copy2(source_file, target / name)
             copied.append(f".codereview/{name}")
     for name in ("prompts", "schemas"):
         source_dir = source / name
         target_dir = target / name
-        if source_dir.is_dir():
+        if not source_dir.is_symlink() and source_dir.is_dir():
             if target_dir.exists():
                 shutil.rmtree(target_dir)
             shutil.copytree(source_dir, target_dir)

@@ -99,14 +99,15 @@ def _git_files(checkout: Path, *, include_untracked: bool) -> list[str]:
 def _walk_files(checkout: Path) -> list[str]:
     paths: list[str] = []
     for root, dirs, names in os.walk(checkout):
-        rel_root = Path(root).resolve(strict=False).relative_to(checkout.resolve(strict=False)).as_posix()
+        root_path = Path(root)
+        rel_root = root_path.relative_to(checkout).as_posix()
         dirs[:] = [
             name
             for name in dirs
-            if not _is_excluded_path(f"{rel_root}/{name}".strip("./"))
+            if not (root_path / name).is_symlink() and not _is_excluded_path(f"{rel_root}/{name}".strip("./"))
         ]
         for name in names:
-            rel = (Path(root) / name).resolve(strict=False).relative_to(checkout.resolve(strict=False)).as_posix()
+            rel = (root_path / name).relative_to(checkout).as_posix()
             safe = safe_relative_path(rel)
             if safe:
                 paths.append(safe)
@@ -157,11 +158,16 @@ def _file_entry(checkout: Path, rel: str, status: str) -> dict:
     ext = path.suffix.lower()
     reason = ""
     scope = "analyze"
-    binary = looks_binary(path) if path.is_file() else False
+    is_symlink = path.is_symlink()
+    is_regular_file = path.is_file() and not is_symlink
+    binary = looks_binary(path) if is_regular_file else False
     if _is_excluded_path(rel):
         scope = "excluded"
         reason = "excluded-path"
-    elif not path.is_file():
+    elif is_symlink:
+        scope = "excluded"
+        reason = "symlink"
+    elif not is_regular_file:
         scope = "excluded"
         reason = "missing-or-non-file"
     elif binary:
@@ -175,9 +181,9 @@ def _file_entry(checkout: Path, rel: str, status: str) -> dict:
         reason = "unsupported-extension"
     return {
         "path": rel,
-        "size_bytes": path.stat().st_size if path.is_file() else 0,
-        "line_count": line_count(path) if path.is_file() and not binary else 0,
-        "content_hash": sha256_file(path) if path.is_file() else "",
+        "size_bytes": path.stat().st_size if is_regular_file else 0,
+        "line_count": line_count(path) if is_regular_file and not binary else 0,
+        "content_hash": sha256_file(path) if is_regular_file else "",
         "extension": ext,
         "git_status": status,
         "scope": scope,
