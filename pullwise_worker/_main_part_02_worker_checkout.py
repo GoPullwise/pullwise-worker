@@ -1434,6 +1434,8 @@ def clone_repository(job: dict, checkout_dir: Path) -> str:
         except RuntimeError:
             remove_checkout_dir(checkout_dir)
             if attempt == 0:
+                if mirror_dir.is_symlink():
+                    raise
                 remove_checkout_dir(mirror_dir)
                 continue
             raise
@@ -1467,6 +1469,10 @@ def ensure_repository_mirror(mirror_dir: Path, clone_url: str, env: dict[str, st
     if cache_root.exists() and not cache_root.is_dir():
         raise RuntimeError("repository mirror cache root must be a directory")
     cache_root.mkdir(parents=True, exist_ok=True)
+    if mirror_dir.is_symlink():
+        raise RuntimeError("repository mirror directory must not be a symlink")
+    if mirror_dir.exists() and not mirror_dir.is_dir():
+        raise RuntimeError("repository mirror directory must be a directory")
     if not (mirror_dir / "HEAD").exists():
         run_git_command(["git", "init", "--bare", str(mirror_dir)], phase="mirror-init")
         run_git_command(["git", "-C", str(mirror_dir), "remote", "add", "origin", clone_url], phase="mirror-remote")

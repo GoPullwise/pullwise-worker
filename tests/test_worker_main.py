@@ -1655,6 +1655,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             run_git.assert_not_called()
             self.assertEqual(list(outside_cache.iterdir()), [])
 
+    def test_clone_repository_rejects_symlinked_mirror_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source, first_commit, _second_commit = self.make_git_repo(root)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            checkout = work_dir / "job_1"
+            job = {
+                "repo": "owner/repo",
+                "clone_url": str(source),
+                "branch": "master",
+                "commit": first_commit,
+            }
+            outside_mirror = root / "outside-mirror.git"
+            outside_mirror.mkdir()
+            mirror_dir = worker_main.repository_mirror_dir(work_dir, job, str(source))
+            mirror_dir.parent.mkdir()
+            mirror_dir.symlink_to(outside_mirror, target_is_directory=True)
+
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+                worker_main, "run_git_command"
+            ) as run_git:
+                with self.assertRaisesRegex(RuntimeError, "mirror directory must not be a symlink"):
+                    worker_main.clone_repository(job, checkout)
+
+            run_git.assert_not_called()
+            self.assertEqual(list(outside_mirror.iterdir()), [])
+
     def test_clone_repository_rejects_untrusted_clone_urls_before_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
