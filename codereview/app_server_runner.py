@@ -12,6 +12,11 @@ from pathlib import Path
 from .config import CodexConfig
 from .utils.process import ProcessResult
 
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - fcntl is unavailable on Windows.
+    _fcntl = None
+
 
 @dataclass
 class AppServerRequest:
@@ -34,6 +39,7 @@ class AppServerTurn:
 
 _APP_SERVER_CLIENTS_LOCK = threading.Lock()
 _APP_SERVER_CLIENTS: dict[tuple[str, str, str, str, str], "CodexAppServerClient"] = {}
+_APP_SERVER_LOCK_FILE = ".pullwise-app-server.lock"
 
 
 def app_server_key(command: str, env: dict[str, str] | None) -> tuple[str, str, str, str, str]:
@@ -45,6 +51,87 @@ def app_server_key(command: str, env: dict[str, str] | None) -> tuple[str, str, 
         str(source.get("CODEX_SQLITE_HOME") or ""),
         str(source.get("PATH") or ""),
     )
+
+
+class AppServerStateLock:
+    def __init__(self, path: Path | None, *, timeout_seconds: float) -> None:
+        self.path = path
+        self.timeout_seconds = max(0.0, float(timeout_seconds or 0))
+        self._handle = None
+
+    def acquire(self) -> None:
+        if self.path is None or _fcntl is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            try:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                handle.seek(0)
+                handle.truncate()
+                handle.write(f"pid={os.getpid()} started_at={int(time.time())}\n")
+                handle.flush()
+                self._handle = handle
+                return
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise RuntimeError(f"deferred: codex is running; app-server state lock is busy at {self.path}") from exc
+                time.sleep(0.25)
+            except Exception:
+                handle.close()
+                raise
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            if _fcntl is not None:
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def app_server_state_lock_supported() -> bool:
+    return _fcntl is not None
+
+
+def prepare_app_server_state(env: dict[str, str] | None) -> None:
+    source = env or {}
+    for key in (
+        "HOME",
+        "USERPROFILE",
+        "CODEX_HOME",
+        "CODEX_SQLITE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+    ):
+        value = str(source.get(key) or "").strip()
+        if value:
+            Path(value).mkdir(parents=True, exist_ok=True)
+    codex_home = str(source.get("CODEX_HOME") or "").strip()
+    if not codex_home:
+        return
+    config_path = Path(codex_home) / "config.toml"
+    if not config_path.exists():
+        config_path.write_text("", encoding="utf-8")
+
+
+def app_server_state_lock_path(env: dict[str, str] | None) -> Path | None:
+    source = env or {}
+    for key in ("CODEX_HOME", "CODEX_SQLITE_HOME", "HOME", "USERPROFILE"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            return Path(value) / _APP_SERVER_LOCK_FILE
+    return None
+
+
+def app_server_lock_timeout_seconds(env: dict[str, str] | None) -> int:
+    return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_LOCK_TIMEOUT_SECONDS"), 60)
 
 
 def get_codex_app_server_client(command: str, env: dict[str, str] | None, cwd: Path) -> "CodexAppServerClient":
@@ -148,6 +235,7 @@ class CodexAppServerClient:
         self._completed_turns = 0
         self._ready = False
         self._closed = False
+        self._state_lock: AppServerStateLock | None = None
 
     def ensure_started(self) -> None:
         with self._start_lock:
@@ -260,8 +348,15 @@ class CodexAppServerClient:
     def _start_locked(self) -> None:
         self.close()
         self._closed = False
+        prepare_app_server_state(self.env)
+        state_lock = AppServerStateLock(
+            app_server_state_lock_path(self.env),
+            timeout_seconds=app_server_lock_timeout_seconds(self.env),
+        )
         launch_args = app_server_launch_args(self.command, self.env)
         try:
+            state_lock.acquire()
+            self._state_lock = state_lock
             self.process = subprocess.Popen(
                 launch_args,
                 cwd=str(self.cwd),
@@ -305,42 +400,48 @@ class CodexAppServerClient:
             self._completed_turns = 0
         process = self.process
         self.process = None
-        if process is None:
-            return
-        if process.stdin is not None:
-            try:
-                process.stdin.close()
-            except (OSError, ValueError):
-                pass
-        if process.poll() is None:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
+        try:
+            if process is None:
+                return
+            if process.stdin is not None:
                 try:
-                    process.kill()
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            if process.poll() is None:
+                try:
+                    process.terminate()
                 except OSError:
                     pass
                 try:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+            for stream in (process.stdout, process.stderr):
+                if stream is None:
+                    continue
+                try:
+                    stream.close()
+                except (OSError, ValueError):
                     pass
-        for stream in (process.stdout, process.stderr):
-            if stream is None:
-                continue
-            try:
-                stream.close()
-            except (OSError, ValueError):
-                pass
-        current = threading.current_thread()
-        for reader in (self._reader, self._stderr_reader):
-            if reader is not None and reader is not current and reader.is_alive():
-                reader.join(timeout=0.5)
-        self._reader = None
-        self._stderr_reader = None
+            current = threading.current_thread()
+            for reader in (self._reader, self._stderr_reader):
+                if reader is not None and reader is not current and reader.is_alive():
+                    reader.join(timeout=0.5)
+            self._reader = None
+            self._stderr_reader = None
+        finally:
+            state_lock = self._state_lock
+            self._state_lock = None
+            if state_lock is not None:
+                state_lock.release()
 
     def stderr_text(self) -> str:
         with self._lock:
@@ -469,6 +570,7 @@ def app_server_safe_to_retry(exc: Exception) -> bool:
         or "stdout closed" in text
         or "database is locked" in text
         or "disk I/O error" in text
+        or "failed to load configuration" in text
     )
 
 

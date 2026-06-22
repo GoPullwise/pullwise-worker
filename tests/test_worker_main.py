@@ -774,6 +774,18 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["scoring"]["min_score_for_repro"], 9)
         self.assertEqual(payload["scoring"]["always_repro_severities"], ["critical", "high"])
 
+    def test_worker_wrapper_exports_codex_sqlite_home(self) -> None:
+        script = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk/worker.env"))
+
+        self.assertIn('export CODEX_SQLITE_HOME="$SERVICE_HOME/.codex-sqlite"', script)
+
+    def test_service_user_doctor_command_exports_codex_sqlite_home(self) -> None:
+        cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")
+
+        command = worker_main.service_user_doctor_command(cfg, Path("/usr/local/bin/pullwise-worker-wk"))
+
+        self.assertIn("CODEX_SQLITE_HOME=/var/lib/pullwise-worker/wk/.codex-sqlite", command)
+
     def test_graph_verified_job_state_is_per_checkout_without_global_mcp_setup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

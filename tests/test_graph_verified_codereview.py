@@ -1215,6 +1215,50 @@ def test_app_server_turn_writes_structured_output_and_turn_events(tmp_path: Path
     assert events.is_file()
 
 
+def test_prepare_app_server_state_creates_codex_dirs_and_config(tmp_path: Path) -> None:
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "home" / ".codex"),
+        "CODEX_SQLITE_HOME": str(tmp_path / "home" / ".codex-sqlite"),
+        "XDG_CONFIG_HOME": str(tmp_path / "home" / ".config"),
+        "XDG_CACHE_HOME": str(tmp_path / "home" / ".cache"),
+        "XDG_DATA_HOME": str(tmp_path / "home" / ".local" / "share"),
+    }
+
+    app_server_runner.prepare_app_server_state(env)
+
+    for key in env:
+        assert Path(env[key]).is_dir()
+    config_path = Path(env["CODEX_HOME"]) / "config.toml"
+    assert config_path.is_file()
+
+    config_path.write_text("model = \"gpt-5\"\n", encoding="utf-8")
+    app_server_runner.prepare_app_server_state(env)
+    assert config_path.read_text(encoding="utf-8") == "model = \"gpt-5\"\n"
+
+
+def test_app_server_state_lock_reports_busy_process_on_posix(tmp_path: Path) -> None:
+    if not app_server_runner.app_server_state_lock_supported():
+        raise unittest.SkipTest("POSIX fcntl locks are not available on this platform.")
+
+    lock_path = tmp_path / ".codex" / ".pullwise-app-server.lock"
+    first_lock = app_server_runner.AppServerStateLock(lock_path, timeout_seconds=0)
+    first_lock.acquire()
+    try:
+        second_lock = app_server_runner.AppServerStateLock(lock_path, timeout_seconds=0)
+        try:
+            second_lock.acquire()
+        except RuntimeError as exc:
+            assert "deferred" in str(exc)
+            assert "codex is running" in str(exc)
+        else:
+            second_lock.release()
+            raise AssertionError("second app-server state lock unexpectedly succeeded")
+    finally:
+        first_lock.release()
+
+
 def test_app_server_client_recycles_after_age_or_turn_limit(tmp_path: Path) -> None:
     client = app_server_runner.CodexAppServerClient(
         command="codex",

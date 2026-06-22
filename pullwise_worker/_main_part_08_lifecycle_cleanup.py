@@ -558,6 +558,7 @@ def service_user_doctor_command(config: WorkerConfig, bin_path: Path) -> list[st
         f"HOME={service_home}",
         f"USERPROFILE={service_home}",
         f"CODEX_HOME={service_home}/.codex",
+        f"CODEX_SQLITE_HOME={service_home}/.codex-sqlite",
         f"XDG_CONFIG_HOME={service_home}/.config",
         f"XDG_CACHE_HOME={service_home}/.cache",
         f"XDG_DATA_HOME={service_home}/.local/share",
@@ -587,6 +588,7 @@ SERVICE_HOME="${{PULLWISE_SERVICE_HOME:-/var/lib/pullwise-worker}}"
 export HOME="$SERVICE_HOME"
 export USERPROFILE="$SERVICE_HOME"
 export CODEX_HOME="$SERVICE_HOME/.codex"
+export CODEX_SQLITE_HOME="$SERVICE_HOME/.codex-sqlite"
 export XDG_CONFIG_HOME="$SERVICE_HOME/.config"
 export XDG_CACHE_HOME="$SERVICE_HOME/.cache"
 export XDG_DATA_HOME="$SERVICE_HOME/.local/share"
