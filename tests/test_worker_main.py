@@ -744,6 +744,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     "../escape",
                     "bad\njob",
                     ".",
+                    "j" * (worker_main._MAX_JOB_ID_LENGTH + 1),
                     "",
                     None,
                     "job_one",
@@ -752,6 +753,18 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             )
 
         self.assertEqual(captured["payload"]["active_job_ids"], ["job_one", "job-two.3"])
+
+    def test_safe_job_id_rejects_oversized_identifier(self) -> None:
+        oversized = "j" * (worker_main._MAX_JOB_ID_LENGTH + 1)
+
+        with self.assertRaisesRegex(ValueError, "unsafe path characters"):
+            worker_main.safe_job_id(oversized)
+
+        with self.assertRaisesRegex(ValueError, "unsafe path characters"):
+            worker_main.result_upload_file(Path("/tmp/work"), oversized)
+
+        with self.assertRaisesRegex(ValueError, "unsafe path characters"):
+            worker_main.validate_claimed_job({"job_id": oversized})
 
     def test_heartbeat_payload_filters_invalid_ready_providers(self) -> None:
         config = SimpleNamespace(

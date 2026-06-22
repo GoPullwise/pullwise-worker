@@ -42,6 +42,7 @@ PHASE_PROGRESS = {
     "report": 95,
 }
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_MAX_JOB_ID_LENGTH = 128
 _FAILED_CHECKOUT_MARKER_SUFFIX = ".failed-retain"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
@@ -735,6 +736,8 @@ def client_active_job_ids(values: object) -> list[str]:
     job_ids: list[str] = []
     for value in values:
         job_id = str(value or "").strip()
+        if len(job_id) > _MAX_JOB_ID_LENGTH:
+            continue
         if not job_id or job_id in {".", ".."} or not _SAFE_JOB_ID_RE.match(job_id):
             continue
         if job_id not in job_ids:

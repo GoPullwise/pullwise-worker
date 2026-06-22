@@ -1251,7 +1251,7 @@ class Worker:
 
 def safe_job_id(value: object) -> str:
     job_id = str(value or "").strip()
-    if not job_id or job_id in {".", ".."} or not _SAFE_JOB_ID_RE.match(job_id):
+    if not job_id or len(job_id) > _MAX_JOB_ID_LENGTH or job_id in {".", ".."} or not _SAFE_JOB_ID_RE.match(job_id):
         raise ValueError("job_id contains unsafe path characters")
     return job_id
 
