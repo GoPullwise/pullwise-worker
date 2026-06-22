@@ -223,9 +223,13 @@ def readiness_error_message(check: tuple[str, bool, str], config: WorkerConfig) 
 
 def writable_path_check(path: Path) -> tuple[bool, str]:
     try:
+        if path.is_symlink():
+            return False, f"path must not be a symlink: {path}"
         path.mkdir(parents=True, exist_ok=True)
         test_file = path / f".pullwise-write-test-{os.getpid()}"
-        test_file.write_text("ok", encoding="utf-8")
+        if repository_path_exists_without_following_symlink(test_file):
+            return False, f"write test path already exists: {test_file.name}"
+        write_no_follow_text_file(test_file, "ok")
         test_file.unlink(missing_ok=True)
         return True, str(path)
     except Exception as exc:
@@ -399,7 +403,8 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         tmp_path = Path(tmpdir)
         output_path = tmp_path / "codex-ready.json"
         schema_path = tmp_path / "codex-ready.schema.json"
-        schema_path.write_text(
+        write_no_follow_text_file(
+            schema_path,
             json.dumps(
                 {
                     "type": "object",
@@ -408,7 +413,6 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
                     "properties": {"ok": {"type": "boolean"}},
                 }
             ),
-            encoding="utf-8",
         )
         provider_env = provider_process_env(config)
         ready_prompt = 'Return only JSON: {"ok": true}'
@@ -437,7 +441,10 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         output = redact_secrets((result.stderr or result.stdout).strip(), config)
         detail = output.splitlines()[0] if output else f"exit {result.returncode}"
         if result.returncode == 0:
-            final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+            try:
+                final_message = read_no_follow_text_file(output_path) if output_path.exists() else ""
+            except (OSError, UnicodeDecodeError):
+                final_message = ""
             if not (codex_ready_probe_confirmed(final_message) or codex_ready_probe_confirmed(result.stdout)):
                 return False, "codex app-server ready check did not confirm model response"
             clear_codex_auth_failure()

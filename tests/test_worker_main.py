@@ -2335,6 +2335,36 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(ready_providers, ["codex"])
         self.assertFalse(any(name == "graph_verified_mcp" for name, _ok, _detail in checks))
 
+    def test_writable_path_check_rejects_symlinked_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside"
+            outside.mkdir()
+            path = root / "work"
+            path.symlink_to(outside, target_is_directory=True)
+
+            ok, detail = worker_main.writable_path_check(path)
+
+            self.assertFalse(ok)
+            self.assertIn("must not be a symlink", detail)
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_writable_path_check_does_not_follow_symlinked_test_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside"
+            outside.write_text("outside", encoding="utf-8")
+            test_file = root / ".pullwise-write-test-123"
+            test_file.symlink_to(outside)
+
+            with patch.object(worker_main.os, "getpid", return_value=123):
+                ok, detail = worker_main.writable_path_check(root)
+
+            self.assertFalse(ok)
+            self.assertTrue(detail)
+            self.assertTrue(test_file.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+
     def test_worker_home_isolation_rejects_normalized_default_home(self) -> None:
         cfg = SimpleNamespace(service_home=f"{worker_main.DEFAULT_SERVICE_HOME}/.")
 
