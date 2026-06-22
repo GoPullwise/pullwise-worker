@@ -1862,6 +1862,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("summary.json", payload["debugMarkdown"])
         self.assertIn("failed before confirmation", payload["debugMarkdown"])
 
+    def test_run_graph_verified_review_payload_rejects_symlink_report_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            reports = root / ".codereview" / "runs" / "run_1" / "reports"
+            reports.mkdir(parents=True)
+            outside = root / "outside-confirmed.json"
+            outside.write_text(json.dumps([{"candidate": {"candidate_id": "outside"}}]), encoding="utf-8")
+            final_md = reports / "final.md"
+            final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
+            (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
+            (reports / "confirmed.json").symlink_to(outside)
+            (reports / "rejected.json").write_text("[]", encoding="utf-8")
+            (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
+            (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
+            codereview_main = importlib.import_module("codereview.main")
+
+            with patch.object(codereview_main, "run_review", return_value=final_md):
+                payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    root,
+                )
+
+        self.assertEqual(payload["confirmedCount"], 0)
+        self.assertEqual(payload["blockedCount"], 1)
+        self.assertIn("must not be a symlink: confirmed.json", payload["debugMarkdown"])
+
     def test_run_graph_verified_review_payload_blocks_on_review_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

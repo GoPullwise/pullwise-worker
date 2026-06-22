@@ -66,8 +66,8 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
         "blockedCount": graph_verified_count(report_counts.get("blocked")),
-        "finalMarkdown": final_path.read_text(encoding="utf-8") if final_path.is_file() else "",
-        "debugMarkdown": (reports / "debug.md").read_text(encoding="utf-8") if (reports / "debug.md").is_file() else "",
+        "finalMarkdown": final_path.read_text(encoding="utf-8") if graph_verified_regular_file(final_path) else "",
+        "debugMarkdown": (reports / "debug.md").read_text(encoding="utf-8") if graph_verified_regular_file(reports / "debug.md") else "",
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
         "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
@@ -88,9 +88,12 @@ def graph_verified_failed_report(mode: str, scan_mode: str, error: object) -> di
 
 
 def graph_verified_report_artifact_error(final_path: Path) -> str:
-    if not final_path.is_file():
+    if not graph_verified_regular_file(final_path):
         return "GraphVerified final markdown report is missing."
     reports = final_path.parent
+    debug_path = reports / "debug.md"
+    if debug_path.exists() and not graph_verified_regular_file(debug_path):
+        return "GraphVerified report artifact must not be a symlink: debug.md."
     checks = (
         ("confirmed.json", list),
         ("rejected.json", list),
@@ -99,6 +102,8 @@ def graph_verified_report_artifact_error(final_path: Path) -> str:
     )
     for filename, expected_type in checks:
         path = reports / filename
+        if path.is_symlink():
+            return f"GraphVerified report artifact must not be a symlink: {filename}."
         if not path.is_file():
             return f"GraphVerified report artifact is missing: {filename}."
         try:
@@ -108,6 +113,10 @@ def graph_verified_report_artifact_error(final_path: Path) -> str:
         if not isinstance(payload, expected_type):
             return f"GraphVerified report artifact has invalid shape: {filename}."
     return ""
+
+
+def graph_verified_regular_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
 
 
 def graph_verified_progress_message(value: object) -> str:
