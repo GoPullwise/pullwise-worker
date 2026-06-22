@@ -948,6 +948,8 @@ def _unlink_path_ignore_errors(path: Path) -> None:
 
 def cleanup_logs(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:
     active = set(active_job_ids or set())
+    if config.log_dir.is_symlink():
+        return
     config.log_dir.mkdir(parents=True, exist_ok=True)
     now_ts = int(time.time())
     files: list[tuple[float, Path]] = []

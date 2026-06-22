@@ -1652,6 +1652,24 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(symlinked.is_symlink())
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
 
+    def test_cleanup_logs_rejects_symlinked_log_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside_logs = root / "outside-logs"
+            outside_logs.mkdir()
+            expired = outside_logs / "expired.log"
+            expired.write_text("expired", encoding="utf-8")
+            old_ts = time.time() - 3600
+            os.utime(expired, (old_ts, old_ts))
+            log_dir = root / "logs"
+            log_dir.symlink_to(outside_logs, target_is_directory=True)
+            config = SimpleNamespace(log_dir=log_dir, log_retention_seconds=1, max_log_bytes=1)
+
+            worker_main.cleanup_logs(config)
+
+            self.assertTrue(expired.exists())
+            self.assertEqual(expired.read_text(encoding="utf-8"), "expired")
+
     def test_journal_log_tailer_reports_unavailable_once_and_backs_off(self) -> None:
         tailer = worker_main.WorkerJournalLogTailer("pullwise-worker-wk_1", since_timestamp=1781200000)
 
