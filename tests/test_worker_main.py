@@ -45,6 +45,51 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("Run the Pullwise pull worker.", completed.stdout)
 
+    def test_worker_config_tolerates_bad_numeric_environment_values(self) -> None:
+        env = {
+            "PULLWISE_WORKER_POLL_SECONDS": "bad",
+            "PULLWISE_WORKER_POLL_JITTER_SECONDS": "bad",
+            "PULLWISE_WORKER_MAX_BACKOFF_SECONDS": "bad",
+            "PULLWISE_WATCHER_POLL_SECONDS": "bad",
+            "PULLWISE_CODEX_TIMEOUT_SECONDS": "bad",
+            "PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS": "bad",
+            "PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS": "bad",
+            "PULLWISE_READINESS_CHECK_SECONDS": "bad",
+            "PULLWISE_RESULT_UPLOAD_ATTEMPTS": "bad",
+            "PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES": "bad",
+            "PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS": "bad",
+            "PULLWISE_MAX_CHECKOUT_BYTES": "bad",
+            "PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS": "bad",
+            "PULLWISE_LOG_RETENTION_SECONDS": "bad",
+            "PULLWISE_MAX_LOG_BYTES": "bad",
+            "PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES": "bad",
+        }
+        args = SimpleNamespace(
+            server_url="http://localhost:8080",
+            worker_token="",
+            worker_id="wk_test",
+            provider="codex",
+            poll_seconds=None,
+            checkout_root=None,
+            work_dir=None,
+            log_dir=None,
+            codex_command=None,
+            codex_timeout_seconds=None,
+        )
+
+        with patch.dict(worker_main.os.environ, env, clear=False):
+            config = worker_main.WorkerConfig(args, require_worker_token=False)
+
+        self.assertEqual(config.poll_seconds, 5)
+        self.assertEqual(config.poll_jitter_seconds, 2)
+        self.assertEqual(config.max_backoff_seconds, 60)
+        self.assertEqual(config.watcher_poll_seconds, 5)
+        self.assertEqual(config.codex_timeout_seconds, 1800)
+        self.assertEqual(config.codex_doctor_timeout_seconds, 60)
+        self.assertEqual(config.result_upload_attempts, 5)
+        self.assertEqual(config.failed_checkout_retention_seconds, 0)
+        self.assertEqual(config.scan_summary_log_max_bytes, 10 * 1024 * 1024)
+
     def git(self, repo: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", *args],

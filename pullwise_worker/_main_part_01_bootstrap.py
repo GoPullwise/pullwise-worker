@@ -409,14 +409,14 @@ def env_bool(name: str, default: bool) -> bool:
 def env_int(name: str, default: int, *, minimum: int = 1) -> int:
     try:
         return max(minimum, int(os.environ.get(name) or default))
-    except ValueError:
-        return default
+    except (TypeError, ValueError, OverflowError):
+        return max(minimum, int(default))
 
 
 def env_float(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
     try:
         value = float(os.environ.get(name) or default)
-    except ValueError:
+    except (TypeError, ValueError, OverflowError):
         value = default
     if minimum is not None:
         value = max(minimum, value)
@@ -611,9 +611,9 @@ class WorkerConfig:
             configured_provider,
         )
         self.provider = configured_provider or (self.provider_chain[0] if self.provider_chain else "")
-        self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or os.environ.get("PULLWISE_WORKER_POLL_SECONDS") or 5))
-        self.poll_jitter_seconds = max(0.0, float(os.environ.get("PULLWISE_WORKER_POLL_JITTER_SECONDS") or 2))
-        self.max_backoff_seconds = max(self.poll_seconds, int(os.environ.get("PULLWISE_WORKER_MAX_BACKOFF_SECONDS") or 60))
+        self.poll_seconds = max(1, int(getattr(args, "poll_seconds", None) or env_int("PULLWISE_WORKER_POLL_SECONDS", 5)))
+        self.poll_jitter_seconds = env_float("PULLWISE_WORKER_POLL_JITTER_SECONDS", 2, minimum=0.0)
+        self.max_backoff_seconds = max(self.poll_seconds, env_int("PULLWISE_WORKER_MAX_BACKOFF_SECONDS", 60))
         checkout_root = getattr(args, "checkout_root", None) or os.environ.get("PULLWISE_CHECKOUT_ROOT")
         work_dir = getattr(args, "work_dir", None) or os.environ.get("PULLWISE_WORKER_WORK_DIR")
         self.work_dir = Path(checkout_root) if checkout_root else Path(work_dir or tempfile.gettempdir()) / "pullwise-worker"
@@ -644,7 +644,7 @@ class WorkerConfig:
             or f"/etc/logrotate.d/{self.service_name}"
         )
         self.lifecycle_watcher_enabled = env_bool("PULLWISE_LIFECYCLE_WATCHER_ENABLED", False)
-        self.watcher_poll_seconds = max(1, int(os.environ.get("PULLWISE_WATCHER_POLL_SECONDS") or self.poll_seconds))
+        self.watcher_poll_seconds = env_int("PULLWISE_WATCHER_POLL_SECONDS", self.poll_seconds)
         self.watcher_service_name = (
             os.environ.get("PULLWISE_WATCHER_SERVICE_NAME", f"{self.service_name}-watcher").strip()
             or f"{self.service_name}-watcher"
@@ -665,28 +665,25 @@ class WorkerConfig:
             os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", DEFAULT_CODEX_REASONING_EFFORT).strip()
             or DEFAULT_CODEX_REASONING_EFFORT
         )
-        self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or os.environ.get("PULLWISE_CODEX_TIMEOUT_SECONDS") or 1800))
-        self.codex_doctor_timeout_seconds = max(10, int(os.environ.get("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS") or 60))
-        self.codex_auth_failure_cooldown_seconds = max(0, int(os.environ.get("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS") or 3600))
-        self.readiness_check_seconds = max(10, int(os.environ.get("PULLWISE_READINESS_CHECK_SECONDS") or 60))
+        self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or env_int("PULLWISE_CODEX_TIMEOUT_SECONDS", 1800)))
+        self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
+        self.codex_auth_failure_cooldown_seconds = env_int("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS", 3600, minimum=0)
+        self.readiness_check_seconds = env_int("PULLWISE_READINESS_CHECK_SECONDS", 60, minimum=10)
         self.machine_metrics_interval_seconds = env_int(
             "PULLWISE_WORKER_MACHINE_METRICS_SECONDS",
             DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS,
             minimum=1,
         )
-        self.result_upload_attempts = max(1, int(os.environ.get("PULLWISE_RESULT_UPLOAD_ATTEMPTS") or 5))
-        self.result_upload_compress_min_bytes = max(
-            0,
-            int(os.environ.get("PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES") or 1024),
-        )
-        self.failed_checkout_retention_seconds = max(0, int(os.environ.get("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS") or 0))
-        self.max_checkout_bytes = max(1, int(os.environ.get("PULLWISE_MAX_CHECKOUT_BYTES") or 20 * 1024 * 1024 * 1024))
+        self.result_upload_attempts = env_int("PULLWISE_RESULT_UPLOAD_ATTEMPTS", 5)
+        self.result_upload_compress_min_bytes = env_int("PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES", 1024, minimum=0)
+        self.failed_checkout_retention_seconds = env_int("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS", 0, minimum=0)
+        self.max_checkout_bytes = env_int("PULLWISE_MAX_CHECKOUT_BYTES", 20 * 1024 * 1024 * 1024)
         self.max_repo_files = _DEFAULT_MAX_REPO_FILES
         self.max_repo_bytes = _DEFAULT_MAX_REPO_BYTES
-        self.cleanup_interval_seconds = max(60, int(os.environ.get("PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS") or 3600))
-        self.log_retention_seconds = max(0, int(os.environ.get("PULLWISE_LOG_RETENTION_SECONDS") or 14 * 24 * 60 * 60))
-        self.max_log_bytes = max(1, int(os.environ.get("PULLWISE_MAX_LOG_BYTES") or 1024 * 1024 * 1024))
-        self.scan_summary_log_max_bytes = max(1024, int(os.environ.get("PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES") or 10 * 1024 * 1024))
+        self.cleanup_interval_seconds = env_int("PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS", 3600, minimum=60)
+        self.log_retention_seconds = env_int("PULLWISE_LOG_RETENTION_SECONDS", 14 * 24 * 60 * 60, minimum=0)
+        self.max_log_bytes = env_int("PULLWISE_MAX_LOG_BYTES", 1024 * 1024 * 1024)
+        self.scan_summary_log_max_bytes = env_int("PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES", 10 * 1024 * 1024, minimum=1024)
         if require_worker_token and not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 
