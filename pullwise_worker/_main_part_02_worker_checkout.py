@@ -1259,8 +1259,8 @@ def clone_repository(job: dict, checkout_dir: Path) -> str:
     if clone_token_value(clone_token):
         clone_url = trusted_clone_url_for_token(job, clone_url, clone_token)
     git_env = git_auth_env(clone_token, clone_url, job.get("repo"))
-    commit = str(job.get("commit") or "pending")
-    branch = str(job.get("branch") or "main")
+    commit = normalize_git_commit_or_pending(job.get("commit"))
+    branch = normalize_git_branch(job.get("branch") or "main")
     mirror_dir = repository_mirror_dir(checkout_dir.parent, job, clone_url)
     for attempt in range(2):
         try:
@@ -1322,6 +1322,31 @@ def fetch_repository_ref(mirror_dir: Path, *, branch: str, commit: str, env: dic
         env=env,
     )
     return resolve_git_ref(mirror_dir, target_ref), target_ref
+
+
+def normalize_git_commit_or_pending(value: object) -> str:
+    commit = str(value or "pending").strip()
+    if not commit or commit.lower() == "pending":
+        return "pending"
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise RuntimeError("Worker job commit must be a 40-character SHA or pending.")
+    return commit.lower()
+
+
+def normalize_git_branch(value: object) -> str:
+    branch = str(value or "main").strip()
+    if not branch:
+        raise RuntimeError("Worker job branch is required.")
+    if branch.startswith(("/", "-")) or branch.endswith(("/", ".")):
+        raise RuntimeError("Worker job branch name is invalid.")
+    forbidden = ("..", "@{", "\\")
+    if any(item in branch for item in forbidden):
+        raise RuntimeError("Worker job branch name is invalid.")
+    if any(ord(char) < 32 or char in " ~^:?*[" for char in branch):
+        raise RuntimeError("Worker job branch name is invalid.")
+    if any(part in {"", ".", ".."} or part.endswith(".lock") for part in branch.split("/")):
+        raise RuntimeError("Worker job branch name is invalid.")
+    return branch
 
 
 def clone_checkout_from_mirror(mirror_dir: Path, checkout_dir: Path, *, clone_url: str, mirror_ref: str) -> None:

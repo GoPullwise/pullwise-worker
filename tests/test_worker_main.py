@@ -911,6 +911,31 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             )
             self.assertNotIn(["git", "clone", str(source), str(first_checkout)], commands)
 
+    def test_clone_repository_rejects_invalid_git_ref_inputs_before_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            checkout = root / "work" / "job_1"
+            invalid_branch_job = {
+                "repo": "owner/repo",
+                "clone_url": "https://github.com/owner/repo.git",
+                "branch": "main:refs/heads/owned",
+                "commit": "pending",
+            }
+            invalid_commit_job = {
+                "repo": "owner/repo",
+                "clone_url": "https://github.com/owner/repo.git",
+                "branch": "main",
+                "commit": "not-a-sha",
+            }
+
+            with patch.object(worker_main, "run_git_command") as run_git:
+                with self.assertRaisesRegex(RuntimeError, "branch name is invalid"):
+                    worker_main.clone_repository(invalid_branch_job, checkout)
+                with self.assertRaisesRegex(RuntimeError, "40-character SHA"):
+                    worker_main.clone_repository(invalid_commit_job, checkout)
+
+            run_git.assert_not_called()
+
     def test_git_logging_redacts_url_credentials(self) -> None:
         self.assertEqual(
             worker_main.git_log_safe_arg("https://user:secret@example.com/owner/repo.git?token=ignored"),
