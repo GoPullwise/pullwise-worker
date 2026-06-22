@@ -395,6 +395,54 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(worker.pending_result_job_ids(), ["job_retry"])
 
+    def test_cancelled_pending_result_upload_is_not_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker.job_cancel_event("job_pending_cancel")
+            worker.cancel_server_jobs(["job_pending_cancel"])
+
+            with patch.object(worker.client, "result") as result:
+                with self.assertRaises(worker_main.WorkerJobCancelled):
+                    worker.upload_result_with_retry("job_pending_cancel", {"status": "done"})
+
+            result.assert_not_called()
+
+    def test_cancelled_pending_result_upload_is_removed_instead_of_rescheduled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=2,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_pending_cancel")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(json.dumps({"job_id": "job_pending_cancel", "payload": {"status": "done"}}), encoding="utf-8")
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_exception(worker_main.WorkerJobCancelled("job job_pending_cancel is no longer accepting worker updates"))
+            worker._pending_result_uploads["job_pending_cancel"] = (future, pending_path)
+
+            worker.collect_result_uploads()
+
+            self.assertEqual(worker.pending_result_job_ids(), [])
+            self.assertFalse(pending_path.exists())
+            self.assertIn("no longer accepting worker updates", worker.last_error or "")
+
     def test_heartbeat_payload_does_not_report_capacity_or_free_slots(self) -> None:
         config = SimpleNamespace(
             server_url="https://pullwise.example",

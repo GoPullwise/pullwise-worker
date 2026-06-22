@@ -656,6 +656,8 @@ class Worker:
     def upload_result_with_retry(self, job_id: str, payload: dict) -> None:
         last_error: Exception | None = None
         for attempt in range(1, self.config.result_upload_attempts + 1):
+            if self.job_cancel_requested(job_id):
+                raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
             try:
                 self.client.result(job_id, payload)
                 return
@@ -667,6 +669,8 @@ class Worker:
                 last_error = exc
                 if attempt >= self.config.result_upload_attempts:
                     raise
+            if self.job_cancel_requested(job_id):
+                raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
             if attempt < self.config.result_upload_attempts:
                 time.sleep(min(30, 2 ** (attempt - 1)))
         if last_error:
@@ -714,6 +718,12 @@ class Worker:
                     f"pending result upload record permanently invalid for {job_id}: "
                     f"{redact_secrets(str(exc), self.config)}"
                 )[:500]
+            except WorkerJobCancelled as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.last_error = redact_secrets(str(exc), self.config)[:500]
             except PullwiseHTTPError as exc:
                 if exc.status_code < 500:
                     try:
