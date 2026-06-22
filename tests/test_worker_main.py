@@ -979,6 +979,35 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             defer.assert_not_called()
 
+    def test_result_upload_retry_wait_stops_when_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_cancel_retry_wait",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+                result_upload_attempts=2,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            event = worker.job_cancel_event("job_cancel_retry_wait")
+
+            with patch.object(
+                worker.client,
+                "result",
+                side_effect=worker_main.PullwiseRequestError("offline"),
+            ) as result, patch.object(event, "wait", return_value=True) as wait:
+                with self.assertRaises(worker_main.WorkerJobCancelled):
+                    worker.upload_result_with_retry("job_cancel_retry_wait", {"status": "done"})
+
+            self.assertEqual(result.call_count, 1)
+            wait.assert_called_once_with(1)
+
     def test_process_runner_stops_when_cancel_event_is_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cancel_event = threading.Event()

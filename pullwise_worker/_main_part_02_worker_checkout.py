@@ -672,9 +672,14 @@ class Worker:
             if self.job_cancel_requested(job_id):
                 raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
             if attempt < self.config.result_upload_attempts:
-                time.sleep(min(30, 2 ** (attempt - 1)))
+                self.wait_before_result_upload_retry(job_id, min(30, 2 ** (attempt - 1)))
         if last_error:
             raise last_error
+
+    def wait_before_result_upload_retry(self, job_id: str, delay_seconds: float) -> None:
+        event = self.job_cancel_event(job_id)
+        if event.wait(max(0.0, float(delay_seconds or 0))):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
 
     def load_pending_result_uploads(self) -> None:
         pending_dir = result_upload_dir(self.config.work_dir)
