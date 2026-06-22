@@ -474,9 +474,15 @@ class Worker:
                     if not loop_error:
                         try:
                             job = self.client.claim()
+                            if job:
+                                validate_claimed_job(job)
                         except PullwiseRequestError as exc:
                             self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
                             loop_error = True
+                        except ValueError as exc:
+                            self.last_error = f"job claim failed: {redact_secrets(str(exc), self.config)}"[:500]
+                            loop_error = True
+                            job = None
                     if job:
                         running_job = job
                         running_future = executor.submit(self.run_job, job)
@@ -1172,6 +1178,13 @@ def safe_job_id(value: object) -> str:
     if not job_id or job_id in {".", ".."} or not _SAFE_JOB_ID_RE.match(job_id):
         raise ValueError("job_id contains unsafe path characters")
     return job_id
+
+
+def validate_claimed_job(job: object) -> dict:
+    if not isinstance(job, dict):
+        raise ValueError("claim response job must be an object")
+    safe_job_id(job.get("job_id"))
+    return job
 
 
 def checkout_dir_for_job(work_dir: Path, job_id: str) -> Path:
