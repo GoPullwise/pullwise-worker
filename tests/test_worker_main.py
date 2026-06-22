@@ -3370,6 +3370,25 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertTrue(worker_main.safe_remote_service_home_target(service_home, work_dir))
 
+    def test_worker_instance_owned_path_rejects_unsafe_worker_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            target = root / "evil"
+            target.mkdir()
+            config = SimpleNamespace(service_home="", worker_id="evil/../../root")
+
+            self.assertFalse(worker_main.worker_instance_owned_path(target, config))
+            self.assertFalse(worker_main.safe_worker_instance_log_target(target, config))
+
+    def test_worker_instance_owned_path_rejects_relative_service_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            relative_home = Path("service-home")
+            target = Path.cwd() / relative_home / "logs"
+            config = SimpleNamespace(service_home=str(relative_home), worker_id="")
+
+            self.assertFalse(worker_main.worker_instance_owned_path(target, config))
+
     def test_safe_unlink_rejects_service_name_path_traversal(self) -> None:
         with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
             worker_main.safe_unlink(

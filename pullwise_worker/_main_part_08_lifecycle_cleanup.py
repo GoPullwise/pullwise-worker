@@ -546,9 +546,11 @@ def safe_worker_instance_config_target(config_dir: Path, config: WorkerConfig | 
 
 def worker_instance_owned_path(path: Path, config: WorkerConfig) -> bool:
     service_home = Path(str(getattr(config, "service_home", "") or ""))
-    if str(service_home) and path_same_or_within(path, service_home):
+    if service_home.is_absolute() and not path_is_root(service_home) and path_same_or_within(path, service_home):
         return True
     worker_id = str(getattr(config, "worker_id", "") or "").strip()
+    if not worker_id or len(worker_id) > _MAX_JOB_ID_LENGTH or not _SAFE_JOB_ID_RE.match(worker_id):
+        return False
     return bool(worker_id) and path.resolve(strict=False).name == worker_id
 
 
