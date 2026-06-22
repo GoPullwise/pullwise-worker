@@ -44,7 +44,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     except Exception as exc:
         return graph_verified_failed_report(mode, scan_mode, redact_secrets(str(exc), config))
     reports = final_path.parent
-    report_error = graph_verified_report_artifact_error(final_path)
+    report_error = graph_verified_report_artifact_error(final_path, checkout_dir)
     if report_error:
         return graph_verified_failed_report(mode, scan_mode, report_error)
     confirmed = read_json(reports / "confirmed.json", [])
@@ -87,7 +87,11 @@ def graph_verified_failed_report(mode: str, scan_mode: str, error: object) -> di
     }
 
 
-def graph_verified_report_artifact_error(final_path: Path) -> str:
+def graph_verified_report_artifact_error(final_path: Path, checkout_dir: Path | None = None) -> str:
+    if checkout_dir is not None:
+        location_error = graph_verified_report_location_error(final_path, checkout_dir)
+        if location_error:
+            return location_error
     if not graph_verified_regular_file(final_path):
         return "GraphVerified final markdown report is missing."
     reports = final_path.parent
@@ -112,6 +116,20 @@ def graph_verified_report_artifact_error(final_path: Path) -> str:
             return f"GraphVerified report artifact is unreadable: {filename}: {exc}."
         if not isinstance(payload, expected_type):
             return f"GraphVerified report artifact has invalid shape: {filename}."
+    return ""
+
+
+def graph_verified_report_location_error(final_path: Path, checkout_dir: Path) -> str:
+    if final_path.name != "final.md" or final_path.parent.name != "reports":
+        return "GraphVerified final markdown report path is invalid."
+    try:
+        resolved_final = final_path.resolve(strict=True)
+        expected_runs = (checkout_dir / ".codereview" / "runs").resolve(strict=False)
+        resolved_final.relative_to(expected_runs)
+    except (OSError, RuntimeError, ValueError):
+        return "GraphVerified final markdown report is outside the checkout run directory."
+    if resolved_final.parent.name != "reports" or resolved_final.name != "final.md":
+        return "GraphVerified final markdown report path is invalid."
     return ""
 
 
