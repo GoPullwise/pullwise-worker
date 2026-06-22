@@ -741,8 +741,7 @@ class PullwiseClient:
             with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(response.read())
         except urllib.error.HTTPError as exc:
-            reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
-            raise PullwiseHTTPError(f"HTTP {exc.code}: {reason}", exc.code) from exc
+            raise PullwiseHTTPError(http_error_message(exc), exc.code) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
@@ -756,8 +755,7 @@ class PullwiseClient:
             with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(response.read())
         except urllib.error.HTTPError as exc:
-            reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
-            raise PullwiseHTTPError(f"HTTP {exc.code}: {reason}", exc.code) from exc
+            raise PullwiseHTTPError(http_error_message(exc), exc.code) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
@@ -853,6 +851,35 @@ def url_path_segment(value: object) -> str:
     if not text:
         raise PullwiseRequestError("URL path segment is required")
     return urllib.parse.quote(text, safe="")
+
+
+def http_error_message(exc: urllib.error.HTTPError) -> str:
+    reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
+    detail = ""
+    try:
+        body = exc.read(8192)
+    except Exception:
+        body = b""
+    if body:
+        text = body.decode("utf-8", errors="replace").strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            detail = text
+        else:
+            if isinstance(parsed, dict):
+                for key in ("error", "message", "detail"):
+                    value = parsed.get(key)
+                    if isinstance(value, str) and value.strip():
+                        detail = value.strip()
+                        break
+            elif isinstance(parsed, str):
+                detail = parsed.strip()
+        detail = clean_protocol_text(detail)[:1000]
+    message = f"HTTP {exc.code}: {reason}"
+    if detail:
+        message = f"{message}: {detail}"
+    return message
 
 
 def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False) -> bool:

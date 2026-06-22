@@ -423,6 +423,31 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(worker_main.PullwiseRequestError, "JSON response must be an object"):
                 client.claim()
 
+    def test_client_http_error_includes_server_error_body(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        error = worker_main.urllib.error.HTTPError(
+            "https://pullwise.example/worker/jobs/claim",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"error":"job payload is malformed"}'),
+        )
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(
+                worker_main.PullwiseHTTPError,
+                "HTTP 400: Bad Request: job payload is malformed",
+            ):
+                client.claim()
+
     def test_worker_once_does_not_start_non_object_claimed_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
