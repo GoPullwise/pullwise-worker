@@ -909,15 +909,15 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
         if checkout.name in protected:
             continue
         if marker.is_symlink():
-            marker.unlink(missing_ok=True)
+            _unlink_path_ignore_errors(marker)
             continue
         try:
             expires_at = int(marker.read_text(encoding="utf-8").strip() or "0")
-        except ValueError:
+        except (OSError, UnicodeDecodeError, ValueError):
             expires_at = 0
         if expires_at <= now_ts:
             if cleanup_checkout_path(checkout):
-                marker.unlink(missing_ok=True)
+                _unlink_path_ignore_errors(marker)
     entries = sorted(
         [path for path in config.work_dir.iterdir() if path.is_dir() and path.name not in protected],
         key=lambda path: path.stat().st_mtime,
@@ -925,7 +925,7 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
     while directory_size(config.work_dir) > config.max_checkout_bytes and entries:
         checkout = entries.pop(0)
         if cleanup_checkout_path(checkout):
-            failed_checkout_marker(checkout).unlink(missing_ok=True)
+            _unlink_path_ignore_errors(failed_checkout_marker(checkout))
 
 
 def cleanup_checkout_path(checkout: Path) -> bool:
@@ -937,6 +937,13 @@ def cleanup_checkout_path(checkout: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _unlink_path_ignore_errors(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 def cleanup_logs(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:

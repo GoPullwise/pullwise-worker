@@ -1859,6 +1859,27 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual(outside.read_text(encoding="utf-8"), "0")
 
+    def test_cleanup_failed_checkout_ignores_unreadable_marker_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            bad_marker = work_dir / f"bad_marker{worker_main._FAILED_CHECKOUT_MARKER_SUFFIX}"
+            bad_marker.mkdir()
+            checkout = work_dir / "job_expired"
+            checkout.mkdir()
+            (checkout / "old.txt").write_text("old", encoding="utf-8")
+            marker = worker_main.failed_checkout_marker(checkout)
+            marker.write_text("0", encoding="utf-8")
+            config = SimpleNamespace(work_dir=work_dir, max_checkout_bytes=1024 * 1024)
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertTrue(bad_marker.exists())
+            self.assertFalse(checkout.exists())
+            self.assertFalse(marker.exists())
+
     def test_remote_uninstall_marker_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
