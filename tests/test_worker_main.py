@@ -2405,6 +2405,26 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(env_path.is_symlink())
             self.assertEqual(outside.read_text(encoding="utf-8"), "PULLWISE_EXISTING=1\n")
 
+    def test_append_missing_env_values_rejects_invalid_key_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = Path(tmp_dir) / "worker.env"
+            env_path.write_text("PULLWISE_EXISTING=1\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "environment key is invalid"):
+                worker_main.append_missing_env_values(env_path, {"PULLWISE_BAD\nINJECT": "1"})
+
+            self.assertEqual(env_path.read_text(encoding="utf-8"), "PULLWISE_EXISTING=1\n")
+
+    def test_append_missing_env_values_rejects_multiline_value_in_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = Path(tmp_dir) / "worker.env"
+            env_path.write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "must be single-line"):
+                worker_main.append_missing_env_values(env_path, {"PULLWISE_NEW": "1\nPULLWISE_OTHER=2"}, dry_run=True)
+
+            self.assertEqual(env_path.read_text(encoding="utf-8"), "")
+
     def test_ensure_lifecycle_watcher_service_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

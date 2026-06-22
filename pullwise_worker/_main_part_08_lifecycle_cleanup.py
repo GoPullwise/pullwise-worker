@@ -692,15 +692,17 @@ def append_missing_env_values(env_path: Path, values: dict[str, str], *, dry_run
             if sep and key:
                 existing_keys.add(key)
     missing = [(key, value) for key, value in values.items() if key not in existing_keys]
+    for key, value in missing:
+        if not isinstance(key, str) or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            raise ValueError(f"environment key is invalid: {key}")
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"environment value for {key} must be single-line")
     if dry_run:
         for key, value in missing:
             print(f"append env {key}={value}")
         return
     if not missing:
         return
-    for key, value in missing:
-        if "\n" in value or "\r" in value:
-            raise ValueError(f"environment value for {key} must be single-line")
     append_no_follow_text_file(env_path, "".join(f"{key}={value}\n" for key, value in missing))
 
 
