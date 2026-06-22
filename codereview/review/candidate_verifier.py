@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
-from ..utils.jsonl import write_json
+from ..utils.jsonl import write_json, write_text
 from ..utils.paths import safe_path_component
 from ..utils.process import raise_if_cancelled_callback_exception
 
@@ -128,7 +128,7 @@ def verify_candidate(
             json.dumps(local, ensure_ascii=False, indent=2, sort_keys=True),
         ]
     )
-    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
     events = worker / "events.jsonl"
     process = run_codex_turn(

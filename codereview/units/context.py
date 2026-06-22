@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..utils.jsonl import write_json
+from ..utils.jsonl import write_json, write_text
 from ..utils.paths import safe_path_component
 
 
@@ -18,7 +18,7 @@ def write_review_units(run: Path, units: list[dict]) -> None:
         unit_id = str(unit.get("unit_id") or "")
         stem = unit_file_stem(unit_id)
         write_json(units_dir / f"{stem}.json", unit)
-        (units_dir / f"{stem}.context.md").write_text(render_review_unit_context_pack(unit), encoding="utf-8")
+        write_text(units_dir / f"{stem}.context.md", render_review_unit_context_pack(unit))
 
 
 def render_review_unit_context_pack(unit: dict) -> str:

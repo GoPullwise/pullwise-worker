@@ -6,7 +6,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..inventory.git_inventory import analyzable_files
-from ..utils.jsonl import write_json
+from ..utils.jsonl import write_json, write_text
 from ..utils.process import compact_process_output
 from .contracts import language_for_path, risk_tags_for_path
 
@@ -56,7 +56,7 @@ def run_repository_census(checkout: Path, run: Path, inventory: dict, config: Re
         ]
     )
     write_json(worker / "task.json", task)
-    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
     events = worker / "events.jsonl"
     codex_config = auxiliary_codex_config(config)

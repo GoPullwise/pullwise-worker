@@ -9,6 +9,7 @@ from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..graph.ids import short_hash
 from ..units.context import unit_file_stem
+from ..utils.jsonl import write_json, write_text
 from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception
 from .tasks import FinderTask
 
@@ -211,8 +212,8 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
     worker.mkdir(parents=True, exist_ok=True)
     payload = finder_batch_payload(checkout, run, tasks, config)
     prompt = finder_batch_prompt(checkout, payload)
-    (worker / "task.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_json(worker / "task.json", payload)
+    write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
     events = worker / "events.jsonl"
     process = run_codex_turn(
@@ -227,7 +228,7 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
         events_file=events,
     )
     process_payload = {**process.to_dict(), "events_path": str(events)}
-    (worker / "process.json").write_text(json.dumps(process_payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    write_json(worker / "process.json", process_payload)
     if process.returncode != 0:
         return blocked_finder_batch_results(tasks, process_payload, process_failure_reason("finder batch codex turn", process))
     if not output.is_file():
@@ -330,8 +331,7 @@ def normalize_finder_result(item: dict, task: FinderTask) -> dict:
 def write_individual_finder_output(run: Path, task: FinderTask, result: dict) -> None:
     stem = unit_file_stem(task.unit_id)
     output = run / "finder" / task.focus / f"{stem}.result.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    write_json(output, result)
 
 
 def blocked_finder_batch_results(tasks: list[FinderTask], process_payload: dict, reason: str) -> list[dict]:

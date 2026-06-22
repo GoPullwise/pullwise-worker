@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
-from ..utils.jsonl import write_json
+from ..utils.jsonl import write_json, write_text
 from .ids import stable_edge_id
 from .merge import build_inline_indexes
 
@@ -131,7 +131,7 @@ def _run_linker(
         ]
     )
     write_json(worker / "task.json", payload)
-    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
     events = worker / "events.jsonl"
     codex_config = auxiliary_codex_config(config)

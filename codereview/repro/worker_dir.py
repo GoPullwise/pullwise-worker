@@ -4,6 +4,7 @@ import json
 import shutil
 from pathlib import Path
 
+from ..utils.jsonl import write_text
 from ..utils.paths import ensure_dir
 from ..utils.paths import is_within
 from ..utils.process import run_process
@@ -32,8 +33,8 @@ def create_worker_dir(checkout: Path, worker: Path, candidate: dict) -> Path:
     for child in ("logs", "repro", "home", "tmp", "cache"):
         ensure_dir(worker / child)
     payload = json.dumps(candidate, ensure_ascii=False, indent=2)
-    (worker / "input_candidate.json").write_text(payload, encoding="utf-8")
-    (worker / "candidate.json").write_text(payload, encoding="utf-8")
+    write_text(worker / "input_candidate.json", payload)
+    write_text(worker / "candidate.json", payload)
     return worker
 
 

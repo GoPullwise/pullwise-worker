@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
-from ..utils.jsonl import read_json, write_json
+from ..utils.jsonl import read_json, write_json, write_text
 from ..utils.process import raise_if_cancelled_callback_exception
 from .cache import graph_cache_key
 from .contracts import confidence_for_evidence, language_for_path, risk_tags_for_path
@@ -195,7 +195,7 @@ def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_p
     }
     prompt = _graph_mapper_prompt(checkout, task_payload)
     write_json(worker / "task.json", task_payload)
-    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
     events = worker / "events.jsonl"
     codex_config = auxiliary_codex_config(config)
@@ -276,7 +276,7 @@ def run_codex_graph_mapper_coordinator(
     }
     prompt = _graph_mapper_coordinator_prompt(checkout, payload)
     write_json(worker / "task.json", payload)
-    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
     events = worker / "events.jsonl"
     codex_config = auxiliary_codex_config(config)

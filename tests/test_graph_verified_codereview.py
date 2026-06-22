@@ -154,6 +154,22 @@ def test_write_text_does_not_follow_symlink(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
+def test_write_review_units_does_not_follow_context_symlink(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    units_dir = run / "artifacts" / "review-units"
+    units_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.context.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    context_path = units_dir / "unit_1.context.md"
+    context_path.symlink_to(outside)
+
+    write_review_units(run, [{"unit_id": "unit_1", "context": {}, "span": {}, "context_files": []}])
+
+    assert not context_path.is_symlink()
+    assert "Review Unit Context Pack" in context_path.read_text(encoding="utf-8")
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
 def test_generated_codex_schemas_are_strict_objects(tmp_path: Path) -> None:
     ensure_project_files(tmp_path)
 

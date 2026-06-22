@@ -6,7 +6,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..inventory.git_inventory import analyzable_files
-from ..utils.jsonl import write_json
+from ..utils.jsonl import write_json, write_text
 from .validate import validate_graph
 
 
@@ -117,7 +117,7 @@ def run_agent_graph_audit(checkout: Path, run: Path, graph: dict, inventory: dic
             json.dumps(_graph_audit_summary(graph), ensure_ascii=False, indent=2, sort_keys=True),
         ]
     )
-    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    write_text(worker / "prompt.md", prompt)
     write_json(worker / "task.json", {"scan": {"mode": "full-repository"}, "deterministic_audit": deterministic_audit})
     output = worker / "result.json"
     events = worker / "events.jsonl"
