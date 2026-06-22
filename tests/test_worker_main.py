@@ -2602,6 +2602,24 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertTrue(worker_main.safe_remote_service_home_target(service_home, work_dir))
 
+    def test_safe_unlink_rejects_service_name_path_traversal(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+            worker_main.safe_unlink(
+                Path("/etc/systemd/system/evil.service"),
+                service_name="pullwise-worker/../../evil",
+            )
+
+    def test_safe_worker_file_unlink_rejects_service_name_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            target = root / "pullwise-worker"
+            target.write_text("keep", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+                worker_main.safe_worker_file_unlink(target, root, "pullwise-worker/../../evil")
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
     def test_service_user_doctor_command_exports_codex_sqlite_home(self) -> None:
         cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")
 

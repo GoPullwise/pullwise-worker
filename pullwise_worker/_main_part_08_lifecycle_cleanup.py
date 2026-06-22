@@ -1060,10 +1060,20 @@ def trim_file_to_last_bytes(path: Path, max_bytes: int) -> None:
         return
 
 
-def safe_worker_file_unlink(path: Path, allowed_root: Path, service_name: str) -> None:
+def safe_worker_service_name(service_name: object) -> str:
     safe_service_name = str(service_name or "").strip()
-    if not safe_service_name.startswith(DEFAULT_SERVICE_NAME):
-        raise ValueError(f"refusing to remove unexpected worker file for service: {service_name}")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.@-")
+    if (
+        not safe_service_name.startswith(DEFAULT_SERVICE_NAME)
+        or ".." in safe_service_name
+        or any(char not in allowed for char in safe_service_name)
+    ):
+        raise ValueError(f"refusing to use unexpected worker service name: {service_name}")
+    return safe_service_name
+
+
+def safe_worker_file_unlink(path: Path, allowed_root: Path, service_name: str) -> None:
+    safe_service_name = safe_worker_service_name(service_name)
     resolved = path.resolve(strict=False)
     allowed = allowed_root.resolve(strict=False)
     try:
@@ -1080,9 +1090,9 @@ def removable_service_user(service_user: str) -> bool:
 
 
 def safe_unlink(path: Path, *, service_name: str = DEFAULT_SERVICE_NAME) -> None:
-    safe_service_name = str(service_name or "").strip()
+    safe_service_name = safe_worker_service_name(service_name)
     expected = Path("/etc/systemd/system") / f"{safe_service_name}.service"
-    if not safe_service_name.startswith(DEFAULT_SERVICE_NAME) or path.resolve(strict=False) != expected.resolve(strict=False):
+    if path.resolve(strict=False) != expected.resolve(strict=False):
         raise ValueError(f"refusing to remove unexpected file: {path}")
     path.unlink(missing_ok=True)
 
