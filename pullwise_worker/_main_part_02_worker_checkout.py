@@ -789,6 +789,8 @@ class Worker:
         return path
 
     def upload_result_once_or_defer(self, job_id: str, payload: dict) -> bool:
+        if self.job_cancel_requested(job_id):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
         try:
             self.client.result(job_id, payload)
             return True
@@ -798,6 +800,8 @@ class Worker:
             error = exc
         except PullwiseRequestError as exc:
             error = exc
+        if self.job_cancel_requested(job_id):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
         self.defer_result_upload(job_id, payload)
         self.last_error = f"result upload deferred for {job_id}: {redact_secrets(str(error), self.config)}"[:500]
         return False

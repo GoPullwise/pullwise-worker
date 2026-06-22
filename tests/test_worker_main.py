@@ -819,6 +819,59 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             progress.assert_not_called()
 
+    def test_result_upload_stops_when_heartbeat_cancelled_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_cancel_upload",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker.job_cancel_event("job_cancel_upload")
+            worker.cancel_server_jobs(["job_cancel_upload"])
+
+            with patch.object(worker.client, "result") as result, patch.object(worker, "defer_result_upload") as defer:
+                with self.assertRaises(worker_main.WorkerJobCancelled):
+                    worker.upload_result_once_or_defer("job_cancel_upload", {"status": "done"})
+
+            result.assert_not_called()
+            defer.assert_not_called()
+
+    def test_result_upload_does_not_defer_when_cancelled_after_retryable_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_cancel_upload_retry",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker.job_cancel_event("job_cancel_upload_retry")
+
+            def fail_then_cancel(job_id: str, payload: dict) -> None:
+                del payload
+                worker.cancel_server_jobs([job_id])
+                raise worker_main.PullwiseHTTPError("HTTP 503: unavailable", 503)
+
+            with patch.object(worker.client, "result", side_effect=fail_then_cancel), patch.object(worker, "defer_result_upload") as defer:
+                with self.assertRaises(worker_main.WorkerJobCancelled):
+                    worker.upload_result_once_or_defer("job_cancel_upload_retry", {"status": "done"})
+
+            defer.assert_not_called()
+
     def test_process_runner_stops_when_cancel_event_is_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cancel_event = threading.Event()
