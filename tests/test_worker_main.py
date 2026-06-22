@@ -2671,6 +2671,39 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["scoring"]["min_score_for_repro"], 9)
         self.assertEqual(payload["scoring"]["always_repro_severities"], ["critical", "high"])
 
+    def test_write_graph_verified_codereview_config_does_not_inherit_repo_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            config_dir = root / ".codereview"
+            config_dir.mkdir()
+            (config_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "codegraph": {"enabled": True},
+                        "impact": {"enabled": True},
+                        "codex": {"dangerous": "repo-value"},
+                        "context": {"repoInjected": True},
+                        "finders": {"repoInjected": True},
+                        "repro": {"repoInjected": True},
+                        "scan": {"repoInjected": True},
+                        "scope": {"repoInjected": True},
+                        "scoring": {"repoInjected": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            worker_main.write_graph_verified_codereview_config(cfg, root, {"maxRepro": 0}, "standard")
+
+            payload = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
+
+        self.assertNotIn("codegraph", payload)
+        self.assertNotIn("impact", payload)
+        for section in ("codex", "context", "finders", "repro", "scan", "scope", "scoring"):
+            self.assertNotIn("repoInjected", payload[section])
+        self.assertNotIn("dangerous", payload["codex"])
+
     def test_write_graph_verified_codereview_config_uses_standard_repro_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -213,24 +213,14 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
     root.mkdir(parents=True, exist_ok=True)
     path = root / "config.json"
     current: dict = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(read_no_follow_text_file(path))
-            current = loaded if isinstance(loaded, dict) else {}
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            current = {}
     current["mode"] = graph_verified_mode(mode)
-    for stale_key in ("codegraph", "impact"):
-        current.pop(stale_key, None)
     scan_mode = graph_verified_scan_mode(graph_config.get("scanMode") or "full-cached")
     current["scan"] = {
-        **(current.get("scan") if isinstance(current.get("scan"), dict) else {}),
         "mode": scan_mode,
         "include_untracked": True,
         "fail_on_source_change": True,
     }
     current["scope"] = {
-        **(current.get("scope") if isinstance(current.get("scope"), dict) else {}),
         "exclude": [".git/**", ".codereview/**", "node_modules/**", "vendor/**", "dist/**", "build/**", "coverage/**", "target/**"],
         "max_text_file_bytes": 1000000,
         "inventory_excluded_files": True,
@@ -268,7 +258,6 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "max_context_chars": 80000,
     }
     current["context"] = {
-        **(current.get("context") if isinstance(current.get("context"), dict) else {}),
         "enabled": graph_config.get("contextEnabled") is not False,
         "timeout_seconds": graph_verified_positive_int(
             graph_config.get("contextTimeoutSeconds"),
@@ -278,14 +267,12 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         ),
     }
     current["codex"] = {
-        **(current.get("codex") if isinstance(current.get("codex"), dict) else {}),
         "command": getattr(config, "codex_command", "") or "codex",
         "model": getattr(config, "codex_model", "") or "",
         "reasoning_effort": getattr(config, "codex_reasoning_effort", "") or "high",
         "env": graph_verified_codex_env(config),
     }
     current["finders"] = {
-        **(current.get("finders") if isinstance(current.get("finders"), dict) else {}),
         "enabled": True,
         "max_workers": graph_verified_positive_int(graph_config.get("finderMaxParallel"), default=6, minimum=1, maximum=6),
         "turn_parallel": graph_verified_positive_int(graph_config.get("finderTurnParallel"), default=1, minimum=1, maximum=6),
@@ -293,7 +280,6 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
     }
     repro_limit = graph_verified_repro_limit(graph_config.get("maxRepro"), mode)
     current["repro"] = {
-        **(current.get("repro") if isinstance(current.get("repro"), dict) else {}),
         "enabled": True,
         "max_workers": graph_verified_positive_int(graph_config.get("reproMaxParallel"), default=2, minimum=1, maximum=8),
         "timeout_seconds": graph_verified_positive_int(graph_config.get("reproTimeoutSeconds"), default=900, minimum=60, maximum=7200),
@@ -307,7 +293,6 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "require_expected_behavior_source": True,
     }
     current["scoring"] = {
-        **(current.get("scoring") if isinstance(current.get("scoring"), dict) else {}),
         "min_score_for_repro": graph_verified_positive_int(graph_config.get("minScoreForRepro"), default=8, minimum=0, maximum=50),
         "always_repro_severities": ["critical", "high"],
     }
