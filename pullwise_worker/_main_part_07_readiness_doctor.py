@@ -48,8 +48,7 @@ def write_scan_summary(
         payload,
         sort_keys=True,
     )
-    with path.open("a", encoding="utf-8") as log_file:
-        log_file.write(line + "\n")
+    append_no_follow_text_file(path, line + "\n")
     trim_file_to_last_bytes(path, config.scan_summary_log_max_bytes)
 
 
@@ -81,8 +80,7 @@ def write_scan_progress_summary(
     if safe_logs_summary:
         payload["logs_summary"] = safe_logs_summary
     line = json.dumps(payload, sort_keys=True)
-    with path.open("a", encoding="utf-8") as log_file:
-        log_file.write(line + "\n")
+    append_no_follow_text_file(path, line + "\n")
     trim_file_to_last_bytes(path, config.scan_summary_log_max_bytes)
 
 

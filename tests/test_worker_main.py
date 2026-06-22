@@ -1210,6 +1210,33 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(offset, len("new line\n"))
         self.assertEqual(partial, "")
 
+    def test_file_log_tailer_does_not_follow_symlinked_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside-summary.log"
+            outside.write_text("outside\n", encoding="utf-8")
+            path = root / "scan-summary.log"
+            path.symlink_to(outside)
+            tailer = worker_main.WorkerFileLogTailer(path)
+
+            entries, offset, partial = tailer.collect()
+
+        self.assertEqual(entries, [])
+        self.assertEqual(offset, 0)
+        self.assertEqual(partial, "")
+
+    def test_trim_file_to_last_bytes_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside-summary.log"
+            outside.write_text("0123456789", encoding="utf-8")
+            path = root / "scan-summary.log"
+            path.symlink_to(outside)
+
+            worker_main.trim_file_to_last_bytes(path, 3)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "0123456789")
+
     def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1367,6 +1394,40 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("tail -n 5", text)
         self.assertIn("pullwise-worker", text)
         self.assertIn("scan-summary.log", text)
+
+    def test_scan_summary_write_rejects_symlinked_log_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            outside = root / "outside-summary.log"
+            outside.write_text("outside\n", encoding="utf-8")
+            (log_dir / "scan-summary.log").symlink_to(outside)
+            config = SimpleNamespace(log_dir=log_dir, scan_summary_log_max_bytes=1024, worker_token="secret-token")
+
+            with self.assertRaises(OSError):
+                worker_main.write_scan_progress_summary(config, "job_1", "ai", 80, "msg")
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_worker_logs_does_not_read_symlinked_scan_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            outside = root / "outside-summary.log"
+            outside.write_text("outside secret\n", encoding="utf-8")
+            (log_dir / "scan-summary.log").symlink_to(outside)
+            config = SimpleNamespace(service_name="pullwise-worker-wk_1", log_dir=log_dir)
+            output = io.StringIO()
+
+            with patch.object(worker_main.subprocess, "run", return_value=SimpleNamespace(returncode=0)), patch("sys.stdout", output):
+                code = worker_main.worker_logs(config, lines=5)
+
+            self.assertEqual(code, 0)
+            text = output.getvalue()
+            self.assertIn("scan summary log not found or empty", text)
+            self.assertNotIn("outside secret", text)
 
     def test_lifecycle_watcher_uploads_active_log_session_lines(self) -> None:
         class FakeClient:

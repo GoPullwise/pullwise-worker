@@ -25,7 +25,7 @@ def service_action(
 
 
 def tail_text_lines(path: Path, lines: int) -> list[str]:
-    if not path.is_file():
+    if not regular_log_file(path):
         return []
     try:
         return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
@@ -169,14 +169,16 @@ class WorkerFileLogTailer:
     def __init__(self, path: Path) -> None:
         self.path = path
         try:
-            self.offset = path.stat().st_size
+            self.offset = path.lstat().st_size if regular_log_file(path) else 0
         except OSError:
             self.offset = 0
         self.partial = ""
 
     def collect(self, *, max_bytes: int = 128 * 1024) -> tuple[list[dict], int, str]:
+        if not regular_log_file(self.path):
+            return [], self.offset, self.partial
         try:
-            size = self.path.stat().st_size
+            size = self.path.lstat().st_size
         except OSError:
             return [], self.offset, self.partial
         truncated = not (0 <= self.offset <= size)
@@ -207,6 +209,10 @@ class WorkerFileLogTailer:
     def commit(self, offset: int, partial: str) -> None:
         self.offset = offset
         self.partial = partial
+
+
+def regular_log_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
 
 
 class WorkerLogStreamTailer:
@@ -984,8 +990,10 @@ def prune_empty_directories(root: Path) -> None:
 
 
 def trim_file_to_last_bytes(path: Path, max_bytes: int) -> None:
+    if not regular_log_file(path):
+        return
     try:
-        size = path.stat().st_size
+        size = path.lstat().st_size
     except OSError:
         return
     if size <= max_bytes:

@@ -1268,6 +1268,22 @@ def write_no_follow_text_file(path: Path, text: str) -> None:
         raise
 
 
+def append_no_follow_text_file(path: Path, text: str) -> None:
+    if path.parent.is_symlink():
+        raise RuntimeError(f"refusing to write through symlinked directory: {path.parent}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(text)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def checkout_dir_from_failed_marker(marker: Path) -> Path:
     name = marker.name
     if not name.endswith(_FAILED_CHECKOUT_MARKER_SUFFIX):
