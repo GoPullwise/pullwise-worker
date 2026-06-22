@@ -230,10 +230,10 @@ def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_p
         }
     parsed.setdefault("task_id", task_id)
     parsed.setdefault("shard_id", task.get("shard_id"))
-    parsed.setdefault("coverage", {"assigned_files": task.get("files") or [], "mapped_files": task.get("files") or []})
     parsed.setdefault("warnings", [])
     parsed["process"] = process_payload
     parsed["status"] = "ok"
+    parsed["coverage"] = _normalized_task_coverage(parsed, task)
     return parsed
 
 
@@ -364,12 +364,29 @@ def _normalize_coordinator_task_result(item: dict, task: dict) -> dict:
     result.setdefault("unresolved_refs", [])
     result.setdefault("warnings", [])
     result.setdefault("status", "ok")
-    coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
-    result["coverage"] = {
-        "assigned_files": [str(path) for path in (coverage.get("assigned_files") or task.get("files") or []) if str(path)],
-        "mapped_files": [str(path) for path in (coverage.get("mapped_files") or []) if str(path)],
-    }
+    result["coverage"] = _normalized_task_coverage(result, task)
     return result
+
+
+def _normalized_task_coverage(result: dict, task: dict) -> dict:
+    coverage = result.get("coverage") if isinstance(result.get("coverage"), dict) else {}
+    assigned_files = _ordered_paths(coverage.get("assigned_files") or task.get("files") or [])
+    mapped_files = _ordered_paths(coverage.get("mapped_files") or [])
+    if str(result.get("status") or "ok").lower() == "ok" and assigned_files and not mapped_files:
+        mapped_files = list(assigned_files)
+        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+        warnings.append("mapper result omitted coverage.mapped_files; normalized to assigned_files for ok task")
+        result["warnings"] = warnings
+    return {"assigned_files": assigned_files, "mapped_files": mapped_files}
+
+
+def _ordered_paths(values: object) -> list[str]:
+    paths: list[str] = []
+    for value in values if isinstance(values, list) else []:
+        text = str(value)
+        if text and text not in paths:
+            paths.append(text)
+    return paths
 
 
 def _task_key(task: dict) -> tuple[str, str, int]:

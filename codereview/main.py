@@ -95,7 +95,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         if audit.get("quality_gate_passed"):
             break
         repairs = plan_repairs(audit)
-        repair_tasks = _graph_repair_tasks(repairs, start_index=len(graph_tasks) + len(repair_history) + 1)
+        repair_tasks = _graph_repair_tasks(repairs, start_index=len(graph_tasks) + _repair_task_count(repair_history) + 1)
         if not repair_tasks:
             break
         _emit_progress(
@@ -153,7 +153,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     finder_tasks = plan_finder_tasks(review_units)
     _emit_progress(progress, "finder", f"Finder: review tasks 0/{len(finder_tasks)}", current=0, total=len(finder_tasks), run_id=run_id)
     raw_candidates = _run_finders_with_progress(snapshot_repo, run, finder_tasks, config, progress)
-    context_repair_tasks = _finder_context_repair_tasks(raw_candidates, start_index=len(graph_tasks) + len(repair_history) + 1)
+    context_repair_tasks = _finder_context_repair_tasks(raw_candidates, start_index=len(graph_tasks) + _repair_task_count(repair_history) + 1)
     context_repair_history: list[dict] = []
     if context_repair_tasks:
         _emit_progress(
@@ -343,6 +343,7 @@ def _graph_quality_gate_failure_message(audit: dict) -> str:
     errors = [str(item) for item in audit.get("quality_errors", []) if str(item)]
     missing_mapped = len(audit.get("missing_mapped_files") or [])
     missing_file_nodes = len(audit.get("missing_file_nodes") or [])
+    critical_unresolved = int(audit.get("critical_unresolved") or 0)
     parts = ["Graph: quality gate failed"]
     if errors:
         parts.append("; ".join(errors))
@@ -351,6 +352,8 @@ def _graph_quality_gate_failure_message(audit: dict) -> str:
         details.append(f"missing_mapped_files={missing_mapped}")
     if missing_file_nodes:
         details.append(f"missing_file_nodes={missing_file_nodes}")
+    if critical_unresolved:
+        details.append(f"critical_unresolved={critical_unresolved}")
     if details:
         parts.append(f"({', '.join(details)})")
     return " ".join(parts)
@@ -553,6 +556,14 @@ def _graph_repair_tasks(repairs: list[dict], *, start_index: int) -> list[dict]:
             }
         )
     return tasks
+
+
+def _repair_task_count(history: list[dict]) -> int:
+    total = 0
+    for item in history:
+        tasks = item.get("tasks") if isinstance(item, dict) else []
+        total += len(tasks) if isinstance(tasks, list) else 0
+    return total
 
 
 def _finder_context_repair_tasks(raw_candidates: list[dict], *, start_index: int) -> list[dict]:

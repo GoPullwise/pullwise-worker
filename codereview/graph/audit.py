@@ -30,7 +30,7 @@ REVIEW_RELEVANT_UNRESOLVED_TAGS = CRITICAL_UNRESOLVED_TAGS | {
 
 
 def audit_graph(graph: dict, inventory: dict, checkout: Path) -> dict:
-    analyzable = {str(item.get("path") or "") for item in analyzable_files(inventory)}
+    analyzable = {path for item in analyzable_files(inventory) if (path := str(item.get("path") or ""))}
     mapped = set(str(path) for path in (graph.get("coverage") or {}).get("mapped_files", []) if str(path))
     review_files = set(analyzable)
     nodes = [node for node in graph.get("nodes", []) if isinstance(node, dict)]
@@ -93,7 +93,7 @@ def audit_graph(graph: dict, inventory: dict, checkout: Path) -> dict:
         "quality_errors": quality_errors,
         "quality_gate": quality_gate,
         "quality_gate_passed": quality_gate == "passed",
-        "repairs": _repair_tasks(sorted(set(missing_mapped) | set(missing_file_nodes))),
+        "repairs": _repair_tasks(sorted(set(missing_mapped) | set(missing_file_nodes)), critical_unresolved),
     }
 
 
@@ -172,8 +172,24 @@ def _graph_audit_summary(graph: dict) -> dict:
     }
 
 
-def _repair_tasks(missing: list[str]) -> list[dict]:
-    repairs = [{"type": "remap_files", "files": missing[:50], "reason": "Analyzable files were not covered by mapper output."}] if missing else []
+def _repair_tasks(missing: list[str], critical_unresolved: list[dict] | None = None) -> list[dict]:
+    repairs = []
+    missing_set = set(missing)
+    if missing:
+        repairs.append({"type": "remap_files", "files": missing[:50], "reason": "Analyzable files were not covered by mapper output."})
+    critical_files = []
+    for item in critical_unresolved or []:
+        path = str(item.get("source_file") or "")
+        if path and path not in missing_set and path not in critical_files:
+            critical_files.append(path)
+    if critical_files:
+        repairs.append(
+            {
+                "type": "remap_files",
+                "files": critical_files[:50],
+                "reason": "Critical unresolved graph references need remapping or link-resolution evidence.",
+            }
+        )
     return repairs
 
 

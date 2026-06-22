@@ -542,9 +542,143 @@ def test_graph_normalizer_repairs_live_quality_gate_failures(tmp_path: Path) -> 
     assert audit["quality_gate_passed"] is True
 
 
+def test_graph_audit_ignores_blank_inventory_paths(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    app = checkout / "app.py"
+    app.write_text("print('ok')\n", encoding="utf-8")
+    inventory = {
+        "files": [
+            {"path": "", "scope": "analyze"},
+            {"path": "app.py", "scope": "analyze", "size_bytes": app.stat().st_size, "line_count": 1, "content_hash": "", "extension": ".py"},
+        ]
+    }
+    graph = normalize_graph_for_inventory(
+        merge_graph_results(
+            [
+                {
+                    "task_id": "graph-map-0001",
+                    "shard_id": "shard-0001",
+                    "nodes": [],
+                    "edges": [],
+                    "unresolved_refs": [],
+                    "coverage": {"assigned_files": ["app.py"], "mapped_files": ["app.py"]},
+                }
+            ]
+        ),
+        inventory,
+        checkout,
+    )
+
+    audit = audit_graph(graph, inventory, checkout)
+
+    assert audit["missing_file_nodes"] == []
+    assert audit["quality_gate_passed"] is True
+
+
+def test_graph_audit_repairs_critical_unresolved_source_files(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    worker = checkout / "worker.py"
+    worker.write_text("def handle():\n    dispatch()\n", encoding="utf-8")
+    inventory = {
+        "files": [
+            {"path": "worker.py", "scope": "analyze", "size_bytes": worker.stat().st_size, "line_count": 2, "content_hash": "", "extension": ".py"},
+        ]
+    }
+    graph = normalize_graph_for_inventory(
+        merge_graph_results(
+            [
+                {
+                    "task_id": "graph-map-0001",
+                    "shard_id": "shard-0001",
+                    "nodes": [
+                        {
+                            "id": "sym:handle",
+                            "kind": "function",
+                            "name": "handle",
+                            "qualified_name": "handle",
+                            "file": "worker.py",
+                            "span": {"start_line": 1, "end_line": 2},
+                            "attributes": ["job-handler"],
+                            "evidence": [{"file": "worker.py", "start_line": 1, "end_line": 2, "evidence_kind": "direct_syntax"}],
+                        }
+                    ],
+                    "edges": [],
+                    "unresolved_refs": [
+                        {
+                            "source_node": "sym:handle",
+                            "reference_kind": "call",
+                            "raw_reference": "dispatch",
+                            "source_file": "worker.py",
+                            "source_line": 2,
+                            "reason": "Target is dynamically dispatched.",
+                        }
+                    ],
+                    "coverage": {"assigned_files": ["worker.py"], "mapped_files": ["worker.py"]},
+                }
+            ]
+        ),
+        inventory,
+        checkout,
+    )
+
+    audit = audit_graph(graph, inventory, checkout)
+
+    assert audit["critical_unresolved"] == 1
+    assert any("worker.py" in repair.get("files", []) for repair in audit["repairs"])
+
+
 def test_graph_linker_requires_resolution_reason() -> None:
     assert _valid_link_result({"status": "resolved", "target": "sym:handle", "reason": "import binding matches"}, ["sym:handle"])
     assert not _valid_link_result({"status": "resolved", "target": "sym:handle"}, ["sym:handle"])
+
+
+def test_codex_graph_mapper_coordinator_normalizes_empty_mapped_files(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    (checkout / "one.py").write_text("def one():\n    return 1\n", encoding="utf-8")
+    run = tmp_path / "run"
+    config = ReviewConfig()
+    config.graph.codex_mappers = True
+    config.graph.mapper_subagent_limit = 6
+    inventory = {"files": [{"path": "one.py", "scope": "analyze", "content_hash": "hash-one", "line_count": 2, "size_bytes": 24}]}
+    tasks = [{"task_id": "graph-map-0001", "shard_id": "shard-0001", "mapper_index": 1, "files": ["one.py"], "double_mapped": False}]
+
+    def fake_run_codex_turn(**kwargs):
+        output = Path(kwargs["output_file"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "task_id": "graph-map-0001",
+                            "shard_id": "shard-0001",
+                            "mapper_index": 1,
+                            "files": ["one.py"],
+                            "status": "ok",
+                            "nodes": [],
+                            "edges": [],
+                            "unresolved_refs": [],
+                            "coverage": {"assigned_files": ["one.py"], "mapped_files": []},
+                            "warnings": [],
+                        }
+                    ],
+                    "warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(graph_mapper_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = graph_mapper_module.map_graph_tasks(checkout, tasks, inventory, config, run=run)
+
+    assert results[0]["coverage"]["mapped_files"] == ["one.py"]
+    assert "normalized to assigned_files" in results[0]["warnings"][0]
 
 
 def test_codex_graph_mapper_uses_one_app_server_coordinator_for_many_tasks(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
