@@ -740,6 +740,34 @@ def test_graph_merge_ignores_mapped_coverage_from_blocked_shards(tmp_path: Path)
     assert audit["quality_gate_passed"] is False
 
 
+def test_dual_map_conflicts_ignore_blocked_shards() -> None:
+    ok_result = {
+        "task_id": "graph-map-0001",
+        "shard_id": "shard-0001",
+        "status": "ok",
+        "nodes": [{"id": "sym:ok"}],
+        "edges": [],
+    }
+    blocked_result = {
+        "task_id": "graph-map-0002",
+        "shard_id": "shard-0001",
+        "status": "blocked",
+        "blocked_reason": "mapper timed out",
+        "nodes": [],
+        "edges": [],
+    }
+    other_ok_result = {
+        "task_id": "graph-map-0003",
+        "shard_id": "shard-0001",
+        "status": "ok",
+        "nodes": [{"id": "sym:other"}],
+        "edges": [],
+    }
+
+    assert merge_graph_results([ok_result, blocked_result])["conflicts"] == []
+    assert merge_graph_results([ok_result, other_ok_result])["conflicts"]
+
+
 def test_deterministic_graph_config_does_not_disable_codex_enrichment() -> None:
     config = ReviewConfig()
     config.graph.codex_mappers = True

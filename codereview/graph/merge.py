@@ -292,6 +292,8 @@ def _is_test_file(rel: str) -> bool:
 def detect_dual_map_conflicts(shard_results: list[dict]) -> list[dict]:
     by_shard: dict[str, list[dict]] = {}
     for result in shard_results:
+        if str(result.get("status") or "ok").lower() != "ok":
+            continue
         shard_id = str(result.get("shard_id") or "")
         if shard_id:
             by_shard.setdefault(shard_id, []).append(result)
