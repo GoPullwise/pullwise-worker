@@ -92,6 +92,72 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(config.failed_checkout_retention_seconds, 0)
         self.assertEqual(config.scan_summary_log_max_bytes, 10 * 1024 * 1024)
 
+    def test_worker_config_rejects_unsafe_worker_id(self) -> None:
+        args = SimpleNamespace(
+            server_url="http://localhost:8080",
+            worker_token="",
+            worker_id="wk_bad\nother",
+            provider="codex",
+            poll_seconds=None,
+            checkout_root=None,
+            work_dir=None,
+            log_dir=None,
+            codex_command=None,
+            codex_timeout_seconds=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "PULLWISE_WORKER_ID"):
+            worker_main.WorkerConfig(args, require_worker_token=False)
+
+    def test_worker_config_rejects_unsafe_service_names_before_deriving_paths(self) -> None:
+        args = SimpleNamespace(
+            server_url="http://localhost:8080",
+            worker_token="",
+            worker_id="wk_test",
+            provider="codex",
+            poll_seconds=None,
+            checkout_root=None,
+            work_dir=None,
+            log_dir=None,
+            codex_command=None,
+            codex_timeout_seconds=None,
+        )
+
+        with patch.dict(worker_main.os.environ, {"PULLWISE_SERVICE_NAME": "pullwise-worker/../../evil"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+                worker_main.WorkerConfig(args, require_worker_token=False)
+
+        with patch.dict(
+            worker_main.os.environ,
+            {"PULLWISE_SERVICE_NAME": "pullwise-worker-wk_1", "PULLWISE_WATCHER_SERVICE_NAME": "pullwise-worker/watcher"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+                worker_main.WorkerConfig(args, require_worker_token=False)
+
+    def test_worker_config_uses_valid_service_names_for_derived_paths(self) -> None:
+        args = SimpleNamespace(
+            server_url="http://localhost:8080",
+            worker_token="",
+            worker_id="wk_test",
+            provider="codex",
+            poll_seconds=None,
+            checkout_root=None,
+            work_dir=None,
+            log_dir=None,
+            codex_command=None,
+            codex_timeout_seconds=None,
+        )
+
+        with patch.dict(worker_main.os.environ, {"PULLWISE_SERVICE_NAME": "pullwise-worker-wk_1"}, clear=False):
+            config = worker_main.WorkerConfig(args, require_worker_token=False)
+
+        self.assertEqual(config.service_name, "pullwise-worker-wk_1")
+        self.assertEqual(config.service_file, "/etc/systemd/system/pullwise-worker-wk_1.service")
+        self.assertEqual(config.logrotate_file, "/etc/logrotate.d/pullwise-worker-wk_1")
+        self.assertEqual(config.uninstall_marker_file, "/run/pullwise-worker-wk_1/uninstall-requested")
+        self.assertEqual(config.watcher_service_name, "pullwise-worker-wk_1-watcher")
+
     def git(self, repo: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", *args],

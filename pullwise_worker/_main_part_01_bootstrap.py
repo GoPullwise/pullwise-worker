@@ -42,6 +42,7 @@ PHASE_PROGRESS = {
     "report": 95,
 }
 _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SAFE_WORKER_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 _MAX_JOB_ID_LENGTH = 128
 _FAILED_CHECKOUT_MARKER_SUFFIX = ".failed-retain"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
@@ -413,6 +414,24 @@ def env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return max(minimum, int(default))
 
 
+def safe_worker_id(worker_id: object) -> str:
+    safe_id = str(worker_id or "").strip()
+    if not safe_id or len(safe_id) > _MAX_JOB_ID_LENGTH or not _SAFE_JOB_ID_RE.match(safe_id):
+        raise ValueError("PULLWISE_WORKER_ID must be 1-128 characters of letters, numbers, dot, underscore, or dash")
+    return safe_id
+
+
+def safe_worker_service_name(service_name: object) -> str:
+    safe_service_name = str(service_name or "").strip()
+    if (
+        not safe_service_name.startswith(DEFAULT_SERVICE_NAME)
+        or ".." in safe_service_name
+        or not _SAFE_WORKER_SERVICE_NAME_RE.match(safe_service_name)
+    ):
+        raise ValueError(f"refusing to use unexpected worker service name: {service_name}")
+    return safe_service_name
+
+
 def env_float(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
     try:
         value = float(os.environ.get(name) or default)
@@ -604,7 +623,9 @@ class WorkerConfig:
                 "or PULLWISE_ALLOW_INSECURE_SERVER_URL=true is set."
             )
         self.worker_token = getattr(args, "worker_token", None) or os.environ.get("PULLWISE_WORKER_TOKEN") or ""
-        self.worker_id = getattr(args, "worker_id", None) or os.environ.get("PULLWISE_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
+        self.worker_id = safe_worker_id(
+            getattr(args, "worker_id", None) or os.environ.get("PULLWISE_WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
+        )
         configured_provider = str(getattr(args, "provider", None) or os.environ.get("PULLWISE_PROVIDER") or "").strip().lower()
         self.provider_chain = parse_provider_chain(
             os.environ.get("PULLWISE_PROVIDER_CHAIN"),
@@ -622,7 +643,9 @@ class WorkerConfig:
         self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
         self.service_home = os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
         self.service_path = os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
-        self.service_name = os.environ.get("PULLWISE_SERVICE_NAME", DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
+        self.service_name = safe_worker_service_name(
+            os.environ.get("PULLWISE_SERVICE_NAME", DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
+        )
         self.service_file = (
             os.environ.get("PULLWISE_SERVICE_FILE", f"/etc/systemd/system/{self.service_name}.service").strip()
             or f"/etc/systemd/system/{self.service_name}.service"
@@ -645,7 +668,7 @@ class WorkerConfig:
         )
         self.lifecycle_watcher_enabled = env_bool("PULLWISE_LIFECYCLE_WATCHER_ENABLED", False)
         self.watcher_poll_seconds = env_int("PULLWISE_WATCHER_POLL_SECONDS", self.poll_seconds)
-        self.watcher_service_name = (
+        self.watcher_service_name = safe_worker_service_name(
             os.environ.get("PULLWISE_WATCHER_SERVICE_NAME", f"{self.service_name}-watcher").strip()
             or f"{self.service_name}-watcher"
         )
