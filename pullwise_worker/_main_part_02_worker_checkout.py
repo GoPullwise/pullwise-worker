@@ -680,6 +680,9 @@ class Worker:
         pending_dir = result_upload_dir(self.config.work_dir)
         if not pending_dir.exists():
             return
+        if pending_dir.is_symlink():
+            self.last_error = f"pending result upload directory must not be a symlink: {pending_dir.name}"
+            return
         for path in sorted(pending_dir.glob("*.json")):
             try:
                 job_id, _payload = self.pending_result_upload_record(path)
