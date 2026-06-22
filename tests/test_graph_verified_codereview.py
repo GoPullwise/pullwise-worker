@@ -979,6 +979,37 @@ def test_core_candidate_verifier_keeps_plan_reasoning_effort(tmp_path: Path, mon
     assert result["verifier_source"] == "codex"
 
 
+def test_candidate_verifier_parallel_blocks_one_exception_and_keeps_others(monkeypatch: _MonkeyPatch) -> None:
+    config = ReviewConfig()
+    candidates = [{"issue_id": "bad"}, {"issue_id": "ok"}]
+    graph = {"unresolved_refs": [{"id": "ref1"}]}
+
+    def fake_verify_candidate(candidate: dict, graph: dict, config: ReviewConfig, checkout: Path | None = None, run: Path | None = None) -> dict:
+        del graph, config, checkout, run
+        if candidate["issue_id"] == "bad":
+            raise RuntimeError("verifier crashed")
+        return {
+            "candidate_id": "ok",
+            "verdict": "reproducible",
+            "claim_survived": True,
+            "graph_path_valid": True,
+            "expected_behavior_supported": True,
+            "reproduction": {},
+            "rejection_reason": "",
+            "verifier_source": "test",
+        }
+
+    monkeypatch.setattr(candidate_verifier_module, "verify_candidate", fake_verify_candidate)
+
+    results = candidate_verifier_module.run_candidate_verifiers_parallel(candidates, graph, config)
+
+    assert [result["candidate_id"] for result in results] == ["bad", "ok"]
+    assert results[0]["verdict"] == "blocked"
+    assert results[0]["graph_unresolved_refs"] == 1
+    assert "RuntimeError: verifier crashed" in results[0]["blocked_reason"]
+    assert results[1]["verdict"] == "reproducible"
+
+
 def test_fast_profile_does_not_cap_full_review_unit_coverage() -> None:
     config = ReviewConfig(mode="fast")
     nodes = [
@@ -1850,6 +1881,41 @@ def test_codex_judge_confirmed_result_uses_local_verified_evidence(tmp_path: Pat
     assert len(calls) == 1
     assert judge["status"] == "confirmed"
     assert judge["evidence_summary"] == {"command": "python repro.py", "log_path": "logs/repro.log", "observable": "AttributeError"}
+
+
+def test_judge_parallel_blocks_one_exception_and_keeps_others(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    config = ReviewConfig()
+    config.repro.max_workers = 2
+    checkout = tmp_path / "checkout"
+    run = tmp_path / "run"
+    checkout.mkdir()
+    run.mkdir()
+    candidates = [{"issue_id": "bad"}, {"issue_id": "ok"}]
+    repro_results = [{"candidate_id": "bad"}, {"candidate_id": "ok"}]
+
+    def fake_run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: ReviewConfig) -> dict:
+        del run, candidate, checkout, config
+        if repro["candidate_id"] == "bad":
+            raise RuntimeError("judge crashed")
+        return {
+            "candidate_id": "ok",
+            "status": "rejected",
+            "level": "L0",
+            "safe_to_show_user": False,
+            "reason": "not enough evidence",
+            "evidence_summary": {"command": "", "log_path": "", "observable": ""},
+            "limitations": [],
+        }
+
+    monkeypatch.setattr(judge_runner_module, "run_judge", fake_run_judge)
+
+    results = judge_runner_module.run_judges_parallel(run, candidates, repro_results, checkout, config)
+
+    assert [result["candidate_id"] for result in results] == ["bad", "ok"]
+    assert results[0]["status"] == "blocked"
+    assert results[0]["safe_to_show_user"] is False
+    assert "RuntimeError: judge crashed" in results[0]["reason"]
+    assert results[1]["status"] == "rejected"
 
 
 def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: Path) -> None:

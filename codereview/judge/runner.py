@@ -34,7 +34,10 @@ def run_judges_parallel(
         total = len(futures)
         for future in concurrent.futures.as_completed(futures):
             index, repro = futures[future]
-            results[index] = future.result()
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                results[index] = blocked_judge_exception(repro, exc)
             completed += 1
             _emit_task_progress(
                 progress,
@@ -45,6 +48,20 @@ def run_judges_parallel(
                 task_id=repro.get("candidate_id"),
             )
     return [result for result in results if result is not None]
+
+
+def blocked_judge_exception(repro: dict, exc: Exception) -> dict:
+    candidate_id = str(repro.get("candidate_id") or "")
+    reason = f"judge failed before producing a result: {type(exc).__name__}: {exc}"
+    return {
+        "candidate_id": candidate_id,
+        "status": "blocked",
+        "level": "L0",
+        "safe_to_show_user": False,
+        "reason": reason,
+        "evidence_summary": {"command": "", "log_path": "", "observable": ""},
+        "limitations": [reason],
+    }
 
 
 def _emit_task_progress(

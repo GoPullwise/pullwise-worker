@@ -33,7 +33,10 @@ def run_candidate_verifiers_parallel(
         total = len(futures)
         for future in concurrent.futures.as_completed(futures):
             index, candidate = futures[future]
-            results[index] = future.result()
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                results[index] = blocked_verification_exception(candidate, graph, exc)
             completed += 1
             _emit_task_progress(
                 progress,
@@ -44,6 +47,30 @@ def run_candidate_verifiers_parallel(
                 task_id=candidate.get("issue_id") or candidate.get("candidate_id"),
             )
     return [result for result in results if result is not None]
+
+
+def blocked_verification_exception(candidate: dict, graph: dict, exc: Exception) -> dict:
+    candidate_id = str(candidate.get("issue_id") or candidate.get("candidate_id") or "")
+    reason = f"candidate verifier failed before producing a result: {type(exc).__name__}: {exc}"
+    return {
+        "candidate_id": candidate_id,
+        "verdict": "blocked",
+        "claim_survived": False,
+        "graph_path_valid": False,
+        "expected_behavior_supported": False,
+        "reproduction": {
+            "harness": "",
+            "target_test": "",
+            "commands": [],
+            "expected_signal": "",
+            "needs_network": False,
+            "estimated_scope": "unknown",
+        },
+        "rejection_reason": reason,
+        "blocked_reason": reason,
+        "graph_unresolved_refs": len(graph.get("unresolved_refs", []) or []) if isinstance(graph, dict) else 0,
+        "verifier_source": "blocked_exception",
+    }
 
 
 def _emit_task_progress(
