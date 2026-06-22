@@ -1201,7 +1201,7 @@ class Worker:
             self.clear_job_cancel_event(job_id, cancel_event)
             if job_error and job_config.failed_checkout_retention_seconds > 0:
                 marker = failed_checkout_marker(checkout_dir)
-                marker.write_text(str(int(time.time()) + job_config.failed_checkout_retention_seconds), encoding="utf-8")
+                write_failed_checkout_marker(marker, int(time.time()) + job_config.failed_checkout_retention_seconds)
             else:
                 try:
                     cleanup_job_checkout(checkout_dir)
@@ -1256,6 +1256,31 @@ def result_upload_file(work_dir: Path, job_id: str) -> Path:
 
 def failed_checkout_marker(checkout_dir: Path) -> Path:
     return checkout_dir.parent / f"{checkout_dir.name}{_FAILED_CHECKOUT_MARKER_SUFFIX}"
+
+
+def write_failed_checkout_marker(marker: Path, expires_at: int) -> None:
+    payload = str(int(expires_at))
+    temp_path = marker.with_name(f".{marker.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
+    try:
+        fd = os.open(temp_path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(payload)
+        temp_path.replace(marker)
+    except Exception:
+        try:
+            if fd >= 0:
+                os.close(fd)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def checkout_dir_from_failed_marker(marker: Path) -> Path:

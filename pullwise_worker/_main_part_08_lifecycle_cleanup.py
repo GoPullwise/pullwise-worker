@@ -902,6 +902,9 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
         checkout = checkout_dir_from_failed_marker(marker)
         if checkout.name in protected:
             continue
+        if marker.is_symlink():
+            marker.unlink(missing_ok=True)
+            continue
         try:
             expires_at = int(marker.read_text(encoding="utf-8").strip() or "0")
         except ValueError:

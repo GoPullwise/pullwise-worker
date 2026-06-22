@@ -1529,6 +1529,43 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_failed_checkout_marker_write_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            outside = root / "outside-marker"
+            outside.write_text("outside", encoding="utf-8")
+            marker = work_dir / f"job_failed{worker_main._FAILED_CHECKOUT_MARKER_SUFFIX}"
+            marker.symlink_to(outside)
+
+            worker_main.write_failed_checkout_marker(marker, 12345)
+
+            self.assertFalse(marker.is_symlink())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "12345")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+
+    def test_cleanup_failed_checkout_rejects_symlink_marker_without_reading_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            checkout = work_dir / "job_marker"
+            checkout.mkdir()
+            (checkout / "keep.txt").write_text("keep", encoding="utf-8")
+            outside = root / "outside-marker"
+            outside.write_text("0", encoding="utf-8")
+            marker = worker_main.failed_checkout_marker(checkout)
+            marker.symlink_to(outside)
+            config = SimpleNamespace(work_dir=work_dir, max_checkout_bytes=1024 * 1024)
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertTrue(checkout.exists())
+            self.assertFalse(marker.exists())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "0")
+
     def test_directory_size_does_not_follow_symlinked_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
