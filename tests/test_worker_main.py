@@ -847,6 +847,28 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertIn('export CODEX_SQLITE_HOME="$SERVICE_HOME/.codex-sqlite"', script)
 
+    def test_cleanup_expired_failed_checkout_unlinks_symlink_without_touching_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            target = root / "outside"
+            target.mkdir()
+            (target / "keep.txt").write_text("keep", encoding="utf-8")
+            checkout = work_dir / "job_old"
+            checkout.symlink_to(target, target_is_directory=True)
+            marker = worker_main.failed_checkout_marker(checkout)
+            marker.write_text("0", encoding="utf-8")
+            config = SimpleNamespace(work_dir=work_dir, max_checkout_bytes=1024 * 1024)
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertFalse(checkout.exists())
+            self.assertFalse(checkout.is_symlink())
+            self.assertFalse(marker.exists())
+            self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "keep")
+
     def test_service_user_doctor_command_exports_codex_sqlite_home(self) -> None:
         cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")
 

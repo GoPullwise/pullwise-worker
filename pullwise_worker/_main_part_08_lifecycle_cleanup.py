@@ -889,16 +889,27 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
         except ValueError:
             expires_at = 0
         if expires_at <= now_ts:
-            shutil.rmtree(checkout, ignore_errors=True)
-            marker.unlink(missing_ok=True)
+            if cleanup_checkout_path(checkout):
+                marker.unlink(missing_ok=True)
     entries = sorted(
         [path for path in config.work_dir.iterdir() if path.is_dir() and path.name not in protected],
         key=lambda path: path.stat().st_mtime,
     )
     while directory_size(config.work_dir) > config.max_checkout_bytes and entries:
         checkout = entries.pop(0)
-        shutil.rmtree(checkout, ignore_errors=True)
-        failed_checkout_marker(checkout).unlink(missing_ok=True)
+        if cleanup_checkout_path(checkout):
+            failed_checkout_marker(checkout).unlink(missing_ok=True)
+
+
+def cleanup_checkout_path(checkout: Path) -> bool:
+    try:
+        if checkout.is_symlink():
+            checkout.unlink(missing_ok=True)
+            return True
+        remove_checkout_dir(checkout)
+        return True
+    except Exception:
+        return False
 
 
 def cleanup_logs(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:
