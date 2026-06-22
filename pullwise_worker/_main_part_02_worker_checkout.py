@@ -674,10 +674,17 @@ class Worker:
         if not pending_dir.exists():
             return
         for path in sorted(pending_dir.glob("*.json")):
-            job_id = path.stem
             try:
-                job_id = safe_job_id(job_id)
-            except ValueError:
+                job_id, _payload = self.pending_result_upload_record(path)
+            except PendingResultUploadRecordError as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.last_error = (
+                    f"pending result upload record permanently invalid for {path.name}: "
+                    f"{redact_secrets(str(exc), self.config)}"
+                )[:500]
                 continue
             self.schedule_pending_result_upload(job_id, path)
 
@@ -734,6 +741,11 @@ class Worker:
             self._pending_result_uploads[job_id] = (future, path)
 
     def upload_pending_result_file(self, path: Path) -> None:
+        job_id, payload = self.pending_result_upload_record(path)
+        self.upload_result_with_retry(job_id, payload)
+        path.unlink(missing_ok=True)
+
+    def pending_result_upload_record(self, path: Path) -> tuple[str, dict]:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -744,11 +756,13 @@ class Worker:
             job_id = safe_job_id(record.get("job_id"))
         except ValueError as exc:
             raise PendingResultUploadRecordError(f"pending result upload job_id is invalid: {exc}") from exc
+        expected_path = result_upload_file(self.config.work_dir, job_id)
+        if path.resolve(strict=False) != expected_path.resolve(strict=False):
+            raise PendingResultUploadRecordError("pending result upload filename does not match job_id")
         payload = record.get("payload")
         if not isinstance(payload, dict):
             raise PendingResultUploadRecordError("pending result upload payload must be an object")
-        self.upload_result_with_retry(job_id, payload)
-        path.unlink(missing_ok=True)
+        return job_id, payload
 
     def defer_result_upload(self, job_id: str, payload: dict) -> Path:
         pending_dir = result_upload_dir(self.config.work_dir)

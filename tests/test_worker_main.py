@@ -288,6 +288,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(pending_path.exists())
             self.assertIn("permanently invalid", worker.last_error or "")
 
+    def test_pending_result_upload_rejects_filename_job_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_a")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps({"job_id": "job_b", "payload": {"status": "done"}}),
+                encoding="utf-8",
+            )
+
+            with patch.object(worker.client, "result") as upload:
+                worker.load_pending_result_uploads()
+
+            upload.assert_not_called()
+            self.assertEqual(worker.pending_result_job_ids(), [])
+            self.assertFalse(pending_path.exists())
+            self.assertIn("filename does not match job_id", worker.last_error or "")
+
     def test_done_pending_result_upload_still_renews_job_until_collected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
