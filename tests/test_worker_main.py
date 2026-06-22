@@ -1767,6 +1767,26 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["repro"]["max_repro"], 20)
         self.assertEqual(payload["candidates"]["max_total_for_reproduction"], 20)
 
+    def test_write_graph_verified_codereview_config_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            config_dir = root / ".codereview"
+            config_dir.mkdir()
+            outside = root / "outside-config.json"
+            outside.write_text('{"mode": "outside"}\n', encoding="utf-8")
+            config_path = config_dir / "config.json"
+            config_path.symlink_to(outside)
+
+            worker_main.write_graph_verified_codereview_config(cfg, root, {"maxRepro": 0}, "fast")
+
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            outside_text = outside.read_text(encoding="utf-8")
+
+            self.assertFalse(config_path.is_symlink())
+            self.assertEqual(payload["mode"], "fast")
+            self.assertEqual(outside_text, '{"mode": "outside"}\n')
+
     def test_repository_limit_helpers_tolerate_bad_numeric_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

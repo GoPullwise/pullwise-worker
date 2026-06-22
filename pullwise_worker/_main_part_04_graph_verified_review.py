@@ -274,7 +274,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "min_score_for_repro": graph_verified_positive_int(graph_config.get("minScoreForRepro"), default=8, minimum=0, maximum=50),
         "always_repro_severities": ["critical", "high"],
     }
-    path.write_text(json.dumps(current, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_no_follow_text_file(path, json.dumps(current, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 def graph_verified_mode(value: object) -> str:
