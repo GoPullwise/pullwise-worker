@@ -805,6 +805,33 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         handle_log_session.assert_not_called()
 
+    def test_worker_log_session_collection_error_does_not_crash_loop(self) -> None:
+        class BrokenTailer:
+            def collect(self):
+                raise RuntimeError("tailer broke")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_1",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_name="pullwise-worker-wk_1",
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker.log_tailers["log_1"] = BrokenTailer()
+
+            with patch.object(worker.client, "log_stream_lines") as upload:
+                worker.handle_log_session({"id": "log_1"})
+
+            upload.assert_not_called()
+            self.assertIn("log stream collection failed", worker.last_error or "")
+            self.assertIn("tailer broke", worker.last_error or "")
+
     def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -928,6 +955,32 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(watcher.client.calls[1][1][0]["stream"], "scan-summary")
             self.assertEqual(watcher.client.calls[1][1][0]["line"], "new summary")
             self.assertEqual(watcher.log_tailers["log_1"].journal.cursor, "cursor-1")
+
+    def test_lifecycle_watcher_log_session_collection_error_does_not_crash(self) -> None:
+        class FakeClient:
+            def log_stream_lines(self, session_id, lines):
+                del session_id, lines
+                raise AssertionError("upload should not run")
+
+        class BrokenTailer:
+            def collect(self):
+                raise RuntimeError("tailer broke")
+
+        config = SimpleNamespace(
+            worker_id="wk_1",
+            worker_token="pwk_test",
+            server_url="https://api.example.com",
+            service_name="pullwise-worker-wk_1",
+            log_dir=Path("/tmp"),
+        )
+        watcher = worker_main.WorkerLifecycleWatcher(config)
+        watcher.client = FakeClient()
+        watcher.log_tailers["log_1"] = BrokenTailer()
+
+        watcher.handle_log_session({"id": "log_1"})
+
+        self.assertIn("log stream collection failed", watcher.last_error or "")
+        self.assertIn("tailer broke", watcher.last_error or "")
 
     def test_journal_log_tailer_reports_unavailable_once_and_backs_off(self) -> None:
         tailer = worker_main.WorkerJournalLogTailer("pullwise-worker-wk_1", since_timestamp=1781200000)

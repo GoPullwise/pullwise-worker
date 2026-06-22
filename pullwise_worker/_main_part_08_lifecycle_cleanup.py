@@ -374,7 +374,11 @@ class WorkerLifecycleWatcher:
         if session_id not in self.log_tailers:
             self.log_tailers = {session_id: WorkerLogStreamTailer(self.config, session)}
         tailer = self.log_tailers[session_id]
-        entries, state = tailer.collect()
+        try:
+            entries, state = tailer.collect()
+        except Exception as exc:
+            self.last_error = f"log stream collection failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return
         if not entries:
             return
         try:
@@ -382,7 +386,10 @@ class WorkerLifecycleWatcher:
         except PullwiseRequestError as exc:
             self.last_error = f"log stream upload failed: {redact_secrets(str(exc), self.config)}"[:500]
             return
-        tailer.commit(state)
+        try:
+            tailer.commit(state)
+        except Exception as exc:
+            self.last_error = f"log stream checkpoint failed: {redact_secrets(str(exc), self.config)}"[:500]
 
 
 def run_lifecycle_watcher(config: WorkerConfig, *, once: bool = False) -> int:
