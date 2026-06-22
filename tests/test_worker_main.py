@@ -2686,6 +2686,21 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         install.assert_not_called()
 
+    def test_service_user_doctor_command_rejects_unsafe_service_user(self) -> None:
+        cfg = SimpleNamespace(
+            service_user="pw-worker-../../root",
+            service_home="/var/lib/pullwise-worker/wk",
+            service_path="/usr/bin",
+        )
+
+        with self.assertRaisesRegex(ValueError, "unexpected worker service user"):
+            worker_main.service_user_doctor_command(cfg, Path("/usr/local/bin/pullwise-worker-wk"))
+
+    def test_removable_service_user_rejects_unsafe_user(self) -> None:
+        self.assertFalse(worker_main.removable_service_user("pw-worker-../../root"))
+        self.assertFalse(worker_main.removable_service_user("root"))
+        self.assertTrue(worker_main.removable_service_user("pw-worker-wk_1"))
+
     def test_service_user_doctor_command_exports_codex_sqlite_home(self) -> None:
         cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")
 

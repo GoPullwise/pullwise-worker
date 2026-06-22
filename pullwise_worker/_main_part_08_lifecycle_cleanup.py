@@ -590,7 +590,7 @@ def default_worker_package() -> str:
 
 
 def service_user_doctor_command(config: WorkerConfig, bin_path: Path) -> list[str]:
-    service_user = str(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
+    service_user = safe_worker_service_user(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER)
     service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
     service_path = provider_tool_path(config)
     service_bin = str(bin_path).replace("\\", "/")
@@ -1092,8 +1092,24 @@ def safe_worker_file_unlink(path: Path, allowed_root: Path, service_name: str) -
     path.unlink(missing_ok=True)
 
 
+def safe_worker_service_user(service_user: object) -> str:
+    safe_user = str(service_user or "").strip()
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.@-")
+    if (
+        not safe_user.startswith("pw-worker-")
+        or ".." in safe_user
+        or any(char not in allowed for char in safe_user)
+    ):
+        raise ValueError(f"refusing to use unexpected worker service user: {service_user}")
+    return safe_user
+
+
 def removable_service_user(service_user: str) -> bool:
-    return str(service_user or "").strip().startswith("pw-worker-")
+    try:
+        safe_worker_service_user(service_user)
+    except ValueError:
+        return False
+    return True
 
 
 def safe_unlink(path: Path, *, service_name: str = DEFAULT_SERVICE_NAME) -> None:
