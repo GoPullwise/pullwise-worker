@@ -742,6 +742,18 @@ def client_active_job_ids(values: object) -> list[str]:
     return job_ids
 
 
+def client_ready_providers(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    providers: list[str] = []
+    for value in values:
+        provider = str(value or "").strip().lower()
+        if provider not in SUPPORTED_REVIEW_PROVIDERS or provider in providers:
+            continue
+        providers.append(provider)
+    return providers
+
+
 class PullwiseClient:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
@@ -815,7 +827,7 @@ class PullwiseClient:
             "doctor_checked_at": doctor_checked_at,
         }
         if ready_providers is not None:
-            payload["readyProviders"] = [str(provider) for provider in ready_providers if str(provider or "").strip()]
+            payload["readyProviders"] = client_ready_providers(ready_providers)
         if active_job_ids is not None:
             payload["active_job_ids"] = client_active_job_ids(active_job_ids)
         if isinstance(machine_metrics, dict):
