@@ -40,8 +40,8 @@ class RepositoryTooLargeError(RuntimeError):
 
 def repository_limits_metadata(config: WorkerConfig) -> dict:
     return {
-        "maxFiles": max(1, int(getattr(config, "max_repo_files", _DEFAULT_MAX_REPO_FILES) or _DEFAULT_MAX_REPO_FILES)),
-        "maxBytes": max(1, int(getattr(config, "max_repo_bytes", _DEFAULT_MAX_REPO_BYTES) or _DEFAULT_MAX_REPO_BYTES)),
+        "maxFiles": positive_limit_int(getattr(config, "max_repo_files", _DEFAULT_MAX_REPO_FILES), _DEFAULT_MAX_REPO_FILES, minimum=1),
+        "maxBytes": positive_limit_int(getattr(config, "max_repo_bytes", _DEFAULT_MAX_REPO_BYTES), _DEFAULT_MAX_REPO_BYTES, minimum=1),
     }
 
 
@@ -50,8 +50,8 @@ def repository_resource_stats(checkout_dir: Path, limits: dict | None = None) ->
     total_bytes = 0
     if not checkout_dir.is_dir():
         return {"fileCount": 0, "totalBytes": 0}
-    max_files = int(limits.get("maxFiles") or 0) if isinstance(limits, dict) else 0
-    max_bytes = int(limits.get("maxBytes") or 0) if isinstance(limits, dict) else 0
+    max_files = positive_limit_int(limits.get("maxFiles"), 0) if isinstance(limits, dict) else 0
+    max_bytes = positive_limit_int(limits.get("maxBytes"), 0) if isinstance(limits, dict) else 0
     stopped_early = False
     stack = [checkout_dir]
     while stack:
@@ -85,11 +85,21 @@ def repository_resource_stats(checkout_dir: Path, limits: dict | None = None) ->
 
 def repository_limit_exceeded(stats: dict, limits: dict) -> list[str]:
     exceeded = []
-    if int(stats.get("fileCount") or 0) > int(limits.get("maxFiles") or 0):
+    if positive_limit_int(stats.get("fileCount"), 0) > positive_limit_int(limits.get("maxFiles"), 0):
         exceeded.append("file_count")
-    if int(stats.get("totalBytes") or 0) > int(limits.get("maxBytes") or 0):
+    if positive_limit_int(stats.get("totalBytes"), 0) > positive_limit_int(limits.get("maxBytes"), 0):
         exceeded.append("total_bytes")
     return exceeded
+
+
+def positive_limit_int(value: object, default: int, *, minimum: int = 0) -> int:
+    if isinstance(value, bool):
+        return max(minimum, int(default or 0))
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        parsed = int(default or 0)
+    return max(minimum, parsed)
 
 
 def repository_limit_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
@@ -1202,4 +1212,3 @@ def missing_dockerfile_source_finding(
         "goodCode": [],
         "references": [],
     }
-

@@ -915,6 +915,29 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["repro"]["max_repro"], 20)
         self.assertEqual(payload["candidates"]["max_total_for_reproduction"], 20)
 
+    def test_repository_limit_helpers_tolerate_bad_numeric_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            (checkout / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            config = SimpleNamespace(max_repo_files="not-a-number", max_repo_bytes=-5)
+
+            limits = worker_main.repository_limits_metadata(config)
+            stats = worker_main.repository_resource_stats(
+                checkout,
+                limits={"maxFiles": "bad", "maxBytes": object()},
+            )
+            exceeded = worker_main.repository_limit_exceeded(
+                {"fileCount": "bad", "totalBytes": object()},
+                {"maxFiles": "bad", "maxBytes": object()},
+            )
+
+        self.assertEqual(limits["maxFiles"], worker_main._DEFAULT_MAX_REPO_FILES)
+        self.assertEqual(limits["maxBytes"], 1)
+        self.assertEqual(stats["fileCount"], 1)
+        self.assertEqual(exceeded, [])
+
     def test_worker_wrapper_exports_codex_sqlite_home(self) -> None:
         script = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk/worker.env"))
 
