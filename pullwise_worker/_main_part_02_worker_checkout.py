@@ -463,7 +463,7 @@ class Worker:
                     self.handle_log_session(heartbeat_payload.get("logSession") or heartbeat_payload.get("log_session"))
                 if worker_state.get("status") == "disabled":
                     ready = False
-                if command:
+                if lifecycle_command_parts(command):
                     ready = False
                     if not job_running and not loop_error and self.handle_lifecycle_command(command):
                         return
@@ -576,10 +576,10 @@ class Worker:
             self.last_error = f"worker cleanup failed: {redact_secrets(str(exc), self.config)}"[:500]
 
     def handle_lifecycle_command(self, command: dict) -> bool:
-        command_id = str(command.get("id") or "").strip()
-        action = str(command.get("command") or "").strip().lower()
-        if not command_id or action not in {"stop", "uninstall"}:
+        parsed = lifecycle_command_parts(command)
+        if parsed is None:
             return False
+        command_id, action = parsed
         if getattr(self.config, "lifecycle_watcher_enabled", False):
             return False
         try:
@@ -1199,6 +1199,16 @@ def validate_claimed_job(job: object) -> dict:
         raise ValueError("claim response job must be an object")
     safe_job_id(job.get("job_id"))
     return job
+
+
+def lifecycle_command_parts(command: object) -> tuple[str, str] | None:
+    if not isinstance(command, dict):
+        return None
+    command_id = str(command.get("id") or "").strip()
+    action = str(command.get("command") or "").strip().lower()
+    if not command_id or action not in {"stop", "uninstall"}:
+        return None
+    return command_id, action
 
 
 def checkout_dir_for_job(work_dir: Path, job_id: str) -> Path:

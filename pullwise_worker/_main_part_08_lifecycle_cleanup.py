@@ -341,10 +341,10 @@ class WorkerLifecycleWatcher:
             time.sleep(max(1, int(getattr(self.config, "watcher_poll_seconds", 1) or 1)))
 
     def handle_lifecycle_command(self, command: dict, *, worker_state: dict | None = None) -> bool:
-        command_id = str(command.get("id") or "").strip()
-        action = str(command.get("command") or "").strip().lower()
-        if not command_id or action not in {"stop", "uninstall"}:
+        parsed = lifecycle_command_parts(command)
+        if parsed is None:
             return False
+        command_id, action = parsed
         if action == "uninstall" and command_worker_has_active_jobs(worker_state):
             return False
         try:
