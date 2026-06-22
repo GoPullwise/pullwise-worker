@@ -102,7 +102,7 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert config["graph"]["codex_mappers"] is False
     assert config["graph"]["map_parallel"] == 2
     assert config["graph"]["graph_timeout_seconds"] == 960
-    assert config["finders"]["turn_parallel"] == 2
+    assert config["finders"]["turn_parallel"] == 1
     assert "impact" not in config
     assert set(schema["required"]) == set(schema["properties"])
     assert (tmp_path / ".codereview" / "schemas" / "graph-shard-batch.schema.json").is_file()
@@ -260,7 +260,7 @@ def test_default_finder_batch_width_is_six(tmp_path: Path) -> None:
     config = load_config(tmp_path)
 
     assert config.finders.max_workers == 6
-    assert config.finders.turn_parallel == 2
+    assert config.finders.turn_parallel == 1
 
 
 def test_run_finders_batches_tasks_into_single_app_server_waves(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:

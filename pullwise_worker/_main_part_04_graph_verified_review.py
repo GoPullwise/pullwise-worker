@@ -194,7 +194,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         **(current.get("finders") if isinstance(current.get("finders"), dict) else {}),
         "enabled": True,
         "max_workers": graph_verified_positive_int(graph_config.get("finderMaxParallel"), default=6, minimum=1, maximum=6),
-        "turn_parallel": graph_verified_positive_int(graph_config.get("finderTurnParallel"), default=2, minimum=1, maximum=6),
+        "turn_parallel": graph_verified_positive_int(graph_config.get("finderTurnParallel"), default=1, minimum=1, maximum=6),
         "timeout_seconds": graph_verified_positive_int(graph_config.get("finderTimeoutSeconds"), default=600, minimum=60, maximum=3600),
     }
     repro_limit = graph_verified_repro_limit(graph_config.get("maxRepro"), mode)

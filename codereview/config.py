@@ -33,7 +33,7 @@ class FinderConfig:
     enabled: bool = True
     timeout_seconds: int = 600
     max_workers: int = 6
-    turn_parallel: int = 2
+    turn_parallel: int = 1
 
 
 @dataclass
@@ -253,7 +253,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
             enabled=bool(finders.get("enabled", True)),
             timeout_seconds=int(finders.get("timeout_seconds") or agents.get("finder_timeout_seconds") or 600),
             max_workers=max(1, int(finders.get("max_workers") or agents.get("finder_parallel") or 6)),
-            turn_parallel=max(1, min(6, int(finders.get("turn_parallel") or agents.get("finder_turn_parallel") or 2))),
+            turn_parallel=max(1, min(6, int(finders.get("turn_parallel") or agents.get("finder_turn_parallel") or 1))),
         ),
         repro=ReproConfig(
             enabled=bool(repro.get("enabled", True)),
