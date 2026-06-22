@@ -454,6 +454,52 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(worker.pending_result_job_ids(), ["job_retry"])
 
+    def test_successful_pending_result_upload_clears_matching_upload_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_retry")
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_result(None)
+            worker._pending_result_uploads["job_retry"] = (future, pending_path)
+            worker.last_error = "result upload retry failed for job_retry: offline"
+
+            worker.collect_result_uploads()
+
+            self.assertIsNone(worker.last_error)
+
+    def test_successful_pending_result_upload_keeps_unrelated_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_retry")
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_result(None)
+            worker._pending_result_uploads["job_retry"] = (future, pending_path)
+            worker.last_error = "worker cleanup failed: disk busy"
+
+            worker.collect_result_uploads()
+
+            self.assertEqual(worker.last_error, "worker cleanup failed: disk busy")
+
     def test_cancelled_pending_result_upload_is_not_sent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)

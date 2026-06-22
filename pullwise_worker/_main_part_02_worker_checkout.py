@@ -727,6 +727,7 @@ class Worker:
         for job_id, future, path in done_uploads:
             try:
                 future.result()
+                self.clear_result_upload_error(job_id)
             except PendingResultUploadRecordError as exc:
                 try:
                     path.unlink(missing_ok=True)
@@ -762,6 +763,17 @@ class Worker:
             except Exception as exc:
                 self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
                 self.schedule_pending_result_upload(job_id, path)
+
+    def clear_result_upload_error(self, job_id: str) -> None:
+        if not self.last_error:
+            return
+        prefixes = (
+            f"result upload retry failed for {job_id}:",
+            f"result upload failed for {job_id}:",
+            f"result upload deferred for {job_id}:",
+        )
+        if any(self.last_error.startswith(prefix) for prefix in prefixes):
+            self.last_error = None
 
     def schedule_pending_result_upload(self, job_id: str, path: Path) -> None:
         job_id = safe_job_id(job_id)
