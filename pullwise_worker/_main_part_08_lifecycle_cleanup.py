@@ -706,6 +706,10 @@ def append_missing_env_values(env_path: Path, values: dict[str, str], *, dry_run
     append_no_follow_text_file(env_path, "".join(f"{key}={value}\n" for key, value in missing))
 
 
+def copy_text_file_no_follow(source: Path, destination: Path) -> None:
+    write_no_follow_text_file(destination, read_no_follow_text_file(source))
+
+
 def ensure_lifecycle_watcher(
     config: WorkerConfig,
     *,
@@ -795,7 +799,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     else:
         try:
             if env_path.exists():
-                shutil.copy2(env_path, backup_path)
+                copy_text_file_no_follow(env_path, backup_path)
         except OSError as exc:
             print(f"failed to back up env file: {exc}", file=sys.stderr)
             return 1
@@ -809,7 +813,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         completed = subprocess.run(command)
         if completed.returncode != 0:
             if backup_path.exists():
-                shutil.copy2(backup_path, env_path)
+                copy_text_file_no_follow(backup_path, env_path)
             subprocess.run(["systemctl", "restart", service_name])
             return completed.returncode
         if command is install_command:
@@ -818,13 +822,13 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
                 watcher_code = ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=False)
                 if watcher_code != 0:
                     if backup_path.exists():
-                        shutil.copy2(backup_path, env_path)
+                        copy_text_file_no_follow(backup_path, env_path)
                     subprocess.run(["systemctl", "restart", service_name])
                     return watcher_code
             except OSError as exc:
                 print(f"failed to write worker wrapper: {exc}", file=sys.stderr)
                 if backup_path.exists():
-                    shutil.copy2(backup_path, env_path)
+                    copy_text_file_no_follow(backup_path, env_path)
                 subprocess.run(["systemctl", "restart", service_name])
                 return 1
     return 0

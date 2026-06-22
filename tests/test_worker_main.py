@@ -2425,6 +2425,67 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(env_path.read_text(encoding="utf-8"), "")
 
+    def test_copy_text_file_no_follow_rejects_symlink_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside.env"
+            outside.write_text("PULLWISE_SECRET=1\n", encoding="utf-8")
+            source = root / "worker.env"
+            source.symlink_to(outside)
+            destination = root / "backup.env"
+
+            with self.assertRaises(OSError):
+                worker_main.copy_text_file_no_follow(source, destination)
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "PULLWISE_SECRET=1\n")
+
+    def test_copy_text_file_no_follow_replaces_symlink_destination_without_touching_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source = root / "worker.env"
+            source.write_text("PULLWISE_EXISTING=1\n", encoding="utf-8")
+            outside = root / "outside-backup.env"
+            outside.write_text("outside\n", encoding="utf-8")
+            destination = root / "backup.env"
+            destination.symlink_to(outside)
+
+            worker_main.copy_text_file_no_follow(source, destination)
+
+            self.assertFalse(destination.is_symlink())
+            self.assertEqual(destination.read_text(encoding="utf-8"), "PULLWISE_EXISTING=1\n")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_update_worker_backup_does_not_follow_symlinked_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside.env"
+            outside.write_text("PULLWISE_SECRET=1\n", encoding="utf-8")
+            env_path = root / "worker.env"
+            env_path.symlink_to(outside)
+            backup_path = root / "worker.env.bak"
+            bin_path = root / "pullwise-worker"
+            config = SimpleNamespace(
+                service_name="pullwise-worker-test",
+                service_user="pw-worker-test",
+                service_home=str(root / "home"),
+                service_path="/usr/bin",
+                worker_env_file=str(env_path),
+                worker_env_backup_file=str(backup_path),
+                worker_bin_path=str(bin_path),
+            )
+
+            with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
+                worker_main.subprocess,
+                "run",
+            ) as run:
+                status = worker_main.update_worker(config)
+
+            self.assertEqual(status, 1)
+            run.assert_not_called()
+            self.assertFalse(backup_path.exists())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "PULLWISE_SECRET=1\n")
+
     def test_ensure_lifecycle_watcher_service_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
