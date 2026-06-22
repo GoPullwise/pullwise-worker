@@ -109,6 +109,31 @@ def repository_regular_file(path: Path) -> bool:
         return False
 
 
+def read_repository_text_file(path: Path) -> str | None:
+    if not repository_regular_file(path):
+        return None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        handle = os.fdopen(fd, "r", encoding="utf-8")
+    except OSError:
+        os.close(fd)
+        return None
+    except Exception:
+        os.close(fd)
+        raise
+    try:
+        with handle:
+            return handle.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def repository_path_exists_without_following_symlink(path: Path) -> bool:
     try:
         path.lstat()
@@ -241,11 +266,12 @@ def dedupe_manifests(manifests: list[dict]) -> list[dict]:
 
 
 def read_package_json(path: Path) -> dict:
-    if not repository_regular_file(path):
+    text = read_repository_text_file(path)
+    if text is None:
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        data = json.loads(text)
+    except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -370,11 +396,8 @@ def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | No
 
 def package_script_line(checkout_dir: Path, script: str) -> int:
     package_path = checkout_dir / "package.json"
-    if not repository_regular_file(package_path):
-        return 1
-    try:
-        package_text = package_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    package_text = read_repository_text_file(package_path)
+    if package_text is None:
         return 1
     return first_matching_line(package_text, rf'"{re.escape(script)}"\s*:')
 
@@ -403,11 +426,13 @@ def readme_missing_package_script_findings(job: dict, checkout_dir: Path) -> lis
     if readme_path is None:
         return []
 
+    package_text = read_repository_text_file(package_path)
+    readme_text = read_repository_text_file(readme_path)
+    if package_text is None or readme_text is None:
+        return []
     try:
-        package_text = package_path.read_text(encoding="utf-8")
         package_data = json.loads(package_text)
-        readme_text = readme_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return []
 
     scripts = package_data.get("scripts") if isinstance(package_data, dict) else None
@@ -454,10 +479,12 @@ def workflow_missing_package_script_findings(job: dict, checkout_dir: Path) -> l
     if not repository_regular_file(package_path) or not workflows_dir.is_dir():
         return []
 
+    package_text = read_repository_text_file(package_path)
+    if package_text is None:
+        return []
     try:
-        package_text = package_path.read_text(encoding="utf-8")
         package_data = json.loads(package_text)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return []
 
     scripts = package_data.get("scripts") if isinstance(package_data, dict) else None
@@ -469,9 +496,8 @@ def workflow_missing_package_script_findings(job: dict, checkout_dir: Path) -> l
     for workflow_path in sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")]):
         if not repository_regular_file(workflow_path):
             continue
-        try:
-            workflow_text = workflow_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        workflow_text = read_repository_text_file(workflow_path)
+        if workflow_text is None:
             continue
         workflow_rel = workflow_path.relative_to(checkout_dir).as_posix()
         for line_number, line in enumerate(workflow_text.splitlines(), start=1):
@@ -509,9 +535,8 @@ def dockerfile_missing_source_findings(job: dict, checkout_dir: Path) -> list[di
     findings: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for dockerfile_path in iter_dockerfiles(checkout_dir):
-        try:
-            dockerfile_text = dockerfile_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        dockerfile_text = read_repository_text_file(dockerfile_path)
+        if dockerfile_text is None:
             continue
         dockerfile_rel = dockerfile_path.relative_to(checkout_dir).as_posix()
         for line_number, line in enumerate(dockerfile_text.splitlines(), start=1):
@@ -707,9 +732,8 @@ def committed_secret_findings(job: dict, checkout_dir: Path) -> list[dict]:
     findings: list[dict] = []
     seen_locations: set[tuple[str, str]] = set()
     for path in iter_secret_scan_files(checkout_dir):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        text = read_repository_text_file(path)
+        if text is None:
             continue
         file_path = path.relative_to(checkout_dir).as_posix()
         for line_number, line in enumerate(text.splitlines(), start=1):
