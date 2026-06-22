@@ -25,6 +25,7 @@ from codereview.graph.census import run_repository_census
 from codereview.graph.link import _valid_link_result
 from codereview.graph import mapper as graph_mapper_module
 from codereview.graph.merge import merge_graph_results, normalize_graph_for_inventory
+from codereview.graph.scheduler import plan_graph_tasks
 from codereview.inventory.git_inventory import analyzable_files, build_git_inventory
 from codereview.judge import runner as judge_runner_module
 from codereview.judge.runner import run_judge
@@ -96,8 +97,10 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
 
     assert config["scan"]["mode"] == "full-cached"
     assert config["graph"]["schema_version"] == "3"
-    assert config["graph"]["target_shards"] == 6
+    assert config["graph"]["target_shards"] == 12
     assert config["graph"]["mapper_subagent_limit"] == 6
+    assert config["graph"]["map_parallel"] == 2
+    assert config["graph"]["graph_timeout_seconds"] == 960
     assert config["finders"]["turn_parallel"] == 2
     assert "impact" not in config
     assert set(schema["required"]) == set(schema["properties"])
@@ -634,6 +637,24 @@ def test_graph_linker_requires_resolution_reason() -> None:
     assert not _valid_link_result({"status": "resolved", "target": "sym:handle"}, ["sym:handle"])
 
 
+def test_graph_scheduler_caps_high_risk_double_mapping_to_target_shards() -> None:
+    config = ReviewConfig()
+    config.graph.target_shards = 12
+    config.graph.double_map_high_risk = True
+    census = {
+        "high_risk_roots": [{"path": "."}],
+        "shards": [
+            {"shard_id": f"shard-{index + 1:04d}", "files": [f"app/file_{index + 1}.py"]}
+            for index in range(7)
+        ],
+    }
+
+    tasks = plan_graph_tasks(census, {}, config)
+
+    assert len(tasks) == 12
+    assert sum(1 for task in tasks if task["double_mapped"]) == 10
+
+
 def test_codex_graph_mapper_coordinator_normalizes_empty_mapped_files(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
@@ -681,7 +702,7 @@ def test_codex_graph_mapper_coordinator_normalizes_empty_mapped_files(tmp_path: 
     assert "normalized to assigned_files" in results[0]["warnings"][0]
 
 
-def test_codex_graph_mapper_uses_one_app_server_coordinator_for_many_tasks(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+def test_codex_graph_mapper_batches_coordinator_turns_and_reports_batch_progress(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
     ensure_project_files(checkout)
@@ -692,6 +713,7 @@ def test_codex_graph_mapper_uses_one_app_server_coordinator_for_many_tasks(tmp_p
     config.graph.codex_mappers = True
     config.graph.mapper_subagent_limit = 6
     config.graph.graph_timeout_seconds = 120
+    config.graph.map_parallel = 2
     config.codex.reasoning_effort = "xhigh"
     inventory = {
         "files": [
@@ -700,16 +722,27 @@ def test_codex_graph_mapper_uses_one_app_server_coordinator_for_many_tasks(tmp_p
         ]
     }
     tasks = [
-        {"task_id": "graph-map-0001", "shard_id": "shard-0001", "mapper_index": 1, "files": ["one.py"], "double_mapped": False},
-        {"task_id": "graph-map-0002", "shard_id": "shard-0002", "mapper_index": 1, "files": ["two.py"], "double_mapped": False},
+        {
+            "task_id": f"graph-map-{index + 1:04d}",
+            "shard_id": f"shard-{index + 1:04d}",
+            "mapper_index": 1,
+            "files": ["one.py"] if index % 2 == 0 else ["two.py"],
+            "double_mapped": False,
+        }
+        for index in range(8)
     ]
     calls = []
+    barrier = threading.Barrier(2, timeout=2)
 
     def fake_run_codex_turn(**kwargs):
         calls.append(kwargs)
+        barrier.wait()
         assert kwargs["output_schema"].name == "graph-shard-batch.schema.json"
         assert kwargs["config"].reasoning_effort == "medium"
         assert "Use at most mapper_subagent_limit subagents at one time" in kwargs["prompt"]
+        task_payload = json.loads(Path(kwargs["output_file"]).parent.joinpath("task.json").read_text(encoding="utf-8"))
+        batch_tasks = task_payload["jobs"]
+        assert len(batch_tasks) <= 6
         output = Path(kwargs["output_file"])
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
@@ -728,7 +761,7 @@ def test_codex_graph_mapper_uses_one_app_server_coordinator_for_many_tasks(tmp_p
                             "coverage": {"assigned_files": task["files"], "mapped_files": task["files"]},
                             "warnings": [],
                         }
-                        for task in reversed(tasks)
+                        for task in reversed(batch_tasks)
                     ],
                     "warnings": [],
                 }
@@ -742,13 +775,14 @@ def test_codex_graph_mapper_uses_one_app_server_coordinator_for_many_tasks(tmp_p
 
     results = graph_mapper_module.map_graph_tasks(checkout, tasks, inventory, config, run=run, progress=events.append)
 
-    assert len(calls) == 1
-    assert calls[0]["timeout_seconds"] == 120
-    assert [result["task_id"] for result in results] == ["graph-map-0001", "graph-map-0002"]
-    assert [event["message"] for event in events] == ["Graph: mapping shards 1/2", "Graph: mapping shards 2/2"]
+    assert len(calls) == 2
+    assert {call["timeout_seconds"] for call in calls} == {120}
+    assert [result["task_id"] for result in results] == [task["task_id"] for task in tasks]
+    assert sorted(event["current"] for event in events) == list(range(1, 9))
+    assert events[-1]["message"] == "Graph: mapping shards 8/8"
 
 
-def test_codex_graph_mapper_coordinator_scales_timeout_by_internal_waves(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+def test_codex_graph_mapper_coordinator_batches_keep_per_turn_timeout(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
     ensure_project_files(checkout)
@@ -796,7 +830,7 @@ def test_codex_graph_mapper_coordinator_scales_timeout_by_internal_waves(tmp_pat
 
     graph_mapper_module.map_graph_tasks(checkout, tasks, inventory, config, run=tmp_path / "run")
 
-    assert observed["timeout_seconds"] == 200
+    assert observed["timeout_seconds"] == 100
     assert observed["reasoning_effort"] == "medium"
 
 

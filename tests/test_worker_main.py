@@ -754,8 +754,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertEqual(payload["mode"], "deep")
         self.assertNotIn("codegraph", payload)
-        self.assertEqual(payload["graph"]["target_shards"], 6)
+        self.assertEqual(payload["graph"]["target_shards"], 12)
         self.assertEqual(payload["graph"]["mapper_subagent_limit"], 6)
+        self.assertEqual(payload["graph"]["map_parallel"], 2)
+        self.assertEqual(payload["graph"]["graph_timeout_seconds"], 960)
         self.assertEqual(payload["codex"]["reasoning_effort"], "medium")
         self.assertEqual(payload["codex"]["env"]["CODEX_SQLITE_HOME"], str(root / "home" / ".codex-sqlite"))
         self.assertTrue(payload["context"]["enabled"])

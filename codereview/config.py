@@ -81,7 +81,7 @@ class GraphConfig:
     prompt_version: str = "graph-v3"
     full_inventory: bool = True
     incremental: bool = True
-    target_shards: int = 6
+    target_shards: int = 12
     max_shard_files: int = 25
     max_shard_bytes: int = 500000
     large_file_bytes: int = 120000
@@ -91,8 +91,8 @@ class GraphConfig:
     codex_census: bool = True
     codex_mappers: bool = True
     mapper_subagent_limit: int = 6
-    map_parallel: int = 6
-    graph_timeout_seconds: int = 480
+    map_parallel: int = 2
+    graph_timeout_seconds: int = 960
 
 
 @dataclass
@@ -205,7 +205,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
             prompt_version=str(graph.get("prompt_version") or "graph-v3"),
             full_inventory=bool(graph.get("full_inventory", True)),
             incremental=selected_scan_mode != "full-strict" and bool(graph.get("incremental", True)),
-            target_shards=max(1, int(graph.get("target_shards") or agents.get("graph_target_shards") or mapper_subagent_limit)),
+            target_shards=max(1, int(graph.get("target_shards") or agents.get("graph_target_shards") or 12)),
             max_shard_files=max(1, int(graph.get("max_shard_files") or 25)),
             max_shard_bytes=max(1, int(graph.get("max_shard_bytes") or 500000)),
             large_file_bytes=max(1, int(graph.get("large_file_bytes") or graph.get("max_large_file_bytes") or 120000)),
@@ -215,8 +215,8 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
             codex_census=bool(graph.get("codex_census", codex_mappers_enabled)),
             codex_mappers=codex_mappers_enabled,
             mapper_subagent_limit=mapper_subagent_limit,
-            map_parallel=max(1, int(agents.get("graph_map_parallel") or graph.get("map_parallel") or 6)),
-            graph_timeout_seconds=max(30, int(agents.get("graph_timeout_seconds") or graph.get("graph_timeout_seconds") or 480)),
+            map_parallel=max(1, int(graph.get("map_parallel") or agents.get("graph_map_parallel") or 2)),
+            graph_timeout_seconds=max(30, int(graph.get("graph_timeout_seconds") or agents.get("graph_timeout_seconds") or 960)),
         ),
         units=ReviewUnitConfig(
             require_baseline_for_every_unit=bool(units.get("require_baseline_for_every_unit", True)),

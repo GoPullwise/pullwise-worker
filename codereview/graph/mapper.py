@@ -100,31 +100,49 @@ def map_codex_graph_tasks_with_coordinator(
             task_id=task.get("task_id") or task.get("shard_id"),
         )
     if pending:
-        mapped = run_codex_graph_mapper_coordinator(
-            checkout,
-            run,
-            [task for _, task in pending],
-            inventory_by_path,
-            config,
-        )
-        mapped_by_task = {_task_result_key(result): result for result in mapped if isinstance(result, dict)}
-        for index, task in pending:
-            result = mapped_by_task.get(_task_key(task))
-            if result is None:
-                result = _blocked_task_result(task, "codex graph mapper coordinator did not return a result for this task")
-            results[index] = result
-            if result.get("status") == "ok":
-                _save_cached_task_result(checkout, task, inventory_by_path, config, result)
-            completed += 1
-            _emit_task_progress(
-                progress,
-                stage="graph",
-                message=f"{progress_label} {completed}/{total}",
-                current=completed,
-                total=total,
-                task_id=task.get("task_id") or task.get("shard_id"),
-            )
+        batches = _coordinator_task_batches(pending, config)
+        max_workers = max(1, min(len(batches), int(getattr(config.graph, "map_parallel", 1))))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    run_codex_graph_mapper_coordinator,
+                    checkout,
+                    run,
+                    [task for _, task in batch],
+                    inventory_by_path,
+                    config,
+                ): batch
+                for batch in batches
+            }
+            for future in concurrent.futures.as_completed(futures):
+                batch = futures[future]
+                mapped = future.result()
+                mapped_by_task = {_task_result_key(result): result for result in mapped if isinstance(result, dict)}
+                for index, task in batch:
+                    result = mapped_by_task.get(_task_key(task))
+                    if result is None:
+                        result = _blocked_task_result(task, "codex graph mapper coordinator did not return a result for this task")
+                    results[index] = result
+                    if result.get("status") == "ok":
+                        _save_cached_task_result(checkout, task, inventory_by_path, config, result)
+                    completed += 1
+                    _emit_task_progress(
+                        progress,
+                        stage="graph",
+                        message=f"{progress_label} {completed}/{total}",
+                        current=completed,
+                        total=total,
+                        task_id=task.get("task_id") or task.get("shard_id"),
+                    )
     return [result for result in results if result is not None]
+
+
+def _coordinator_task_batches(pending: list[tuple[int, dict]], config: ReviewConfig) -> list[list[tuple[int, dict]]]:
+    batch_size = max(1, int(getattr(config.graph, "mapper_subagent_limit", 6)))
+    return [
+        pending[offset : offset + batch_size]
+        for offset in range(0, len(pending), batch_size)
+    ]
 
 
 def _emit_task_progress(
