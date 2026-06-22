@@ -40,8 +40,16 @@ class RepositoryTooLargeError(RuntimeError):
 
 def repository_limits_metadata(config: WorkerConfig) -> dict:
     return {
-        "maxFiles": positive_limit_int(getattr(config, "max_repo_files", _DEFAULT_MAX_REPO_FILES), _DEFAULT_MAX_REPO_FILES, minimum=1),
-        "maxBytes": positive_limit_int(getattr(config, "max_repo_bytes", _DEFAULT_MAX_REPO_BYTES), _DEFAULT_MAX_REPO_BYTES, minimum=1),
+        "maxFiles": bounded_positive_int(
+            getattr(config, "max_repo_files", _DEFAULT_MAX_REPO_FILES),
+            default=_DEFAULT_MAX_REPO_FILES,
+            maximum=_MAX_REPO_LIMIT_FILES,
+        ),
+        "maxBytes": bounded_positive_int(
+            getattr(config, "max_repo_bytes", _DEFAULT_MAX_REPO_BYTES),
+            default=_DEFAULT_MAX_REPO_BYTES,
+            maximum=_MAX_REPO_LIMIT_BYTES,
+        ),
     }
 
 

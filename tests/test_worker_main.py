@@ -2911,6 +2911,32 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(stats["fileCount"], 1)
         self.assertEqual(exceeded, [])
 
+    def test_repository_limits_are_bounded_locally(self) -> None:
+        base = SimpleNamespace(
+            provider="codex",
+            provider_chain=["codex"],
+            codex_model="gpt-5",
+            codex_reasoning_effort="high",
+            max_repo_files=10**12,
+            max_repo_bytes=10**18,
+        )
+        job = {
+            "job_id": "job_limits",
+            "agentConfig": {
+                "provider": "codex",
+                "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+            },
+            "repositoryLimits": {"maxFiles": 10**12, "maxBytes": 10**18},
+        }
+
+        job_config = worker_main.worker_config_for_job(base, job)
+        limits = worker_main.repository_limits_metadata(base)
+
+        self.assertEqual(job_config.max_repo_files, worker_main._MAX_REPO_LIMIT_FILES)
+        self.assertEqual(job_config.max_repo_bytes, worker_main._MAX_REPO_LIMIT_BYTES)
+        self.assertEqual(limits["maxFiles"], worker_main._MAX_REPO_LIMIT_FILES)
+        self.assertEqual(limits["maxBytes"], worker_main._MAX_REPO_LIMIT_BYTES)
+
     def test_preflight_ignores_symlinked_repository_manifests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

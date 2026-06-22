@@ -81,6 +81,17 @@ def normalized_positive_int(value: object) -> int:
         return 0
 
 
+def bounded_positive_int(value: object, *, default: int, maximum: int, minimum: int = 1) -> int:
+    if isinstance(value, bool):
+        parsed = int(default or 0)
+    else:
+        try:
+            parsed = int(value if value is not None else default)
+        except (OverflowError, TypeError, ValueError):
+            parsed = int(default or 0)
+    return max(minimum, min(maximum, parsed))
+
+
 def normalize_job_attempt(value: object) -> int:
     if value is None or value == "":
         return 1
@@ -317,8 +328,16 @@ def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
         config.codex_model = codex_model
     if codex_reasoning_effort:
         config.codex_reasoning_effort = codex_reasoning_effort
-    config.max_repo_files = max_repo_files
-    config.max_repo_bytes = max_repo_bytes
+    config.max_repo_files = bounded_positive_int(
+        max_repo_files,
+        default=_DEFAULT_MAX_REPO_FILES,
+        maximum=_MAX_REPO_LIMIT_FILES,
+    )
+    config.max_repo_bytes = bounded_positive_int(
+        max_repo_bytes,
+        default=_DEFAULT_MAX_REPO_BYTES,
+        maximum=_MAX_REPO_LIMIT_BYTES,
+    )
     return config
 
 
