@@ -5,9 +5,10 @@ import os
 import threading
 from pathlib import Path
 
+from .paths import ensure_dir
+
 
 def write_json(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     write_text(path, json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
@@ -18,7 +19,6 @@ def read_json(path: Path, default: object = None) -> object:
 
 
 def write_jsonl(path: Path, rows: list[object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     write_text(
         path,
         "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
@@ -37,9 +37,7 @@ def read_jsonl(path: Path) -> list[object]:
 
 
 def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
-        raise OSError(f"refusing to write through symlinked directory: {path.parent}")
+    ensure_dir(path.parent)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):

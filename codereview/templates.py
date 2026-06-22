@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .utils.jsonl import write_text
+from .utils.paths import ensure_dir
+
 
 FINDER_FOCI = [
     "correctness",
@@ -15,12 +18,13 @@ FINDER_FOCI = [
 
 def ensure_project_files(checkout: Path) -> None:
     root = checkout / ".codereview"
-    (root / "schemas").mkdir(parents=True, exist_ok=True)
-    (root / "prompts").mkdir(parents=True, exist_ok=True)
-    (root / "runs").mkdir(parents=True, exist_ok=True)
+    ensure_dir(root / "schemas")
+    ensure_dir(root / "prompts")
+    ensure_dir(root / "runs")
     config = root / "config.json"
-    if not config.is_file():
-        config.write_text(
+    if config.is_symlink() or not config.is_file():
+        write_text(
+            config,
             json.dumps(
                 {
                     "mode": "standard",
@@ -99,7 +103,6 @@ def ensure_project_files(checkout: Path) -> None:
                 },
                 indent=2,
             ),
-            encoding="utf-8",
         )
     schemas = {
         "finder_result.schema.json": codex_output_schema(finder_result_schema()),
@@ -117,11 +120,11 @@ def ensure_project_files(checkout: Path) -> None:
     }
     for name, schema in schemas.items():
         path = root / "schemas" / name
-        path.write_text(json.dumps(schema, indent=2, sort_keys=True), encoding="utf-8")
+        write_text(path, json.dumps(schema, indent=2, sort_keys=True))
     for focus in FINDER_FOCI:
         path = root / "prompts" / f"finder_{focus}.md"
-        if not path.is_file():
-            path.write_text(finder_prompt(focus), encoding="utf-8")
+        if path.is_symlink() or not path.is_file():
+            write_text(path, finder_prompt(focus))
     prompts = {
         "finder-batch-coordinator.md": FINDER_BATCH_COORDINATOR_PROMPT,
         "repo-census.md": REPO_CENSUS_PROMPT,
@@ -137,8 +140,8 @@ def ensure_project_files(checkout: Path) -> None:
     }
     for name, prompt in prompts.items():
         path = root / "prompts" / name
-        if not path.is_file():
-            path.write_text(prompt, encoding="utf-8")
+        if path.is_symlink() or not path.is_file():
+            write_text(path, prompt)
 
 
 def codex_output_schema(schema: dict) -> dict:

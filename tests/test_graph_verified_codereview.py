@@ -115,6 +115,64 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert set(graph_props) == {"unit_id", "context_files", "path_summary"}
 
 
+def test_init_rejects_symlinked_codereview_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / ".codereview"
+    root.symlink_to(outside, target_is_directory=True)
+
+    try:
+        ensure_project_files(tmp_path)
+    except OSError as exc:
+        assert "symlink" in str(exc)
+    else:
+        raise AssertionError("expected symlinked .codereview directory to be rejected")
+
+    assert not (outside / "schemas").exists()
+
+
+def test_init_rejects_symlinked_schema_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside-schemas"
+    outside.mkdir()
+    root = tmp_path / ".codereview"
+    (root / "prompts").mkdir(parents=True)
+    (root / "runs").mkdir()
+    (root / "schemas").symlink_to(outside, target_is_directory=True)
+
+    try:
+        ensure_project_files(tmp_path)
+    except OSError as exc:
+        assert "symlink" in str(exc)
+    else:
+        raise AssertionError("expected symlinked schema directory to be rejected")
+
+    assert not (outside / "finder_result.schema.json").exists()
+
+
+def test_init_replaces_symlinked_config_and_prompt_files(tmp_path: Path) -> None:
+    root = tmp_path / ".codereview"
+    (root / "schemas").mkdir(parents=True)
+    (root / "prompts").mkdir()
+    (root / "runs").mkdir()
+    outside_config = tmp_path / "outside-config.json"
+    outside_prompt = tmp_path / "outside-prompt.md"
+    outside_config.write_text('{"mode": "outside"}', encoding="utf-8")
+    outside_prompt.write_text("outside prompt", encoding="utf-8")
+    config = root / "config.json"
+    prompt = root / "prompts" / "judge.md"
+    config.symlink_to(outside_config)
+    prompt.symlink_to(outside_prompt)
+
+    ensure_project_files(tmp_path)
+
+    assert not config.is_symlink()
+    assert not prompt.is_symlink()
+    assert json.loads(config.read_text(encoding="utf-8"))["mode"] == "standard"
+    assert "Output JSON only matching judge_result.schema.json" in prompt.read_text(encoding="utf-8")
+    assert outside_config.read_text(encoding="utf-8") == '{"mode": "outside"}'
+    assert outside_prompt.read_text(encoding="utf-8") == "outside prompt"
+
+
 def test_write_json_does_not_follow_symlink(tmp_path: Path) -> None:
     outside = tmp_path / "outside.json"
     outside.write_text('{"outside": true}', encoding="utf-8")

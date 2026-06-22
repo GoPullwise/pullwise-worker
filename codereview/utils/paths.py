@@ -6,7 +6,15 @@ from pathlib import Path
 
 
 def ensure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    parts = path.parts[1:] if path.is_absolute() else path.parts
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise OSError(f"refusing to create directory through symlink: {current}")
+        current.mkdir(exist_ok=True)
+        if current.is_symlink() or not current.is_dir():
+            raise OSError(f"refusing to use non-directory path: {current}")
     return path
 
 
