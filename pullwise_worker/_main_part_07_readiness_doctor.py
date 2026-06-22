@@ -117,8 +117,8 @@ def worker_provider_home_isolation_check(config: WorkerConfig) -> tuple[bool, st
     service_home = str(config.service_home or "").strip()
     if not service_home:
         return False, "PULLWISE_SERVICE_HOME is required"
-    normalized = service_home.replace("\\", "/").rstrip("/")
-    default_home = DEFAULT_SERVICE_HOME.rstrip("/")
+    normalized = posixpath.normpath(service_home.replace("\\", "/"))
+    default_home = posixpath.normpath(DEFAULT_SERVICE_HOME.replace("\\", "/"))
     if normalized == default_home:
         return (
             False,

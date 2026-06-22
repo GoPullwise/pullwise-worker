@@ -1487,6 +1487,22 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(ready_providers, ["codex"])
         self.assertFalse(any(name == "graph_verified_mcp" for name, _ok, _detail in checks))
 
+    def test_worker_home_isolation_rejects_normalized_default_home(self) -> None:
+        cfg = SimpleNamespace(service_home=f"{worker_main.DEFAULT_SERVICE_HOME}/.")
+
+        ok, detail = worker_main.worker_provider_home_isolation_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertIn("worker-instance-specific", detail)
+
+    def test_worker_home_isolation_allows_instance_subdirectory(self) -> None:
+        cfg = SimpleNamespace(service_home=f"{worker_main.DEFAULT_SERVICE_HOME}/wk_1")
+
+        ok, detail = worker_main.worker_provider_home_isolation_check(cfg)
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, cfg.service_home)
+
     def test_codex_ready_check_clears_auth_failure_state_on_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
