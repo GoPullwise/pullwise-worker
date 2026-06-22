@@ -870,6 +870,35 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(worker_main.PullwiseRequestError, "JSON response must be an object"):
                 client.claim()
 
+    def test_client_rejects_oversized_success_response_body(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, size=-1) -> bytes:
+                captured["size"] = size
+                return b"x" * (worker_main.WORKER_HTTP_RESPONSE_MAX_BYTES + 1)
+
+        with patch.object(worker_main.urllib.request, "urlopen", return_value=Response()):
+            with self.assertRaisesRegex(worker_main.PullwiseRequestError, "response body too large"):
+                client.claim()
+
+        self.assertEqual(captured["size"], worker_main.WORKER_HTTP_RESPONSE_MAX_BYTES + 1)
+
     def test_client_http_error_includes_server_error_body(self) -> None:
         config = SimpleNamespace(
             server_url="https://pullwise.example",

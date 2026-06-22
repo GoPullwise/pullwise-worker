@@ -54,6 +54,7 @@ _CHECKOUT_RUNTIME_DIR_NAMES: set[str] = set()
 _PROC_MEMINFO_PATH = "/proc/meminfo"
 DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 WORKER_HTTP_TIMEOUT_SECONDS = 60
+WORKER_HTTP_RESPONSE_MAX_BYTES = 1024 * 1024
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
@@ -714,6 +715,16 @@ class PullwiseResponse:
         return parsed
 
 
+def read_pullwise_response_body(response: object) -> bytes:
+    try:
+        body = response.read(WORKER_HTTP_RESPONSE_MAX_BYTES + 1)
+    except TypeError:
+        body = response.read()
+    if len(body) > WORKER_HTTP_RESPONSE_MAX_BYTES:
+        raise PullwiseRequestError("response body too large")
+    return body
+
+
 def client_protocol_text(value: object, config: WorkerConfig | None = None, max_length: int = 500) -> str:
     return clean_protocol_text(redact_secrets(value, config), max_length)
 
@@ -756,7 +767,7 @@ class PullwiseClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
-                return PullwiseResponse(response.read())
+                return PullwiseResponse(read_pullwise_response_body(response))
         except urllib.error.HTTPError as exc:
             raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
@@ -770,7 +781,7 @@ class PullwiseClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
-                return PullwiseResponse(response.read())
+                return PullwiseResponse(read_pullwise_response_body(response))
         except urllib.error.HTTPError as exc:
             raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
