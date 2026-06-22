@@ -330,6 +330,7 @@ def service_user_command(config: WorkerConfig | None, command: list[str]) -> str
         f"HOME={shlex.quote(service_home)} "
         f"USERPROFILE={shlex.quote(service_home)} "
         f"CODEX_HOME={shlex.quote(str(Path(service_home) / '.codex'))} "
+        f"CODEX_SQLITE_HOME={shlex.quote(str(Path(service_home) / '.codex-sqlite'))} "
         f"XDG_CONFIG_HOME={shlex.quote(str(Path(service_home) / '.config'))} "
         f"XDG_CACHE_HOME={shlex.quote(str(Path(service_home) / '.cache'))} "
         f"XDG_DATA_HOME={shlex.quote(str(Path(service_home) / '.local' / 'share'))} "
@@ -358,10 +359,7 @@ def provider_home_path(service_home: str, *parts: str) -> str:
 
 def provider_process_env(config: WorkerConfig) -> dict[str, str]:
     service_home = str(config.service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
-    codex_sqlite_home = (
-        os.environ.get("PULLWISE_CODEX_SQLITE_HOME", "").strip()
-        or provider_home_path(service_home, ".codex-sqlite")
-    )
+    codex_sqlite_home = provider_home_path(service_home, ".codex-sqlite")
     env = {
         key: os.environ[key]
         for key in PROVIDER_ENV_PASSTHROUGH_KEYS

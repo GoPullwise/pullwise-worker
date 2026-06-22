@@ -2842,6 +2842,18 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertIn('export CODEX_SQLITE_HOME="$SERVICE_HOME/.codex-sqlite"', script)
 
+    def test_provider_process_env_ignores_global_codex_sqlite_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            outside = root / "outside-sqlite"
+
+            with patch.dict(worker_main.os.environ, {"PULLWISE_CODEX_SQLITE_HOME": str(outside)}):
+                env = worker_main.provider_process_env(cfg)
+
+        self.assertEqual(env["CODEX_SQLITE_HOME"], str(root / "home" / ".codex-sqlite"))
+        self.assertNotEqual(env["CODEX_SQLITE_HOME"], str(outside))
+
     def test_write_worker_wrapper_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3325,6 +3337,18 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")
 
         command = worker_main.service_user_doctor_command(cfg, Path("/usr/local/bin/pullwise-worker-wk"))
+
+        self.assertIn("CODEX_SQLITE_HOME=/var/lib/pullwise-worker/wk/.codex-sqlite", command)
+
+    def test_codex_login_command_exports_codex_sqlite_home(self) -> None:
+        cfg = SimpleNamespace(
+            service_user="pw-worker-wk",
+            service_home="/var/lib/pullwise-worker/wk",
+            service_path="/usr/bin",
+            codex_command="/var/lib/pullwise-worker/wk/.codex/bin/codex",
+        )
+
+        command = worker_main.codex_login_command(cfg)
 
         self.assertIn("CODEX_SQLITE_HOME=/var/lib/pullwise-worker/wk/.codex-sqlite", command)
 
