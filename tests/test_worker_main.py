@@ -2007,6 +2007,70 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertIn('export CODEX_SQLITE_HOME="$SERVICE_HOME/.codex-sqlite"', script)
 
+    def test_write_worker_wrapper_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            bin_path = root / "pullwise-worker"
+            env_path = root / "worker.env"
+            outside = root / "outside-wrapper"
+            outside.write_text("outside", encoding="utf-8")
+            bin_path.symlink_to(outside)
+
+            worker_main.write_worker_wrapper(bin_path, env_path)
+
+            self.assertFalse(bin_path.is_symlink())
+            self.assertIn("python3.10", bin_path.read_text(encoding="utf-8"))
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+
+    def test_append_missing_env_values_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            env_path = root / "worker.env"
+            outside = root / "outside.env"
+            outside.write_text("PULLWISE_EXISTING=1\n", encoding="utf-8")
+            env_path.symlink_to(outside)
+
+            with self.assertRaises(OSError):
+                worker_main.append_missing_env_values(env_path, {"PULLWISE_NEW": "1"})
+
+            self.assertTrue(env_path.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "PULLWISE_EXISTING=1\n")
+
+    def test_ensure_lifecycle_watcher_service_write_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            env_path = root / "worker.env"
+            env_path.write_text("", encoding="utf-8")
+            bin_path = root / "pullwise-worker"
+            bin_path.write_text("#!/bin/sh\n", encoding="utf-8")
+            service_file = root / "pullwise-worker-watch.service"
+            outside = root / "outside.service"
+            outside.write_text("outside", encoding="utf-8")
+            service_file.symlink_to(outside)
+            config = SimpleNamespace(
+                worker_env_file=str(env_path),
+                worker_bin_path=str(bin_path),
+                watcher_service_name="pullwise-worker-watch",
+                watcher_service_file=str(service_file),
+                watcher_poll_seconds=5,
+                service_name="pullwise-worker-test",
+            )
+
+            def fake_run(command):
+                return SimpleNamespace(returncode=0, args=command)
+
+            with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
+                worker_main.subprocess,
+                "run",
+                side_effect=fake_run,
+            ):
+                status = worker_main.ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path)
+
+            self.assertEqual(status, 0)
+            self.assertFalse(service_file.is_symlink())
+            self.assertIn("ExecStart=", service_file.read_text(encoding="utf-8"))
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+
     def test_cleanup_expired_failed_checkout_unlinks_symlink_without_touching_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -645,7 +645,7 @@ exec "$PYTHON_BIN" -m pullwise_worker.main "$@"
 
 def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
     bin_path.parent.mkdir(parents=True, exist_ok=True)
-    bin_path.write_text(worker_wrapper_script(env_path), encoding="utf-8")
+    write_no_follow_text_file(bin_path, worker_wrapper_script(env_path))
     bin_path.chmod(0o755)
 
 
@@ -684,7 +684,7 @@ WantedBy=multi-user.target
 def append_missing_env_values(env_path: Path, values: dict[str, str], *, dry_run: bool = False) -> None:
     existing_keys: set[str] = set()
     if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
+        for line in read_no_follow_text_file(env_path).splitlines():
             key, sep, _value = line.partition("=")
             if sep and key:
                 existing_keys.add(key)
@@ -695,11 +695,10 @@ def append_missing_env_values(env_path: Path, values: dict[str, str], *, dry_run
         return
     if not missing:
         return
-    with env_path.open("a", encoding="utf-8") as handle:
-        for key, value in missing:
-            if "\n" in value or "\r" in value:
-                raise ValueError(f"environment value for {key} must be single-line")
-            handle.write(f"{key}={value}\n")
+    for key, value in missing:
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"environment value for {key} must be single-line")
+    append_no_follow_text_file(env_path, "".join(f"{key}={value}\n" for key, value in missing))
 
 
 def ensure_lifecycle_watcher(
@@ -736,7 +735,7 @@ def ensure_lifecycle_watcher(
     try:
         append_missing_env_values(env_file, env_values)
         watcher_service_file.parent.mkdir(parents=True, exist_ok=True)
-        watcher_service_file.write_text(watcher_service_unit(config, env_path=env_file, bin_path=worker_bin), encoding="utf-8")
+        write_no_follow_text_file(watcher_service_file, watcher_service_unit(config, env_path=env_file, bin_path=worker_bin))
         watcher_service_file.chmod(0o644)
     except (OSError, ValueError) as exc:
         print(f"failed to write watcher service: {exc}", file=sys.stderr)
