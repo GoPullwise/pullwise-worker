@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import concurrent.futures
 import json
+import concurrent.futures
 from collections.abc import Callable
 from pathlib import Path
 
-from ..codex_runner import base_env, run_codex_exec
+from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
+from ..graph.ids import short_hash
 from ..units.context import unit_file_stem
 from ..utils.process import compact_process_output
 from .tasks import FinderTask
+
+
+MAX_FINDER_SUBAGENTS = 6
 
 
 def run_finders_parallel(
@@ -21,27 +25,157 @@ def run_finders_parallel(
 ) -> list[dict]:
     if not config.finders.enabled:
         return []
-    results: list[dict | None] = [None] * len(tasks)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=config.finders.max_workers) as executor:
+    completed = 0
+    total = len(tasks)
+    batch_size = finder_batch_size(config)
+    batches = list(enumerate(finder_indexed_batches(tasks, batch_size, run), start=1))
+    results_by_index: list[dict | None] = [None] * len(tasks)
+    max_workers = min(len(batches), finder_turn_parallel(config)) if batches else 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(run_finder, checkout, run, task, config): (index, task)
-            for index, task in enumerate(tasks)
+            executor.submit(
+                run_finder_batch,
+                checkout,
+                run,
+                [task for _index, task in indexed_batch],
+                config,
+                batch_index=batch_index,
+            ): indexed_batch
+            for batch_index, indexed_batch in batches
         }
-        completed = 0
-        total = len(futures)
         for future in concurrent.futures.as_completed(futures):
-            index, task = futures[future]
-            results[index] = future.result()
-            completed += 1
-            _emit_task_progress(
-                progress,
-                stage="finder",
-                message=f"Finder: review tasks {completed}/{total}",
-                current=completed,
-                total=total,
-                task_id=f"{task.focus}:{task.unit_id}",
-            )
-    return [result for result in results if result is not None]
+            indexed_batch = futures[future]
+            batch_results = future.result()
+            for (index, task), result in zip(indexed_batch, batch_results):
+                results_by_index[index] = result
+                completed += 1
+                _emit_task_progress(
+                    progress,
+                    stage="finder",
+                    message=f"Finder: review tasks {completed}/{total}",
+                    current=completed,
+                    total=total,
+                    task_id=f"{task.focus}:{task.unit_id}",
+                )
+    return [result for result in results_by_index if result is not None]
+
+
+def finder_batch_size(config: ReviewConfig) -> int:
+    return max(1, min(MAX_FINDER_SUBAGENTS, int(getattr(config.finders, "max_workers", 1) or 1)))
+
+
+def finder_turn_parallel(config: ReviewConfig) -> int:
+    return max(1, min(6, int(getattr(config.finders, "turn_parallel", 1) or 1)))
+
+
+def finder_batches(tasks: list[FinderTask], size: int, run: Path | None = None) -> list[list[FinderTask]]:
+    return [[task for _index, task in batch] for batch in finder_indexed_batches(tasks, size, run)]
+
+
+def finder_indexed_batches(tasks: list[FinderTask], size: int, run: Path | None = None) -> list[list[tuple[int, FinderTask]]]:
+    size = max(1, int(size or 1))
+    grouped: dict[str, list[tuple[int, FinderTask]]] = {}
+    group_order: list[str] = []
+    for index, task in enumerate(tasks):
+        key = finder_batch_group_key(run, task)
+        if key not in grouped:
+            grouped[key] = []
+            group_order.append(key)
+        grouped[key].append((index, task))
+    batches: list[list[tuple[int, FinderTask]]] = []
+    current: list[tuple[int, FinderTask]] = []
+    current_family = ""
+    for key in group_order:
+        group = grouped[key]
+        family = finder_batch_group_family(key)
+        for start in range(0, len(group), size):
+            chunk = group[start : start + size]
+            if len(chunk) == size:
+                if current:
+                    batches.append(current)
+                    current = []
+                    current_family = ""
+                batches.append(chunk)
+                continue
+            if current and (current_family != family or len(current) + len(chunk) > size):
+                batches.append(current)
+                current = []
+                current_family = ""
+            if not current:
+                current_family = family
+            current.extend(chunk)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def finder_batch_group_family(key: str) -> str:
+    return key.split(":", 1)[0] if ":" in key else key
+
+
+def finder_batch_group_key(run: Path | None, task: FinderTask) -> str:
+    unit = read_review_unit(run, task.unit_id)
+    unit_type = str(unit.get("unit_type") or task.unit_type or "component")
+    if unit_type == "cross_boundary":
+        return f"cross_boundary:{task.unit_id}"
+    if unit_type == "global_invariant":
+        return f"global:{unit.get('symbol') or task.unit_id}"
+    module = review_unit_module_key(unit)
+    if module:
+        return f"{unit_type}:{module}"
+    tags = ",".join(str(tag) for tag in (task.risk_tags or unit.get("risk_tags") or []) if str(tag))
+    return f"{unit_type}:{tags or 'default'}"
+
+
+def read_review_unit(run: Path | None, unit_id: str) -> dict:
+    if run is None:
+        return {}
+    path = run / "artifacts" / "review-units" / f"{unit_file_stem(unit_id)}.json"
+    if not path.is_file():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def review_unit_module_key(unit: dict) -> str:
+    paths = review_unit_context_paths(unit)
+    if not paths:
+        return ""
+    modules = sorted({module_key_for_path(path) for path in paths if module_key_for_path(path)})
+    return modules[0] if len(modules) == 1 else "+".join(modules[:2])
+
+
+def review_unit_context_paths(unit: dict) -> list[str]:
+    paths: list[str] = []
+    context_files = unit.get("context_files") if isinstance(unit.get("context_files"), list) else []
+    for item in context_files:
+        if isinstance(item, dict):
+            path = str(item.get("path") or "")
+        else:
+            path = str(item or "")
+        if path:
+            paths.append(path)
+    context = unit.get("context") if isinstance(unit.get("context"), dict) else {}
+    files = context.get("files") if isinstance(context.get("files"), list) else []
+    paths.extend(str(path) for path in files if str(path))
+    return sorted(dict.fromkeys(paths))
+
+
+def module_key_for_path(path: str) -> str:
+    normalized = path.replace("\\", "/").strip("/")
+    if not normalized:
+        return ""
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return "."
+    if "." in parts[1]:
+        return parts[0]
+    return "/".join(parts[:2])
 
 
 def _emit_task_progress(
@@ -69,6 +203,157 @@ def _emit_task_progress(
         return
 
 
+def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config: ReviewConfig, *, batch_index: int = 1) -> list[dict]:
+    if not tasks:
+        return []
+    worker = run / "finder-batches" / finder_batch_id(tasks, batch_index=batch_index)
+    worker.mkdir(parents=True, exist_ok=True)
+    payload = finder_batch_payload(checkout, run, tasks, config)
+    prompt = finder_batch_prompt(checkout, payload)
+    (worker / "task.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    (worker / "prompt.md").write_text(prompt, encoding="utf-8")
+    output = worker / "result.json"
+    events = worker / "events.jsonl"
+    process = run_codex_turn(
+        cd=checkout,
+        prompt=prompt,
+        output_schema=checkout / ".codereview" / "schemas" / "finder-batch.schema.json",
+        output_file=output,
+        sandbox="read-only",
+        timeout_seconds=finder_batch_timeout_seconds(len(tasks), config),
+        config=config.codex,
+        env=base_env(checkout, config.codex),
+        events_file=events,
+    )
+    process_payload = {**process.to_dict(), "events_path": str(events)}
+    (worker / "process.json").write_text(json.dumps(process_payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    if process.returncode != 0:
+        return blocked_finder_batch_results(tasks, process_payload, process_failure_reason("finder batch codex turn", process))
+    if not output.is_file():
+        return blocked_finder_batch_results(tasks, process_payload, "finder batch did not produce an output file")
+    try:
+        parsed = json.loads(output.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return blocked_finder_batch_results(tasks, process_payload, f"finder batch produced invalid JSON: {exc}")
+    return finder_batch_results(run, tasks, parsed, process_payload)
+
+
+def finder_batch_id(tasks: list[FinderTask], *, batch_index: int) -> str:
+    key = [
+        {"unit_id": task.unit_id, "focus": task.focus, "unit_type": task.unit_type, "review_pass": task.review_pass}
+        for task in tasks
+    ]
+    return f"finder-batch-{batch_index:04d}-{short_hash(key, length=12)}"
+
+
+def finder_batch_timeout_seconds(task_count: int, config: ReviewConfig) -> int:
+    waves = max(1, (max(1, task_count) + finder_batch_size(config) - 1) // finder_batch_size(config))
+    return max(60, int(getattr(config.finders, "timeout_seconds", 600) or 600)) * waves
+
+
+def finder_batch_payload(checkout: Path, run: Path, tasks: list[FinderTask], config: ReviewConfig) -> dict:
+    focus_prompts = {
+        focus: (checkout / ".codereview" / "prompts" / f"finder_{focus}.md").read_text(encoding="utf-8")
+        for focus in sorted({task.focus for task in tasks})
+    }
+    jobs = []
+    context_packs: dict[str, str] = {}
+    for task in tasks:
+        stem = unit_file_stem(task.unit_id)
+        context_file = run / "artifacts" / "review-units" / f"{stem}.context.md"
+        context_packs.setdefault(task.unit_id, context_file.read_text(encoding="utf-8"))
+        jobs.append(
+            {
+                "task_id": finder_task_id(task),
+                "unit_id": task.unit_id,
+                "focus": task.focus,
+                "module_key": finder_batch_group_key(run, task),
+                "unit_type": task.unit_type,
+                "review_pass": task.review_pass,
+                "risk_tags": task.risk_tags or [],
+                "context_pack_id": task.unit_id,
+            }
+        )
+    return {
+        "finder_subagent_limit": finder_batch_size(config),
+        "context_packs": context_packs,
+        "focus_prompts": focus_prompts,
+        "jobs": jobs,
+    }
+
+
+def finder_batch_prompt(checkout: Path, payload: dict) -> str:
+    prompt_file = checkout / ".codereview" / "prompts" / "finder-batch-coordinator.md"
+    prefix = prompt_file.read_text(encoding="utf-8") if prompt_file.is_file() else "You are a graph-verified finder coordinator."
+    return f"{prefix}\n\nAssigned finder batch JSON:\n```json\n{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)}\n```"
+
+
+def finder_batch_results(run: Path, tasks: list[FinderTask], parsed: object, process_payload: dict) -> list[dict]:
+    results = parsed.get("results") if isinstance(parsed, dict) and isinstance(parsed.get("results"), list) else []
+    by_key: dict[tuple[str, str], dict] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        by_key[(str(item.get("unit_id") or ""), str(item.get("focus") or ""))] = item
+    output: list[dict] = []
+    for task in tasks:
+        item = by_key.get(finder_task_key(task))
+        if item is None:
+            output.append(
+                {
+                    "task": task.__dict__,
+                    "process": process_payload,
+                    "result": {"unit_id": task.unit_id, "focus": task.focus, "context_requests": [], "candidates": []},
+                    "status": "blocked",
+                    "blocked_reason": "finder batch did not return a result for this task",
+                }
+            )
+            continue
+        result = normalize_finder_result(item, task)
+        write_individual_finder_output(run, task, result)
+        output.append({"task": task.__dict__, "process": process_payload, "result": result, "status": "ok"})
+    return output
+
+
+def normalize_finder_result(item: dict, task: FinderTask) -> dict:
+    candidates = item.get("candidates") if isinstance(item.get("candidates"), list) else []
+    context_requests = item.get("context_requests") if isinstance(item.get("context_requests"), list) else []
+    return {
+        "unit_id": task.unit_id,
+        "focus": task.focus,
+        "context_requests": context_requests,
+        "candidates": candidates,
+    }
+
+
+def write_individual_finder_output(run: Path, task: FinderTask, result: dict) -> None:
+    stem = unit_file_stem(task.unit_id)
+    output = run / "finder" / task.focus / f"{stem}.result.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def blocked_finder_batch_results(tasks: list[FinderTask], process_payload: dict, reason: str) -> list[dict]:
+    return [
+        {
+            "task": task.__dict__,
+            "process": process_payload,
+            "result": {"unit_id": task.unit_id, "focus": task.focus, "context_requests": [], "candidates": []},
+            "status": "blocked",
+            "blocked_reason": reason,
+        }
+        for task in tasks
+    ]
+
+
+def finder_task_id(task: FinderTask) -> str:
+    return f"{task.focus}:{task.unit_id}"
+
+
+def finder_task_key(task: FinderTask) -> tuple[str, str]:
+    return (str(task.unit_id or ""), str(task.focus or ""))
+
+
 def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig) -> dict:
     prompt_file = checkout / ".codereview" / "prompts" / f"finder_{task.focus}.md"
     stem = unit_file_stem(task.unit_id)
@@ -77,7 +362,7 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
     output = run / "finder" / task.focus / f"{stem}.result.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     events = output.with_suffix(".events.jsonl")
-    result = run_codex_exec(
+    result = run_codex_turn(
         cd=checkout,
         prompt=prompt,
         output_schema=checkout / ".codereview" / "schemas" / "finder_result.schema.json",
@@ -95,7 +380,7 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
             "process": process_payload,
             "result": {"candidates": []},
             "status": "blocked",
-            "blocked_reason": process_failure_reason("finder codex exec", result),
+            "blocked_reason": process_failure_reason("finder codex turn", result),
         }
     parsed = {}
     if output.is_file():

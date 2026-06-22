@@ -6,7 +6,7 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path
 
-from ..codex_runner import run_codex_exec
+from ..codex_runner import run_codex_turn
 from ..config import CodexConfig, ReviewConfig
 from ..judge.precheck import verify_repro_events_and_paths
 from ..judge.validate import validate_repro_result
@@ -86,7 +86,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     prompt = (checkout / ".codereview" / "prompts" / "repro_worker.md").read_text(encoding="utf-8")
     output = worker / "result.json"
     events = worker / "events.jsonl"
-    process = run_codex_exec(
+    process = run_codex_turn(
         cd=worker,
         prompt=prompt,
         output_schema=checkout / ".codereview" / "schemas" / "repro_result.schema.json",
@@ -106,7 +106,7 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
         violations: list[str] = []
         if checkout_status_after != checkout_status_before:
             violations.append("snapshot checkout changed during repro worker execution")
-        failure = process_failure_reason("repro codex exec", process)
+        failure = process_failure_reason("repro codex turn", process)
         return {
             "candidate_id": issue_id,
             "worker": str(worker),

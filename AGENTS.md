@@ -50,23 +50,34 @@ own `service_home` for Codex binaries, config, cache, and auth state.
 
 ## Codex Execution Concurrency
 
-Never run two Codex agent CLI processes concurrently when they use the same
-Codex login state or auth files. This is a hard correctness rule, not only a
-performance preference.
+GraphVerified Codex work runs through one instance-scoped `codex app-server`
+per worker. The `codex` binary is still used to launch the app-server and for
+login flows, but the review pipeline must not start CLI review commands.
 
-- All code paths that can start `codex` or another Codex agent CLI process must
-  pass through the same worker-level execution lock.
-- The risk is shared mutable auth state: concurrent CLI processes under the
-  same `CODEX_HOME`, `HOME`, or system credential store can try to refresh the
-  same login token/session at the same time and invalidate `auth.json` or the
-  stored credential state.
-- Do not bypass the lock for finder/repro/semantic fallback/readiness helper
-  threads if they launch the Codex agent CLI.
-- If job latency or timeout behavior needs improvement, keep Codex agent CLI
-  execution serial within each worker identity and address queueing, timeout
-  reporting, scheduling, or multi-worker capacity instead.
+- Express Codex concurrency as app-server threads/turns inside the worker's
+  single server process. App-server turns may run concurrently when bounded by
+  config such as `finders.turn_parallel`; this is not process-level CLI
+  concurrency.
+- Do not start multiple app-server processes for one worker identity.
 - Do not add process-level Codex parallelism to a worker identity. Add more
   worker instances when more throughput is needed.
+
+- Do not start multiple app-server processes that share the same `CODEX_HOME`,
+  `CODEX_SQLITE_HOME`, `HOME`, or credential store. The desktop app can keep
+  the default `~/.codex/sqlite` state locked, so worker app-server runs must use
+  worker-owned SQLite state.
+- Prefer stdio or an instance-scoped Unix socket for app-server transport. If a
+  TCP/WebSocket listener is ever used, bind it to a worker-specific local port
+  and require app-server WebSocket auth; do not expose unauthenticated
+  non-loopback listeners.
+- Multiple workers on the same host may each run their own app-server only when
+  each worker has distinct `service_home`, `CODEX_HOME`, `CODEX_SQLITE_HOME`,
+  config, cache, and auth state.
+- Recycle a long-lived app-server only between active turns. The worker defaults
+  to recycling after roughly 40 minutes or 48 completed turns to avoid stale
+  control-plane hangs.
+- Treat app-server failures as backend failures, not as permission to launch
+  parallel CLI review processes.
 
 Codex configuration and generated review context follow the same boundary:
 
@@ -152,15 +163,21 @@ scope.
 The graph-verified review implementation lives under `codereview/` and follows
 the v3 full-repository design in `../codex-native-full-repo-graph-review.md`:
 use Git only for file discovery/status metadata, Python standard library, and
-the Codex Agent CLI. Do not add third-party graph, static-analysis, parser, or
-database dependencies for this pipeline.
+the worker's Codex app-server interface. Do not add third-party graph,
+static-analysis, parser, or database dependencies for this pipeline.
 
-- All code that starts `codex` for graph mapping, finder, verifier, repro, judge,
-  context, or fallback work must call `codereview.codex_runner.run_codex_exec`.
-  That function owns the worker-level Codex CLI lock required by the concurrency
-  rule above. It is fine for orchestrator stages to use thread pools for task
-  scheduling, but concurrent calls under one worker identity must still serialize
-  at the Codex CLI boundary.
+- All code that starts Codex for graph mapping, finder, verifier, repro, judge,
+  context, or fallback work must call `codereview.codex_runner.run_codex_turn`.
+  That function uses the worker's instance-scoped app-server. It is fine for
+  orchestrator stages to use thread pools for task scheduling; concurrent calls
+  under one worker identity must still stay within the single app-server
+  boundary.
+- Batch model-driven finder work by module/context before starting Codex work.
+  A single app-server turn may fan out to at most six subagents. Do not
+  split one module into repeated context reads when the jobs can share one
+  context pack, and do not force unrelated modules into the same batch. Multiple
+  finder batch turns may run concurrently through the same app-server, bounded
+  by `finders.turn_parallel`.
 - `.codereview/runs/<run_id>/` is checkout-scoped run state. Keep graph JSONL,
   review units, candidate artifacts, worker task files, reports, and debug data
   there. Do not move repository context or review run data under `service_home`.

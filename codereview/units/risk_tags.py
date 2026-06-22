@@ -20,6 +20,22 @@ RISK_KEYWORDS = {
 }
 
 
+SECURITY_RISK_TAGS = {
+    "auth",
+    "authentication",
+    "authorization",
+    "input-validation",
+    "validation",
+    "secret-handling",
+    "trust-boundary",
+    "filesystem",
+    "network",
+    "tenant-isolation",
+}
+API_CONTRACT_RISK_TAGS = {"public-entrypoint", "api-contract", "serialization", "deserialization", "cross-boundary"}
+STATE_RISK_TAGS = {"state", "db-write", "transaction", "cache", "async", "concurrency", "resource", "resource-lifecycle"}
+
+
 def risk_tags_for_symbol(item: dict) -> list[str]:
     haystack = " ".join(str(item.get(key) or "") for key in ("file", "symbol")).lower()
     tags = []
@@ -33,11 +49,10 @@ def risk_tags_for_symbol(item: dict) -> list[str]:
 
 def choose_finders(risk_tags: set[str]) -> list[str]:
     finders = ["correctness"]
-    if {"auth", "authorization", "input-validation", "filesystem", "network"} & risk_tags:
+    if SECURITY_RISK_TAGS & risk_tags:
         finders.append("security_auth_dataflow")
-    if {"public-entrypoint", "api-contract", "serialization", "deserialization"} & risk_tags:
+    elif API_CONTRACT_RISK_TAGS & risk_tags:
         finders.append("api_contract")
-    if {"db-write", "transaction", "cache", "async", "concurrency", "resource"} & risk_tags:
+    elif STATE_RISK_TAGS & risk_tags:
         finders.append("state_concurrency_resource")
-    finders.append("test_repro")
     return list(dict.fromkeys(finders))

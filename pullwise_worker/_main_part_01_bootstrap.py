@@ -356,6 +356,10 @@ def provider_home_path(service_home: str, *parts: str) -> str:
 
 def provider_process_env(config: WorkerConfig) -> dict[str, str]:
     service_home = str(config.service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    codex_sqlite_home = (
+        os.environ.get("PULLWISE_CODEX_SQLITE_HOME", "").strip()
+        or provider_home_path(service_home, ".codex-sqlite")
+    )
     env = {
         key: os.environ[key]
         for key in PROVIDER_ENV_PASSTHROUGH_KEYS
@@ -366,6 +370,7 @@ def provider_process_env(config: WorkerConfig) -> dict[str, str]:
             "HOME": service_home,
             "USERPROFILE": service_home,
             "CODEX_HOME": provider_home_path(service_home, ".codex"),
+            "CODEX_SQLITE_HOME": codex_sqlite_home,
             "XDG_CONFIG_HOME": provider_home_path(service_home, ".config"),
             "XDG_CACHE_HOME": provider_home_path(service_home, ".cache"),
             "XDG_DATA_HOME": provider_home_path(service_home, ".local", "share"),

@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from ..codex_runner import base_env, run_codex_exec
+from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..utils.jsonl import read_json, write_json
 from .cache import graph_cache_key
@@ -179,7 +179,7 @@ def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_p
     output = worker / "result.json"
     events = worker / "events.jsonl"
     codex_config = auxiliary_codex_config(config)
-    process = run_codex_exec(
+    process = run_codex_turn(
         cd=checkout,
         prompt=prompt,
         output_schema=checkout / ".codereview" / "schemas" / "graph-shard.schema.json",
@@ -260,7 +260,7 @@ def run_codex_graph_mapper_coordinator(
     output = worker / "result.json"
     events = worker / "events.jsonl"
     codex_config = auxiliary_codex_config(config)
-    process = run_codex_exec(
+    process = run_codex_turn(
         cd=checkout,
         prompt=prompt,
         output_schema=checkout / ".codereview" / "schemas" / "graph-shard-batch.schema.json",

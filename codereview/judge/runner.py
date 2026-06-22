@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
-from ..codex_runner import base_env, run_codex_exec
+from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..utils.paths import safe_path_component
 from .validate import local_judge, validate_judge_result
@@ -101,7 +101,7 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
             json.dumps(local, ensure_ascii=False, indent=2),
         ]
     )
-    process = run_codex_exec(
+    process = run_codex_turn(
         cd=checkout,
         prompt=prompt,
         output_schema=schema,

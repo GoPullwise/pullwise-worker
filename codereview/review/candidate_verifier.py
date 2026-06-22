@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
-from ..codex_runner import base_env, run_codex_exec
+from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..utils.jsonl import write_json
 from ..utils.paths import safe_path_component
@@ -102,7 +102,7 @@ def verify_candidate(
     (worker / "prompt.md").write_text(prompt, encoding="utf-8")
     output = worker / "result.json"
     events = worker / "events.jsonl"
-    process = run_codex_exec(
+    process = run_codex_turn(
         cd=checkout,
         prompt=prompt,
         output_schema=schema,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .codex_runner import base_env, run_codex_exec
+from .codex_runner import base_env, run_codex_turn
 from .config import ReviewConfig, auxiliary_codex_config
 from .utils.jsonl import write_json
 from .utils.paths import safe_relative_path
@@ -37,7 +37,7 @@ def symbol_context(
     output = run / "context" / f"{name}.result.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     codex_config = auxiliary_codex_config(config)
-    process = run_codex_exec(
+    process = run_codex_turn(
         cd=checkout,
         prompt=context_prompt(seed),
         output_schema=checkout / ".codereview" / "schemas" / "context_result.schema.json",
@@ -175,7 +175,7 @@ def wrap_context(seed: dict, payload: dict, *, process: ProcessResult | None) ->
         "source": source,
         "query": {
             "query": query,
-            "command": ["codex", "exec", "repository-context"],
+            "command": ["codex", "app-server", "repository-context"],
             "result": payload,
             "attempts": [process_dict] if process_dict else [],
         },

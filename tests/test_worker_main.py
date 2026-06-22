@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codereview.utils.process import ProcessCancelled, clear_process_cancel_event, run_process, set_process_cancel_event
+from codereview.utils.process import ProcessCancelled, ProcessResult, clear_process_cancel_event, run_process, set_process_cancel_event
 
 worker_main = importlib.import_module("pullwise_worker.main")
 
@@ -418,8 +418,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                         "blockedItems": [
                             {
                                 "reason": (
-                                    "finder codex exec failed with exit code 2: "
-                                    "error: unexpected argument '--ask-for-approval' found"
+                                    "finder codex turn failed with exit code 2: "
+                                    "codex app-server request thread/start timed out"
                                 )
                             }
                         ],
@@ -452,10 +452,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(payload["status"], "failed")
             self.assertEqual(payload["error_code"], "GRAPH_VERIFIED_COMPLETION_FAILED")
             self.assertIn("GraphVerified finder pipeline blocked every finder task", payload["error"])
-            self.assertIn("unexpected argument '--ask-for-approval'", payload["error"])
+            self.assertIn("codex app-server request thread/start timed out", payload["error"])
             summary_text = (config.log_dir / "scan-summary.log").read_text(encoding="utf-8")
             self.assertIn('"status": "failed"', summary_text)
-            self.assertIn("unexpected argument '--ask-for-approval'", summary_text)
+            self.assertIn("codex app-server request thread/start timed out", summary_text)
 
     def test_worker_run_once_claims_and_runs_one_job_without_capacity_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -743,6 +743,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 {
                     "contextTimeoutSeconds": 240,
                     "finderMaxParallel": 7,
+                    "finderTurnParallel": 4,
                     "finderTimeoutSeconds": 300,
                     "reproMaxParallel": 3,
                     "reproTimeoutSeconds": 600,
@@ -760,9 +761,11 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["graph"]["target_shards"], 6)
         self.assertEqual(payload["graph"]["mapper_subagent_limit"], 6)
         self.assertEqual(payload["codex"]["reasoning_effort"], "medium")
+        self.assertEqual(payload["codex"]["env"]["CODEX_SQLITE_HOME"], str(root / "home" / ".codex-sqlite"))
         self.assertTrue(payload["context"]["enabled"])
         self.assertEqual(payload["context"]["timeout_seconds"], 240)
-        self.assertEqual(payload["finders"]["max_workers"], 7)
+        self.assertEqual(payload["finders"]["max_workers"], 6)
+        self.assertEqual(payload["finders"]["turn_parallel"], 4)
         self.assertEqual(payload["finders"]["timeout_seconds"], 300)
         self.assertEqual(payload["repro"]["max_workers"], 3)
         self.assertEqual(payload["repro"]["timeout_seconds"], 600)
@@ -869,18 +872,16 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             worker_main.mark_codex_auth_failure(cfg, "401 Unauthorized")
             self.assertGreater(worker_main._codex_auth_failure_until, 0)
 
-            def fake_run(command, **kwargs):
-                self.assertEqual(command[-1], "-")
-                self.assertEqual(kwargs["input"], 'Return only JSON: {"ok": true}')
-                output_path = Path(command[command.index("--output-last-message") + 1])
-                output_path.write_text('{"ok": true}', encoding="utf-8")
-                return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}\n', stderr="")
+            def fake_app_server_turn(**kwargs):
+                self.assertEqual(kwargs["prompt"], 'Return only JSON: {"ok": true}')
+                kwargs["output_file"].write_text('{"ok": true}', encoding="utf-8")
+                return ProcessResult(["codex", "app-server", "turn/start"], str(kwargs["cd"]), 0, '{"ok": true}\n', "", 1)
 
             with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
                 worker_main,
                 "provider_process_env",
                 return_value={},
-            ), patch.object(worker_main.subprocess, "run", side_effect=fake_run):
+            ), patch.object(worker_main, "run_codex_app_server_turn", side_effect=fake_app_server_turn):
                 ok, detail = worker_main.codex_ready_check(cfg)
 
         self.assertTrue(ok)
@@ -888,20 +889,22 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(worker_main._codex_auth_failure_until, 0.0)
         self.assertEqual(worker_main._codex_auth_failure_detail, "")
 
-    def test_codex_ready_check_defers_while_review_codex_lock_is_held(self) -> None:
-        from codereview.codex_runner import acquire_codex_cli_lock, release_codex_cli_lock
-
+    def test_codex_ready_check_reports_app_server_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg = config_for(Path(tmp_dir))
-            acquired = acquire_codex_cli_lock(blocking=False)
-            self.assertTrue(acquired)
-            try:
+            with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
+                worker_main,
+                "provider_process_env",
+                return_value={},
+            ), patch.object(
+                worker_main,
+                "run_codex_app_server_turn",
+                return_value=ProcessResult(["codex", "app-server", "turn/start"], str(Path(tmp_dir)), 2, "", "boom", 1),
+            ):
                 ok, detail = worker_main.codex_ready_check(cfg)
-            finally:
-                release_codex_cli_lock()
 
         self.assertFalse(ok)
-        self.assertIn("deferred while codex is running", detail)
+        self.assertIn("boom", detail)
 
     def test_refresh_readiness_reports_degraded_instead_of_crashing_on_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -185,6 +185,8 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
             raise RuntimeError(f"graph quality gate failed after context repair: {'; '.join(audit.get('quality_errors') or [])}")
         agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
         write_json(graph_dir / "agent-audit.json", agent_audit)
+        previous_finder_tasks = finder_tasks
+        previous_raw_candidates = raw_candidates
         review_units = build_all_review_units(graph, inventory, census, config)
         write_review_units(run, review_units)
         planned_coverage = build_unit_coverage(graph, inventory, review_units)
@@ -192,8 +194,21 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         require_full_unit_coverage(planned_coverage)
         write_json(run / "artifacts" / "review-units" / "coverage-planned.json", planned_coverage)
         finder_tasks = plan_finder_tasks(review_units)
-        _emit_progress(progress, "finder", f"Finder: review tasks 0/{len(finder_tasks)}", current=0, total=len(finder_tasks), run_id=run_id)
-        raw_candidates = _run_finders_with_progress(snapshot_repo, run, finder_tasks, config, progress)
+        repair_finder_tasks, kept_raw_candidates = _finder_context_repair_rerun_plan(
+            previous_raw_candidates,
+            previous_finder_tasks,
+            finder_tasks,
+        )
+        _emit_progress(
+            progress,
+            "finder",
+            f"Finder: review tasks 0/{len(repair_finder_tasks)}",
+            current=0,
+            total=len(repair_finder_tasks),
+            run_id=run_id,
+        )
+        repaired_raw_candidates = _run_finders_with_progress(snapshot_repo, run, repair_finder_tasks, config, progress) if repair_finder_tasks else []
+        raw_candidates = [*kept_raw_candidates, *repaired_raw_candidates]
     write_jsonl(run / "candidates" / "raw.jsonl", raw_candidates)
 
     _emit_progress(progress, "candidates", "Candidates: normalizing and scoring", run_id=run_id)
@@ -565,6 +580,53 @@ def _finder_context_repair_tasks(raw_candidates: list[dict], *, start_index: int
             "double_mapped": False,
         }
     ]
+
+
+def _finder_context_repair_rerun_plan(raw_candidates: list[dict], old_tasks: list[object], new_tasks: list[object]) -> tuple[list[object], list[dict]]:
+    requested_units = _finder_context_request_unit_ids(raw_candidates)
+    old_keys = {_finder_task_key(task) for task in old_tasks}
+    new_keys = {_finder_task_key(task) for task in new_tasks}
+    rerun_tasks = [
+        task
+        for task in new_tasks
+        if _finder_task_unit_id(task) in requested_units or _finder_task_key(task) not in old_keys
+    ]
+    rerun_keys = {_finder_task_key(task) for task in rerun_tasks}
+    kept = [
+        item
+        for item in raw_candidates
+        if _finder_result_key(item) in new_keys and _finder_result_key(item) not in rerun_keys
+    ]
+    return rerun_tasks, kept
+
+
+def _finder_context_request_unit_ids(raw_candidates: list[dict]) -> set[str]:
+    units: set[str] = set()
+    for item in raw_candidates:
+        result = item.get("result") if isinstance(item, dict) and isinstance(item.get("result"), dict) else {}
+        requests = result.get("context_requests") if isinstance(result.get("context_requests"), list) else []
+        if requests:
+            unit_id, _focus = _finder_result_key(item)
+            if unit_id:
+                units.add(unit_id)
+    return units
+
+
+def _finder_result_key(item: object) -> tuple[str, str]:
+    source = item if isinstance(item, dict) else {}
+    task = source.get("task") if isinstance(source.get("task"), dict) else {}
+    result = source.get("result") if isinstance(source.get("result"), dict) else {}
+    unit_id = str(task.get("unit_id") or result.get("unit_id") or "")
+    focus = str(task.get("focus") or result.get("focus") or "")
+    return (unit_id, focus)
+
+
+def _finder_task_key(task: object) -> tuple[str, str]:
+    return (_finder_task_unit_id(task), str(getattr(task, "focus", "") or (task.get("focus") if isinstance(task, dict) else "") or ""))
+
+
+def _finder_task_unit_id(task: object) -> str:
+    return str(getattr(task, "unit_id", "") or (task.get("unit_id") if isinstance(task, dict) else "") or "")
 
 
 def blocked_summary(item: dict) -> dict:

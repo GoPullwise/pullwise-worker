@@ -58,7 +58,8 @@ def ensure_project_files(checkout: Path) -> None:
                     "agents": {
                         "graph_map_parallel": 6,
                         "graph_link_parallel": 4,
-                        "finder_parallel": 5,
+                        "finder_parallel": 6,
+                        "finder_turn_parallel": 2,
                         "verifier_parallel": 4,
                         "repro_parallel": 3,
                         "judge_parallel": 3,
@@ -89,7 +90,7 @@ def ensure_project_files(checkout: Path) -> None:
                     },
                     "context": {"enabled": True, "timeout_seconds": 300},
                     "codex": {"command": "codex", "reasoning_effort": "high"},
-                    "finders": {"enabled": True, "max_workers": 4},
+                    "finders": {"enabled": True, "max_workers": 6, "turn_parallel": 2},
                     "scoring": {"min_score_for_repro": 8, "always_repro_severities": ["critical", "high"]},
                     "repro": {"enabled": True, "max_workers": 2, "max_repro": 0, "require_red_green": False},
                     "safety": {"confirmed_only": True},
@@ -100,6 +101,7 @@ def ensure_project_files(checkout: Path) -> None:
         )
     schemas = {
         "finder_result.schema.json": codex_output_schema(finder_result_schema()),
+        "finder-batch.schema.json": codex_output_schema(finder_batch_schema()),
         "context_result.schema.json": codex_output_schema(context_result_schema()),
         "repo-census.schema.json": codex_output_schema(repo_census_schema()),
         "graph-shard.schema.json": codex_output_schema(graph_shard_schema()),
@@ -119,6 +121,7 @@ def ensure_project_files(checkout: Path) -> None:
         if not path.is_file():
             path.write_text(finder_prompt(focus), encoding="utf-8")
     prompts = {
+        "finder-batch-coordinator.md": FINDER_BATCH_COORDINATOR_PROMPT,
         "repo-census.md": REPO_CENSUS_PROMPT,
         "graph-mapper.md": GRAPH_MAPPER_PROMPT,
         "graph-mapper-coordinator.md": GRAPH_MAPPER_COORDINATOR_PROMPT,
@@ -256,6 +259,18 @@ def finder_result_schema() -> dict:
                     },
                 },
             }
+        },
+    }
+
+
+def finder_batch_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["results", "warnings"],
+        "additionalProperties": False,
+        "properties": {
+            "results": {"type": "array", "items": finder_result_schema()},
+            "warnings": {"type": "array", "items": {"type": "string"}},
         },
     }
 
@@ -654,6 +669,47 @@ expected_behavior, expected_behavior_source, actual_behavior_hypothesis, minimal
 """
 
 
+FINDER_BATCH_COORDINATOR_PROMPT = """You are a finder coordinator for a full-repository GraphVerified review.
+
+You are running inside exactly one Codex app-server turn. Do not ask the caller
+to start another Codex process, and do not run nested codex commands.
+
+You will receive several independent finder jobs grouped by module/context.
+Each job has unit_id, focus, module_key, unit_type, review_pass, risk_tags, and
+context_pack_id. The payload also includes context_packs keyed by unit_id and
+the focus-specific finder prompt text for each focus.
+
+Your task:
+1. Spawn subagents inside this Codex session to review finder jobs concurrently.
+2. Use at most finder_subagent_limit subagents at one time.
+3. Assign one finder job to each subagent.
+4. If there are more jobs than finder_subagent_limit, run additional waves inside
+   this same Codex session.
+5. Wait for all subagents to finish.
+6. Return one finder result per input job, preserving unit_id and focus.
+
+Each subagent must follow the focus-specific finder prompt for its job and use
+only context_packs[job.context_pack_id] plus repository files explicitly
+referenced by that context. Reuse module-level code reading across jobs with the
+same module_key. If required context is missing, return context_requests with
+exact repository-relative files instead of inventing evidence.
+
+If one job is too broad or blocked, return an empty candidates list plus
+context_requests or a warning for that job. Do not let one long-tail job block
+the whole batch.
+
+Hard rules:
+- Do not modify repository files.
+- Do not write files directly.
+- Do not scan unrelated repository areas.
+- No repository context evidence, no candidate.
+- Do not report style concerns or speculative risks.
+- Each result must include unit_id, focus, context_requests, and candidates.
+
+Output JSON only, matching finder-batch.schema.json.
+"""
+
+
 REPO_CENSUS_PROMPT = """You are a repository census agent for a graph-verified code review system.
 
 Input will contain a deterministic inventory: paths, sizes, hashes, manifest
@@ -706,8 +762,8 @@ Output JSON only, matching graph-shard.schema.json.
 
 GRAPH_MAPPER_COORDINATOR_PROMPT = """You are a graph mapper coordinator for a full-repository GraphVerified review.
 
-You are running inside exactly one Codex CLI exec. Do not ask the caller to start
-another Codex CLI process.
+You are running inside exactly one Codex app-server turn. Do not ask the caller
+to start another Codex process.
 
 You will receive several independent mapper jobs. Each job has task_id, shard_id,
 mapper_index, files, reason, double_mapped, and files_metadata.

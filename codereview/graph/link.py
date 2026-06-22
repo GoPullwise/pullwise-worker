@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..codex_runner import base_env, run_codex_exec
+from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..utils.jsonl import write_json
 from .ids import stable_edge_id
@@ -135,7 +135,7 @@ def _run_linker(
     output = worker / "result.json"
     events = worker / "events.jsonl"
     codex_config = auxiliary_codex_config(config)
-    process = run_codex_exec(
+    process = run_codex_turn(
         cd=checkout,
         prompt=prompt,
         output_schema=schema,

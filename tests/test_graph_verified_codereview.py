@@ -5,17 +5,20 @@ import inspect
 import json
 import os
 import subprocess
-import sys
+import threading
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Optional
 
 codereview_main = importlib.import_module("codereview.main")
 from codereview.candidates.normalize import normalize_candidates
+from codereview import app_server_runner
 from codereview.codex_runner import base_env
-from codereview.config import ReviewConfig
-from codereview.finder.runner import run_finder
+from codereview.config import ReviewConfig, load_config
+from codereview.finder import runner as finder_runner_module
+from codereview.finder.runner import run_finder, run_finders_parallel
 from codereview.finder.tasks import FinderTask, plan_finder_tasks
 from codereview.graph.audit import audit_graph
 from codereview.graph.census import run_repository_census
@@ -23,6 +26,7 @@ from codereview.graph.link import _valid_link_result
 from codereview.graph import mapper as graph_mapper_module
 from codereview.graph.merge import merge_graph_results, normalize_graph_for_inventory
 from codereview.inventory.git_inventory import analyzable_files, build_git_inventory
+from codereview.judge import runner as judge_runner_module
 from codereview.judge.runner import run_judge
 from codereview.judge.precheck import verify_repro_events_and_paths
 from codereview.judge.validate import local_judge
@@ -79,6 +83,7 @@ def _run_test_function(func: object) -> None:
         try:
             func(**kwargs)  # type: ignore[misc]
         finally:
+            app_server_runner.reset_app_server_clients_for_tests()
             if patcher is not None:
                 patcher.undo()
 
@@ -93,10 +98,13 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert config["graph"]["schema_version"] == "3"
     assert config["graph"]["target_shards"] == 6
     assert config["graph"]["mapper_subagent_limit"] == 6
+    assert config["finders"]["turn_parallel"] == 2
     assert "impact" not in config
     assert set(schema["required"]) == set(schema["properties"])
     assert (tmp_path / ".codereview" / "schemas" / "graph-shard-batch.schema.json").is_file()
+    assert (tmp_path / ".codereview" / "schemas" / "finder-batch.schema.json").is_file()
     assert (tmp_path / ".codereview" / "prompts" / "graph-mapper-coordinator.md").is_file()
+    assert (tmp_path / ".codereview" / "prompts" / "finder-batch-coordinator.md").is_file()
     graph_props = schema["properties"]["candidates"]["items"]["properties"]["graph_evidence"]["properties"]
     assert set(graph_props) == {"unit_id", "context_files", "path_summary"}
 
@@ -220,16 +228,221 @@ def test_repository_snapshot_uses_inventory_not_git_ref(tmp_path: Path) -> None:
 
 
 def test_finder_assignment_uses_review_unit_risk_tags() -> None:
-    assert choose_finders({"auth", "api-contract", "concurrency"}) == [
-        "correctness",
-        "security_auth_dataflow",
-        "api_contract",
-        "state_concurrency_resource",
-        "test_repro",
-    ]
+    assert choose_finders({"auth", "api-contract", "concurrency"}) == ["correctness", "security_auth_dataflow"]
+    assert choose_finders({"state"}) == ["correctness", "state_concurrency_resource"]
+    assert choose_finders({"trust-boundary"}) == ["correctness", "security_auth_dataflow"]
     tasks = plan_finder_tasks([{"unit_id": "component:1", "unit_type": "component", "risk_tags": ["auth"]}])
     assert tasks[0] == FinderTask(unit_id="component:1", focus="correctness", unit_type="component", review_pass="baseline", risk_tags=["auth"])
-    assert {task.focus for task in tasks} >= {"correctness", "security_auth_dataflow", "test_repro"}
+    assert [task.focus for task in tasks] == ["correctness", "security_auth_dataflow"]
+
+
+def test_finder_assignment_keeps_boundary_and_global_specialists() -> None:
+    tasks = plan_finder_tasks(
+        [
+            {"unit_id": "boundary:1", "unit_type": "cross_boundary", "risk_tags": ["isolated-helper"]},
+            {"unit_id": "global:1", "unit_type": "global_invariant", "risk_tags": []},
+        ]
+    )
+
+    by_unit = {}
+    for task in tasks:
+        by_unit.setdefault(task.unit_id, []).append(task.focus)
+
+    assert by_unit["boundary:1"] == ["correctness", "api_contract"]
+    assert by_unit["global:1"] == ["correctness", "security_auth_dataflow", "state_concurrency_resource", "test_repro"]
+
+
+def test_default_finder_batch_width_is_six(tmp_path: Path) -> None:
+    config = load_config(tmp_path)
+
+    assert config.finders.max_workers == 6
+    assert config.finders.turn_parallel == 2
+
+
+def test_run_finders_batches_tasks_into_single_app_server_waves(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    tasks = [FinderTask(unit_id=f"component:{index}", focus="correctness", unit_type="component") for index in range(7)]
+    write_review_units(
+        run,
+        [
+            {"unit_id": task.unit_id, "unit_type": task.unit_type, "review_pass": task.review_pass, "risk_tags": [], "context": {}}
+            for task in tasks
+        ],
+    )
+    config = ReviewConfig()
+    config.finders.max_workers = 6
+    calls: list[dict] = []
+
+    def fake_run_codex_turn(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["output_schema"].name == "finder-batch.schema.json"
+        prompt = kwargs["prompt"]
+        payload_text = prompt.split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(payload_text)
+        results = [
+            {"unit_id": job["unit_id"], "focus": job["focus"], "context_requests": [], "candidates": []}
+            for job in payload["jobs"]
+        ]
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(json.dumps({"results": results, "warnings": []}), encoding="utf-8")
+        return ProcessResult(
+            command=["codex", "app-server", "turn/start"],
+            cwd=str(checkout),
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_ms=25,
+        )
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = run_finders_parallel(checkout, run, tasks, config)
+
+    assert len(calls) == 2
+    assert sorted(
+        len(json.loads(call["prompt"].split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0])["jobs"])
+        for call in calls
+    ) == [1, 6]
+    assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
+    assert all(item["status"] == "ok" for item in results)
+
+
+def test_run_finders_runs_batches_as_parallel_app_server_turns(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    tasks = [FinderTask(unit_id=f"component:{index}", focus="correctness", unit_type="component") for index in range(12)]
+    write_review_units(
+        run,
+        [
+            {"unit_id": task.unit_id, "unit_type": task.unit_type, "review_pass": task.review_pass, "risk_tags": [], "context": {}}
+            for task in tasks
+        ],
+    )
+    config = ReviewConfig()
+    config.finders.max_workers = 6
+    config.finders.turn_parallel = 2
+    lock = threading.Lock()
+    second_turn_started = threading.Event()
+    started_turns = 0
+    first_turn_saw_parallelism: list[bool] = []
+
+    def fake_run_codex_turn(**kwargs):
+        nonlocal started_turns
+        with lock:
+            started_turns += 1
+            turn_index = started_turns
+            if started_turns >= 2:
+                second_turn_started.set()
+        if turn_index == 1:
+            first_turn_saw_parallelism.append(second_turn_started.wait(timeout=2))
+        prompt = kwargs["prompt"]
+        payload_text = prompt.split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(payload_text)
+        results = [
+            {"unit_id": job["unit_id"], "focus": job["focus"], "context_requests": [], "candidates": []}
+            for job in payload["jobs"]
+        ]
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(json.dumps({"results": results, "warnings": []}), encoding="utf-8")
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = run_finders_parallel(checkout, run, tasks, config)
+
+    assert first_turn_saw_parallelism == [True]
+    assert len(results) == len(tasks)
+    assert all(item["status"] == "ok" for item in results)
+
+
+def test_run_finders_groups_module_context_before_batching(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    tasks = [
+        FinderTask(unit_id="component:auth-a", focus="correctness", unit_type="component"),
+        FinderTask(unit_id="component:billing", focus="correctness", unit_type="component"),
+        FinderTask(unit_id="component:auth-b", focus="api_contract", unit_type="component"),
+    ]
+    write_review_units(
+        run,
+        [
+            {"unit_id": "component:auth-a", "unit_type": "component", "review_pass": "baseline", "risk_tags": [], "context_files": [{"path": "src/auth/login.py"}], "context": {}},
+            {"unit_id": "component:billing", "unit_type": "component", "review_pass": "baseline", "risk_tags": [], "context_files": [{"path": "src/billing/invoice.py"}], "context": {}},
+            {"unit_id": "component:auth-b", "unit_type": "component", "review_pass": "baseline", "risk_tags": [], "context_files": [{"path": "src/auth/token.py"}], "context": {}},
+        ],
+    )
+    config = ReviewConfig()
+    config.finders.max_workers = 2
+    calls: list[list[str]] = []
+
+    def fake_run_codex_turn(**kwargs):
+        prompt = kwargs["prompt"]
+        payload_text = prompt.split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(payload_text)
+        calls.append([job["unit_id"] for job in payload["jobs"]])
+        results = [
+            {"unit_id": job["unit_id"], "focus": job["focus"], "context_requests": [], "candidates": []}
+            for job in payload["jobs"]
+        ]
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(json.dumps({"results": results, "warnings": []}), encoding="utf-8")
+        return ProcessResult(
+            command=["codex", "app-server", "turn/start"],
+            cwd=str(checkout),
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_ms=25,
+        )
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = run_finders_parallel(checkout, run, tasks, config)
+
+    assert sorted(calls) == sorted([["component:auth-a", "component:auth-b"], ["component:billing"]])
+    assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
+
+
+def test_context_repair_reruns_only_requesting_or_new_finder_tasks() -> None:
+    old_tasks = [
+        FinderTask(unit_id="component:a", focus="correctness"),
+        FinderTask(unit_id="component:a", focus="test_repro", review_pass="specialist"),
+        FinderTask(unit_id="component:b", focus="correctness"),
+    ]
+    new_tasks = [
+        *old_tasks,
+        FinderTask(unit_id="component:c", focus="correctness"),
+    ]
+    raw_candidates = [
+        {
+            "task": old_tasks[0].__dict__,
+            "result": {
+                "unit_id": "component:a",
+                "focus": "correctness",
+                "context_requests": [{"requested_files": ["a.py"], "reason": "need caller"}],
+                "candidates": [],
+            },
+            "status": "ok",
+        },
+        {"task": old_tasks[1].__dict__, "result": {"unit_id": "component:a", "focus": "test_repro", "candidates": []}, "status": "ok"},
+        {"task": old_tasks[2].__dict__, "result": {"unit_id": "component:b", "focus": "correctness", "candidates": []}, "status": "ok"},
+    ]
+
+    rerun, kept = codereview_main._finder_context_repair_rerun_plan(raw_candidates, old_tasks, new_tasks)
+
+    assert [(task.unit_id, task.focus) for task in rerun] == [
+        ("component:a", "correctness"),
+        ("component:a", "test_repro"),
+        ("component:c", "correctness"),
+    ]
+    assert [(item["task"]["unit_id"], item["task"]["focus"]) for item in kept] == [("component:b", "correctness")]
 
 
 def test_git_inventory_reads_full_large_git_file_lists(tmp_path: Path) -> None:
@@ -334,7 +547,7 @@ def test_graph_linker_requires_resolution_reason() -> None:
     assert not _valid_link_result({"status": "resolved", "target": "sym:handle"}, ["sym:handle"])
 
 
-def test_codex_graph_mapper_uses_one_cli_coordinator_for_many_tasks(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+def test_codex_graph_mapper_uses_one_app_server_coordinator_for_many_tasks(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
     ensure_project_files(checkout)
@@ -358,7 +571,7 @@ def test_codex_graph_mapper_uses_one_cli_coordinator_for_many_tasks(tmp_path: Pa
     ]
     calls = []
 
-    def fake_run_codex_exec(**kwargs):
+    def fake_run_codex_turn(**kwargs):
         calls.append(kwargs)
         assert kwargs["output_schema"].name == "graph-shard-batch.schema.json"
         assert kwargs["config"].reasoning_effort == "medium"
@@ -388,9 +601,9 @@ def test_codex_graph_mapper_uses_one_cli_coordinator_for_many_tasks(tmp_path: Pa
             ),
             encoding="utf-8",
         )
-        return ProcessResult(["codex", "exec"], str(checkout), 0, "{}", "", 1)
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
 
-    monkeypatch.setattr(graph_mapper_module, "run_codex_exec", fake_run_codex_exec)
+    monkeypatch.setattr(graph_mapper_module, "run_codex_turn", fake_run_codex_turn)
     events: list[dict] = []
 
     results = graph_mapper_module.map_graph_tasks(checkout, tasks, inventory, config, run=run, progress=events.append)
@@ -417,7 +630,7 @@ def test_codex_graph_mapper_coordinator_scales_timeout_by_internal_waves(tmp_pat
     ]
     observed = {}
 
-    def fake_run_codex_exec(**kwargs):
+    def fake_run_codex_turn(**kwargs):
         observed["timeout_seconds"] = kwargs["timeout_seconds"]
         observed["reasoning_effort"] = kwargs["config"].reasoning_effort
         Path(kwargs["output_file"]).write_text(
@@ -443,9 +656,9 @@ def test_codex_graph_mapper_coordinator_scales_timeout_by_internal_waves(tmp_pat
             ),
             encoding="utf-8",
         )
-        return ProcessResult(["codex", "exec"], str(checkout), 0, "{}", "", 1)
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
 
-    monkeypatch.setattr(graph_mapper_module, "run_codex_exec", fake_run_codex_exec)
+    monkeypatch.setattr(graph_mapper_module, "run_codex_turn", fake_run_codex_turn)
 
     graph_mapper_module.map_graph_tasks(checkout, tasks, inventory, config, run=tmp_path / "run")
 
@@ -471,7 +684,7 @@ def test_core_candidate_verifier_keeps_plan_reasoning_effort(tmp_path: Path, mon
     graph = {"nodes": [], "edges": [], "unresolved_refs": []}
     observed = {}
 
-    def fake_run_codex_exec(**kwargs):
+    def fake_run_codex_turn(**kwargs):
         observed["reasoning_effort"] = kwargs["config"].reasoning_effort
         output = Path(kwargs["output_file"])
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -496,9 +709,9 @@ def test_core_candidate_verifier_keeps_plan_reasoning_effort(tmp_path: Path, mon
             ),
             encoding="utf-8",
         )
-        return ProcessResult(["codex", "exec"], str(checkout), 0, "{}", "", 1)
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
 
-    monkeypatch.setattr(candidate_verifier_module, "run_codex_exec", fake_run_codex_exec)
+    monkeypatch.setattr(candidate_verifier_module, "run_codex_turn", fake_run_codex_turn)
 
     result = candidate_verifier_module.verify_candidate(candidate, graph, config, checkout, run)
 
@@ -630,7 +843,7 @@ def test_candidate_pipeline_requires_unit_graph_evidence(tmp_path: Path) -> None
     assert any("expected_behavior_source must be a non-empty list" in "; ".join(item["invalid_reasons"]) for item in normalized)
 
 
-def test_finder_codex_failure_is_blocked_not_silent_empty(tmp_path: Path) -> None:
+def test_finder_codex_failure_is_blocked_not_silent_empty(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     run = checkout / ".codereview" / "runs" / "run_1"
     checkout.mkdir(parents=True)
@@ -639,19 +852,20 @@ def test_finder_codex_failure_is_blocked_not_silent_empty(tmp_path: Path) -> Non
         run,
         [{"unit_id": "component:handle", "unit_type": "component", "review_pass": "baseline", "risk_tags": [], "context": {}}],
     )
-    fake_codex = write_fake_cli(
-        tmp_path,
-        "fake_codex_fails",
-        r'''
-import sys
-
-print("finder stdout detail")
-print("finder failed", file=sys.stderr)
-sys.exit(42)
-''',
-    )
     config = ReviewConfig()
-    config.codex.command = str(fake_codex)
+
+    def fake_run_codex_turn(**kwargs):
+        del kwargs
+        return ProcessResult(
+            command=["codex", "app-server", "turn/start"],
+            cwd=str(checkout),
+            returncode=42,
+            stdout="finder stdout detail",
+            stderr="finder failed",
+            duration_ms=25,
+        )
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
 
     result = run_finder(checkout, run, FinderTask(unit_id="component:handle", focus="correctness"), config)
 
@@ -670,7 +884,7 @@ def test_pipeline_summary_preserves_blocked_process_evidence() -> None:
             "task": {"unit_id": "component:handle", "focus": "correctness"},
             "blocked_reason": "finder failed",
             "process": {
-                "command": ["codex", "exec", "-"],
+                "command": ["codex", "app-server", "turn/start"],
                 "returncode": 1,
                 "timed_out": False,
                 "duration_ms": 123,
@@ -901,34 +1115,21 @@ def test_worker_env_and_codex_base_env_are_isolated(tmp_path: Path) -> None:
             os.environ["OPENAI_API_KEY"] = previous_api_key
 
 
-def test_codex_exec_builds_command_while_cli_lock_is_held(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+def test_codex_turn_dispatches_to_app_server(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     from codereview import codex_runner
 
-    observed = {"capability_lookup_had_lock": False}
-
-    def fake_capabilities(command, env=None):
-        del command, env
-        acquired = codex_runner.acquire_codex_cli_lock(blocking=False)
-        if acquired:
-            codex_runner.release_codex_cli_lock()
-        observed["capability_lookup_had_lock"] = not acquired
-        return codex_runner.CodexCliCapabilities(
-            frozenset(),
-            frozenset({"--cd", "--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "--json"}),
-        )
-
-    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
-        del env, timeout, queue_wait_ms, kwargs
-        output_arg = Path(command[command.index("--output-last-message") + 1])
-        output_arg.write_text("{}", encoding="utf-8")
-        return ProcessResult(command, str(cwd), 0, "{}", "", 1)
-
-    monkeypatch.setattr(codex_runner, "codex_cli_capabilities", fake_capabilities)
-    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
+    captured = {}
     schema = tmp_path / "schema.json"
     schema.write_text("{}", encoding="utf-8")
 
-    codex_runner.run_codex_exec(
+    def fake_app_server_turn(**kwargs):
+        captured.update(kwargs)
+        kwargs["output_file"].write_text('{"ok": true}', encoding="utf-8")
+        return ProcessResult(["codex", "app-server", "turn/start"], str(kwargs["cd"]), 0, "{}", "", 1)
+
+    monkeypatch.setattr(codex_runner, "run_codex_app_server_turn", fake_app_server_turn)
+
+    result = codex_runner.run_codex_turn(
         cd=tmp_path,
         prompt="review",
         output_schema=schema,
@@ -938,52 +1139,13 @@ def test_codex_exec_builds_command_while_cli_lock_is_held(tmp_path: Path, monkey
         config=ReviewConfig().codex,
     )
 
-    assert observed["capability_lookup_had_lock"] is True
-
-
-def test_codex_exec_places_approval_flag_before_exec_when_only_top_level_supports_it(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
-    from codereview import codex_runner
-
-    captured = {}
-
-    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
-        del env, timeout, queue_wait_ms
-        captured["command"] = command
-        captured["stdin_text"] = kwargs.get("stdin_text")
-        return ProcessResult(command, str(cwd), 0, "{}", "", 1)
-
-    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
-    monkeypatch.setattr(
-        codex_runner,
-        "codex_cli_capabilities",
-        lambda command, env=None: codex_runner.CodexCliCapabilities(
-            frozenset({"--ask-for-approval"}),
-            frozenset({"--cd", "--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "--json", "--model", "--config"}),
-        ),
-    )
-    config = ReviewConfig()
-    schema = tmp_path / "schema.json"
-    schema.write_text("{}", encoding="utf-8")
-
-    result = codex_runner.run_codex_exec(
-        cd=tmp_path,
-        prompt="review",
-        output_schema=schema,
-        output_file=tmp_path / "result.json",
-        sandbox="read-only",
-        timeout_seconds=30,
-        config=config.codex,
-    )
-
     assert result.returncode == 0
-    command = captured["command"]
-    assert command[:4] == ["codex", "--ask-for-approval", "never", "exec"]
-    assert command[command.index("--sandbox") + 1] == "workspace-write"
-    assert command[-1] == "-"
-    assert captured["stdin_text"] == "review"
+    assert captured["prompt"] == "review"
+    assert captured["sandbox"] == "read-only"
+    assert captured["events_file"] is None
 
 
-def test_codex_exec_copies_workspace_local_output_to_requested_path(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+def test_codex_turn_app_server_writes_requested_output_path(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     from codereview import codex_runner
 
     checkout = tmp_path / "repo"
@@ -993,26 +1155,15 @@ def test_codex_exec_copies_workspace_local_output_to_requested_path(tmp_path: Pa
     requested_output = tmp_path / "run" / "workers" / "result.json"
     captured = {}
 
-    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
-        del env, timeout, queue_wait_ms, kwargs
-        output_arg = Path(command[command.index("--output-last-message") + 1])
-        captured["output_arg"] = output_arg
-        assert output_arg.resolve(strict=False).relative_to(Path(cwd).resolve(strict=False))
-        assert output_arg.parent.is_dir()
-        output_arg.write_text('{"ok": true}', encoding="utf-8")
-        return ProcessResult(command, str(cwd), 0, "{}", "", 1)
+    def fake_app_server_turn(**kwargs):
+        captured["output_arg"] = kwargs["output_file"]
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text('{"ok": true}', encoding="utf-8")
+        return ProcessResult(["codex", "app-server", "turn/start"], str(kwargs["cd"]), 0, "{}", "", 1)
 
-    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
-    monkeypatch.setattr(
-        codex_runner,
-        "codex_cli_capabilities",
-        lambda command, env=None: codex_runner.CodexCliCapabilities(
-            frozenset(),
-            frozenset({"--cd", "--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "--json"}),
-        ),
-    )
+    monkeypatch.setattr(codex_runner, "run_codex_app_server_turn", fake_app_server_turn)
 
-    result = codex_runner.run_codex_exec(
+    result = codex_runner.run_codex_turn(
         cd=checkout,
         prompt="review",
         output_schema=schema,
@@ -1023,11 +1174,70 @@ def test_codex_exec_copies_workspace_local_output_to_requested_path(tmp_path: Pa
     )
 
     assert result.returncode == 0
-    assert captured["output_arg"] != requested_output
+    assert captured["output_arg"] == requested_output
     assert json.loads(requested_output.read_text(encoding="utf-8")) == {"ok": True}
 
 
-def test_codex_exec_recovers_workspace_output_from_json_events(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+def test_app_server_turn_writes_structured_output_and_turn_events(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object", "properties": {"ok": {"type": "boolean"}}}), encoding="utf-8")
+    output = tmp_path / "result.json"
+    events = tmp_path / "events.jsonl"
+    captured = {}
+
+    class FakeAppServerClient:
+        def run_turn(self, **kwargs):
+            captured.update(kwargs)
+            turn = app_server_runner.AppServerTurn(thread_id="thread_1")
+            turn.assistant_messages.append('{"ok": true}')
+            turn.events.append({"method": "turn/completed", "params": {"threadId": "thread_1"}})
+            return turn
+
+    monkeypatch.setattr(app_server_runner, "get_codex_app_server_client", lambda command, env, cwd: FakeAppServerClient())
+
+    result = app_server_runner.run_codex_app_server_turn(
+        cd=tmp_path,
+        prompt="review",
+        output_schema=schema,
+        output_file=output,
+        sandbox="workspace-write",
+        timeout_seconds=30,
+        config=ReviewConfig().codex,
+        env={"CODEX_HOME": str(tmp_path / ".codex")},
+        events_file=events,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == {"ok": True}
+    assert captured["cwd"] == tmp_path
+    assert captured["output_schema"]["type"] == "object"
+    assert captured["sandbox"] == "workspace-write"
+    assert events.is_file()
+
+
+def test_app_server_client_recycles_after_age_or_turn_limit(tmp_path: Path) -> None:
+    client = app_server_runner.CodexAppServerClient(
+        command="codex",
+        env={"PULLWISE_CODEX_APP_SERVER_MAX_TURNS": "2", "PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS": "0"},
+        cwd=tmp_path,
+    )
+    client.mark_turn_completed()
+    assert client.should_recycle() is False
+    client.mark_turn_completed()
+    assert client.should_recycle() is True
+    client._turns["active"] = app_server_runner.AppServerTurn(thread_id="active")
+    assert client.should_recycle() is False
+
+    aged = app_server_runner.CodexAppServerClient(
+        command="codex",
+        env={"PULLWISE_CODEX_APP_SERVER_MAX_TURNS": "0", "PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS": "10"},
+        cwd=tmp_path,
+    )
+    aged._started_at = time.monotonic() - 11
+    assert aged.should_recycle() is True
+
+
+def test_codex_turn_uses_app_server_final_message(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     from codereview import codex_runner
 
     checkout = tmp_path / "repo"
@@ -1035,44 +1245,16 @@ def test_codex_exec_recovers_workspace_output_from_json_events(tmp_path: Path, m
     schema = checkout / "schema.json"
     schema.write_text("{}", encoding="utf-8")
     requested_output = tmp_path / "run" / "workers" / "result.json"
-    event_log = tmp_path / "codex-events.jsonl"
     payload = {"languages": ["python"], "shards": []}
-    event_log.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "type": "item.completed",
-                        "item": {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": json.dumps(payload)}],
-                        },
-                    }
-                ),
-                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1}}),
-            ]
-        ),
-        encoding="utf-8",
-    )
 
-    def fake_run_process(command, *, cwd, env=None, timeout=600, queue_wait_ms=0, **kwargs):
-        del env, timeout, queue_wait_ms, kwargs
-        output_arg = Path(command[command.index("--output-last-message") + 1])
-        assert output_arg.parent.is_dir()
-        return ProcessResult(command, str(cwd), 0, "truncated event tail", "", 1, stdout_path=str(event_log))
+    def fake_app_server_turn(**kwargs):
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(json.dumps(payload), encoding="utf-8")
+        return ProcessResult(["codex", "app-server", "turn/start"], str(kwargs["cd"]), 0, "{}", "", 1)
 
-    monkeypatch.setattr(codex_runner, "run_process", fake_run_process)
-    monkeypatch.setattr(
-        codex_runner,
-        "codex_cli_capabilities",
-        lambda command, env=None: codex_runner.CodexCliCapabilities(
-            frozenset(),
-            frozenset({"--cd", "--skip-git-repo-check", "--sandbox", "--output-schema", "--output-last-message", "--json"}),
-        ),
-    )
+    monkeypatch.setattr(codex_runner, "run_codex_app_server_turn", fake_app_server_turn)
 
-    result = codex_runner.run_codex_exec(
+    result = codex_runner.run_codex_turn(
         cd=checkout,
         prompt="review",
         output_schema=schema,
@@ -1109,11 +1291,11 @@ def test_repository_census_failure_includes_process_output(tmp_path: Path, monke
     }
     stderr = "Error: failed to initialize in-process app-server client: Read-only file system (os error 30)"
 
-    def fake_run_codex_exec(**kwargs):
+    def fake_run_codex_turn(**kwargs):
         del kwargs
-        return ProcessResult(["codex", "exec"], str(checkout), 1, "", stderr, 12)
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 1, "", stderr, 12)
 
-    monkeypatch.setattr(census_module, "run_codex_exec", fake_run_codex_exec)
+    monkeypatch.setattr(census_module, "run_codex_turn", fake_run_codex_turn)
     try:
         run_repository_census(checkout, run, inventory, ReviewConfig())
     except RuntimeError as exc:
@@ -1139,38 +1321,11 @@ def test_filesystem_guard_rejects_missing_or_outside_logs(tmp_path: Path) -> Non
     assert "missing" in "; ".join(guard_worker_result(worker, {"files_written": []}))
 
 
-def test_codex_judge_cannot_promote_failed_local_gate(tmp_path: Path) -> None:
+def test_codex_judge_cannot_promote_failed_local_gate(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     ensure_project_files(checkout)
-    fake_codex = write_fake_cli(
-        tmp_path,
-        "fake_codex_judge",
-        r'''
-import json
-import sys
-from pathlib import Path
-
-args = sys.argv[1:]
-out = ""
-for index, arg in enumerate(args):
-    if arg == "--output-last-message" and index + 1 < len(args):
-        out = args[index + 1]
-payload = {
-    "candidate_id": "issue_1",
-    "status": "confirmed",
-    "level": "L2",
-    "safe_to_show_user": True,
-    "reason": "agent tried to promote",
-    "evidence_summary": {"command": "python repro.py", "log_path": "logs/missing.log", "observable": "failure"},
-    "limitations": [],
-}
-Path(out).parent.mkdir(parents=True, exist_ok=True)
-Path(out).write_text(json.dumps(payload), encoding="utf-8")
-''',
-    )
     config = ReviewConfig()
-    config.codex.command = str(fake_codex)
     worker = tmp_path / "worker"
     worker.mkdir()
     repro = {
@@ -1192,6 +1347,12 @@ Path(out).write_text(json.dumps(payload), encoding="utf-8")
         "filesystem_violations": ["log path missing: logs/missing.log"],
     }
 
+    def fail_if_called(**kwargs):
+        del kwargs
+        raise AssertionError("judge should not call app-server when local gate rejects")
+
+    monkeypatch.setattr(judge_runner_module, "run_codex_turn", fail_if_called)
+
     judge = run_judge(tmp_path / "run", {"candidate_id": "issue_1", "issue_id": "issue_1"}, repro, checkout, config)
 
     assert judge["status"] == "rejected"
@@ -1199,38 +1360,11 @@ Path(out).write_text(json.dumps(payload), encoding="utf-8")
     assert "missing" in judge["reason"]
 
 
-def test_codex_judge_confirmed_result_uses_local_verified_evidence(tmp_path: Path) -> None:
+def test_codex_judge_confirmed_result_uses_local_verified_evidence(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     ensure_project_files(checkout)
-    fake_codex = write_fake_cli(
-        tmp_path,
-        "fake_codex_judge_evidence",
-        r'''
-import json
-import sys
-from pathlib import Path
-
-args = sys.argv[1:]
-out = ""
-for index, arg in enumerate(args):
-    if arg == "--output-last-message" and index + 1 < len(args):
-        out = args[index + 1]
-payload = {
-    "candidate_id": "issue_1",
-    "status": "confirmed",
-    "level": "L2",
-    "safe_to_show_user": True,
-    "reason": "agent confirmed",
-    "evidence_summary": {"command": "fake command", "log_path": "logs/fake.log", "observable": "fake output"},
-    "limitations": [],
-}
-Path(out).parent.mkdir(parents=True, exist_ok=True)
-Path(out).write_text(json.dumps(payload), encoding="utf-8")
-''',
-    )
     config = ReviewConfig()
-    config.codex.command = str(fake_codex)
     worker = tmp_path / "worker"
     (worker / "logs").mkdir(parents=True)
     (worker / "logs" / "repro.log").write_text("AttributeError", encoding="utf-8")
@@ -1252,9 +1386,28 @@ Path(out).write_text(json.dumps(payload), encoding="utf-8")
         },
         "filesystem_violations": [],
     }
+    calls = []
+
+    def fake_run_codex_turn(**kwargs):
+        calls.append(kwargs)
+        payload = {
+            "candidate_id": "issue_1",
+            "status": "confirmed",
+            "level": "L2",
+            "safe_to_show_user": True,
+            "reason": "agent confirmed",
+            "evidence_summary": {"command": "fake command", "log_path": "logs/fake.log", "observable": "fake output"},
+            "limitations": [],
+        }
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(json.dumps(payload), encoding="utf-8")
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(judge_runner_module, "run_codex_turn", fake_run_codex_turn)
 
     judge = run_judge(tmp_path / "run", {"candidate_id": "issue_1", "issue_id": "issue_1", "graph_evidence": {"unit_id": "u1", "context_files": ["app.py"], "path_summary": ["handle"]}}, repro, checkout, config)
 
+    assert len(calls) == 1
     assert judge["status"] == "confirmed"
     assert judge["evidence_summary"] == {"command": "python repro.py", "log_path": "logs/repro.log", "observable": "AttributeError"}
 
@@ -1336,6 +1489,29 @@ def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: P
             }
         ]
 
+    def fake_verifiers(candidates: list[dict], graph: dict, config: ReviewConfig, checkout: Path, run: Path) -> list[dict]:
+        del graph, config, checkout, run
+        return [
+            {
+                "candidate_id": str(candidate.get("issue_id") or candidate.get("candidate_id") or ""),
+                "verdict": "reproducible",
+                "claim_survived": True,
+                "graph_path_valid": True,
+                "expected_behavior_supported": True,
+                "reproduction": {
+                    "harness": "local",
+                    "target_test": "",
+                    "commands": [],
+                    "expected_signal": "AttributeError",
+                    "needs_network": False,
+                    "estimated_scope": "targeted",
+                },
+                "rejection_reason": "",
+                "verifier_source": "test",
+            }
+            for candidate in candidates
+        ]
+
     def fake_judge(run: Path, selected: list[dict], repro_results: list[dict], snapshot_repo: Path, config: ReviewConfig) -> list[dict]:
         del run, selected, repro_results, snapshot_repo, config
         return [
@@ -1353,6 +1529,7 @@ def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: P
     patcher = _MonkeyPatch()
     try:
         patcher.setattr(codereview_main, "run_finders_parallel", fake_run_finders)
+        patcher.setattr(codereview_main, "run_candidate_verifiers_parallel", fake_verifiers)
         patcher.setattr(codereview_main, "run_repro_workers_parallel", fake_repro)
         patcher.setattr(codereview_main, "run_judges_parallel", fake_judge)
         final = codereview_main.run_review(checkout, mode="fast")
@@ -1368,19 +1545,6 @@ def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: P
     assert summary["reviewUnits"]["coverage"]["baseline_reviewed_units"] == summary["reviewUnits"]["count"]
     assert (final.parent.parent / "artifacts" / "review-units" / "coverage-executed.json").is_file()
     assert not (final.parent.parent / "artifacts" / "inventory" / "diff.json").exists()
-
-
-def write_fake_cli(directory: Path, name: str, body: str) -> Path:
-    script = directory / f"{name}.py"
-    script.write_text(body.strip() + "\n", encoding="utf-8")
-    if os.name == "nt":
-        wrapper = directory / f"{name}.cmd"
-        wrapper.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
-        return wrapper
-    wrapper = directory / name
-    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
-    wrapper.chmod(0o755)
-    return wrapper
 
 
 if __name__ == "__main__":

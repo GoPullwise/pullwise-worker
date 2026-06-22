@@ -11,7 +11,16 @@ def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
     provider_env = provider_process_env(config)
     return {
         key: provider_env[key]
-        for key in ("HOME", "USERPROFILE", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "PATH")
+        for key in (
+            "HOME",
+            "USERPROFILE",
+            "CODEX_HOME",
+            "CODEX_SQLITE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "PATH",
+        )
         if provider_env.get(key)
     }
 
@@ -186,7 +195,8 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
     current["finders"] = {
         **(current.get("finders") if isinstance(current.get("finders"), dict) else {}),
         "enabled": True,
-        "max_workers": graph_verified_positive_int(graph_config.get("finderMaxParallel"), default=4, minimum=1, maximum=12),
+        "max_workers": graph_verified_positive_int(graph_config.get("finderMaxParallel"), default=6, minimum=1, maximum=6),
+        "turn_parallel": graph_verified_positive_int(graph_config.get("finderTurnParallel"), default=2, minimum=1, maximum=6),
         "timeout_seconds": graph_verified_positive_int(graph_config.get("finderTimeoutSeconds"), default=600, minimum=60, maximum=3600),
     }
     current["repro"] = {
