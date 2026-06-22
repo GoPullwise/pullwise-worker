@@ -42,18 +42,11 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     except ProcessCancelled as exc:
         raise WorkerJobCancelled(str(exc)) from exc
     except Exception as exc:
-        return {
-            "version": "graph-verified-code-review/1",
-            "mode": mode,
-            "scanMode": scan_mode,
-            "scope": "full-repository",
-            "confirmedCount": 0,
-            "rejectedCount": 0,
-            "blockedCount": 1,
-            "debugMarkdown": f"Graph-verified review failed before confirmation: {redact_secrets(str(exc), config)}",
-            "finalJson": {"confirmed": []},
-        }
+        return graph_verified_failed_report(mode, scan_mode, redact_secrets(str(exc), config))
     reports = final_path.parent
+    report_error = graph_verified_report_artifact_error(final_path)
+    if report_error:
+        return graph_verified_failed_report(mode, scan_mode, report_error)
     confirmed = read_json(reports / "confirmed.json", [])
     rejected = read_json(reports / "rejected.json", [])
     final_json = read_json(reports / "final.json", {"confirmed": []})
@@ -78,6 +71,43 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
         "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
+
+
+def graph_verified_failed_report(mode: str, scan_mode: str, error: object) -> dict:
+    return {
+        "version": "graph-verified-code-review/1",
+        "mode": mode,
+        "scanMode": scan_mode,
+        "scope": "full-repository",
+        "confirmedCount": 0,
+        "rejectedCount": 0,
+        "blockedCount": 1,
+        "debugMarkdown": f"Graph-verified review failed before confirmation: {clean_protocol_text(error, 1000)}",
+        "finalJson": {"confirmed": []},
+    }
+
+
+def graph_verified_report_artifact_error(final_path: Path) -> str:
+    if not final_path.is_file():
+        return "GraphVerified final markdown report is missing."
+    reports = final_path.parent
+    checks = (
+        ("confirmed.json", list),
+        ("rejected.json", list),
+        ("final.json", dict),
+        ("summary.json", dict),
+    )
+    for filename, expected_type in checks:
+        path = reports / filename
+        if not path.is_file():
+            return f"GraphVerified report artifact is missing: {filename}."
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return f"GraphVerified report artifact is unreadable: {filename}: {exc}."
+        if not isinstance(payload, expected_type):
+            return f"GraphVerified report artifact has invalid shape: {filename}."
+    return ""
 
 
 def graph_verified_progress_message(value: object) -> str:

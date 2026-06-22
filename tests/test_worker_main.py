@@ -1696,6 +1696,33 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertEqual(events, [{"stage": "graph", "message": "Graph: mapping shards 1/2", "current": 1, "total": 2}])
 
+    def test_run_graph_verified_review_payload_blocks_on_missing_report_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            reports = root / ".codereview" / "runs" / "run_1" / "reports"
+            reports.mkdir(parents=True)
+            final_md = reports / "final.md"
+            final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
+            (reports / "confirmed.json").write_text("[]", encoding="utf-8")
+            (reports / "rejected.json").write_text("[]", encoding="utf-8")
+            (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
+            codereview_main = importlib.import_module("codereview.main")
+
+            with patch.object(codereview_main, "run_review", return_value=final_md):
+                payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    root,
+                )
+
+        self.assertEqual(payload["mode"], "fast")
+        self.assertEqual(payload["confirmedCount"], 0)
+        self.assertEqual(payload["blockedCount"], 1)
+        self.assertNotIn("runId", payload)
+        self.assertIn("summary.json", payload["debugMarkdown"])
+        self.assertIn("failed before confirmation", payload["debugMarkdown"])
+
     def test_run_graph_verified_review_payload_blocks_on_review_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
