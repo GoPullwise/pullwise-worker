@@ -1929,6 +1929,27 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("pullwise-worker", text)
         self.assertIn("scan-summary.log", text)
 
+    def test_worker_logs_rejects_unsafe_service_name_before_journalctl(self) -> None:
+        config = SimpleNamespace(
+            service_name="pullwise-worker/../../evil",
+            log_dir=Path("/var/log/pullwise-worker/wk_1"),
+        )
+
+        with patch.object(worker_main.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+                worker_main.worker_logs(config, lines=5)
+
+        run.assert_not_called()
+
+    def test_service_action_rejects_unsafe_service_name_before_dependency_check(self) -> None:
+        config = SimpleNamespace(service_name="pullwise-worker/../../evil")
+
+        with patch.object(worker_main, "install_ubuntu_2204_dependencies") as install:
+            with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+                worker_main.service_action("restart", config=config)
+
+        install.assert_not_called()
+
     def test_scan_summary_write_rejects_symlinked_log_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2419,6 +2440,33 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("ExecStart=", service_file.read_text(encoding="utf-8"))
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
 
+    def test_watcher_service_unit_rejects_unsafe_service_names(self) -> None:
+        config = SimpleNamespace(
+            worker_env_file="/etc/pullwise-worker/worker.env",
+            worker_bin_path="/usr/local/bin/pullwise-worker",
+            watcher_service_name="pullwise-worker/../../watcher",
+            service_name="pullwise-worker-test",
+        )
+
+        with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+            worker_main.watcher_service_unit(config)
+
+    def test_ensure_lifecycle_watcher_rejects_unsafe_service_name_before_dependency_check(self) -> None:
+        config = SimpleNamespace(
+            worker_env_file="/etc/pullwise-worker/worker.env",
+            worker_bin_path="/usr/local/bin/pullwise-worker",
+            watcher_service_name="pullwise-worker/../../watcher",
+            watcher_service_file="/etc/systemd/system/pullwise-worker-watch.service",
+            watcher_poll_seconds=5,
+            service_name="pullwise-worker-test",
+        )
+
+        with patch.object(worker_main, "install_ubuntu_2204_dependencies") as install:
+            status = worker_main.ensure_lifecycle_watcher(config)
+
+        self.assertEqual(status, 2)
+        install.assert_not_called()
+
     def test_cleanup_expired_failed_checkout_unlinks_symlink_without_touching_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2619,6 +2667,24 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 worker_main.safe_worker_file_unlink(target, root, "pullwise-worker/../../evil")
 
             self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
+    def test_update_worker_rejects_unsafe_service_name_before_dependency_check(self) -> None:
+        config = SimpleNamespace(service_name="pullwise-worker/../../evil")
+
+        with patch.object(worker_main, "install_ubuntu_2204_dependencies") as install:
+            with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+                worker_main.update_worker(config)
+
+        install.assert_not_called()
+
+    def test_uninstall_worker_rejects_unsafe_service_name_before_dependency_check(self) -> None:
+        config = SimpleNamespace(service_name="pullwise-worker/../../evil")
+
+        with patch.object(worker_main, "install_ubuntu_2204_dependencies") as install:
+            with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
+                worker_main.uninstall_worker(config)
+
+        install.assert_not_called()
 
     def test_service_user_doctor_command_exports_codex_sqlite_home(self) -> None:
         cfg = SimpleNamespace(service_user="pw-worker-wk", service_home="/var/lib/pullwise-worker/wk", service_path="/usr/bin")

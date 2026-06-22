@@ -9,11 +9,11 @@ def service_action(
     no_block: bool = False,
     config: WorkerConfig | None = None,
 ) -> int:
+    service_name = safe_worker_service_name(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME)
     dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(["systemctl"], dry_run=dry_run)
     if not dependency_ok:
         print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
         return 1
-    service_name = str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
     command = ["systemctl"]
     if no_block:
         command.append("--no-block")
@@ -36,7 +36,7 @@ def tail_text_lines(path: Path, lines: int) -> list[str]:
 
 def worker_logs(config: WorkerConfig, *, lines: int = 120, follow: bool = False, dry_run: bool = False) -> int:
     safe_lines = max(1, min(1000, int(lines or 120)))
-    service_name = str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
+    service_name = safe_worker_service_name(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME)
     log_dir = Path(getattr(config, "log_dir", None) or tempfile.gettempdir())
     scan_summary = log_dir / "scan-summary.log"
     journal_command = ["journalctl", "-u", service_name, "-n", str(safe_lines), "--no-pager"]
@@ -109,7 +109,7 @@ def journal_log_entry_from_json(raw: str) -> tuple[dict | None, str]:
 
 class WorkerJournalLogTailer:
     def __init__(self, service_name: str, *, since_timestamp: int) -> None:
-        self.service_name = service_name
+        self.service_name = safe_worker_service_name(service_name)
         self.since_timestamp = max(0, int(since_timestamp or time.time()))
         self.cursor = ""
         self.unavailable_reported = False
@@ -241,7 +241,7 @@ class WorkerLogStreamTailer:
     def __init__(self, config: WorkerConfig, session: dict) -> None:
         self.session_id = log_stream_session_id(session)
         self.journal = WorkerJournalLogTailer(
-            str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME,
+            safe_worker_service_name(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME),
             since_timestamp=log_stream_created_at(session),
         )
         self.summary = WorkerFileLogTailer(Path(getattr(config, "log_dir", None) or tempfile.gettempdir()) / "scan-summary.log")
@@ -652,10 +652,11 @@ def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
 
 
 def watcher_service_unit(config: WorkerConfig, *, env_path: Path | None = None, bin_path: Path | None = None) -> str:
-    service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
-    if not service_name:
+    raw_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
+    if not raw_service_name:
         raise ValueError("PULLWISE_WATCHER_SERVICE_NAME is required")
-    worker_name = str(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
+    service_name = safe_worker_service_name(raw_service_name)
+    worker_name = safe_worker_service_name(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME)
     env_file = str(env_path or getattr(config, "worker_env_file", "") or "").strip()
     worker_bin = str(bin_path or getattr(config, "worker_bin_path", "") or "").strip()
     if not env_file or not worker_bin:
@@ -710,17 +711,21 @@ def ensure_lifecycle_watcher(
     bin_path: Path | None = None,
     dry_run: bool = False,
 ) -> int:
+    raw_watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
+    watcher_service_file = Path(str(getattr(config, "watcher_service_file", "") or ""))
+    try:
+        watcher_service_name = safe_worker_service_name(raw_watcher_service_name)
+    except ValueError:
+        watcher_service_name = ""
+    if not watcher_service_name or path_is_root(watcher_service_file):
+        print("watcher service name/file is not configured safely", file=sys.stderr)
+        return 2
     dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(["systemctl"], dry_run=dry_run)
     if not dependency_ok:
         print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
         return 1
     env_file = Path(env_path or config.worker_env_file)
     worker_bin = Path(bin_path or config.worker_bin_path)
-    watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
-    watcher_service_file = Path(str(getattr(config, "watcher_service_file", "") or ""))
-    if not watcher_service_name or path_is_root(watcher_service_file):
-        print("watcher service name/file is not configured safely", file=sys.stderr)
-        return 2
     env_values = {
         "PULLWISE_LIFECYCLE_WATCHER_ENABLED": "1",
         "PULLWISE_WATCHER_SERVICE_NAME": watcher_service_name,
@@ -754,6 +759,7 @@ def ensure_lifecycle_watcher(
 
 
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
+    service_name = safe_worker_service_name(os.environ.get("PULLWISE_SERVICE_NAME", "").strip() or config.service_name)
     dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(
         ["python3.10", "python3-pip", "systemctl", "runuser"],
         dry_run=dry_run,
@@ -766,7 +772,6 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE", "").strip() or config.worker_env_file)
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", "").strip() or config.worker_env_backup_file)
     bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH", "").strip() or config.worker_bin_path)
-    service_name = os.environ.get("PULLWISE_SERVICE_NAME", "").strip() or config.service_name
     install_command = [
         python_bin,
         "-m",
@@ -837,19 +842,21 @@ def uninstall_worker(
 ) -> int:
     if config is None:
         config = WorkerConfig(argparse.Namespace(), require_worker_token=False, validate_server_url=False)
+    service_name = safe_worker_service_name(config.service_name)
+    watcher_enabled = bool(getattr(config, "lifecycle_watcher_enabled", False))
+    watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
+    if watcher_service_name:
+        watcher_service_name = safe_worker_service_name(watcher_service_name)
     dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(["systemctl"], dry_run=dry_run)
     if not dependency_ok:
         print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
         return 1
-    service_name = config.service_name
     service_file = Path(config.service_file)
     config_dir = Path(config.worker_env_file).parent
     log_dir = Path(config.log_dir)
     service_home = Path(config.service_home)
     wrapper = Path(config.worker_bin_path)
     logrotate = Path(config.logrotate_file)
-    watcher_enabled = bool(getattr(config, "lifecycle_watcher_enabled", False))
-    watcher_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
     watcher_service_file = Path(str(getattr(config, "watcher_service_file", "") or ""))
     commands = []
     if stop_service:
