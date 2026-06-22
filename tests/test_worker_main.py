@@ -3662,6 +3662,35 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(len(payload["finalMarkdown"]), worker_main.GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES)
         self.assertEqual(len(payload["debugMarkdown"]), worker_main.GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES)
 
+    def test_run_graph_verified_review_payload_rejects_oversized_json_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            reports = root / ".codereview" / "runs" / "run_1" / "reports"
+            reports.mkdir(parents=True)
+            final_md = reports / "final.md"
+            final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
+            (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
+            (reports / "confirmed.json").write_text("[]", encoding="utf-8")
+            (reports / "rejected.json").write_text("[]", encoding="utf-8")
+            (reports / "final.json").write_bytes(b'{"confirmed":[],"debug":"' + b"x" * worker_main.GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES + b'"}')
+            (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
+            codereview_main = importlib.import_module("codereview.main")
+
+            with patch.object(codereview_main, "run_review", return_value=final_md):
+                payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    root,
+                )
+
+        self.assertEqual(payload["confirmedCount"], 0)
+        self.assertEqual(payload["blockedCount"], 1)
+        self.assertNotIn("runId", payload)
+        self.assertEqual(payload["finalJson"], {"confirmed": []})
+        self.assertIn("final.json", payload["debugMarkdown"])
+        self.assertIn("too large", payload["debugMarkdown"])
+
     def test_run_graph_verified_review_payload_forwards_progress_callback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES = 200_000
 GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES = 50_000
+GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES = 512_000
 
 
 def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
@@ -113,7 +114,7 @@ def graph_verified_report_artifact_error(final_path: Path, checkout_dir: Path | 
         if not path.is_file():
             return f"GraphVerified report artifact is missing: {filename}."
         try:
-            payload = json.loads(read_no_follow_text_file(path))
+            payload = json.loads(read_no_follow_text_file(path, max_bytes=GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             return f"GraphVerified report artifact is unreadable: {filename}: {exc}."
         if not isinstance(payload, expected_type):
@@ -168,7 +169,7 @@ def graph_verified_read_json_artifact(path: Path, default: object) -> object:
     if not graph_verified_regular_file(path):
         return default
     try:
-        return json.loads(read_no_follow_text_file(path))
+        return json.loads(read_no_follow_text_file(path, max_bytes=GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return default
 
