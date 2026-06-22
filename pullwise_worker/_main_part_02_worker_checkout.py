@@ -765,7 +765,7 @@ class Worker:
         if path.is_symlink():
             raise PendingResultUploadRecordError("pending result upload record must not be a symlink")
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
+            record = json.loads(read_no_follow_text_file(path))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PendingResultUploadRecordError(f"pending result upload record is unreadable: {exc}") from exc
         if not isinstance(record, dict):
@@ -1283,6 +1283,20 @@ def write_no_follow_text_file(path: Path, text: str) -> None:
             except OSError:
                 pass
         raise
+
+
+def read_no_follow_text_file(path: Path) -> str:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def append_no_follow_text_file(path: Path, text: str) -> None:

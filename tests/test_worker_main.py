@@ -349,6 +349,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(outside_record.exists())
             self.assertIn("must not be a symlink", worker.last_error or "")
 
+    def test_pending_result_upload_read_rejects_symlink_after_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            outside_record = work_dir / "outside.json"
+            outside_record.write_text(
+                json.dumps({"job_id": "job_race", "payload": {"status": "done"}}),
+                encoding="utf-8",
+            )
+            pending_path = worker_main.result_upload_file(work_dir, "job_race")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.symlink_to(outside_record)
+
+            with patch.object(type(pending_path), "is_symlink", return_value=False):
+                with self.assertRaisesRegex(worker_main.PendingResultUploadRecordError, "unreadable"):
+                    worker.pending_result_upload_record(pending_path)
+
+            self.assertEqual(outside_record.read_text(encoding="utf-8"), json.dumps({"job_id": "job_race", "payload": {"status": "done"}}))
+
     def test_pending_result_upload_rejects_symlinked_spool_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
