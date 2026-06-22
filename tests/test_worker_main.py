@@ -338,6 +338,79 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("Running GraphVerified review", summary_text)
             self.assertIn('"status": "done"', summary_text)
 
+    def test_run_job_cleanup_unlinks_checkout_symlink_without_touching_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_cleanup",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_cleanup_symlink",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+            target = root / "outside"
+            target.mkdir()
+            (target / "keep.txt").write_text("keep", encoding="utf-8")
+
+            def fake_clone(_job: dict, checkout_dir: Path) -> str:
+                checkout_dir.parent.mkdir(parents=True, exist_ok=True)
+                checkout_dir.symlink_to(target, target_is_directory=True)
+                return "abc123"
+
+            with patch.object(worker.client, "progress"), patch.object(
+                worker_main,
+                "clone_repository",
+                side_effect=fake_clone,
+            ), patch.object(worker_main, "enforce_repository_limits"), patch.object(
+                worker_main,
+                "collect_preflight_metadata",
+                return_value={"summary": "preflight ok"},
+            ), patch.object(
+                worker_main,
+                "run_graph_verified_review_payload",
+                return_value={
+                    "version": "graph-verified-code-review/1",
+                    "runId": "gv_run",
+                    "confirmedCount": 0,
+                    "rejectedCount": 0,
+                    "blockedCount": 0,
+                    "debugMarkdown": "",
+                    "finalJson": {"confirmed": []},
+                },
+            ), patch.object(worker_main, "graph_verified_summary_findings", return_value=[]), patch.object(
+                worker,
+                "upload_result_once_or_defer",
+                return_value=True,
+            ):
+                worker.run_job(job)
+
+            checkout = worker_main.checkout_dir_for_job(config.work_dir, "job_cleanup_symlink")
+            self.assertFalse(checkout.exists())
+            self.assertFalse(checkout.is_symlink())
+            self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "keep")
+
     def test_run_job_stops_without_result_when_progress_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -1153,7 +1153,11 @@ class Worker:
                 marker = failed_checkout_marker(checkout_dir)
                 marker.write_text(str(int(time.time()) + job_config.failed_checkout_retention_seconds), encoding="utf-8")
             else:
-                shutil.rmtree(checkout_dir, ignore_errors=True)
+                try:
+                    cleanup_job_checkout(checkout_dir)
+                except Exception as cleanup_exc:
+                    cleanup_error = f"checkout cleanup failed for {job_id}: {redact_secrets(str(cleanup_exc), job_config)}"
+                    self.last_error = f"{self.last_error}; {cleanup_error}"[:500] if self.last_error else cleanup_error[:500]
 
 
 def safe_job_id(value: object) -> str:
@@ -1192,6 +1196,13 @@ def checkout_dir_from_failed_marker(marker: Path) -> Path:
     if not name.endswith(_FAILED_CHECKOUT_MARKER_SUFFIX):
         return marker.with_suffix("")
     return marker.parent / name[: -len(_FAILED_CHECKOUT_MARKER_SUFFIX)]
+
+
+def cleanup_job_checkout(checkout_dir: Path) -> None:
+    if checkout_dir.is_symlink():
+        checkout_dir.unlink(missing_ok=True)
+        return
+    remove_checkout_dir(checkout_dir)
 
 
 def checkout_root_sentinel(work_dir: Path) -> Path:
