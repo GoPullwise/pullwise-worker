@@ -937,14 +937,29 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
         if expires_at <= now_ts:
             if cleanup_checkout_path(checkout):
                 _unlink_path_ignore_errors(marker)
-    entries = sorted(
-        [path for path in config.work_dir.iterdir() if path.is_dir() and path.name not in protected],
-        key=lambda path: path.stat().st_mtime,
-    )
+    entries = cleanup_checkout_candidates(config.work_dir, protected)
     while directory_size(config.work_dir) > config.max_checkout_bytes and entries:
         checkout = entries.pop(0)
         if cleanup_checkout_path(checkout):
             _unlink_path_ignore_errors(failed_checkout_marker(checkout))
+
+
+def cleanup_checkout_candidates(work_dir: Path, protected: set[str]) -> list[Path]:
+    candidates: list[tuple[float, Path]] = []
+    try:
+        entries = list(work_dir.iterdir())
+    except OSError:
+        return []
+    for path in entries:
+        if path.name in protected:
+            continue
+        try:
+            stat_result = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISDIR(stat_result.st_mode) or stat.S_ISLNK(stat_result.st_mode):
+            candidates.append((stat_result.st_mtime, path))
+    return [path for _mtime, path in sorted(candidates, key=lambda item: item[0])]
 
 
 def cleanup_checkout_path(checkout: Path) -> bool:

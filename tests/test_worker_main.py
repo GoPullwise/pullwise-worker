@@ -2244,6 +2244,22 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_cleanup_checkouts_unlinks_broken_symlink_without_following_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            (work_dir / "size.txt").write_text("x", encoding="utf-8")
+            checkout = work_dir / "job_broken_link"
+            checkout.symlink_to(root / "missing-target", target_is_directory=True)
+            config = SimpleNamespace(work_dir=work_dir, max_checkout_bytes=0)
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertFalse(checkout.exists())
+            self.assertFalse(checkout.is_symlink())
+
     def test_checkout_root_sentinel_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
