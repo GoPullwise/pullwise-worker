@@ -1398,6 +1398,25 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(offset, 0)
         self.assertEqual(partial, "")
 
+    def test_file_log_tailer_read_does_not_follow_symlink_after_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            path = root / "scan-summary.log"
+            path.write_text("inside\n", encoding="utf-8")
+            tailer = worker_main.WorkerFileLogTailer(path)
+            outside = root / "outside-summary.log"
+            outside.write_text("outside\n", encoding="utf-8")
+            path.unlink()
+            path.symlink_to(outside)
+
+            with patch.object(worker_main, "regular_log_file", return_value=True):
+                entries, offset, partial = tailer.collect()
+
+            self.assertEqual(entries, [])
+            self.assertEqual(offset, tailer.offset)
+            self.assertEqual(partial, tailer.partial)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
     def test_trim_file_to_last_bytes_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1407,6 +1426,19 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             path.symlink_to(outside)
 
             worker_main.trim_file_to_last_bytes(path, 3)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "0123456789")
+
+    def test_trim_file_to_last_bytes_does_not_follow_symlink_after_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside-summary.log"
+            outside.write_text("0123456789", encoding="utf-8")
+            path = root / "scan-summary.log"
+            path.symlink_to(outside)
+
+            with patch.object(worker_main, "regular_log_file", return_value=True):
+                worker_main.trim_file_to_last_bytes(path, 3)
 
             self.assertEqual(outside.read_text(encoding="utf-8"), "0123456789")
 

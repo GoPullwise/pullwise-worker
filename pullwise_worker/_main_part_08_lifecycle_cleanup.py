@@ -28,7 +28,8 @@ def tail_text_lines(path: Path, lines: int) -> list[str]:
     if not regular_log_file(path):
         return []
     try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+        with open_log_file_no_follow(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read().splitlines()[-lines:]
     except OSError:
         return []
 
@@ -185,7 +186,7 @@ class WorkerFileLogTailer:
         start = 0 if truncated else self.offset
         partial = "" if truncated else self.partial
         try:
-            with self.path.open("rb") as stream:
+            with open_log_file_no_follow(self.path, "rb") as stream:
                 stream.seek(start)
                 chunk = stream.read(max_bytes)
                 next_offset = stream.tell()
@@ -213,6 +214,25 @@ class WorkerFileLogTailer:
 
 def regular_log_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
+
+
+def open_log_file_no_follow(path: Path, mode: str, **kwargs):
+    if "w" in mode:
+        flags = os.O_WRONLY | os.O_TRUNC
+    elif "a" in mode:
+        flags = os.O_WRONLY | os.O_APPEND
+    elif "+" in mode:
+        flags = os.O_RDWR
+    else:
+        flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        return os.fdopen(fd, mode, **kwargs)
+    except Exception:
+        os.close(fd)
+        raise
 
 
 class WorkerLogStreamTailer:
@@ -1008,14 +1028,20 @@ def trim_file_to_last_bytes(path: Path, max_bytes: int) -> None:
     if size <= max_bytes:
         return
     keep = max(1, max_bytes)
-    with path.open("rb") as handle:
-        handle.seek(-keep, os.SEEK_END)
-        data = handle.read()
+    try:
+        with open_log_file_no_follow(path, "rb") as handle:
+            handle.seek(-keep, os.SEEK_END)
+            data = handle.read()
+    except OSError:
+        return
     newline = data.find(b"\n")
     if newline >= 0 and newline + 1 < len(data):
         data = data[newline + 1 :]
-    with path.open("wb") as handle:
-        handle.write(data)
+    try:
+        with open_log_file_no_follow(path, "wb") as handle:
+            handle.write(data)
+    except OSError:
+        return
 
 
 def safe_worker_file_unlink(path: Path, allowed_root: Path, service_name: str) -> None:
