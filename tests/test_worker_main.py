@@ -2579,6 +2579,26 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.kwargs["timeout"], 15)
 
+    def test_journal_log_tailer_bounds_journalctl_lines(self) -> None:
+        tailer = worker_main.WorkerJournalLogTailer("pullwise-worker-wk_1", since_timestamp=1781200000)
+
+        with patch.object(
+            worker_main.subprocess,
+            "run",
+            return_value=worker_main.subprocess.CompletedProcess(["journalctl"], 0, stdout="", stderr=""),
+        ) as run, patch.dict(
+            worker_main.os.environ,
+            {"PULLWISE_LOG_STREAM_JOURNAL_MAX_LINES": "999999"},
+            clear=False,
+        ):
+            entries, cursor = tailer.collect()
+
+        self.assertEqual(entries, [])
+        self.assertEqual(cursor, "")
+        command = run.call_args.args[0]
+        self.assertIn("-n", command)
+        self.assertEqual(command[command.index("-n") + 1], "5000")
+
     def test_graph_verified_review_is_the_only_review_path(self) -> None:
         self.assertFalse(hasattr(worker_main, "run_codex_review"))
         self.assertFalse(hasattr(worker_main, "build_repository_graph_bundle"))

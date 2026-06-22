@@ -132,7 +132,8 @@ class WorkerJournalLogTailer:
     def collect(self) -> tuple[list[dict], str]:
         if self.retry_after and time.time() < self.retry_after:
             return [], self.cursor
-        command = ["journalctl", "-u", self.service_name, "--no-pager", "-o", "json"]
+        max_lines = min(5000, env_int("PULLWISE_LOG_STREAM_JOURNAL_MAX_LINES", 1000, minimum=1))
+        command = ["journalctl", "-u", self.service_name, "--no-pager", "-o", "json", "-n", str(max_lines)]
         if self.cursor:
             command.extend(["--after-cursor", self.cursor])
         else:
