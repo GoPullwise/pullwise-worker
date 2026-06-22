@@ -14,6 +14,10 @@ class WorkerJobCancelled(RuntimeError):
     pass
 
 
+class PendingResultUploadRecordError(PullwiseRequestError):
+    pass
+
+
 def protocol_multiline_text(value: object, max_length: int = PROTOCOL_TEXT_MAX_LENGTH) -> str:
     if value is None:
         return ""
@@ -678,6 +682,15 @@ class Worker:
         for job_id, future, path in done_uploads:
             try:
                 future.result()
+            except PendingResultUploadRecordError as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.last_error = (
+                    f"pending result upload record permanently invalid for {job_id}: "
+                    f"{redact_secrets(str(exc), self.config)}"
+                )[:500]
             except PullwiseHTTPError as exc:
                 if exc.status_code < 500:
                     try:
@@ -708,13 +721,19 @@ class Worker:
             self._pending_result_uploads[job_id] = (future, path)
 
     def upload_pending_result_file(self, path: Path) -> None:
-        record = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PendingResultUploadRecordError(f"pending result upload record is unreadable: {exc}") from exc
         if not isinstance(record, dict):
-            raise PullwiseRequestError("pending result upload record must be an object")
-        job_id = safe_job_id(record.get("job_id"))
+            raise PendingResultUploadRecordError("pending result upload record must be an object")
+        try:
+            job_id = safe_job_id(record.get("job_id"))
+        except ValueError as exc:
+            raise PendingResultUploadRecordError(f"pending result upload job_id is invalid: {exc}") from exc
         payload = record.get("payload")
         if not isinstance(payload, dict):
-            raise PullwiseRequestError("pending result upload payload must be an object")
+            raise PendingResultUploadRecordError("pending result upload payload must be an object")
         self.upload_result_with_retry(job_id, payload)
         path.unlink(missing_ok=True)
 
