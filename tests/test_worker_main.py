@@ -193,6 +193,23 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             ],
         )
 
+    def test_client_rejects_invalid_url_path_segments(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+
+        with self.assertRaisesRegex(worker_main.PullwiseRequestError, "URL path segment is invalid"):
+            client.progress("job\nbad", "ai", 80)
+
+        with self.assertRaisesRegex(worker_main.PullwiseRequestError, "URL path segment is invalid"):
+            client.log_stream_lines("s" * 129, [])
+
     def test_result_upload_defers_retry_without_sleeping_in_job_thread(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)

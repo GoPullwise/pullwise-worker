@@ -891,6 +891,8 @@ def url_path_segment(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         raise PullwiseRequestError("URL path segment is required")
+    if len(text) > 128 or any(char in text for char in "\r\n\x00"):
+        raise PullwiseRequestError("URL path segment is invalid")
     return urllib.parse.quote(text, safe="")
 
 
