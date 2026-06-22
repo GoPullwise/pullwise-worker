@@ -720,6 +720,15 @@ def copy_text_file_no_follow(source: Path, destination: Path) -> None:
     write_no_follow_text_file(destination, read_no_follow_text_file(source))
 
 
+def restore_worker_env_backup(backup_path: Path, env_path: Path) -> None:
+    if not backup_path.exists():
+        return
+    try:
+        copy_text_file_no_follow(backup_path, env_path)
+    except OSError as exc:
+        print(f"failed to restore env file backup: {exc}", file=sys.stderr)
+
+
 def ensure_lifecycle_watcher(
     config: WorkerConfig,
     *,
@@ -822,8 +831,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
             continue
         completed = subprocess.run(command)
         if completed.returncode != 0:
-            if backup_path.exists():
-                copy_text_file_no_follow(backup_path, env_path)
+            restore_worker_env_backup(backup_path, env_path)
             subprocess.run(["systemctl", "restart", service_name])
             return completed.returncode
         if command is install_command:
@@ -831,14 +839,12 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
                 write_worker_wrapper(bin_path, env_path)
                 watcher_code = ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=False)
                 if watcher_code != 0:
-                    if backup_path.exists():
-                        copy_text_file_no_follow(backup_path, env_path)
+                    restore_worker_env_backup(backup_path, env_path)
                     subprocess.run(["systemctl", "restart", service_name])
                     return watcher_code
             except OSError as exc:
                 print(f"failed to write worker wrapper: {exc}", file=sys.stderr)
-                if backup_path.exists():
-                    copy_text_file_no_follow(backup_path, env_path)
+                restore_worker_env_backup(backup_path, env_path)
                 subprocess.run(["systemctl", "restart", service_name])
                 return 1
     return 0

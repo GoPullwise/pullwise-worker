@@ -2746,6 +2746,46 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(backup_path.exists())
             self.assertEqual(outside.read_text(encoding="utf-8"), "PULLWISE_SECRET=1\n")
 
+    def test_update_worker_restarts_service_when_backup_restore_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            env_path = root / "worker.env"
+            env_path.write_text("PULLWISE_EXISTING=1\n", encoding="utf-8")
+            outside_backup = root / "outside-backup.env"
+            outside_backup.write_text("PULLWISE_EXISTING=old\n", encoding="utf-8")
+            backup_path = root / "worker.env.bak"
+            bin_path = root / "pullwise-worker"
+            config = SimpleNamespace(
+                service_name="pullwise-worker-test",
+                service_user="pw-worker-test",
+                service_home=str(root / "home"),
+                service_path="/usr/bin",
+                worker_env_file=str(env_path),
+                worker_env_backup_file=str(backup_path),
+                worker_bin_path=str(bin_path),
+            )
+            run_calls = []
+
+            def fake_run(command):
+                run_calls.append(command)
+                if command == ["systemctl", "stop", "pullwise-worker-test"]:
+                    backup_path.unlink()
+                    backup_path.symlink_to(outside_backup)
+                    return SimpleNamespace(returncode=7)
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
+                worker_main.subprocess,
+                "run",
+                side_effect=fake_run,
+            ):
+                status = worker_main.update_worker(config)
+
+            self.assertEqual(status, 7)
+            self.assertIn(["systemctl", "restart", "pullwise-worker-test"], run_calls)
+            self.assertTrue(backup_path.is_symlink())
+            self.assertEqual(outside_backup.read_text(encoding="utf-8"), "PULLWISE_EXISTING=old\n")
+
     def test_ensure_lifecycle_watcher_service_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
