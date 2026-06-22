@@ -573,6 +573,48 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             result.assert_not_called()
 
+    def test_pending_result_upload_409_is_treated_as_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_pending_cancel")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps({"job_id": "job_pending_cancel", "payload": {"status": "done"}}),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                worker.client,
+                "result",
+                side_effect=worker_main.PullwiseHTTPError("HTTP 409: conflict", 409),
+            ):
+                with self.assertRaises(worker_main.WorkerJobCancelled):
+                    worker.upload_pending_result_file(pending_path)
+
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_exception(worker_main.WorkerJobCancelled("job job_pending_cancel is no longer accepting worker updates"))
+            worker._pending_result_uploads["job_pending_cancel"] = (future, pending_path)
+            worker.job_cancel_event("job_pending_cancel")
+            worker.cancel_server_jobs(["job_pending_cancel"])
+
+            worker.collect_result_uploads()
+
+            self.assertEqual(worker.pending_result_job_ids(), [])
+            self.assertFalse(pending_path.exists())
+            self.assertFalse(worker.job_cancel_requested("job_pending_cancel"))
+            self.assertIn("no longer accepting worker updates", worker.last_error or "")
+            self.assertNotIn("permanently failed", worker.last_error or "")
+
     def test_cancelled_pending_result_upload_is_removed_instead_of_rescheduled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)

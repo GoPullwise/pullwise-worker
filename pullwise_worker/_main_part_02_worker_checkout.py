@@ -680,6 +680,8 @@ class Worker:
                 self.client.result(job_id, payload)
                 return
             except PullwiseHTTPError as exc:
+                if exc.status_code == 409:
+                    raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates") from exc
                 if exc.status_code < 500 or attempt >= self.config.result_upload_attempts:
                     raise
                 last_error = exc
