@@ -88,6 +88,13 @@ def process_cancel_requested() -> bool:
     return bool(event is not None and getattr(event, "is_set", lambda: False)())
 
 
+def raise_if_cancelled_callback_exception(exc: BaseException) -> None:
+    if isinstance(exc, ProcessCancelled):
+        raise exc
+    if process_cancel_requested() or exc.__class__.__name__ == "WorkerJobCancelled":
+        raise ProcessCancelled(str(exc) or "operation cancelled") from exc
+
+
 def run_process(
     command: list[str],
     *,

@@ -9,6 +9,7 @@ from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..utils.jsonl import write_json
 from ..utils.paths import safe_path_component
+from ..utils.process import raise_if_cancelled_callback_exception
 
 
 def run_candidate_verifiers_parallel(
@@ -66,7 +67,8 @@ def _emit_task_progress(
                 "taskId": str(task_id or ""),
             }
         )
-    except Exception:
+    except Exception as exc:
+        raise_if_cancelled_callback_exception(exc)
         return
 
 

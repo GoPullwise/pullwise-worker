@@ -8,6 +8,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..utils.paths import safe_path_component
+from ..utils.process import raise_if_cancelled_callback_exception
 from .validate import local_judge, validate_judge_result
 
 
@@ -67,7 +68,8 @@ def _emit_task_progress(
                 "taskId": str(task_id or ""),
             }
         )
-    except Exception:
+    except Exception as exc:
+        raise_if_cancelled_callback_exception(exc)
         return
 
 

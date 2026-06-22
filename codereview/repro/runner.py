@@ -12,7 +12,7 @@ from ..judge.precheck import verify_repro_events_and_paths
 from ..judge.validate import validate_repro_result
 from ..units.context import unit_file_stem
 from ..utils.paths import safe_path_component
-from ..utils.process import compact_process_output, run_process
+from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception, run_process
 from .filesystem_guard import guard_worker_result
 from .worker_dir import create_worker_dir
 
@@ -70,7 +70,8 @@ def _emit_task_progress(
                 "taskId": str(task_id or ""),
             }
         )
-    except Exception:
+    except Exception as exc:
+        raise_if_cancelled_callback_exception(exc)
         return
 
 

@@ -38,6 +38,7 @@ from .units.coverage import build_unit_coverage, require_full_unit_coverage
 from .units.planner import build_all_review_units
 from .utils.jsonl import write_json, write_jsonl
 from .utils.paths import safe_relative_path
+from .utils.process import raise_if_cancelled_callback_exception
 
 
 ProgressCallback = Callable[[dict], None]
@@ -333,7 +334,8 @@ def _emit_progress(
         payload["runId"] = run_id
     try:
         progress(payload)
-    except Exception:
+    except Exception as exc:
+        raise_if_cancelled_callback_exception(exc)
         return
 
 

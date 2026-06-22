@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import CodexConfig
-from .utils.process import ProcessResult
+from .utils.process import ProcessCancelled, ProcessResult, process_cancel_requested
 
 try:
     import fcntl as _fcntl
@@ -178,6 +178,10 @@ def run_codex_app_server_turn(
                 timeout_seconds=timeout_seconds,
             )
             break
+        except ProcessCancelled:
+            if client is not None:
+                client.close()
+            raise
         except Exception as exc:
             if client is not None:
                 client.close()
@@ -274,6 +278,8 @@ class CodexAppServerClient:
     ) -> AppServerTurn:
         self.ensure_started()
         control_timeout = app_server_control_timeout_seconds(timeout_seconds)
+        if process_cancel_requested():
+            raise ProcessCancelled("codex app-server turn cancelled")
         thread_result = self.request(
             "thread/start",
             {
@@ -289,6 +295,8 @@ class CodexAppServerClient:
             thread_id = str((thread_result or {}).get("threadId") or "")
         if not thread_id:
             raise RuntimeError(f"thread/start did not return a thread id: {thread_result!r}")
+        if process_cancel_requested():
+            raise ProcessCancelled("codex app-server turn cancelled")
         turn = AppServerTurn(thread_id=thread_id)
         with self._lock:
             self._turns[thread_id] = turn
@@ -308,14 +316,26 @@ class CodexAppServerClient:
                 timeout_seconds=control_timeout,
             )
             turn.turn_id = turn.turn_id or str((((turn_result or {}).get("turn") or {}).get("id")) or "")
-            if not turn.completed.wait(max(1, int(timeout_seconds or 600))):
-                self.interrupt_turn(turn)
-                raise TimeoutError(f"codex app-server turn timed out after {timeout_seconds}s")
+            self.wait_for_turn(turn, timeout_seconds)
             self.mark_turn_completed()
             return turn
         finally:
             with self._lock:
                 self._turns.pop(thread_id, None)
+
+    def wait_for_turn(self, turn: AppServerTurn, timeout_seconds: int) -> None:
+        timeout = max(1, int(timeout_seconds or 600))
+        deadline = time.monotonic() + timeout
+        while True:
+            if process_cancel_requested():
+                self.interrupt_turn(turn)
+                raise ProcessCancelled("codex app-server turn cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.interrupt_turn(turn)
+                raise TimeoutError(f"codex app-server turn timed out after {timeout_seconds}s")
+            if turn.completed.wait(min(0.2, max(0.01, remaining))):
+                return
 
     def mark_turn_completed(self) -> None:
         with self._lock:

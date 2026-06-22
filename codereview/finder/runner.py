@@ -9,7 +9,7 @@ from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..graph.ids import short_hash
 from ..units.context import unit_file_stem
-from ..utils.process import compact_process_output
+from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception
 from .tasks import FinderTask
 
 
@@ -199,7 +199,8 @@ def _emit_task_progress(
                 "taskId": str(task_id or ""),
             }
         )
-    except Exception:
+    except Exception as exc:
+        raise_if_cancelled_callback_exception(exc)
         return
 
 

@@ -43,7 +43,7 @@ from codereview.units.coverage import build_unit_coverage
 from codereview.units.context import write_review_units
 from codereview.units.planner import build_all_review_units
 from codereview.units.risk_tags import choose_finders
-from codereview.utils.process import ProcessResult
+from codereview.utils.process import ProcessCancelled, ProcessResult, clear_process_cancel_event, set_process_cancel_event
 
 
 class _MonkeyPatch:
@@ -1213,6 +1213,96 @@ def test_app_server_turn_writes_structured_output_and_turn_events(tmp_path: Path
     assert captured["output_schema"]["type"] == "object"
     assert captured["sandbox"] == "workspace-write"
     assert events.is_file()
+
+
+def test_app_server_client_interrupts_running_turn_when_process_cancelled(tmp_path: Path) -> None:
+    client = app_server_runner.CodexAppServerClient(command="codex", env={}, cwd=tmp_path)
+    client.ensure_started = lambda: None
+    requests = []
+    cancel_event = threading.Event()
+
+    def fake_request(method: str, params: dict | None = None, *, timeout_seconds: int = 30) -> dict:
+        requests.append((method, params or {}, timeout_seconds))
+        if method == "thread/start":
+            return {"thread": {"id": "thread_cancel"}}
+        if method == "turn/start":
+            cancel_event.set()
+            return {"turn": {"id": "turn_cancel"}}
+        if method == "turn/interrupt":
+            return {"ok": True}
+        raise AssertionError(f"unexpected app-server request: {method}")
+
+    client.request = fake_request
+    set_process_cancel_event(cancel_event)
+    try:
+        try:
+            client.run_turn(
+                cwd=tmp_path,
+                prompt="review",
+                output_schema={"type": "object"},
+                sandbox="read-only",
+                model="gpt-5",
+                reasoning_effort="medium",
+                timeout_seconds=1,
+            )
+        except ProcessCancelled:
+            pass
+        else:
+            raise AssertionError("expected app-server turn cancellation to propagate")
+    finally:
+        clear_process_cancel_event()
+
+    assert any(method == "turn/interrupt" for method, _params, _timeout in requests)
+    assert client._turns == {}
+
+
+def test_app_server_turn_propagates_process_cancelled(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+
+    class FakeAppServerClient:
+        def run_turn(self, **kwargs):
+            raise ProcessCancelled("codex app-server turn cancelled")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(app_server_runner, "get_codex_app_server_client", lambda command, env, cwd: FakeAppServerClient())
+
+    try:
+        app_server_runner.run_codex_app_server_turn(
+            cd=tmp_path,
+            prompt="review",
+            output_schema=schema,
+            output_file=tmp_path / "result.json",
+            sandbox="read-only",
+            timeout_seconds=30,
+            config=ReviewConfig().codex,
+            env={"CODEX_HOME": str(tmp_path / ".codex")},
+        )
+    except ProcessCancelled:
+        pass
+    else:
+        raise AssertionError("expected ProcessCancelled to propagate out of app-server turn")
+
+
+def test_graphverified_progress_callback_cancellation_is_not_swallowed() -> None:
+    cancel_event = threading.Event()
+    cancel_event.set()
+    set_process_cancel_event(cancel_event)
+
+    def cancelled_progress(_payload: dict) -> None:
+        raise RuntimeError("job was cancelled")
+
+    try:
+        try:
+            codereview_main._emit_progress(cancelled_progress, "graph", "Graph: mapping shards 0/10")
+        except ProcessCancelled:
+            pass
+        else:
+            raise AssertionError("expected cancelled progress callback to stop the review")
+    finally:
+        clear_process_cancel_event()
 
 
 def test_prepare_app_server_state_creates_codex_dirs_and_config(tmp_path: Path) -> None:

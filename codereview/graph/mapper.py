@@ -10,6 +10,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..utils.jsonl import read_json, write_json
+from ..utils.process import raise_if_cancelled_callback_exception
 from .cache import graph_cache_key
 from .contracts import confidence_for_evidence, language_for_path, risk_tags_for_path
 from .ids import (
@@ -147,7 +148,8 @@ def _emit_task_progress(
                 "taskId": str(task_id or ""),
             }
         )
-    except Exception:
+    except Exception as exc:
+        raise_if_cancelled_callback_exception(exc)
         return
 
 
