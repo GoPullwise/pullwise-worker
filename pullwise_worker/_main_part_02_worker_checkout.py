@@ -1253,7 +1253,24 @@ def safe_job_id(value: object) -> str:
 def validate_claimed_job(job: object) -> dict:
     if not isinstance(job, dict):
         raise ValueError("claim response job must be an object")
-    safe_job_id(job.get("job_id"))
+    try:
+        safe_job_id(job.get("job_id"))
+        if "commit" in job:
+            normalize_git_commit_or_pending(job.get("commit"))
+        if "branch" in job:
+            normalize_git_branch(job.get("branch") or "main")
+        repo = str(job.get("repo") or "").strip()
+        clone_url = job.get("clone_url")
+        clone_token = job.get("clone_token")
+        if repo or clone_url or clone_token_value(clone_token):
+            effective_clone_url = str(clone_url or "")
+            if not effective_clone_url and repo:
+                effective_clone_url = f"{worker_github_web_url()}/{repo}.git"
+            trusted_or_local_clone_url(job, effective_clone_url, clone_token)
+            if clone_token_value(clone_token):
+                trusted_clone_url_for_token(job, effective_clone_url, clone_token)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
     return job
 
 
