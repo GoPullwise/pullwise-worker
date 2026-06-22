@@ -1797,6 +1797,7 @@ _CONFIG_MANIFEST_TYPES = {
     "Dockerfile": "dockerfile",
 }
 _DOCKERFILE_SCAN_MAX_FILES = 50
+_REPOSITORY_TEXT_READ_MAX_BYTES = 512 * 1024
 _DOCKERFILE_SKIP_DIRS = {
     ".git",
     "docs",

@@ -2762,6 +2762,35 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(docker_findings, [])
         self.assertEqual(secret_findings, [])
 
+    def test_repository_text_reads_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            oversized = root / "README.md"
+            oversized.write_text("x" * 11, encoding="utf-8")
+
+            text = worker_main.read_repository_text_file(oversized, max_bytes=10)
+            package_data = worker_main.read_package_json(oversized)
+
+        self.assertIsNone(text)
+        self.assertEqual(package_data, {})
+
+    def test_dockerfile_scan_skips_ignored_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            checkout = Path(tmp_dir)
+            app_dir = checkout / "app"
+            ignored_dir = checkout / "node_modules" / "pkg"
+            app_dir.mkdir()
+            ignored_dir.mkdir(parents=True)
+            (app_dir / "Dockerfile").write_text("COPY missing-file /app/\n", encoding="utf-8")
+            (ignored_dir / "Dockerfile").write_text("COPY ignored-missing /app/\n", encoding="utf-8")
+
+            dockerfiles = [path.relative_to(checkout).as_posix() for path in worker_main.iter_dockerfiles(checkout)]
+            findings = worker_main.dockerfile_missing_source_findings({"job_id": "job_docker_skip"}, checkout)
+
+        self.assertEqual(dockerfiles, ["app/Dockerfile"])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["affectedLocations"][0]["file"], "app/Dockerfile")
+
     def test_worker_wrapper_exports_codex_sqlite_home(self) -> None:
         script = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk/worker.env"))
 

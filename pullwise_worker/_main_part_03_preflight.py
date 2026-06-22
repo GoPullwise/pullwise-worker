@@ -109,7 +109,7 @@ def repository_regular_file(path: Path) -> bool:
         return False
 
 
-def read_repository_text_file(path: Path) -> str | None:
+def read_repository_text_file(path: Path, max_bytes: int = _REPOSITORY_TEXT_READ_MAX_BYTES) -> str | None:
     if not repository_regular_file(path):
         return None
     flags = os.O_RDONLY
@@ -120,18 +120,28 @@ def read_repository_text_file(path: Path) -> str | None:
     except OSError:
         return None
     try:
-        handle = os.fdopen(fd, "r", encoding="utf-8")
-    except OSError:
-        os.close(fd)
-        return None
-    except Exception:
-        os.close(fd)
-        raise
-    try:
-        with handle:
-            return handle.read()
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            return None
+        byte_limit = positive_limit_int(max_bytes, _REPOSITORY_TEXT_READ_MAX_BYTES, minimum=1)
+        if stat_result.st_size > byte_limit:
+            return None
+        chunks = []
+        remaining = byte_limit + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > byte_limit:
+            return None
+        return data.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+    finally:
+        os.close(fd)
 
 
 def repository_path_exists_without_following_symlink(path: Path) -> bool:
@@ -568,22 +578,62 @@ def dockerfile_missing_source_findings(job: dict, checkout_dir: Path) -> list[di
 
 
 def iter_dockerfiles(checkout_dir: Path):
-    candidates = []
     root_dockerfile = checkout_dir / "Dockerfile"
-    if repository_regular_file(root_dockerfile):
-        candidates.append(root_dockerfile)
-    candidates.extend(path for path in checkout_dir.rglob("Dockerfile") if repository_regular_file(path) and path != root_dockerfile)
-    candidates.extend(path for path in checkout_dir.rglob("*.Dockerfile") if repository_regular_file(path))
     yielded = 0
     seen = set()
-    for path in sorted(candidates):
-        if yielded >= _DOCKERFILE_SCAN_MAX_FILES:
-            return
-        if path in seen or not dockerfile_scan_allowed(path, checkout_dir):
+    for path in iter_dockerfile_candidates(checkout_dir):
+        if path in seen:
             continue
         seen.add(path)
         yielded += 1
         yield path
+        if yielded >= _DOCKERFILE_SCAN_MAX_FILES:
+            return
+
+
+def iter_dockerfile_candidates(checkout_dir: Path):
+    root_dockerfile = checkout_dir / "Dockerfile"
+    if repository_regular_file(root_dockerfile):
+        yield root_dockerfile
+    stack = [checkout_dir]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name == ".git":
+                continue
+            path = Path(entry.path)
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if dockerfile_directory_scan_allowed(path, checkout_dir):
+                        stack.append(path)
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if path == root_dockerfile or not dockerfile_name_matches(path):
+                continue
+            if dockerfile_scan_allowed(path, checkout_dir):
+                yield path
+
+
+def dockerfile_name_matches(path: Path) -> bool:
+    name = path.name
+    return name == "Dockerfile" or name.endswith(".Dockerfile")
+
+
+def dockerfile_directory_scan_allowed(path: Path, checkout_dir: Path) -> bool:
+    try:
+        relative = path.relative_to(checkout_dir)
+    except ValueError:
+        return False
+    parts = [part.lower() for part in relative.parts]
+    return not any(part in _DOCKERFILE_SKIP_DIRS for part in parts)
 
 
 def dockerfile_scan_allowed(path: Path, checkout_dir: Path) -> bool:
