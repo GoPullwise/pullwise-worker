@@ -2792,6 +2792,39 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected worker service name"):
             worker_main.watcher_service_unit(config)
 
+    def test_watcher_service_unit_rejects_unsafe_unit_paths(self) -> None:
+        config = SimpleNamespace(
+            worker_env_file="/etc/pullwise-worker/worker.env\nExecStart=/bin/sh",
+            worker_bin_path="/usr/local/bin/pullwise-worker",
+            watcher_service_name="pullwise-worker-watcher",
+            service_name="pullwise-worker-test",
+        )
+
+        with self.assertRaisesRegex(ValueError, "worker env file path must be single-line"):
+            worker_main.watcher_service_unit(config)
+
+        config.worker_env_file = "relative.env"
+        with self.assertRaisesRegex(ValueError, "worker env file path must be an absolute non-root path"):
+            worker_main.watcher_service_unit(config)
+
+        config.worker_env_file = "/etc/pullwise-worker/worker.env"
+        config.worker_bin_path = "/usr/local/bin/pullwise-worker\nEnvironment=BAD=1"
+        with self.assertRaisesRegex(ValueError, "worker binary path must be single-line"):
+            worker_main.watcher_service_unit(config)
+
+    def test_watcher_service_unit_accepts_absolute_unit_paths(self) -> None:
+        config = SimpleNamespace(
+            worker_env_file="/etc/pullwise-worker/worker.env",
+            worker_bin_path="/usr/local/bin/pullwise-worker",
+            watcher_service_name="pullwise-worker-watcher",
+            service_name="pullwise-worker-test",
+        )
+
+        unit = worker_main.watcher_service_unit(config)
+
+        self.assertIn("EnvironmentFile=/etc/pullwise-worker/worker.env", unit)
+        self.assertIn("ExecStart=/usr/local/bin/pullwise-worker watch", unit)
+
     def test_ensure_lifecycle_watcher_rejects_unsafe_service_name_before_dependency_check(self) -> None:
         config = SimpleNamespace(
             worker_env_file="/etc/pullwise-worker/worker.env",

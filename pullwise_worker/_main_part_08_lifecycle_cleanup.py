@@ -651,16 +651,26 @@ def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
     bin_path.chmod(0o755)
 
 
+def systemd_unit_path_text(value: object, label: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{label} path is required")
+    if any(char in text for char in "\r\n\x00"):
+        raise ValueError(f"{label} path must be single-line")
+    path = Path(text)
+    if not path.is_absolute() or path_is_root(path):
+        raise ValueError(f"{label} path must be an absolute non-root path")
+    return text
+
+
 def watcher_service_unit(config: WorkerConfig, *, env_path: Path | None = None, bin_path: Path | None = None) -> str:
     raw_service_name = str(getattr(config, "watcher_service_name", "") or "").strip()
     if not raw_service_name:
         raise ValueError("PULLWISE_WATCHER_SERVICE_NAME is required")
     service_name = safe_worker_service_name(raw_service_name)
     worker_name = safe_worker_service_name(getattr(config, "service_name", None) or DEFAULT_SERVICE_NAME)
-    env_file = str(env_path or getattr(config, "worker_env_file", "") or "").strip()
-    worker_bin = str(bin_path or getattr(config, "worker_bin_path", "") or "").strip()
-    if not env_file or not worker_bin:
-        raise ValueError("worker env file and bin path are required")
+    env_file = systemd_unit_path_text(env_path or getattr(config, "worker_env_file", ""), "worker env file")
+    worker_bin = systemd_unit_path_text(bin_path or getattr(config, "worker_bin_path", ""), "worker binary")
     return f"""[Unit]
 Description=Pullwise Worker Watcher {worker_name}
 After=network-online.target
