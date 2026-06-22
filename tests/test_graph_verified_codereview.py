@@ -1762,6 +1762,48 @@ def test_app_server_turn_writes_structured_output_and_turn_events(tmp_path: Path
     assert events.is_file()
 
 
+def test_app_server_turn_does_not_follow_output_or_events_symlinks(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    schema = tmp_path / "schema.json"
+    schema.write_text(json.dumps({"type": "object"}), encoding="utf-8")
+    outside_output = tmp_path / "outside-result.json"
+    outside_output.write_text('{"outside": true}', encoding="utf-8")
+    outside_events = tmp_path / "outside-events.jsonl"
+    outside_events.write_text('{"outside": true}\n', encoding="utf-8")
+    output = tmp_path / "result.json"
+    events = tmp_path / "events.jsonl"
+    output.symlink_to(outside_output)
+    events.symlink_to(outside_events)
+
+    class FakeAppServerClient:
+        def run_turn(self, **kwargs):
+            del kwargs
+            turn = app_server_runner.AppServerTurn(thread_id="thread_1")
+            turn.assistant_messages.append('{"ok": true}')
+            turn.events.append({"method": "turn/completed"})
+            return turn
+
+    monkeypatch.setattr(app_server_runner, "get_codex_app_server_client", lambda command, env, cwd: FakeAppServerClient())
+
+    result = app_server_runner.run_codex_app_server_turn(
+        cd=tmp_path,
+        prompt="review",
+        output_schema=schema,
+        output_file=output,
+        sandbox="workspace-write",
+        timeout_seconds=30,
+        config=ReviewConfig().codex,
+        env={"CODEX_HOME": str(tmp_path / ".codex")},
+        events_file=events,
+    )
+
+    assert result.returncode == 0
+    assert not output.is_symlink()
+    assert not events.is_symlink()
+    assert json.loads(output.read_text(encoding="utf-8")) == {"ok": True}
+    assert outside_output.read_text(encoding="utf-8") == '{"outside": true}'
+    assert outside_events.read_text(encoding="utf-8") == '{"outside": true}\n'
+
+
 def test_app_server_client_interrupts_running_turn_when_process_cancelled(tmp_path: Path) -> None:
     client = app_server_runner.CodexAppServerClient(command="codex", env={}, cwd=tmp_path)
     client.ensure_started = lambda: None
@@ -1873,6 +1915,21 @@ def test_prepare_app_server_state_creates_codex_dirs_and_config(tmp_path: Path) 
     config_path.write_text("model = \"gpt-5\"\n", encoding="utf-8")
     app_server_runner.prepare_app_server_state(env)
     assert config_path.read_text(encoding="utf-8") == "model = \"gpt-5\"\n"
+
+
+def test_prepare_app_server_state_does_not_follow_config_symlink(tmp_path: Path) -> None:
+    codex_home = tmp_path / "home" / ".codex"
+    codex_home.mkdir(parents=True)
+    outside = tmp_path / "outside-config.toml"
+    outside.write_text("outside\n", encoding="utf-8")
+    config_path = codex_home / "config.toml"
+    config_path.symlink_to(outside)
+
+    app_server_runner.prepare_app_server_state({"CODEX_HOME": str(codex_home)})
+
+    assert not config_path.is_symlink()
+    assert config_path.read_text(encoding="utf-8") == ""
+    assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
 def test_app_server_state_lock_reports_busy_process_on_posix(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import CodexConfig
+from .utils.jsonl import write_text
 from .utils.process import ProcessCancelled, ProcessResult, process_cancel_requested
 
 try:
@@ -117,8 +118,8 @@ def prepare_app_server_state(env: dict[str, str] | None) -> None:
     if not codex_home:
         return
     config_path = Path(codex_home) / "config.toml"
-    if not config_path.exists():
-        config_path.write_text("", encoding="utf-8")
+    if config_path.is_symlink() or not config_path.exists():
+        write_text(config_path, "")
 
 
 def app_server_state_lock_path(env: dict[str, str] | None) -> Path | None:
@@ -201,15 +202,13 @@ def run_codex_app_server_turn(
     duration_ms = int((time.monotonic() - started) * 1000)
     events_text = "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in turn.events)
     if events_file is not None:
-        events_file.parent.mkdir(parents=True, exist_ok=True)
-        events_file.write_text(events_text, encoding="utf-8")
+        write_text(events_file, events_text)
     if turn.error:
         return ProcessResult(process_command, str(cd), 1, events_text[-65536:], turn.error, duration_ms, stdout_path=str(events_file or ""))
     text = final_assistant_text(turn)
     if not text:
         return ProcessResult(process_command, str(cd), 1, events_text[-65536:], "codex app-server turn completed without assistant output", duration_ms, stdout_path=str(events_file or ""))
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(text, encoding="utf-8")
+    write_text(output_file, text)
     return ProcessResult(process_command, str(cd), 0, events_text[-65536:], "", duration_ms, stdout_path=str(events_file or ""))
 
 
