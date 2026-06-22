@@ -2029,6 +2029,21 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "keep")
 
+    def test_checkout_root_sentinel_does_not_follow_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            outside = root / "outside-sentinel"
+            outside.write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            worker_main.checkout_root_sentinel(work_dir).symlink_to(outside)
+
+            owned = worker_main.checkout_root_is_owned(work_dir)
+
+            self.assertFalse(owned)
+            self.assertTrue(worker_main.checkout_root_sentinel(work_dir).is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "pullwise-worker checkout root\n")
+
     def test_failed_checkout_marker_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2064,6 +2079,28 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertTrue(checkout.exists())
             self.assertFalse(marker.exists())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "0")
+
+    def test_cleanup_failed_checkout_marker_read_does_not_follow_symlink_after_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            checkout = work_dir / "job_marker_race"
+            checkout.mkdir()
+            (checkout / "keep.txt").write_text("keep", encoding="utf-8")
+            outside = root / "outside-marker"
+            outside.write_text("0", encoding="utf-8")
+            marker = worker_main.failed_checkout_marker(checkout)
+            marker.symlink_to(outside)
+            config = SimpleNamespace(work_dir=work_dir, max_checkout_bytes=1024 * 1024)
+
+            with patch.object(type(marker), "is_symlink", return_value=False):
+                worker_main.cleanup_checkouts(config)
+
+            self.assertTrue(checkout.exists())
+            self.assertTrue(marker.is_symlink())
             self.assertEqual(outside.read_text(encoding="utf-8"), "0")
 
     def test_cleanup_failed_checkout_ignores_unreadable_marker_and_continues(self) -> None:

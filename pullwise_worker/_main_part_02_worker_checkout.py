@@ -1335,16 +1335,25 @@ def checkout_root_sentinel(work_dir: Path) -> Path:
 
 def checkout_root_is_owned(work_dir: Path) -> bool:
     sentinel = checkout_root_sentinel(work_dir)
-    if sentinel.is_file():
+    if checkout_root_sentinel_is_valid(sentinel):
         return True
     entries = [path for path in work_dir.iterdir() if path.name not in _CHECKOUT_RUNTIME_DIR_NAMES]
     if entries:
         return False
     try:
-        sentinel.write_text("pullwise-worker checkout root\n", encoding="utf-8")
+        write_no_follow_text_file(sentinel, "pullwise-worker checkout root\n")
     except OSError:
         return False
     return True
+
+
+def checkout_root_sentinel_is_valid(sentinel: Path) -> bool:
+    try:
+        if not stat.S_ISREG(sentinel.lstat().st_mode):
+            return False
+        return read_no_follow_text_file(sentinel) == "pullwise-worker checkout root\n"
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def remove_checkout_dir(checkout_dir: Path) -> None:

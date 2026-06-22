@@ -932,9 +932,9 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
             _unlink_path_ignore_errors(marker)
             continue
         try:
-            expires_at = int(marker.read_text(encoding="utf-8").strip() or "0")
+            expires_at = int(read_no_follow_text_file(marker).strip() or "0")
         except (OSError, UnicodeDecodeError, ValueError):
-            expires_at = 0
+            continue
         if expires_at <= now_ts:
             if cleanup_checkout_path(checkout):
                 _unlink_path_ignore_errors(marker)
