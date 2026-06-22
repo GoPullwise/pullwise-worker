@@ -636,7 +636,7 @@ def build_pipeline_summary(
 
 def _graph_repair_tasks(repairs: list[dict], *, config: object, start_index: int) -> list[dict]:
     tasks: list[dict] = []
-    max_files = max(1, int(getattr(getattr(config, "graph", object()), "max_shard_files", 25) or 25))
+    max_files = _graph_repair_task_file_limit(config)
     for repair in repairs:
         if not isinstance(repair, dict) or repair.get("type") != "remap_files":
             continue
@@ -656,6 +656,12 @@ def _graph_repair_tasks(repairs: list[dict], *, config: object, start_index: int
                 }
             )
     return tasks
+
+
+def _graph_repair_task_file_limit(config: object) -> int:
+    graph_config = getattr(config, "graph", object())
+    shard_limit = max(1, int(getattr(graph_config, "max_shard_files", 25) or 25))
+    return min(shard_limit, 25)
 
 
 def _repair_task_count(history: list[dict]) -> int:

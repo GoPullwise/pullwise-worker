@@ -856,6 +856,16 @@ def test_graph_repair_tasks_chunk_missing_files_by_shard_limit() -> None:
     assert all(len(task["files"]) <= config.graph.max_shard_files for task in tasks)
 
 
+def test_graph_repair_tasks_keep_conservative_file_limit_when_shards_are_large() -> None:
+    config = ReviewConfig()
+    config.graph.max_shard_files = 200
+    repairs = [{"type": "remap_files", "files": [f"pkg/file_{index:03d}.py" for index in range(85)], "reason": "missing"}]
+
+    tasks = codereview_main._graph_repair_tasks(repairs, config=config, start_index=15)
+
+    assert [len(task["files"]) for task in tasks] == [25, 25, 25, 10]
+
+
 def test_graph_quality_gate_failure_message_uses_full_missing_counts() -> None:
     message = codereview_main._graph_quality_gate_failure_message(
         {
