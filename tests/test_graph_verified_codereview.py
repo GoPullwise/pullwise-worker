@@ -34,6 +34,7 @@ from codereview.judge.validate import local_judge
 from codereview.report.render import collect_confirmed, collect_rejected, render_final_report
 from codereview.repository.snapshot import analyze_repository_snapshot
 from codereview.repository.symbols import map_repository_symbols
+from codereview.repro import runner as repro_runner_module
 from codereview.repro.filesystem_guard import guard_worker_result
 from codereview.repro.runner import git_status_porcelain, worker_env
 from codereview.repro.worker_dir import create_worker_dir
@@ -1346,6 +1347,52 @@ def test_repro_worker_dir_uses_snapshot_repo_without_extra_checkouts(tmp_path: P
         "tmp",
     ]
     assert (worker / "input_candidate.json").is_file()
+
+
+def test_repro_worker_dir_replaces_symlink_without_touching_target(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    (checkout / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    target = tmp_path / "outside"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+    worker = tmp_path / "workers" / "issue_1"
+    worker.parent.mkdir()
+    worker.symlink_to(target, target_is_directory=True)
+
+    create_worker_dir(checkout, worker, {"candidate_id": "issue_1"})
+
+    assert worker.is_dir()
+    assert not worker.is_symlink()
+    assert (worker / "repo" / "app.py").is_file()
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_repro_parallel_blocks_one_failed_worker_and_keeps_others(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    config = ReviewConfig()
+    config.repro.enabled = True
+    config.repro.max_workers = 2
+    checkout = tmp_path / "repo"
+    run = tmp_path / "run"
+    checkout.mkdir()
+    run.mkdir()
+    candidates = [{"issue_id": "bad"}, {"issue_id": "ok"}]
+
+    def fake_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewConfig) -> dict:
+        del checkout, run, config
+        if candidate["issue_id"] == "bad":
+            raise RuntimeError("setup exploded")
+        return {"candidate_id": "ok", "status": "reproduced"}
+
+    monkeypatch.setattr(repro_runner_module, "run_repro_worker", fake_repro_worker)
+
+    results = repro_runner_module.run_repro_workers_parallel(checkout, run, candidates, config)
+
+    assert [result["candidate_id"] for result in results] == ["bad", "ok"]
+    assert results[0]["status"] == "blocked"
+    assert "RuntimeError: setup exploded" in results[0]["blocked_reason"]
+    assert results[0]["event_precheck"]["status"] == "passed"
+    assert results[1]["status"] == "reproduced"
 
 
 def test_worker_env_and_codex_base_env_are_isolated(tmp_path: Path) -> None:

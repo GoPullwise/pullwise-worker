@@ -36,7 +36,10 @@ def run_repro_workers_parallel(
         total = len(futures)
         for future in concurrent.futures.as_completed(futures):
             index, candidate = futures[future]
-            results[index] = future.result()
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                results[index] = blocked_repro_worker_exception(run, candidate, exc)
             completed += 1
             _emit_task_progress(
                 progress,
@@ -47,6 +50,25 @@ def run_repro_workers_parallel(
                 task_id=candidate.get("issue_id") or candidate.get("candidate_id"),
             )
     return [result for result in results if result is not None]
+
+
+def blocked_repro_worker_exception(run: Path, candidate: dict, exc: Exception) -> dict:
+    issue_id = safe_path_component(candidate.get("issue_id") or candidate.get("candidate_id"), default="candidate")
+    worker = run / "workers" / issue_id
+    reason = f"repro worker failed before producing a result: {type(exc).__name__}: {exc}"
+    payload = {
+        "candidate_id": issue_id,
+        "worker": str(worker),
+        "process": {"returncode": None, "timed_out": False, "stdout": "", "stderr": reason},
+        "result": blocked_repro_result(issue_id, reason),
+        "status": "blocked",
+        "blocked_reason": reason,
+        "filesystem_violations": [],
+        "checkout_status_before": [],
+        "checkout_status_after": [],
+    }
+    payload["event_precheck"] = verify_repro_events_and_paths(payload)
+    return payload
 
 
 def _emit_task_progress(

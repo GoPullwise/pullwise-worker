@@ -10,10 +10,7 @@ from ..utils.process import run_process
 
 
 def create_worker_dir(checkout: Path, worker: Path, candidate: dict) -> Path:
-    if worker.exists():
-        if not is_within(worker, worker.parent):
-            raise RuntimeError(f"refusing to remove worker outside worker root: {worker}")
-        shutil.rmtree(worker)
+    _reset_worker_dir(worker)
     ensure_dir(worker.parent)
     ensure_dir(worker)
     repo = worker / "repo"
@@ -38,6 +35,20 @@ def create_worker_dir(checkout: Path, worker: Path, candidate: dict) -> Path:
     (worker / "input_candidate.json").write_text(payload, encoding="utf-8")
     (worker / "candidate.json").write_text(payload, encoding="utf-8")
     return worker
+
+
+def _reset_worker_dir(worker: Path) -> None:
+    if not worker.exists() and not worker.is_symlink():
+        return
+    if worker.is_symlink():
+        worker.unlink()
+        return
+    if not is_within(worker, worker.parent):
+        raise RuntimeError(f"refusing to remove worker outside worker root: {worker}")
+    if worker.is_dir():
+        shutil.rmtree(worker)
+    else:
+        worker.unlink()
 
 
 def _copytree_ignore(directory: str, names: list[str]) -> set[str]:
