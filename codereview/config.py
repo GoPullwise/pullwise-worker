@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+from .utils.jsonl import read_json
 
 
 MODE_BUDGETS = {
@@ -160,7 +161,7 @@ def _section(source: dict, key: str) -> dict:
 
 def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewConfig:
     path = checkout / ".codereview" / "config.json"
-    raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    raw = read_json(path, default={})
     if not isinstance(raw, dict):
         raw = {}
     review_units = _section(raw, "review")

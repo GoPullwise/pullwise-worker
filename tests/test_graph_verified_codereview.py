@@ -456,6 +456,19 @@ def test_default_finder_batch_width_is_six(tmp_path: Path) -> None:
     assert config.finders.turn_parallel == 1
 
 
+def test_load_config_does_not_follow_symlinked_config(tmp_path: Path) -> None:
+    root = tmp_path / ".codereview"
+    root.mkdir()
+    outside = tmp_path / "outside-config.json"
+    outside.write_text(json.dumps({"mode": "deep", "finders": {"max_workers": 1}}), encoding="utf-8")
+    (root / "config.json").symlink_to(outside)
+
+    config = load_config(tmp_path)
+
+    assert config.mode == "standard"
+    assert config.finders.max_workers == 6
+
+
 def test_run_finders_batches_tasks_into_single_app_server_waves(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     run = checkout / ".codereview" / "runs" / "run_1"
