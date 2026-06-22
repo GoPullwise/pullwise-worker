@@ -666,11 +666,7 @@ class Worker:
 
     def pending_result_job_ids(self) -> list[str]:
         with self._pending_result_uploads_lock:
-            return [
-                job_id
-                for job_id, (future, _path) in self._pending_result_uploads.items()
-                if not future.done()
-            ]
+            return list(self._pending_result_uploads.keys())
 
     def collect_result_uploads(self) -> None:
         done_uploads: list[tuple[str, concurrent.futures.Future[None], Path]] = []

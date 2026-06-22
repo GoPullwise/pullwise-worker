@@ -168,6 +168,28 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(pending_path.with_suffix(".failed.json").exists())
             self.assertIn("permanently failed", worker.last_error or "")
 
+    def test_done_pending_result_upload_still_renews_job_until_collected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_retry")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(json.dumps({"job_id": "job_retry", "payload": {"status": "done"}}), encoding="utf-8")
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_exception(worker_main.PullwiseRequestError("offline"))
+            worker._pending_result_uploads["job_retry"] = (future, pending_path)
+
+            self.assertEqual(worker.pending_result_job_ids(), ["job_retry"])
+
     def test_heartbeat_payload_does_not_report_capacity_or_free_slots(self) -> None:
         config = SimpleNamespace(
             server_url="https://pullwise.example",
