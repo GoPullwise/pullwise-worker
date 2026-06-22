@@ -476,6 +476,27 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             result.assert_not_called()
 
+    def test_cancelled_pending_result_upload_is_not_sent_when_cancel_arrives_before_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker.cancel_server_jobs(["job_pending_cancel"])
+
+            with patch.object(worker.client, "result") as result:
+                with self.assertRaises(worker_main.WorkerJobCancelled):
+                    worker.upload_result_with_retry("job_pending_cancel", {"status": "done"})
+
+            result.assert_not_called()
+
     def test_cancelled_pending_result_upload_is_removed_instead_of_rescheduled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
@@ -500,6 +521,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(worker.pending_result_job_ids(), [])
             self.assertFalse(pending_path.exists())
+            self.assertFalse(worker.job_cancel_requested("job_pending_cancel"))
             self.assertIn("no longer accepting worker updates", worker.last_error or "")
 
     def test_heartbeat_payload_does_not_report_capacity_or_free_slots(self) -> None:

@@ -380,8 +380,10 @@ class Worker:
                 except ValueError:
                     continue
                 event = self._job_cancel_events.get(job_id)
-                if event is not None:
-                    event.set()
+                if event is None:
+                    event = threading.Event()
+                    self._job_cancel_events[job_id] = event
+                event.set()
 
     def clear_job_cancel_event(self, job_id: str, event: threading.Event) -> None:
         try:
@@ -391,6 +393,14 @@ class Worker:
         with self._job_cancel_events_lock:
             if self._job_cancel_events.get(job_id) is event:
                 self._job_cancel_events.pop(job_id, None)
+
+    def clear_job_cancel_event_by_id(self, job_id: str) -> None:
+        try:
+            job_id = safe_job_id(job_id)
+        except ValueError:
+            return
+        with self._job_cancel_events_lock:
+            self._job_cancel_events.pop(job_id, None)
 
     def job_cancel_requested(self, job_id: str) -> bool:
         try:
@@ -731,6 +741,7 @@ class Worker:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
+                self.clear_job_cancel_event_by_id(job_id)
                 self.last_error = redact_secrets(str(exc), self.config)[:500]
             except PullwiseHTTPError as exc:
                 if exc.status_code < 500:
