@@ -966,6 +966,19 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             finally:
                 clear_process_cancel_event()
 
+    def test_process_runner_rejects_symlinked_log_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside_logs = root / "outside-logs"
+            outside_logs.mkdir()
+            log_dir = root / "process-logs"
+            log_dir.symlink_to(outside_logs, target_is_directory=True)
+
+            with self.assertRaisesRegex(OSError, "symlink"):
+                run_process([sys.executable, "-c", "print('ok')"], cwd=root, log_dir=log_dir)
+
+            self.assertEqual(list(outside_logs.iterdir()), [])
+
     def test_run_job_marks_all_blocked_graph_verified_report_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

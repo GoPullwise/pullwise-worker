@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import tempfile
 import threading
@@ -8,6 +9,8 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from .paths import ensure_dir
 
 
 _PROCESS_CANCEL_STATE = threading.local()
@@ -47,15 +50,32 @@ class ProcessResult:
 
 
 def _tail_text(path: Path, limit: int = 65536) -> str:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = -1
     try:
-        size = path.stat().st_size
-        with path.open("rb") as handle:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            size = os.fstat(handle.fileno()).st_size
             if size > limit:
                 handle.seek(-limit, 2)
             data = handle.read()
     except OSError:
         return ""
+    finally:
+        if fd >= 0:
+            os.close(fd)
     return data.decode("utf-8", errors="replace")
+
+
+def _create_log_file(path: Path):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, "wb")
 
 
 def compact_process_output(result: object, *, limit: int = 700) -> str:
@@ -109,13 +129,13 @@ def run_process(
     started = time.monotonic()
     cwd_key = hashlib.sha256(str(cwd.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:16]
     log_root = log_dir or (Path(tempfile.gettempdir()) / "pullwise-codereview-process-logs" / cwd_key)
-    log_root.mkdir(parents=True, exist_ok=True)
+    ensure_dir(log_root)
     prefix = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in (command[0] if command else "process"))
     stamp = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
     stdout_path = log_root / f"{prefix}-{stamp}.stdout.log"
     stderr_path = log_root / f"{prefix}-{stamp}.stderr.log"
     try:
-        with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+        with _create_log_file(stdout_path) as stdout_file, _create_log_file(stderr_path) as stderr_file:
             stdin_pipe = subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL
             process = subprocess.Popen(
                 command,
