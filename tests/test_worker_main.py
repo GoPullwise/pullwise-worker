@@ -3235,11 +3235,18 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
     def test_remote_uninstall_marker_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            marker = root / "uninstall.marker"
+            service_home = root / "service-home"
+            service_home.mkdir()
+            marker = service_home / "uninstall.marker"
             outside = root / "outside-marker"
             outside.write_text("outside", encoding="utf-8")
             marker.symlink_to(outside)
-            config = SimpleNamespace(uninstall_marker_file=str(marker), worker_id="wk_123")
+            config = SimpleNamespace(
+                service_name="pullwise-worker-wk_123",
+                service_home=str(service_home),
+                uninstall_marker_file=str(marker),
+                worker_id="wk_123",
+            )
 
             written = worker_main.write_remote_uninstall_marker(config)
 
@@ -3247,6 +3254,17 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(marker.is_symlink())
             self.assertEqual(marker.read_text(encoding="utf-8"), "wk_123\n")
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+
+    def test_remote_uninstall_marker_rejects_path_outside_worker_roots(self) -> None:
+        config = SimpleNamespace(
+            service_name="pullwise-worker-wk_123",
+            service_home="/var/lib/pullwise-worker/wk_123",
+            uninstall_marker_file="/etc/passwd",
+            worker_id="wk_123",
+        )
+
+        with self.assertRaisesRegex(ValueError, "outside worker-owned paths"):
+            worker_main.remote_uninstall_marker_path(config)
 
     def test_directory_size_does_not_follow_symlinked_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

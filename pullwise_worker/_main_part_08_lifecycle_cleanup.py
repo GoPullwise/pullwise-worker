@@ -444,7 +444,27 @@ def remote_uninstall_marker_path(config: WorkerConfig) -> Path:
     marker = Path(marker_text)
     if not marker.is_absolute() or path_is_root(marker):
         raise ValueError(f"refusing to use unsafe uninstall marker path: {marker}")
+    allowed_roots: list[Path] = []
+    service_name = safe_worker_service_name(getattr(config, "service_name", DEFAULT_SERVICE_NAME))
+    allowed_roots.append(Path("/run") / service_name)
+    service_home_text = str(getattr(config, "service_home", "") or "").strip()
+    if service_home_text:
+        service_home = Path(service_home_text)
+        if service_home.is_absolute() and not path_is_root(service_home):
+            allowed_roots.append(service_home)
+    if not any(path_parent_same_or_within(marker, root) for root in allowed_roots):
+        raise ValueError(f"refusing to use uninstall marker outside worker-owned paths: {marker}")
     return marker
+
+
+def path_parent_same_or_within(path: Path, root: Path) -> bool:
+    resolved_parent = path.parent.resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    try:
+        resolved_parent.relative_to(resolved_root)
+    except ValueError:
+        return False
+    return True
 
 
 def write_remote_uninstall_marker(config: WorkerConfig) -> Path:
