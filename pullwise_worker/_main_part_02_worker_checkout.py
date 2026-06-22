@@ -1593,6 +1593,7 @@ def git_log_safe_url(value: object) -> str:
 
 def git_log_safe_arg(value: object) -> str:
     text = str(value or "")
+    text = clean_protocol_text(text, 1000)
     text = re.sub(r"x-access-token:[^@\s]+@", "x-access-token:redacted@", text)
     text = re.sub(r"(https?://)([^/@\s]+):([^/@\s]+)@", r"\1redacted@", text)
     return re.sub(r"https?://[^\s'\"<>]+", lambda match: git_log_safe_url(match.group(0)), text)

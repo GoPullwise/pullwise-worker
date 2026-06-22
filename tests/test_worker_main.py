@@ -2191,6 +2191,15 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertNotIn("ghs_secret", command)
         self.assertIn("https://example.com/owner/repo.git", command)
 
+    def test_git_logging_bounds_and_single_lines_arguments(self) -> None:
+        text = worker_main.git_log_safe_arg(
+            f"first line https://x-access-token:ghs_secret@example.com/owner/repo.git\nsecond line {'x' * 2000}"
+        )
+
+        self.assertNotIn("\n", text)
+        self.assertNotIn("ghs_secret", text)
+        self.assertLessEqual(len(text), 1000)
+
     def test_resolve_git_head_uses_logged_git_capture(self) -> None:
         checkout = Path("/tmp/pullwise-checkout")
         stdout = "ABCDEFabcdef1234567890abcdefABCDEF123456\n"
