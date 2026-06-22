@@ -90,7 +90,10 @@ def map_codex_graph_tasks_with_coordinator(
         if cached is None:
             pending.append((index, task))
             continue
-        results[index] = cached
+        completed_cached = _complete_ok_task_coverage(checkout, task, inventory_by_path, cached)
+        results[index] = completed_cached
+        if completed_cached is not cached and completed_cached.get("status") == "ok":
+            _save_cached_task_result(checkout, task, inventory_by_path, config, completed_cached)
         completed += 1
         _emit_task_progress(
             progress,
@@ -123,6 +126,7 @@ def map_codex_graph_tasks_with_coordinator(
                     result = mapped_by_task.get(_task_key(task))
                     if result is None:
                         result = _blocked_task_result(task, "codex graph mapper coordinator did not return a result for this task")
+                    result = _complete_ok_task_coverage(checkout, task, inventory_by_path, result)
                     results[index] = result
                     if result.get("status") == "ok":
                         _save_cached_task_result(checkout, task, inventory_by_path, config, result)
@@ -175,9 +179,12 @@ def _emit_task_progress(
 def _map_task_with_policy(checkout: Path, task: dict, inventory_by_path: dict[str, dict], config: ReviewConfig, run: Path | None) -> dict:
     cached = _load_cached_task_result(checkout, task, inventory_by_path, config)
     if cached is not None:
-        return cached
+        completed = _complete_ok_task_coverage(checkout, task, inventory_by_path, cached)
+        if completed is not cached and completed.get("status") == "ok":
+            _save_cached_task_result(checkout, task, inventory_by_path, config, completed)
+        return completed
     if getattr(config.graph, "codex_mappers", False) and run is not None:
-        result = run_codex_graph_mapper(checkout, run, task, inventory_by_path, config)
+        result = _complete_ok_task_coverage(checkout, task, inventory_by_path, run_codex_graph_mapper(checkout, run, task, inventory_by_path, config))
         if result.get("status") == "ok":
             _save_cached_task_result(checkout, task, inventory_by_path, config, result)
         return result
@@ -397,6 +404,49 @@ def _normalized_task_coverage(result: dict, task: dict) -> dict:
         warnings.append("mapper result omitted coverage.mapped_files; normalized to assigned_files for ok task")
         result["warnings"] = warnings
     return {"assigned_files": assigned_files, "mapped_files": mapped_files}
+
+
+def _complete_ok_task_coverage(checkout: Path, task: dict, inventory_by_path: dict[str, dict], result: dict) -> dict:
+    if not isinstance(result, dict) or str(result.get("status") or "ok").lower() != "ok":
+        return result
+    coverage = _normalized_task_coverage(result, task)
+    assigned = coverage["assigned_files"]
+    mapped = coverage["mapped_files"]
+    mapped_set = set(mapped)
+    missing = [path for path in assigned if path not in mapped_set]
+    if not missing:
+        result["coverage"] = coverage
+        return result
+
+    fallback_task = {
+        **task,
+        "files": missing,
+        "reason": f"{task.get('reason') or 'graph mapper'} deterministic coverage completion",
+    }
+    fallback = map_graph_task(checkout, fallback_task, inventory_by_path)
+    completed = dict(result)
+    completed["nodes"] = [
+        *[item for item in completed.get("nodes", []) if isinstance(item, dict)],
+        *[item for item in fallback.get("nodes", []) if isinstance(item, dict)],
+    ]
+    completed["edges"] = [
+        *[item for item in completed.get("edges", []) if isinstance(item, dict)],
+        *[item for item in fallback.get("edges", []) if isinstance(item, dict)],
+    ]
+    completed["unresolved_refs"] = [
+        *[item for item in completed.get("unresolved_refs", []) if isinstance(item, dict)],
+        *[item for item in fallback.get("unresolved_refs", []) if isinstance(item, dict)],
+    ]
+    fallback_coverage = fallback.get("coverage") if isinstance(fallback.get("coverage"), dict) else {}
+    completed["coverage"] = {
+        "assigned_files": assigned,
+        "mapped_files": _ordered_paths([*mapped, *list(fallback_coverage.get("mapped_files") or [])]),
+    }
+    warnings = [str(item) for item in completed.get("warnings", []) if str(item)]
+    warnings.append(f"deterministic coverage completion mapped {len(missing)} file(s) omitted by Codex mapper")
+    warnings.extend(str(item) for item in fallback.get("warnings", []) if str(item))
+    completed["warnings"] = warnings
+    return completed
 
 
 def _ordered_paths(values: object) -> list[str]:

@@ -1122,6 +1122,59 @@ def test_codex_graph_mapper_coordinator_normalizes_empty_mapped_files(tmp_path: 
     assert "normalized to assigned_files" in results[0]["warnings"][0]
 
 
+def test_codex_graph_mapper_completes_partial_mapped_files_with_local_fallback(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    (checkout / "one.py").write_text("def one():\n    return 1\n", encoding="utf-8")
+    (checkout / "two.py").write_text("def two():\n    return 2\n", encoding="utf-8")
+    run = tmp_path / "run"
+    config = ReviewConfig()
+    config.graph.codex_mappers = True
+    config.graph.mapper_subagent_limit = 6
+    inventory = build_git_inventory(checkout, include_untracked=True)
+    tasks = [{"task_id": "graph-map-0001", "shard_id": "shard-0001", "mapper_index": 1, "files": ["one.py", "two.py"], "double_mapped": False}]
+
+    def fake_run_codex_turn(**kwargs):
+        output = Path(kwargs["output_file"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "task_id": "graph-map-0001",
+                            "shard_id": "shard-0001",
+                            "mapper_index": 1,
+                            "files": ["one.py", "two.py"],
+                            "status": "ok",
+                            "nodes": [],
+                            "edges": [],
+                            "unresolved_refs": [],
+                            "coverage": {"assigned_files": ["one.py", "two.py"], "mapped_files": ["one.py"]},
+                            "warnings": [],
+                        }
+                    ],
+                    "warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(graph_mapper_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = graph_mapper_module.map_graph_tasks(checkout, tasks, inventory, config, run=run)
+    graph = normalize_graph_for_inventory(merge_graph_results(results), inventory, checkout)
+    audit = audit_graph(graph, inventory, checkout)
+
+    assert results[0]["coverage"]["mapped_files"] == ["one.py", "two.py"]
+    assert any("deterministic coverage completion" in warning for warning in results[0]["warnings"])
+    assert "two.py" in {node.get("file") for node in graph["nodes"]}
+    assert audit["missing_mapped_file_count"] == 0
+    assert audit["quality_gate_passed"] is True
+
+
 def test_codex_graph_mapper_batches_coordinator_turns_and_reports_batch_progress(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
