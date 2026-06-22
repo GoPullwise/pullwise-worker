@@ -102,6 +102,21 @@ def positive_limit_int(value: object, default: int, *, minimum: int = 0) -> int:
     return max(minimum, parsed)
 
 
+def repository_regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def repository_path_exists_without_following_symlink(path: Path) -> bool:
+    try:
+        path.lstat()
+    except OSError:
+        return False
+    return True
+
+
 def repository_limit_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
     limits = repository_limits_metadata(config)
     stats = repository_resource_stats(checkout_dir, limits=limits)
@@ -180,15 +195,15 @@ def repository_manifests(checkout_dir: Path) -> list[dict]:
     manifests: list[dict] = []
     for filename, manifest_type in sorted(_MANIFEST_TYPES.items()):
         path = checkout_dir / filename
-        if path.is_file():
+        if repository_regular_file(path):
             manifests.append({"file": filename, "type": manifest_type})
     for filename, manifest_type in sorted(_CONFIG_MANIFEST_TYPES.items()):
         path = checkout_dir / filename
-        if path.is_file():
+        if repository_regular_file(path):
             manifests.append({"file": filename, "type": manifest_type})
     for filename, manager in sorted(_LOCKFILE_PACKAGE_MANAGERS.items()):
         path = checkout_dir / filename
-        if path.is_file():
+        if repository_regular_file(path):
             manifests.append({"file": filename, "type": f"{manager}-lock"})
     manifests.extend(github_actions_workflow_manifests(checkout_dir))
     manifests.extend(dockerfile_manifests(checkout_dir))
@@ -201,7 +216,7 @@ def github_actions_workflow_manifests(checkout_dir: Path) -> list[dict]:
         return []
     manifests = []
     for path in sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")]):
-        if path.is_file():
+        if repository_regular_file(path):
             manifests.append({"file": path.relative_to(checkout_dir).as_posix(), "type": "github-actions-workflow"})
     return manifests[:20]
 
@@ -226,7 +241,7 @@ def dedupe_manifests(manifests: list[dict]) -> list[dict]:
 
 
 def read_package_json(path: Path) -> dict:
-    if not path.is_file():
+    if not repository_regular_file(path):
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -241,9 +256,9 @@ def package_managers_for_repository(checkout_dir: Path, package_json: dict) -> l
     if package_manager:
         managers.append(package_manager.split("@", 1)[0])
     for filename, manager in sorted(_LOCKFILE_PACKAGE_MANAGERS.items()):
-        if (checkout_dir / filename).is_file():
+        if repository_regular_file(checkout_dir / filename):
             managers.append(manager)
-    if (checkout_dir / "package.json").is_file() and not managers:
+    if repository_regular_file(checkout_dir / "package.json") and not managers:
         managers.append("npm")
     return list(dict.fromkeys(manager for manager in managers if manager))
 
@@ -355,7 +370,7 @@ def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | No
 
 def package_script_line(checkout_dir: Path, script: str) -> int:
     package_path = checkout_dir / "package.json"
-    if not package_path.is_file():
+    if not repository_regular_file(package_path):
         return 1
     try:
         package_text = package_path.read_text(encoding="utf-8")
@@ -366,7 +381,7 @@ def package_script_line(checkout_dir: Path, script: str) -> int:
 
 def install_evidence_file(checkout_dir: Path) -> str:
     for filename in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"):
-        if (checkout_dir / filename).is_file():
+        if repository_regular_file(checkout_dir / filename):
             return filename
     return "package.json"
 
@@ -382,7 +397,7 @@ def run_deterministic_repository_checks(job: dict, checkout_dir: Path) -> list[d
 
 def readme_missing_package_script_findings(job: dict, checkout_dir: Path) -> list[dict]:
     package_path = checkout_dir / "package.json"
-    if not package_path.is_file():
+    if not repository_regular_file(package_path):
         return []
     readme_path = first_existing_file(checkout_dir, ["README.md", "README.markdown", "README"])
     if readme_path is None:
@@ -436,7 +451,7 @@ def readme_missing_package_script_findings(job: dict, checkout_dir: Path) -> lis
 def workflow_missing_package_script_findings(job: dict, checkout_dir: Path) -> list[dict]:
     package_path = checkout_dir / "package.json"
     workflows_dir = checkout_dir / ".github" / "workflows"
-    if not package_path.is_file() or not workflows_dir.is_dir():
+    if not repository_regular_file(package_path) or not workflows_dir.is_dir():
         return []
 
     try:
@@ -452,6 +467,8 @@ def workflow_missing_package_script_findings(job: dict, checkout_dir: Path) -> l
     seen: set[tuple[str, str]] = set()
     findings: list[dict] = []
     for workflow_path in sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")]):
+        if not repository_regular_file(workflow_path):
+            continue
         try:
             workflow_text = workflow_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -528,10 +545,10 @@ def dockerfile_missing_source_findings(job: dict, checkout_dir: Path) -> list[di
 def iter_dockerfiles(checkout_dir: Path):
     candidates = []
     root_dockerfile = checkout_dir / "Dockerfile"
-    if root_dockerfile.is_file():
+    if repository_regular_file(root_dockerfile):
         candidates.append(root_dockerfile)
-    candidates.extend(path for path in checkout_dir.rglob("Dockerfile") if path.is_file() and path != root_dockerfile)
-    candidates.extend(path for path in checkout_dir.rglob("*.Dockerfile") if path.is_file())
+    candidates.extend(path for path in checkout_dir.rglob("Dockerfile") if repository_regular_file(path) and path != root_dockerfile)
+    candidates.extend(path for path in checkout_dir.rglob("*.Dockerfile") if repository_regular_file(path))
     yielded = 0
     seen = set()
     for path in sorted(candidates):
@@ -626,13 +643,13 @@ def docker_source_exists(checkout_dir: Path, source: str) -> bool:
         target.relative_to(root)
     except ValueError:
         return False
-    return target.exists()
+    return repository_path_exists_without_following_symlink(target)
 
 
 def first_existing_file(root: Path, names: list[str]) -> Path | None:
     for name in names:
         candidate = root / name
-        if candidate.is_file():
+        if repository_regular_file(candidate):
             return candidate
     return None
 

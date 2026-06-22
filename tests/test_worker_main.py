@@ -1324,6 +1324,29 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(stats["fileCount"], 1)
         self.assertEqual(exceeded, [])
 
+    def test_preflight_ignores_symlinked_repository_manifests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            checkout = root / "checkout"
+            outside = root / "outside"
+            checkout.mkdir()
+            outside.mkdir()
+            (outside / "package.json").write_text(
+                json.dumps({"scripts": {"build": "vite"}, "packageManager": "npm@10.0.0"}),
+                encoding="utf-8",
+            )
+            (outside / "Dockerfile").write_text("COPY missing-file /app/\n", encoding="utf-8")
+            (checkout / "README.md").write_text("Run npm run missing-script\n", encoding="utf-8")
+            (checkout / "package.json").symlink_to(outside / "package.json")
+            (checkout / "Dockerfile").symlink_to(outside / "Dockerfile")
+
+            metadata = worker_main.repository_preflight_metadata(checkout)
+            findings = worker_main.run_deterministic_repository_checks({"job_id": "job_symlink"}, checkout)
+
+        self.assertEqual(metadata["manifests"], [])
+        self.assertEqual(metadata["packageManagers"], [])
+        self.assertEqual(findings, [])
+
     def test_worker_wrapper_exports_codex_sqlite_home(self) -> None:
         script = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk/worker.env"))
 
