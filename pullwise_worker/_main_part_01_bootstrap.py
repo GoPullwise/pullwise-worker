@@ -806,7 +806,7 @@ class PullwiseClient:
         payload = {"worker_id": self.config.worker_id, "status": status}
         if error:
             payload["error"] = error
-        self.post(f"/worker/commands/{command_id}/status", payload)
+        self.post(f"/worker/commands/{url_path_segment(command_id)}/status", payload)
 
     def command_poll(self) -> dict:
         response = self.post("/worker/commands/poll", {"worker_id": self.config.worker_id})
@@ -814,7 +814,7 @@ class PullwiseClient:
 
     def log_stream_lines(self, session_id: str, lines: list[dict]) -> dict:
         response = self.post(
-            f"/worker/log-streams/{urllib.parse.quote(str(session_id), safe='')}/lines",
+            f"/worker/log-streams/{url_path_segment(session_id)}/lines",
             {"worker_id": self.config.worker_id, "lines": lines},
         )
         return response.json()
@@ -843,10 +843,17 @@ class PullwiseClient:
             "started_at": int(time.time()),
             "logs_summary": logs_summary,
         }
-        self.post(f"/worker/jobs/{job_id}/progress", payload)
+        self.post(f"/worker/jobs/{url_path_segment(job_id)}/progress", payload)
 
     def result(self, job_id: str, payload: dict) -> None:
-        self.post(f"/worker/jobs/{job_id}/result", payload, compress=True)
+        self.post(f"/worker/jobs/{url_path_segment(job_id)}/result", payload, compress=True)
+
+
+def url_path_segment(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise PullwiseRequestError("URL path segment is required")
+    return urllib.parse.quote(text, safe="")
 
 
 def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False) -> bool:

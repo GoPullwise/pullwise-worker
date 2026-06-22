@@ -105,6 +105,47 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(decoded["status"], "done")
         self.assertEqual(decoded["debug"], "x" * 2048)
 
+    def test_client_encodes_dynamic_url_path_segments(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+        urls: list[str] = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            urls.append(request.full_url)
+            return Response()
+
+        with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
+            client.progress("job/a?b", "ai", 80)
+            client.result("job/a?b", {"status": "done"})
+            client.command_status("cmd/a?b", "succeeded")
+
+        self.assertEqual(
+            urls,
+            [
+                "https://pullwise.example/worker/jobs/job%2Fa%3Fb/progress",
+                "https://pullwise.example/worker/jobs/job%2Fa%3Fb/result",
+                "https://pullwise.example/worker/commands/cmd%2Fa%3Fb/status",
+            ],
+        )
+
     def test_result_upload_defers_retry_without_sleeping_in_job_thread(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
