@@ -696,6 +696,17 @@ def worker_wrapper_target_path(path: Path, service_name: str) -> Path:
     return path
 
 
+def worker_service_unit_target_path(path: Path, service_name: str) -> Path:
+    safe_service_name = safe_worker_service_name(service_name)
+    expected = (Path("/etc/systemd/system") / f"{safe_service_name}.service").resolve(strict=False)
+    resolved = path.resolve(strict=False)
+    if resolved != expected:
+        raise ValueError(f"refusing to write unexpected worker service unit path: {path}")
+    if path_is_root(resolved):
+        raise ValueError(f"refusing to write unexpected worker service unit path: {path}")
+    return path
+
+
 def systemd_unit_path_text(value: object, label: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -785,6 +796,7 @@ def ensure_lifecycle_watcher(
     watcher_service_file = Path(str(getattr(config, "watcher_service_file", "") or ""))
     try:
         watcher_service_name = safe_worker_service_name(raw_watcher_service_name)
+        worker_service_unit_target_path(watcher_service_file, watcher_service_name)
     except ValueError:
         watcher_service_name = ""
     if not watcher_service_name or path_is_root(watcher_service_file):

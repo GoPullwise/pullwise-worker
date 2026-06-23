@@ -3129,6 +3129,21 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected worker wrapper path"):
             worker_main.worker_wrapper_target_path(Path("/usr/local/bin/other-worker"), service_name)
 
+    def test_worker_service_unit_target_path_is_service_scoped(self) -> None:
+        service_name = "pullwise-worker-test-watcher"
+
+        self.assertEqual(
+            worker_main.worker_service_unit_target_path(
+                Path("/etc/systemd/system/pullwise-worker-test-watcher.service"),
+                service_name,
+            ),
+            Path("/etc/systemd/system/pullwise-worker-test-watcher.service"),
+        )
+        with self.assertRaisesRegex(ValueError, "unexpected worker service unit path"):
+            worker_main.worker_service_unit_target_path(Path("/tmp/pullwise-worker-test-watcher.service"), service_name)
+        with self.assertRaisesRegex(ValueError, "unexpected worker service unit path"):
+            worker_main.worker_service_unit_target_path(Path("/etc/systemd/system/other.service"), service_name)
+
     def test_append_missing_env_values_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3314,16 +3329,32 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 return SimpleNamespace(returncode=0, args=command)
 
             with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
-                worker_main.subprocess,
-                "run",
-                side_effect=fake_run,
-            ):
+                worker_main,
+                "worker_service_unit_target_path",
+                return_value=service_file,
+            ), patch.object(worker_main.subprocess, "run", side_effect=fake_run):
                 status = worker_main.ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path)
 
             self.assertEqual(status, 0)
             self.assertFalse(service_file.is_symlink())
             self.assertIn("ExecStart=", service_file.read_text(encoding="utf-8"))
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
+
+    def test_ensure_lifecycle_watcher_rejects_unexpected_service_unit_path_before_dependency_check(self) -> None:
+        config = SimpleNamespace(
+            worker_env_file="/etc/pullwise-worker/worker.env",
+            worker_bin_path="/usr/local/bin/pullwise-worker-watch",
+            watcher_service_name="pullwise-worker-watch",
+            watcher_service_file="/tmp/pullwise-worker-watch.service",
+            watcher_poll_seconds=5,
+            service_name="pullwise-worker-test",
+        )
+
+        with patch.object(worker_main, "install_ubuntu_2204_dependencies") as install:
+            status = worker_main.ensure_lifecycle_watcher(config)
+
+        self.assertEqual(status, 2)
+        install.assert_not_called()
 
     def test_watcher_service_unit_rejects_unsafe_service_names(self) -> None:
         config = SimpleNamespace(
