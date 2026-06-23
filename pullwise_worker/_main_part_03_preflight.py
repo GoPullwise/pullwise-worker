@@ -385,15 +385,16 @@ def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | No
     if env is not None:
         run_kwargs["env"] = env
     try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5,
-            **run_kwargs,
-        )
+        with tempfile.TemporaryFile("w+b") as stdout, tempfile.TemporaryFile("w+b") as stderr:
+            completed = subprocess.run(
+                command,
+                check=False,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=5,
+                **run_kwargs,
+            )
+            output = bounded_tool_output(stdout, stderr)
     except (OSError, subprocess.SubprocessError) as exc:
         return {
             "name": name,
@@ -402,7 +403,6 @@ def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | No
             "exitCode": 127,
             "output": str(exc)[:200],
         }
-    output = " ".join(part.strip() for part in (completed.stdout, completed.stderr) if part and part.strip())
     return {
         "name": name,
         "command": command_text,
@@ -410,6 +410,19 @@ def safe_tool_version(name: str, command: list[str], *, env: dict[str, str] | No
         "exitCode": completed.returncode,
         "output": output[:200],
     }
+
+
+def bounded_tool_output(stdout, stderr, max_bytes: int = 16 * 1024) -> str:
+    parts = []
+    for handle in (stdout, stderr):
+        handle.seek(0)
+        data = handle.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            data = data[:max_bytes]
+        text = data.decode("utf-8", errors="replace").strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
 
 
 def package_script_line(checkout_dir: Path, script: str) -> int:

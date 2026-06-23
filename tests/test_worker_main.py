@@ -3128,6 +3128,25 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(metadata["packageManagers"], [])
         self.assertEqual(findings, [])
 
+    def test_safe_tool_version_bounds_command_output_without_pipe(self) -> None:
+        def fake_run(_command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+            stdout_file = kwargs["stdout"]
+            stdout_file.write(b"tool 1.0\n")
+            stdout_file.write(b"x" * (2 * 1024 * 1024))
+            stdout_file.flush()
+            return worker_main.subprocess.CompletedProcess(["tool"], 0)
+
+        with patch.object(worker_main.subprocess, "run", side_effect=fake_run) as run:
+            result = worker_main.safe_tool_version("tool", ["tool", "--version"])
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["exitCode"], 0)
+        self.assertTrue(result["output"].startswith("tool 1.0"))
+        self.assertLessEqual(len(result["output"]), 200)
+        self.assertIsNot(run.call_args.kwargs["stdout"], worker_main.subprocess.PIPE)
+        self.assertIsNot(run.call_args.kwargs["stderr"], worker_main.subprocess.PIPE)
+        self.assertNotIn("text", run.call_args.kwargs)
+
     def test_preflight_reads_do_not_follow_symlink_after_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
