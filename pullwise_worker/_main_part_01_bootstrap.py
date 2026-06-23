@@ -273,15 +273,29 @@ def install_nodesource_nodejs(*, dry_run: bool = False) -> tuple[bool, str]:
     source_path = Path("/etc/apt/sources.list.d/nodesource.list")
     try:
         keyring_dir.mkdir(parents=True, exist_ok=True)
-        curl = subprocess.run(
-            ["curl", "-fsSL", "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"],
-            stdout=subprocess.PIPE,
+        key_max_bytes = env_int(
+            "PULLWISE_NODESOURCE_KEY_MAX_BYTES",
+            1024 * 1024,
+            minimum=1024,
+            maximum=10 * 1024 * 1024,
         )
-        if curl.returncode != 0:
-            return False, f"curl NodeSource key exited {curl.returncode}"
-        gpg = subprocess.run(["gpg", "--dearmor", "--yes", "-o", str(keyring_path)], input=curl.stdout)
-        if gpg.returncode != 0:
-            return False, f"gpg NodeSource key exited {gpg.returncode}"
+        with tempfile.TemporaryFile("w+b") as key_file:
+            curl = subprocess.run(
+                ["curl", "-fsSL", "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"],
+                stdout=key_file,
+            )
+            if curl.returncode != 0:
+                return False, f"curl NodeSource key exited {curl.returncode}"
+            key_file.seek(0, os.SEEK_END)
+            if key_file.tell() > key_max_bytes:
+                return False, "NodeSource key response too large"
+            key_file.seek(0)
+            gpg = subprocess.run(
+                ["gpg", "--dearmor", "--yes", "-o", str(keyring_path)],
+                stdin=key_file,
+            )
+            if gpg.returncode != 0:
+                return False, f"gpg NodeSource key exited {gpg.returncode}"
         keyring_path.chmod(0o644)
         source_path.write_text(
             "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main\n",

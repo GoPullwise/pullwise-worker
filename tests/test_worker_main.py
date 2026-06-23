@@ -2684,6 +2684,94 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         install.assert_not_called()
 
+    def test_install_nodesource_streams_key_without_pipe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source_dir = root / "etc" / "apt" / "sources.list.d"
+            source_dir.mkdir(parents=True)
+            real_path = Path
+            captured = {}
+
+            def mapped_path(value: object) -> Path:
+                text = str(value)
+                if text == "/etc/apt/keyrings":
+                    return root / "etc" / "apt" / "keyrings"
+                if text == "/etc/apt/sources.list.d/nodesource.list":
+                    return source_dir / "nodesource.list"
+                return real_path(text)
+
+            def fake_run(command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+                if command[0] == "curl":
+                    stdout_file = kwargs["stdout"]
+                    stdout_file.write(b"nodesource-key")
+                    stdout_file.flush()
+                    return worker_main.subprocess.CompletedProcess(command, 0)
+                if command[0] == "gpg":
+                    stdin_file = kwargs["stdin"]
+                    captured["gpg_input"] = stdin_file.read()
+                    real_path(command[command.index("-o") + 1]).write_bytes(b"dearmored")
+                    return worker_main.subprocess.CompletedProcess(command, 0)
+                if command[0] == "apt-get":
+                    return worker_main.subprocess.CompletedProcess(command, 0)
+                raise AssertionError(command)
+
+            with patch.object(worker_main, "Path", side_effect=mapped_path), patch.object(
+                worker_main.subprocess,
+                "run",
+                side_effect=fake_run,
+            ) as run, patch.object(worker_main, "node20_available", return_value=True), patch.object(
+                worker_main,
+                "npm_available",
+                return_value=True,
+            ):
+                ok, detail = worker_main.install_nodesource_nodejs()
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "installed NodeSource Node.js 22.x")
+        self.assertEqual(captured["gpg_input"], b"nodesource-key")
+        curl_call = next(call for call in run.call_args_list if call.args[0][0] == "curl")
+        gpg_call = next(call for call in run.call_args_list if call.args[0][0] == "gpg")
+        self.assertIsNot(curl_call.kwargs["stdout"], worker_main.subprocess.PIPE)
+        self.assertIn("stdin", gpg_call.kwargs)
+        self.assertNotIn("input", gpg_call.kwargs)
+
+    def test_install_nodesource_rejects_oversized_key_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source_dir = root / "etc" / "apt" / "sources.list.d"
+            source_dir.mkdir(parents=True)
+            real_path = Path
+
+            def mapped_path(value: object) -> Path:
+                text = str(value)
+                if text == "/etc/apt/keyrings":
+                    return root / "etc" / "apt" / "keyrings"
+                if text == "/etc/apt/sources.list.d/nodesource.list":
+                    return source_dir / "nodesource.list"
+                return real_path(text)
+
+            def fake_run(command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+                if command[0] == "curl":
+                    stdout_file = kwargs["stdout"]
+                    stdout_file.write(b"x" * 2048)
+                    stdout_file.flush()
+                    return worker_main.subprocess.CompletedProcess(command, 0)
+                raise AssertionError("gpg should not run for oversized key")
+
+            with patch.object(worker_main, "Path", side_effect=mapped_path), patch.object(
+                worker_main.subprocess,
+                "run",
+                side_effect=fake_run,
+            ), patch.dict(
+                worker_main.os.environ,
+                {"PULLWISE_NODESOURCE_KEY_MAX_BYTES": "1024"},
+                clear=False,
+            ):
+                ok, detail = worker_main.install_nodesource_nodejs()
+
+        self.assertFalse(ok)
+        self.assertEqual(detail, "NodeSource key response too large")
+
     def test_scan_summary_write_rejects_symlinked_log_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
