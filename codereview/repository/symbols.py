@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -19,13 +20,25 @@ def map_repository_symbols(checkout: Path, snapshot: object) -> list[dict]:
         path = checkout / file_path
         if not path.is_file():
             continue
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        symbols = _map_file_symbols(file_path, file_spans, lines)
+        try:
+            symbols = _map_file_symbols(file_path, file_spans, iter_text_lines_no_follow(path))
+        except OSError:
+            continue
         results.extend(symbols.values())
     return results
 
 
-def _map_file_symbols(file_path: str, file_spans: list[dict], lines: list[str]) -> dict[str, dict]:
+def iter_text_lines_no_follow(path: Path):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            yield line.rstrip("\r\n")
+
+
+def _map_file_symbols(file_path: str, file_spans: list[dict], lines) -> dict[str, dict]:
     repository_span = file_spans[0] if file_spans else {}
     discovered: dict[str, dict] = {}
     for index, line in enumerate(lines, start=1):
