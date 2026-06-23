@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+from collections import deque
 from pathlib import Path
 
 from .codex_runner import base_env, run_codex_turn
 from .config import ReviewConfig, auxiliary_codex_config
-from .utils.jsonl import write_json
+from .utils.jsonl import read_json_strict, write_json
 from .utils.paths import ensure_dir, safe_relative_path
 from .utils.process import ProcessResult
+
+
+CONTEXT_SEED_MAX_BYTES = 2 * 1024 * 1024
+CONTEXT_SEED_LINE_MAX_BYTES = 64 * 1024
 
 
 def preflight_context(checkout: Path, run: Path, config: ReviewConfig) -> dict:
@@ -59,10 +65,12 @@ def symbol_context(
 def build_static_seed(checkout: Path, *, symbol: str, file_path: str, line: int) -> dict:
     rel = safe_relative_path(file_path) or str(file_path or "").strip()
     path = checkout / rel
-    lines: list[str] = []
+    start, end, snippet = 1, 1, []
     if rel and path.is_file():
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    start, end, snippet = snippet_window(lines, line or 1)
+        try:
+            start, end, snippet = snippet_window_from_file(path, line or 1)
+        except OSError:
+            pass
     return {
         "symbol": str(symbol or "<module>"),
         "file": rel,
@@ -73,13 +81,75 @@ def build_static_seed(checkout: Path, *, symbol: str, file_path: str, line: int)
     }
 
 
+def snippet_window_from_file(
+    path: Path,
+    line: int,
+    *,
+    radius: int = 40,
+    max_chars: int = 12000,
+    max_bytes: int = CONTEXT_SEED_MAX_BYTES,
+) -> tuple[int, int, list[str]]:
+    center = max(1, int(line or 1))
+    start_target = max(1, center - radius)
+    end_target = center + radius
+    rows: list[tuple[int, str]] = []
+    tail: deque[tuple[int, str]] = deque(maxlen=(radius * 2) + 1)
+    bytes_read = 0
+    line_number = 0
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            while bytes_read <= max_bytes:
+                raw = handle.readline(CONTEXT_SEED_LINE_MAX_BYTES + 1)
+                if not raw:
+                    break
+                bytes_read += len(raw)
+                line_number += 1
+                if len(raw) > CONTEXT_SEED_LINE_MAX_BYTES and not raw.endswith(b"\n"):
+                    raw = raw[:CONTEXT_SEED_LINE_MAX_BYTES] + b"..."
+                    while bytes_read <= max_bytes:
+                        skipped = handle.readline(CONTEXT_SEED_LINE_MAX_BYTES)
+                        if not skipped:
+                            break
+                        bytes_read += len(skipped)
+                        if skipped.endswith(b"\n"):
+                            break
+                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if start_target <= line_number <= end_target:
+                    rows.append((line_number, text))
+                elif line_number < start_target:
+                    tail.append((line_number, text))
+                if line_number >= end_target:
+                    break
+            if rows:
+                return render_snippet_rows(rows, max_chars=max_chars)
+            if line_number < start_target and bytes_read <= max_bytes:
+                return render_snippet_rows(list(tail), max_chars=max_chars)
+            return 1, 1, []
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        raise
+
+
 def snippet_window(lines: list[str], line: int, *, radius: int = 40, max_chars: int = 12000) -> tuple[int, int, list[str]]:
     if not lines:
         return 1, 1, []
     center = max(1, min(len(lines), int(line or 1)))
     start = max(1, center - radius)
     end = min(len(lines), center + radius)
-    rendered = [f"{number}: {lines[number - 1]}" for number in range(start, end + 1)]
+    return render_snippet_rows([(number, lines[number - 1]) for number in range(start, end + 1)], max_chars=max_chars)
+
+
+def render_snippet_rows(rows: list[tuple[int, str]], *, max_chars: int) -> tuple[int, int, list[str]]:
+    if not rows:
+        return 1, 1, []
+    start = rows[0][0]
+    rendered = [f"{number}: {text}" for number, text in rows]
     while rendered and sum(len(item) + 1 for item in rendered) > max_chars:
         if len(rendered) <= 1:
             rendered[0] = rendered[0][:max_chars]
@@ -109,7 +179,9 @@ def read_context_output(path: Path) -> tuple[dict | None, str]:
     if not path.is_file():
         return None, "codex context generation did not produce an output file"
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = read_json_strict(path)
+    except OSError as exc:
+        return None, f"codex context generation output unreadable: {exc}"
     except json.JSONDecodeError as exc:
         return None, f"codex context generation produced invalid JSON: {exc}"
     if not isinstance(value, dict):
