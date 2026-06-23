@@ -2827,6 +2827,31 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("-n", command)
         self.assertEqual(command[command.index("-n") + 1], "5000")
+        self.assertIn("stdout", run.call_args.kwargs)
+        self.assertIn("stderr", run.call_args.kwargs)
+        self.assertNotIn("capture_output", run.call_args.kwargs)
+        self.assertNotIn("text", run.call_args.kwargs)
+
+    def test_journal_log_tailer_bounds_journalctl_output_bytes(self) -> None:
+        tailer = worker_main.WorkerJournalLogTailer("pullwise-worker-wk_1", since_timestamp=1781200000)
+        journal_entry = json.dumps({"MESSAGE": "ok", "__CURSOR": "cursor_1"}) + "\n"
+
+        def fake_run(_command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+            stdout_file = kwargs["stdout"]
+            stdout_file.write(journal_entry.encode("utf-8"))
+            stdout_file.write(b"x" * (2 * 1024 * 1024))
+            stdout_file.flush()
+            return worker_main.subprocess.CompletedProcess(["journalctl"], 0)
+
+        with patch.object(worker_main.subprocess, "run", side_effect=fake_run), patch.dict(
+            worker_main.os.environ,
+            {"PULLWISE_LOG_STREAM_JOURNAL_MAX_BYTES": "1024"},
+            clear=False,
+        ):
+            entries, cursor = tailer.collect()
+
+        self.assertEqual(cursor, "cursor_1")
+        self.assertEqual([entry["line"] for entry in entries], ["ok"])
 
     def test_graph_verified_review_is_the_only_review_path(self) -> None:
         self.assertFalse(hasattr(worker_main, "run_codex_review"))

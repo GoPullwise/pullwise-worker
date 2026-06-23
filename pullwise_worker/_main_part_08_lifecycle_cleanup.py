@@ -114,6 +114,31 @@ def journal_log_entry_from_json(raw: str) -> tuple[dict | None, str]:
     }, log_stream_text(payload.get("__CURSOR"), 500)
 
 
+def journal_output_text(path: Path, *, max_bytes: int = 512 * 1024) -> str:
+    try:
+        with open_log_file_no_follow(path, "rb") as handle:
+            data = handle.read(max(1, int(max_bytes or 1)) + 1)
+    except OSError:
+        return ""
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+    return data.decode("utf-8", errors="replace")
+
+
+def open_journal_output_file(path: Path):
+    if path.parent.is_symlink():
+        raise OSError(f"refusing to create journal output through symlinked directory: {path.parent}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        return os.fdopen(fd, "wb")
+    except Exception:
+        os.close(fd)
+        raise
+
+
 class WorkerJournalLogTailer:
     def __init__(self, service_name: str, *, since_timestamp: int) -> None:
         self.service_name = safe_worker_service_name(service_name)
@@ -146,20 +171,36 @@ class WorkerJournalLogTailer:
         else:
             command.extend(["--since", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.since_timestamp))])
         try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=env_int("PULLWISE_LOG_STREAM_JOURNAL_TIMEOUT_SECONDS", 15, minimum=1),
-            )
+            with tempfile.TemporaryDirectory(prefix="pullwise-journal-") as tmp_dir:
+                stdout_path = Path(tmp_dir) / "journal.stdout"
+                stderr_path = Path(tmp_dir) / "journal.stderr"
+                with open_journal_output_file(stdout_path) as stdout_file, open_journal_output_file(
+                    stderr_path
+                ) as stderr_file:
+                    completed = subprocess.run(
+                        command,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        timeout=env_int("PULLWISE_LOG_STREAM_JOURNAL_TIMEOUT_SECONDS", 15, minimum=1),
+                    )
+                stdout_text = journal_output_text(
+                    stdout_path,
+                    max_bytes=env_int(
+                        "PULLWISE_LOG_STREAM_JOURNAL_MAX_BYTES",
+                        512 * 1024,
+                        minimum=1024,
+                        maximum=2 * 1024 * 1024,
+                    ),
+                )
+                stderr_text = journal_output_text(stderr_path, max_bytes=32 * 1024)
         except (OSError, subprocess.SubprocessError) as exc:
             return self.unavailable(exc)
         if completed.returncode != 0:
-            detail = log_stream_text(completed.stderr or completed.stdout or f"journalctl exited {completed.returncode}")
+            detail = log_stream_text(stderr_text or stdout_text or f"journalctl exited {completed.returncode}")
             return self.unavailable(detail)
         entries: list[dict] = []
         next_cursor = self.cursor
-        for raw in completed.stdout.splitlines():
+        for raw in stdout_text.splitlines():
             entry, cursor = journal_log_entry_from_json(raw)
             if cursor:
                 next_cursor = cursor
