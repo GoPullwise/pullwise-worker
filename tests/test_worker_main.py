@@ -2578,6 +2578,49 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(commit, "abcdefabcdef1234567890abcdefabcdef123456")
         capture.assert_called_once_with(["git", "-C", str(checkout), "rev-parse", "HEAD"], phase="resolve-head")
 
+    def test_run_git_capture_bounds_stdout_without_pipe(self) -> None:
+        git_stdout = "ABCDEFabcdef1234567890abcdefABCDEF123456\n"
+
+        def fake_run(_command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+            stdout_file = kwargs["stdout"]
+            stdout_file.write(git_stdout.encode("utf-8"))
+            stdout_file.write(b"x" * (2 * 1024 * 1024))
+            stdout_file.flush()
+            return worker_main.subprocess.CompletedProcess(["git"], 0)
+
+        with patch.object(worker_main.subprocess, "run", side_effect=fake_run) as run, patch.dict(
+            worker_main.os.environ,
+            {"PULLWISE_GIT_OUTPUT_MAX_BYTES": "1024"},
+            clear=False,
+        ):
+            output = worker_main.run_git_capture(["git", "rev-parse", "HEAD"], phase="resolve-head")
+
+        self.assertTrue(output.startswith(git_stdout))
+        self.assertEqual(len(output.encode("utf-8")), 1024)
+        self.assertIn("stdout", run.call_args.kwargs)
+        self.assertIn("stderr", run.call_args.kwargs)
+        self.assertIsNot(run.call_args.kwargs["stdout"], worker_main.subprocess.PIPE)
+        self.assertIsNot(run.call_args.kwargs["stderr"], worker_main.subprocess.PIPE)
+        self.assertNotIn("text", run.call_args.kwargs)
+
+    def test_run_git_capture_bounds_failure_output(self) -> None:
+        def fake_run(_command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+            stderr_file = kwargs["stderr"]
+            stderr_file.write(b"fatal: first line\n")
+            stderr_file.write(b"x" * (2 * 1024 * 1024))
+            stderr_file.flush()
+            return worker_main.subprocess.CompletedProcess(["git"], 128)
+
+        with patch.object(worker_main.subprocess, "run", side_effect=fake_run), patch.dict(
+            worker_main.os.environ,
+            {"PULLWISE_GIT_OUTPUT_MAX_BYTES": "1024"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "git fetch failed: fatal: first line") as raised:
+                worker_main.run_git_capture(["git", "fetch"], phase="fetch")
+
+        self.assertLessEqual(len(str(raised.exception)), 420)
+
     def test_worker_logs_dry_run_prints_journal_and_scan_summary_commands(self) -> None:
         config = SimpleNamespace(
             service_name="pullwise-worker-wk_1",

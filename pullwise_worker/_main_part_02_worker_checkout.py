@@ -1675,35 +1675,95 @@ def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | Non
 
 def run_git_capture(command: list[str], *, phase: str, env: dict[str, str] | None = None) -> str:
     timeout_seconds = env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600)
+    output_limit = env_int(
+        "PULLWISE_GIT_OUTPUT_MAX_BYTES",
+        64 * 1024,
+        minimum=1024,
+        maximum=2 * 1024 * 1024,
+    )
     log_worker_git_event(phase, "start", command=command, detail=f"timeout={timeout_seconds}s")
     try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            env=env,
-        )
+        with tempfile.TemporaryDirectory(prefix="pullwise-git-") as tmp_dir:
+            stdout_path = Path(tmp_dir) / "git.stdout"
+            stderr_path = Path(tmp_dir) / "git.stderr"
+            with open_git_output_file(stdout_path) as stdout_file, open_git_output_file(
+                stderr_path
+            ) as stderr_file:
+                completed = subprocess.run(
+                    command,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    timeout=timeout_seconds,
+                    env=env,
+                )
+            stdout_text = git_output_text(stdout_path, max_bytes=output_limit)
+            stderr_text = git_output_text(stderr_path, max_bytes=output_limit)
+            if completed.returncode != 0:
+                message = git_error_summary(
+                    phase,
+                    completed.returncode,
+                    stdout_text=stdout_text,
+                    stderr_text=stderr_text,
+                )
+                log_worker_git_event(phase, "failed", command=command, detail=message)
+                raise RuntimeError(message)
         log_worker_git_event(phase, "done", command=command)
-        return completed.stdout or ""
+        return stdout_text
     except subprocess.TimeoutExpired as exc:
         log_worker_git_event(phase, "timeout", command=command, detail=f"timeout={timeout_seconds}s")
         raise RuntimeError(f"git {phase} timed out after {timeout_seconds}s") from exc
-    except subprocess.CalledProcessError as exc:
-        message = git_error_message(phase, exc)
-        log_worker_git_event(phase, "failed", command=command, detail=message)
-        raise RuntimeError(message) from exc
 
 
-def git_error_message(phase: str, exc: subprocess.CalledProcessError) -> str:
-    output = "\n".join(part for part in (exc.stderr, exc.stdout) if part)
+def open_git_output_file(path: Path):
+    if path.parent.is_symlink():
+        raise OSError(f"refusing to create git output through symlinked directory: {path.parent}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        return os.fdopen(fd, "wb")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def git_output_text(path: Path, *, max_bytes: int) -> str:
+    try:
+        with open_git_output_file_for_read(path) as handle:
+            data = handle.read(max(1, int(max_bytes or 1)) + 1)
+    except OSError:
+        return ""
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+    return data.decode("utf-8", errors="replace")
+
+
+def open_git_output_file_for_read(path: Path):
+    if path.parent.is_symlink():
+        raise OSError(f"refusing to read git output through symlinked directory: {path.parent}")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        return os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def git_error_summary(phase: str, returncode: int, *, stdout_text: str = "", stderr_text: str = "") -> str:
+    output = "\n".join(part for part in (stderr_text, stdout_text) if part)
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     summary = " ".join(lines[:3])[:400]
     if not summary:
-        summary = f"git exited with status {exc.returncode}"
+        summary = f"git exited with status {returncode}"
     return f"git {phase} failed: {summary}"
+
+
+def git_error_message(phase: str, exc: subprocess.CalledProcessError) -> str:
+    return git_error_summary(phase, exc.returncode, stdout_text=exc.stdout or "", stderr_text=exc.stderr or "")
 
 
 def clone_token_value(clone_token: object) -> str:
