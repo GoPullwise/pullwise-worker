@@ -149,7 +149,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
             total=len(repair_tasks),
             run_id=run_id,
         )
-        repair_results = _map_graph_tasks_with_progress(
+        repair_results = _map_graph_repair_tasks_with_progress(
             snapshot_repo,
             repair_tasks,
             inventory,
@@ -434,6 +434,27 @@ def _map_graph_tasks_with_progress(
         config,
         run=run,
         progress=_progress_with_run_id(progress, run),
+        progress_label=progress_label,
+    )
+
+
+def _map_graph_repair_tasks_with_progress(
+    checkout: Path,
+    tasks: list[dict],
+    inventory: dict,
+    config: object,
+    *,
+    run: Path,
+    progress: ProgressCallback | None,
+    progress_label: str = "Graph: repair round",
+) -> list[dict]:
+    return _map_graph_tasks_with_progress(
+        checkout,
+        tasks,
+        inventory,
+        _deterministic_graph_config(config),
+        run=run,
+        progress=progress,
         progress_label=progress_label,
     )
 
