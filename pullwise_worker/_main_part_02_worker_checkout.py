@@ -1448,6 +1448,8 @@ def checkout_root_sentinel(work_dir: Path) -> Path:
 
 
 def checkout_root_is_owned(work_dir: Path) -> bool:
+    if work_dir.is_symlink():
+        return False
     sentinel = checkout_root_sentinel(work_dir)
     if checkout_root_sentinel_is_valid(sentinel):
         return True

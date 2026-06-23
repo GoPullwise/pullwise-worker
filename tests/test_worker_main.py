@@ -3385,6 +3385,28 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(checkout.exists())
             self.assertFalse(checkout.is_symlink())
 
+    def test_cleanup_checkouts_rejects_symlinked_work_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside_work = root / "outside-work"
+            outside_work.mkdir()
+            worker_main.checkout_root_sentinel(outside_work).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            checkout = outside_work / "job_old"
+            checkout.mkdir()
+            (checkout / "keep.txt").write_text("keep", encoding="utf-8")
+            marker = worker_main.failed_checkout_marker(checkout)
+            marker.write_text("0", encoding="utf-8")
+            work_dir = root / "work"
+            work_dir.symlink_to(outside_work, target_is_directory=True)
+            config = SimpleNamespace(work_dir=work_dir, max_checkout_bytes=0)
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertTrue(work_dir.is_symlink())
+            self.assertTrue(checkout.is_dir())
+            self.assertEqual((checkout / "keep.txt").read_text(encoding="utf-8"), "keep")
+            self.assertTrue(marker.exists())
+
     def test_checkout_root_sentinel_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3399,6 +3421,20 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(owned)
             self.assertTrue(worker_main.checkout_root_sentinel(work_dir).is_symlink())
             self.assertEqual(outside.read_text(encoding="utf-8"), "pullwise-worker checkout root\n")
+
+    def test_checkout_root_is_owned_rejects_symlinked_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside_work = root / "outside-work"
+            outside_work.mkdir()
+            worker_main.checkout_root_sentinel(outside_work).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            work_dir = root / "work"
+            work_dir.symlink_to(outside_work, target_is_directory=True)
+
+            owned = worker_main.checkout_root_is_owned(work_dir)
+
+            self.assertFalse(owned)
+            self.assertTrue(work_dir.is_symlink())
 
     def test_failed_checkout_marker_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

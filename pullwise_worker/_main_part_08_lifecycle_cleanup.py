@@ -981,7 +981,12 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
     now_ts = int(time.time())
     active = set(active_job_ids or set())
     protected = active | _CHECKOUT_RUNTIME_DIR_NAMES
-    config.work_dir.mkdir(parents=True, exist_ok=True)
+    if config.work_dir.is_symlink():
+        return
+    try:
+        config.work_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
     if not checkout_root_is_owned(config.work_dir):
         return
     for marker in config.work_dir.glob(f"*{_FAILED_CHECKOUT_MARKER_SUFFIX}"):
