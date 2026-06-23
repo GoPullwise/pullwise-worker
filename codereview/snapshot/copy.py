@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 
 from ..utils.jsonl import write_json
-from ..utils.paths import ensure_dir
+from ..utils.paths import ensure_dir, safe_relative_path
 
 
 def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dict:
@@ -20,8 +20,9 @@ def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dic
     for item in inventory.get("files", []):
         if not isinstance(item, dict) or item.get("scope") != "analyze":
             continue
-        rel = str(item.get("path") or "")
+        rel = safe_relative_path(item.get("path"))
         if not rel:
+            missing.append(str(item.get("path") or ""))
             continue
         source = checkout / rel
         target = repo / rel
@@ -63,8 +64,28 @@ def _copy_codereview_assets(checkout: Path, repo: Path) -> list[str]:
         source_dir = source / name
         target_dir = target / name
         if not source_dir.is_symlink() and source_dir.is_dir():
-            if target_dir.exists():
+            if target_dir.is_symlink():
+                target_dir.unlink()
+            elif target_dir.exists():
                 shutil.rmtree(target_dir)
-            shutil.copytree(source_dir, target_dir)
+            _copy_regular_tree(source_dir, target_dir)
             copied.append(f".codereview/{name}/")
     return copied
+
+
+def _copy_regular_tree(source: Path, target: Path) -> None:
+    ensure_dir(target)
+    for path in source.rglob("*"):
+        if path.is_symlink():
+            continue
+        rel = safe_relative_path(path.relative_to(source).as_posix())
+        if not rel:
+            continue
+        destination = target / rel
+        if path.is_dir():
+            ensure_dir(destination)
+            continue
+        if not path.is_file():
+            continue
+        ensure_dir(destination.parent)
+        shutil.copy2(path, destination)
