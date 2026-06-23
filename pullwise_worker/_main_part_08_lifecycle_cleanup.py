@@ -788,14 +788,23 @@ def worker_env_target_paths(env_path: Path, backup_path: Path) -> tuple[Path, Pa
     return env_path, backup_path
 
 
+def _systemd_path_text_absolute_non_root(text: str) -> bool:
+    posix_path = PurePosixPath(text)
+    if posix_path.is_absolute() and text != posix_path.anchor:
+        return True
+    if os.name != "nt":
+        return False
+    windows_path = PureWindowsPath(text)
+    return windows_path.is_absolute() and len(windows_path.parts) > 1
+
+
 def systemd_unit_path_text(value: object, label: str) -> str:
     text = str(value or "").strip()
     if not text:
         raise ValueError(f"{label} path is required")
     if any(char in text for char in "\r\n\x00"):
         raise ValueError(f"{label} path must be single-line")
-    path = Path(text)
-    if not path.is_absolute() or path_is_root(path):
+    if not _systemd_path_text_absolute_non_root(text):
         raise ValueError(f"{label} path must be an absolute non-root path")
     return text
 

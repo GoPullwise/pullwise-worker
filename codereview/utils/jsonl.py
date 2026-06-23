@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import threading
 from pathlib import Path
 
@@ -59,7 +60,10 @@ def read_text(path: Path) -> str:
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags)
     try:
-        size = os.fstat(fd).st_size
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"refusing to read non-regular JSON file: {path}")
+        size = metadata.st_size
         if size > READ_TEXT_MAX_BYTES:
             raise OSError(f"refusing to read oversized JSON file: {path}")
         with os.fdopen(fd, "rb") as handle:

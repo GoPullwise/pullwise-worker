@@ -213,6 +213,43 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "PULLWISE_SERVICE_PATH"):
                 worker_main.WorkerConfig(args, require_worker_token=False)
 
+    def test_worker_config_accepts_windows_service_path_on_windows(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows service PATH parsing is only meaningful on Windows.")
+        args = SimpleNamespace(
+            server_url="http://localhost:8080",
+            worker_token="",
+            worker_id="wk_test",
+            provider="codex",
+            poll_seconds=None,
+            checkout_root=None,
+            work_dir=None,
+            log_dir=None,
+            codex_command=None,
+            codex_timeout_seconds=None,
+        )
+        raw_path = r"C:\Pullwise\bin;D:\Codex\bin;C:\Pullwise\bin"
+
+        with patch.dict(
+            worker_main.os.environ,
+            {
+                "PULLWISE_SERVICE_HOME": r"C:\Pullwise\worker",
+                "PULLWISE_SERVICE_PATH": raw_path,
+            },
+            clear=False,
+        ):
+            config = worker_main.WorkerConfig(args, require_worker_token=False)
+
+        self.assertEqual(config.service_path, r"C:\Pullwise\bin;D:\Codex\bin")
+        self.assertIn(os.pathsep, worker_main.provider_tool_path(config))
+
+    def test_safe_service_path_rejects_windows_drive_paths_on_posix(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX path validation is only meaningful off Windows.")
+
+        with self.assertRaisesRegex(ValueError, "PULLWISE_SERVICE_PATH"):
+            worker_main.safe_service_path(r"C:\Pullwise\bin")
+
     def test_provider_process_env_rejects_unsafe_service_home_on_direct_config(self) -> None:
         cfg = SimpleNamespace(service_home="relative/home", service_path="/usr/bin")
 

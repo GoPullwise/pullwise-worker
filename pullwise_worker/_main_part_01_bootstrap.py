@@ -363,27 +363,51 @@ def dependency_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def _path_text_absolute_non_root(text: str, *, allow_windows: bool = True) -> bool:
+    if _service_path_entry_absolute_non_root(text, "posix"):
+        return True
+    return allow_windows and _service_path_entry_absolute_non_root(text, "windows")
+
+
 def safe_service_home_path(value: object) -> str:
     text = str(value or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
     if any(char in text for char in "\r\n\x00"):
         raise ValueError("PULLWISE_SERVICE_HOME must be single-line")
-    path = Path(text)
-    if not path.is_absolute() or text == path.anchor:
+    if not _path_text_absolute_non_root(text, allow_windows=os.name == "nt"):
         raise ValueError("PULLWISE_SERVICE_HOME must be an absolute non-root path")
-    return text.rstrip("/") or text
+    return text.rstrip("/\\") or text
+
+
+def _service_path_entry_absolute_non_root(part: str, flavour: str) -> bool:
+    if flavour == "windows":
+        if part.count(":") > 1 or (":" in part and not _WINDOWS_DRIVE_RE.match(part)):
+            return False
+        path = PureWindowsPath(part)
+        return path.is_absolute() and len(path.parts) > 1
+    path = PurePosixPath(part)
+    return path.is_absolute() and part != path.anchor
+
+
+def _split_service_path(text: str) -> tuple[list[str], str, str]:
+    if os.name == "nt":
+        if ";" in text:
+            return [part for part in text.split(";") if part], ";", "windows"
+        if _service_path_entry_absolute_non_root(text, "windows"):
+            return [text], ";", "windows"
+        return [part for part in text.split(":") if part], ":", "posix"
+    return [part for part in text.split(":") if part], ":", "posix"
 
 
 def safe_service_path(value: object) -> str:
     text = str(value or DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
     if any(char in text for char in "\r\n\x00"):
         raise ValueError("PULLWISE_SERVICE_PATH must be single-line")
-    parts = [part for part in text.split(":") if part]
+    parts, separator, flavour = _split_service_path(text)
     if not parts:
         raise ValueError("PULLWISE_SERVICE_PATH must include at least one absolute path")
-    if any(not Path(part).is_absolute() or part == Path(part).anchor for part in parts):
+    if any(not _service_path_entry_absolute_non_root(part, flavour) for part in parts):
         raise ValueError("PULLWISE_SERVICE_PATH entries must be absolute non-root paths")
-    return ":".join(dict.fromkeys(parts))
-
+    return separator.join(dict.fromkeys(parts))
 
 def dependency_packages(requirements: list[str]) -> list[str]:
     packages: list[str] = []
@@ -508,11 +532,11 @@ def service_user_command(config: WorkerConfig | None, command: list[str]) -> str
         f"sudo -u {shlex.quote(service_user)} env "
         f"HOME={shlex.quote(service_home)} "
         f"USERPROFILE={shlex.quote(service_home)} "
-        f"CODEX_HOME={shlex.quote(str(Path(service_home) / '.codex'))} "
-        f"CODEX_SQLITE_HOME={shlex.quote(str(Path(service_home) / '.codex-sqlite'))} "
-        f"XDG_CONFIG_HOME={shlex.quote(str(Path(service_home) / '.config'))} "
-        f"XDG_CACHE_HOME={shlex.quote(str(Path(service_home) / '.cache'))} "
-        f"XDG_DATA_HOME={shlex.quote(str(Path(service_home) / '.local' / 'share'))} "
+        f"CODEX_HOME={shlex.quote(provider_home_path(service_home, '.codex'))} "
+        f"CODEX_SQLITE_HOME={shlex.quote(provider_home_path(service_home, '.codex-sqlite'))} "
+        f"XDG_CONFIG_HOME={shlex.quote(provider_home_path(service_home, '.config'))} "
+        f"XDG_CACHE_HOME={shlex.quote(provider_home_path(service_home, '.cache'))} "
+        f"XDG_DATA_HOME={shlex.quote(provider_home_path(service_home, '.local', 'share'))} "
         f"PATH={shlex.quote(path)} "
         f"sh -lc {shlex.quote(shell_command)}"
     )
@@ -526,12 +550,18 @@ def provider_tool_path(config: WorkerConfig | None) -> str:
         f"{service_home}/.codex/bin",
         service_path,
     ]
-    return ":".join(dict.fromkeys(part for part in path_parts if part))
+    return os.pathsep.join(dict.fromkeys(part for part in path_parts if part))
 
 
 def provider_home_path(service_home: str, *parts: str) -> str:
     home = safe_service_home_path(service_home)
-    return "/".join([home.rstrip("/"), *(part.strip("/") for part in parts if part)])
+    clean_parts = [part.strip("/\\") for part in parts if part]
+    if _service_path_entry_absolute_non_root(home, "windows"):
+        path = PureWindowsPath(home)
+        for part in clean_parts:
+            path /= part
+        return str(path)
+    return "/".join([home.rstrip("/"), *clean_parts])
 
 
 def provider_process_env(config: WorkerConfig) -> dict[str, str]:

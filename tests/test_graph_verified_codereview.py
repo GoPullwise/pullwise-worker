@@ -2286,9 +2286,9 @@ def test_prepare_app_server_state_does_not_follow_config_symlink(tmp_path: Path)
     assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
-def test_app_server_state_lock_reports_busy_process_on_posix(tmp_path: Path) -> None:
+def test_app_server_state_lock_reports_busy_process(tmp_path: Path) -> None:
     if not app_server_runner.app_server_state_lock_supported():
-        raise unittest.SkipTest("POSIX fcntl locks are not available on this platform.")
+        raise unittest.SkipTest("app-server state locks are not available on this platform.")
 
     lock_path = tmp_path / ".codex" / ".pullwise-app-server.lock"
     first_lock = app_server_runner.AppServerStateLock(lock_path, timeout_seconds=0)
@@ -2307,9 +2307,22 @@ def test_app_server_state_lock_reports_busy_process_on_posix(tmp_path: Path) -> 
         first_lock.release()
 
 
+def test_app_server_state_lock_fails_when_platform_lock_unavailable(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    monkeypatch.setattr(app_server_runner, "_fcntl", None)
+    monkeypatch.setattr(app_server_runner, "_msvcrt", None)
+    lock = app_server_runner.AppServerStateLock(tmp_path / ".codex" / ".pullwise-app-server.lock", timeout_seconds=0)
+
+    try:
+        lock.acquire()
+    except RuntimeError as exc:
+        assert "state locking is not available" in str(exc)
+    else:
+        lock.release()
+        raise AssertionError("app-server state lock unexpectedly succeeded without a platform lock")
+
 def test_app_server_state_lock_does_not_follow_symlinked_lock_file(tmp_path: Path) -> None:
     if not app_server_runner.app_server_state_lock_supported():
-        raise unittest.SkipTest("POSIX fcntl locks are not available on this platform.")
+        raise unittest.SkipTest("app-server state locks are not available on this platform.")
 
     lock_dir = tmp_path / ".codex"
     lock_dir.mkdir()

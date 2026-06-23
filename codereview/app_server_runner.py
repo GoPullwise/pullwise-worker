@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import atexit
+import errno
 import json
 import os
 import subprocess
+import stat
 import threading
 import time
 from dataclasses import dataclass, field
@@ -19,6 +21,10 @@ try:
 except ImportError:  # pragma: no cover - fcntl is unavailable on Windows.
     _fcntl = None
 
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - msvcrt is unavailable off Windows.
+    _msvcrt = None
 
 @dataclass
 class AppServerRequest:
@@ -55,59 +61,163 @@ def app_server_key(command: str, env: dict[str, str] | None) -> tuple[str, str, 
     )
 
 
+_LOCK_BUSY_ERRNOS = {
+    errno.EACCES,
+    getattr(errno, "EAGAIN", errno.EACCES),
+    getattr(errno, "EWOULDBLOCK", errno.EACCES),
+    getattr(errno, "EDEADLK", errno.EACCES),
+}
+_APP_SERVER_HELD_LOCKS_LOCK = threading.Lock()
+_APP_SERVER_HELD_LOCKS: set[Path] = set()
+
+
 class AppServerStateLock:
     def __init__(self, path: Path | None, *, timeout_seconds: float) -> None:
         self.path = path
         self.timeout_seconds = max(0.0, float(timeout_seconds or 0))
         self._handle = None
+        self._lock_key: Path | None = None
 
     def acquire(self) -> None:
-        if self.path is None or _fcntl is None:
+        if self.path is None:
             return
+        if not app_server_state_lock_supported():
+            raise RuntimeError(
+                "codex app-server state locking is not available on this platform; "
+                "refusing to start shared app-server without a lock"
+            )
         ensure_dir(self.path.parent)
         handle = _open_lock_file(self.path)
         deadline = time.monotonic() + self.timeout_seconds
         while True:
+            locked = False
+            lock_key: Path | None = None
             try:
-                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                _acquire_handle_lock(handle)
+                locked = True
+                lock_key = _register_process_lock(self.path)
                 handle.seek(0)
                 handle.truncate()
                 handle.write(f"pid={os.getpid()} started_at={int(time.time())}\n")
                 handle.flush()
                 self._handle = handle
+                self._lock_key = lock_key
                 return
             except BlockingIOError as exc:
+                if locked:
+                    _release_handle_lock_quietly(handle)
                 if time.monotonic() >= deadline:
                     handle.close()
                     raise RuntimeError(f"deferred: codex is running; app-server state lock is busy at {self.path}") from exc
                 time.sleep(0.25)
             except Exception:
+                if lock_key is not None:
+                    _unregister_process_lock(lock_key)
+                if locked:
+                    _release_handle_lock_quietly(handle)
                 handle.close()
                 raise
 
     def release(self) -> None:
         handle = self._handle
+        lock_key = self._lock_key
         self._handle = None
+        self._lock_key = None
         if handle is None:
+            if lock_key is not None:
+                _unregister_process_lock(lock_key)
             return
         try:
-            if _fcntl is not None:
-                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+            _release_handle_lock(handle)
         finally:
+            if lock_key is not None:
+                _unregister_process_lock(lock_key)
             handle.close()
 
 
 def app_server_state_lock_supported() -> bool:
-    return _fcntl is not None
+    return _fcntl is not None or _msvcrt is not None
 
 
 def _open_lock_file(path: Path):
+    if path.is_symlink():
+        raise OSError(f"refusing to follow symlink: {path}")
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags, 0o600)
-    return os.fdopen(fd, "a+", encoding="utf-8")
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"refusing to lock non-regular file: {path}")
+        return os.fdopen(fd, "a+", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
 
+
+def _acquire_handle_lock(handle) -> None:
+    if _fcntl is not None:
+        try:
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except OSError as exc:
+            if _lock_error_is_busy(exc):
+                raise BlockingIOError(getattr(exc, "errno", errno.EAGAIN), "app-server state lock is busy") from exc
+            raise
+        return
+    if _msvcrt is not None:
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write("\0")
+                handle.flush()
+            handle.seek(0)
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if _lock_error_is_busy(exc):
+                raise BlockingIOError(getattr(exc, "errno", errno.EACCES), "app-server state lock is busy") from exc
+            raise
+        return
+    raise RuntimeError("codex app-server state locking is not available on this platform")
+
+
+def _release_handle_lock(handle) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        return
+    if _msvcrt is not None:
+        handle.seek(0)
+        _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+        return
+
+
+def _release_handle_lock_quietly(handle) -> None:
+    try:
+        _release_handle_lock(handle)
+    except OSError:
+        pass
+
+
+def _lock_error_is_busy(exc: OSError) -> bool:
+    return getattr(exc, "errno", None) in _LOCK_BUSY_ERRNOS or getattr(exc, "winerror", None) == 33
+
+
+def _lock_identity(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _register_process_lock(path: Path) -> Path:
+    key = _lock_identity(path)
+    with _APP_SERVER_HELD_LOCKS_LOCK:
+        if key in _APP_SERVER_HELD_LOCKS:
+            raise BlockingIOError(errno.EAGAIN, f"app-server state lock is busy at {path}")
+        _APP_SERVER_HELD_LOCKS.add(key)
+    return key
+
+
+def _unregister_process_lock(key: Path) -> None:
+    with _APP_SERVER_HELD_LOCKS_LOCK:
+        _APP_SERVER_HELD_LOCKS.discard(key)
 
 def prepare_app_server_state(env: dict[str, str] | None) -> None:
     source = env or {}
