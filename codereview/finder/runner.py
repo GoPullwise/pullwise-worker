@@ -32,8 +32,7 @@ def run_finders_parallel(
         return []
     completed = 0
     total = len(tasks)
-    batch_size = finder_batch_size(config)
-    batches = list(enumerate(finder_indexed_batches(tasks, batch_size, run), start=1))
+    batches = list(enumerate(finder_turn_indexed_batches(tasks, run, config), start=1))
     results_by_index: list[dict | None] = [None] * len(tasks)
     max_workers = min(len(batches), finder_turn_parallel(config)) if batches else 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -73,26 +72,44 @@ def finder_turn_parallel(config: ReviewConfig) -> int:
     return max(1, min(6, int(getattr(config.finders, "turn_parallel", 1) or 1)))
 
 
+def finder_max_turns_per_scan(config: ReviewConfig) -> int:
+    return max(1, int(getattr(config.finders, "max_turns_per_scan", 3) or 3))
+
+
+def finder_target_jobs_per_subagent(config: ReviewConfig) -> int:
+    return max(1, int(getattr(config.finders, "max_jobs_per_subagent", 18) or 18))
+
+
+def finder_turn_indexed_batches(tasks: list[FinderTask], run: Path | None, config: ReviewConfig) -> list[list[tuple[int, FinderTask]]]:
+    if not tasks:
+        return []
+    single_turn_capacity = finder_batch_size(config) * finder_target_jobs_per_subagent(config)
+    needed_turns = max(1, (len(tasks) + single_turn_capacity - 1) // single_turn_capacity)
+    max_turns = min(len(tasks), finder_max_turns_per_scan(config), needed_turns)
+    target_turn_jobs = max(single_turn_capacity, (len(tasks) + max_turns - 1) // max_turns)
+    groups = []
+    for group in finder_grouped_indexed_tasks(tasks, run):
+        for start in range(0, len(group), target_turn_jobs):
+            groups.append(group[start : start + target_turn_jobs])
+    return _pack_indexed_groups(groups, max_turns)
+
+
+def estimate_finder_turns(tasks: list[FinderTask], run: Path | None, config: ReviewConfig) -> int:
+    return len(finder_turn_indexed_batches(tasks, run, config))
+
+
 def finder_batches(tasks: list[FinderTask], size: int, run: Path | None = None) -> list[list[FinderTask]]:
     return [[task for _index, task in batch] for batch in finder_indexed_batches(tasks, size, run)]
 
 
 def finder_indexed_batches(tasks: list[FinderTask], size: int, run: Path | None = None) -> list[list[tuple[int, FinderTask]]]:
     size = max(1, int(size or 1))
-    grouped: dict[str, list[tuple[int, FinderTask]]] = {}
-    group_order: list[str] = []
-    for index, task in enumerate(tasks):
-        key = finder_batch_group_key(run, task)
-        if key not in grouped:
-            grouped[key] = []
-            group_order.append(key)
-        grouped[key].append((index, task))
+    grouped = finder_grouped_indexed_tasks(tasks, run)
     batches: list[list[tuple[int, FinderTask]]] = []
     current: list[tuple[int, FinderTask]] = []
     current_family = ""
-    for key in group_order:
-        group = grouped[key]
-        family = finder_batch_group_family(key)
+    for group in grouped:
+        family = finder_batch_group_family(finder_batch_group_key(run, group[0][1])) if group else ""
         for start in range(0, len(group), size):
             chunk = group[start : start + size]
             if len(chunk) == size:
@@ -112,6 +129,32 @@ def finder_indexed_batches(tasks: list[FinderTask], size: int, run: Path | None 
     if current:
         batches.append(current)
     return batches
+
+
+def finder_grouped_indexed_tasks(tasks: list[FinderTask], run: Path | None) -> list[list[tuple[int, FinderTask]]]:
+    grouped: dict[str, list[tuple[int, FinderTask]]] = {}
+    group_order: list[str] = []
+    for index, task in enumerate(tasks):
+        key = finder_batch_group_key(run, task)
+        if key not in grouped:
+            grouped[key] = []
+            group_order.append(key)
+        grouped[key].append((index, task))
+    return [grouped[key] for key in group_order]
+
+
+def _pack_indexed_groups(groups: list[list[tuple[int, FinderTask]]], max_bins: int) -> list[list[tuple[int, FinderTask]]]:
+    bins: list[list[tuple[int, FinderTask]]] = [[] for _ in range(max(1, max_bins))]
+    weights = [0 for _ in bins]
+    ordered_groups = sorted(groups, key=lambda group: (-len(group), group[0][0] if group else 0))
+    for group in ordered_groups:
+        if not group:
+            continue
+        target = min(range(len(bins)), key=lambda index: (weights[index], index))
+        bins[target].extend(group)
+        weights[target] += len(group)
+    packed = [sorted(batch, key=lambda item: item[0]) for batch in bins if batch]
+    return sorted(packed, key=lambda batch: batch[0][0])
 
 
 def finder_batch_group_family(key: str) -> str:
@@ -270,7 +313,8 @@ def finder_batch_id(tasks: list[FinderTask], *, batch_index: int) -> str:
 
 
 def finder_batch_timeout_seconds(task_count: int, config: ReviewConfig) -> int:
-    waves = max(1, (max(1, task_count) + finder_batch_size(config) - 1) // finder_batch_size(config))
+    subagent_capacity = finder_batch_size(config) * finder_target_jobs_per_subagent(config)
+    waves = max(1, (max(1, task_count) + subagent_capacity - 1) // subagent_capacity)
     return max(60, int(getattr(config.finders, "timeout_seconds", 600) or 600)) * waves
 
 
@@ -280,16 +324,20 @@ def finder_batch_payload(checkout: Path, run: Path, tasks: list[FinderTask], con
         for focus in sorted({task.focus for task in tasks})
     }
     jobs = []
+    job_groups = finder_subagent_job_groups(run, tasks, config)
+    group_by_job = {job_id: str(group.get("group_id") or "") for group in job_groups for job_id in group.get("jobs", [])}
     context_packs: dict[str, str] = {}
     for task in tasks:
+        task_id = finder_task_id(task)
         stem = unit_file_stem(task.unit_id)
         context_file = run / "artifacts" / "review-units" / f"{stem}.context.md"
         context_packs.setdefault(task.unit_id, read_bounded_text(context_file, max_bytes=FINDER_CONTEXT_PACK_MAX_BYTES))
         jobs.append(
             {
-                "task_id": finder_task_id(task),
+                "task_id": task_id,
                 "unit_id": task.unit_id,
                 "focus": task.focus,
+                "group_id": group_by_job.get(task_id, ""),
                 "module_key": finder_batch_group_key(run, task),
                 "unit_type": task.unit_type,
                 "review_pass": task.review_pass,
@@ -299,10 +347,40 @@ def finder_batch_payload(checkout: Path, run: Path, tasks: list[FinderTask], con
         )
     return {
         "finder_subagent_limit": finder_batch_size(config),
+        "job_groups": job_groups,
         "context_packs": context_packs,
         "focus_prompts": focus_prompts,
         "jobs": jobs,
     }
+
+
+def finder_subagent_job_groups(run: Path, tasks: list[FinderTask], config: ReviewConfig) -> list[dict]:
+    if not tasks:
+        return []
+    subagent_limit = finder_batch_size(config)
+    target_jobs = max(finder_target_jobs_per_subagent(config), (len(tasks) + subagent_limit - 1) // subagent_limit)
+    split_groups: list[list[tuple[int, FinderTask]]] = []
+    for group in finder_grouped_indexed_tasks(tasks, run):
+        for start in range(0, len(group), target_jobs):
+            split_groups.append(group[start : start + target_jobs])
+    packed = _pack_indexed_groups(split_groups, subagent_limit)
+    output = []
+    for index, batch in enumerate(packed, start=1):
+        batch_tasks = [task for _position, task in sorted(batch, key=lambda item: item[0])]
+        module_keys = sorted(dict.fromkeys(finder_batch_group_key(run, task) for task in batch_tasks))
+        output.append(
+            {
+                "group_id": f"finder-group-{index:02d}",
+                "job_count": len(batch_tasks),
+                "unit_count": len({task.unit_id for task in batch_tasks}),
+                "focuses": sorted(dict.fromkeys(task.focus for task in batch_tasks)),
+                "module_keys": module_keys,
+                "risk_tags": sorted({tag for task in batch_tasks for tag in (task.risk_tags or [])}),
+                "context_pack_ids": sorted(dict.fromkeys(task.unit_id for task in batch_tasks)),
+                "jobs": [finder_task_id(task) for task in batch_tasks],
+            }
+        )
+    return output
 
 
 def finder_batch_prompt(checkout: Path, payload: dict) -> str:

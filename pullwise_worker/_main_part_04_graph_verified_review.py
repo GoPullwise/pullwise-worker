@@ -272,7 +272,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "default_downstream_depth": 1,
         "high_risk_upstream_depth": 2,
         "high_risk_downstream_depth": 2,
-        "max_unit_nodes": 100,
+        "max_unit_nodes": 500,
         "max_unit_paths": 30,
         "max_context_chars": 80000,
     }
@@ -295,6 +295,8 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "enabled": True,
         "max_workers": graph_verified_positive_int(graph_config.get("finderMaxParallel"), default=6, minimum=1, maximum=6),
         "turn_parallel": graph_verified_positive_int(graph_config.get("finderTurnParallel"), default=1, minimum=1, maximum=6),
+        "max_turns_per_scan": graph_verified_positive_int(graph_config.get("finderMaxTurnsPerScan"), default=3, minimum=1, maximum=12),
+        "max_jobs_per_subagent": graph_verified_positive_int(graph_config.get("finderMaxJobsPerSubagent"), default=18, minimum=1, maximum=200),
         "timeout_seconds": graph_verified_positive_int(graph_config.get("finderTimeoutSeconds"), default=600, minimum=60, maximum=3600),
     }
     repro_limit = graph_verified_repro_limit(graph_config.get("maxRepro"), mode)

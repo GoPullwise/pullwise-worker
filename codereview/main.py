@@ -14,7 +14,7 @@ from .candidates.score import score_candidates
 from .candidates.select import select_for_repro
 from .context_adapter import preflight_context
 from .config import load_config
-from .finder.runner import run_finders_parallel
+from .finder.runner import estimate_finder_turns, run_finders_parallel
 from .finder.tasks import plan_finder_tasks
 from .graph.audit import audit_graph, run_agent_graph_audit
 from .graph.census import run_repository_census, validate_census_coverage
@@ -217,8 +217,23 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     finder_tasks = plan_finder_tasks(review_units)
     _emit_progress(progress, "finder", f"Finder: review tasks 0/{len(finder_tasks)}", current=0, total=len(finder_tasks), run_id=run_id)
     raw_candidates = _run_finders_with_progress(snapshot_repo, run, finder_tasks, config, progress)
+    finder_turn_budget = max(1, int(getattr(config.finders, "max_turns_per_scan", 3) or 3))
+    finder_turns_used = estimate_finder_turns(finder_tasks, run, config)
     context_repair_tasks = _finder_context_repair_tasks(raw_candidates, start_index=len(graph_tasks) + _repair_task_count(repair_history) + 1)
     context_repair_history: list[dict] = []
+    if context_repair_tasks and finder_turns_used >= finder_turn_budget:
+        context_repair_history.append(
+            {
+                "round": 1,
+                "status": "skipped",
+                "reason": "finder Codex turn budget exhausted; Python extractor turns are tracked separately",
+                "finder_turn_budget": finder_turn_budget,
+                "finder_turns_used": finder_turns_used,
+                "tasks": context_repair_tasks,
+            }
+        )
+        write_json(run / "artifacts" / "graph" / "context-repair-history.json", context_repair_history)
+        context_repair_tasks = []
     if context_repair_tasks:
         _emit_progress(
             progress,
@@ -232,7 +247,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
             snapshot_repo,
             context_repair_tasks,
             inventory,
-            config,
+            _deterministic_graph_config(config),
             run=run,
             progress=progress,
             progress_label="Graph: context repair",
@@ -275,7 +290,9 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
             total=len(repair_finder_tasks),
             run_id=run_id,
         )
-        repaired_raw_candidates = _run_finders_with_progress(snapshot_repo, run, repair_finder_tasks, config, progress) if repair_finder_tasks else []
+        remaining_finder_turns = max(1, finder_turn_budget - finder_turns_used)
+        repair_config = _finder_turn_limit_config(config, remaining_finder_turns)
+        repaired_raw_candidates = _run_finders_with_progress(snapshot_repo, run, repair_finder_tasks, repair_config, progress) if repair_finder_tasks else []
         raw_candidates = [*kept_raw_candidates, *repaired_raw_candidates]
     write_jsonl(run / "candidates" / "raw.jsonl", raw_candidates)
 
@@ -434,6 +451,18 @@ def _deterministic_graph_config(config: object) -> object:
         return replace(config, graph=replace(graph, codex_mappers=False))
     except TypeError:
         graph.codex_mappers = False
+        return config
+
+
+def _finder_turn_limit_config(config: object, max_turns: int) -> object:
+    finders = getattr(config, "finders", None)
+    if finders is None:
+        return config
+    limit = max(1, int(max_turns or 1))
+    try:
+        return replace(config, finders=replace(finders, max_turns_per_scan=limit))
+    except TypeError:
+        finders.max_turns_per_scan = limit
         return config
 
 

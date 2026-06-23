@@ -12,6 +12,7 @@ PRODUCTION_SYMBOL_KINDS = {"function", "method", "class", "interface", "type", "
 STATE_KINDS = {"database_model", "database_table", "cache_key", "filesystem_location", "message_topic", "external_service"}
 CONFIG_KINDS = {"config_file", "config_key", "env_var", "dependency", "build_script", "ci_job"}
 TRUST_TAGS = {"authorization", "authentication", "secret-handling", "validation", "trust-boundary", "public-entrypoint"}
+COMPONENT_EDGE_TYPES = CALL_EDGE_TYPES | STATE_EDGE_TYPES | {"references", "imports", "depends_on", "reads_env", "reads_config"}
 
 
 def build_all_review_units(graph: dict, inventory: dict, census: dict, config: ReviewConfig) -> list[dict]:
@@ -50,23 +51,18 @@ def _entrypoint_flow_units(index: MemoryGraphIndex, graph: dict, config: ReviewC
                 expanded.extend(downstream)
             unit_nodes = _bounded_unique(expanded, config.units.max_unit_nodes)
             covered.update(_production_nodes(index, unit_nodes))
-            units.append(_unit(index, graph, "entrypoint_flow", f"flow:{package}:{chunk_index}", unit_nodes, ["public-entrypoint", *_risk_tags(index, unit_nodes)]))
+            units.append(_unit(index, graph, "entrypoint_flow", f"flow:{package}:{chunk_index}", unit_nodes, ["public-entrypoint", *_risk_tags(index, unit_nodes)], max_nodes=config.units.max_unit_nodes))
     return units
 
 
 def _component_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig, covered: set[str]) -> list[dict]:
     units = []
-    groups: dict[str, list[str]] = {}
-    for node in _nodes(graph, kinds=PRODUCTION_SYMBOL_KINDS):
-        node_id = str(node.get("id") or "")
-        if node_id in covered:
-            continue
-        groups.setdefault(_package(node.get("file")) or ".", []).append(node_id)
-    for package, node_ids in sorted(groups.items()):
-        for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
+    groups = _component_node_groups(index, graph, config, covered)
+    for package, node_groups in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(node_groups):
             unit_nodes = _bounded_unique(chunk, config.units.max_unit_nodes)
             covered.update(_production_nodes(index, unit_nodes))
-            units.append(_unit(index, graph, "component_area", f"component-area:{package}:{chunk_index}", unit_nodes, _risk_tags(index, unit_nodes)))
+            units.append(_unit(index, graph, "component_area", f"component-area:{package}:{chunk_index}", unit_nodes, _risk_tags(index, unit_nodes), max_nodes=config.units.max_unit_nodes))
     return units
 
 
@@ -83,7 +79,7 @@ def _state_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig) -> 
                 upstream = index.walk(node_id, direction="upstream", max_depth=config.units.high_risk_upstream_depth, edge_types=STATE_EDGE_TYPES | CALL_EDGE_TYPES | {"references"}, max_nodes=remaining)
                 expanded.extend(upstream)
             unit_nodes = _bounded_unique(expanded, config.units.max_unit_nodes)
-            units.append(_unit(index, graph, "state", f"state:{package}:{chunk_index}", unit_nodes, ["state", *_risk_tags(index, unit_nodes)]))
+            units.append(_unit(index, graph, "state", f"state:{package}:{chunk_index}", unit_nodes, ["state", *_risk_tags(index, unit_nodes)], max_nodes=config.units.max_unit_nodes))
     return units
 
 
@@ -108,7 +104,7 @@ def _trust_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig) -> 
                 downstream = index.walk(node_id, direction="downstream", max_depth=config.units.high_risk_downstream_depth, edge_types=CALL_EDGE_TYPES | STATE_EDGE_TYPES | {"reads_env", "reads_config"}, max_nodes=remaining)
                 expanded.extend(downstream)
             unit_nodes = _bounded_unique(expanded, config.units.max_unit_nodes)
-            units.append(_unit(index, graph, "trust_boundary", f"trust:{package}:{chunk_index}", unit_nodes, ["trust-boundary", *_risk_tags(index, unit_nodes)]))
+            units.append(_unit(index, graph, "trust_boundary", f"trust:{package}:{chunk_index}", unit_nodes, ["trust-boundary", *_risk_tags(index, unit_nodes)], max_nodes=config.units.max_unit_nodes))
     return units
 
 
@@ -118,7 +114,7 @@ def _config_build_units(index: MemoryGraphIndex, graph: dict, inventory: dict, c
     groups = _group_node_ids_by_package(_nodes(graph, kinds=CONFIG_KINDS))
     for package, node_ids in sorted(groups.items()):
         for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
-            units.append(_unit(index, graph, "config_build", f"config:{package}:{chunk_index}", chunk, ["configuration"]))
+            units.append(_unit(index, graph, "config_build", f"config:{package}:{chunk_index}", chunk, ["configuration"], max_nodes=config.units.max_unit_nodes))
     return units
 
 
@@ -127,7 +123,7 @@ def _test_integrity_units(index: MemoryGraphIndex, graph: dict, config: ReviewCo
     groups = _group_node_ids_by_package(_nodes(graph, kinds={"test_file", "test_case"}))
     for package, node_ids in sorted(groups.items()):
         for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
-            units.append(_unit(index, graph, "test_integrity", f"test:{package}:{chunk_index}", chunk, ["test-only", "test-integrity"]))
+            units.append(_unit(index, graph, "test_integrity", f"test:{package}:{chunk_index}", chunk, ["test-only", "test-integrity"], max_nodes=config.units.max_unit_nodes))
     return units
 
 
@@ -162,7 +158,7 @@ def _cross_boundary_units(index: MemoryGraphIndex, graph: dict, config: ReviewCo
     units = []
     for package_pair, node_ids in sorted(groups.items()):
         for chunk_index, chunk in enumerate(_chunks(_bounded_unique(node_ids, len(node_ids)), config.units.max_unit_nodes)):
-            units.append(_unit(index, graph, "cross_boundary", f"boundary:{package_pair}:{chunk_index}", chunk, ["cross-boundary", *_risk_tags(index, chunk)]))
+            units.append(_unit(index, graph, "cross_boundary", f"boundary:{package_pair}:{chunk_index}", chunk, ["cross-boundary", *_risk_tags(index, chunk)], max_nodes=config.units.max_unit_nodes))
     return units
 
 
@@ -201,8 +197,8 @@ def _global_invariant_units(graph: dict, inventory: dict, census: dict, config: 
     ]
 
 
-def _unit(index: MemoryGraphIndex, graph: dict, unit_type: str, raw_id: str, node_ids: list[str], risk_tags: list[str]) -> dict:
-    node_ids = _bounded_unique(node_ids, 100)
+def _unit(index: MemoryGraphIndex, graph: dict, unit_type: str, raw_id: str, node_ids: list[str], risk_tags: list[str], *, max_nodes: int = 100) -> dict:
+    node_ids = _bounded_unique(node_ids, max_nodes)
     context_files = _context_files(index, node_ids)
     paths = _paths(index, node_ids)
     primary = index.get_node(node_ids[0]) if node_ids else {}
@@ -291,6 +287,80 @@ def _group_node_ids_by_package(nodes: list[dict]) -> dict[str, list[str]]:
             continue
         groups.setdefault(_package(node.get("file")) or ".", []).append(node_id)
     return groups
+
+
+def _component_node_groups(index: MemoryGraphIndex, graph: dict, config: ReviewConfig, covered: set[str]) -> dict[str, list[list[str]]]:
+    module_nodes: dict[str, list[str]] = {}
+    for node in _nodes(graph, kinds=PRODUCTION_SYMBOL_KINDS):
+        node_id = str(node.get("id") or "")
+        if not node_id or node_id in covered:
+            continue
+        module_nodes.setdefault(_package(node.get("file")) or ".", []).append(node_id)
+    grouped: dict[str, list[list[str]]] = {}
+    for module, node_ids in module_nodes.items():
+        components = _connected_components(index, node_ids)
+        grouped[module] = _pack_component_groups(components, config.units.max_unit_nodes)
+    return grouped
+
+
+def _connected_components(index: MemoryGraphIndex, node_ids: list[str]) -> list[list[str]]:
+    allowed = set(node_ids)
+    order = {node_id: position for position, node_id in enumerate(node_ids)}
+    by_file: dict[str, list[str]] = {}
+    for node_id in node_ids:
+        node = index.get_node(node_id) or {}
+        by_file.setdefault(str(node.get("file") or ""), []).append(node_id)
+    seen: set[str] = set()
+    components: list[list[str]] = []
+    for node_id in node_ids:
+        if node_id in seen:
+            continue
+        stack = [node_id]
+        seen.add(node_id)
+        component: list[str] = []
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in _component_neighbors(index, current, allowed, by_file):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        components.append(sorted(component, key=lambda item: order.get(item, 0)))
+    return sorted(components, key=lambda item: order.get(item[0], 0) if item else 0)
+
+
+def _component_neighbors(index: MemoryGraphIndex, node_id: str, allowed: set[str], by_file: dict[str, list[str]]) -> list[str]:
+    node = index.get_node(node_id) or {}
+    neighbors = [candidate for candidate in by_file.get(str(node.get("file") or ""), []) if candidate in allowed and candidate != node_id]
+    for edge in [*index.get_outgoing(node_id, COMPONENT_EDGE_TYPES), *index.get_incoming(node_id, COMPONENT_EDGE_TYPES)]:
+        source = str(edge.get("from") or "")
+        target = str(edge.get("to") or "")
+        other = target if source == node_id else source
+        if other in allowed and other != node_id:
+            neighbors.append(other)
+    return sorted(dict.fromkeys(neighbors))
+
+
+def _pack_component_groups(components: list[list[str]], limit: int) -> list[list[str]]:
+    size = max(1, int(limit or 1))
+    packed: list[list[str]] = []
+    current: list[str] = []
+    for component in components:
+        chunks = _chunks(component, size) if len(component) > size else [component]
+        for chunk in chunks:
+            if current and len(current) + len(chunk) > size:
+                packed.append(current)
+                current = []
+            if len(chunk) >= size:
+                if current:
+                    packed.append(current)
+                    current = []
+                packed.append(chunk)
+                continue
+            current.extend(chunk)
+    if current:
+        packed.append(current)
+    return packed
 
 
 def _chunks(values: list[str], limit: int) -> list[list[str]]:

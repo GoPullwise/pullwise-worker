@@ -71,6 +71,8 @@ def ensure_project_files(checkout: Path) -> None:
                         "graph_link_parallel": 4,
                         "finder_parallel": 6,
                         "finder_turn_parallel": 1,
+                        "finder_max_turns_per_scan": 3,
+                        "finder_max_jobs_per_subagent": 18,
                         "verifier_parallel": 4,
                         "repro_parallel": 3,
                         "judge_parallel": 3,
@@ -89,7 +91,7 @@ def ensure_project_files(checkout: Path) -> None:
                         "default_downstream_depth": 1,
                         "high_risk_upstream_depth": 2,
                         "high_risk_downstream_depth": 2,
-                        "max_unit_nodes": 100,
+                        "max_unit_nodes": 500,
                         "max_unit_paths": 30,
                         "max_context_chars": 80000,
                     },
@@ -101,7 +103,7 @@ def ensure_project_files(checkout: Path) -> None:
                     },
                     "context": {"enabled": True, "timeout_seconds": 300},
                     "codex": {"command": "codex", "reasoning_effort": "high"},
-                    "finders": {"enabled": True, "max_workers": 6, "turn_parallel": 1},
+                    "finders": {"enabled": True, "max_workers": 6, "turn_parallel": 1, "max_turns_per_scan": 3, "max_jobs_per_subagent": 18},
                     "scoring": {"min_score_for_repro": 8, "always_repro_severities": ["critical", "high"]},
                     "repro": {"enabled": True, "max_workers": 2, "max_repro": 0, "require_red_green": False},
                     "safety": {"confirmed_only": True},
@@ -702,17 +704,20 @@ FINDER_BATCH_COORDINATOR_PROMPT = """You are a finder coordinator for a full-rep
 You are running inside exactly one Codex app-server turn. Do not ask the caller
 to start another Codex process, and do not run nested codex commands.
 
-You will receive several independent finder jobs grouped by module/context.
-Each job has unit_id, focus, module_key, unit_type, review_pass, risk_tags, and
-context_pack_id. The payload also includes context_packs keyed by unit_id and
-the focus-specific finder prompt text for each focus.
+You will receive finder jobs and deterministic job_groups built by the worker.
+Each job has unit_id, focus, group_id, module_key, unit_type, review_pass,
+risk_tags, and context_pack_id. Each job_group is the unit of subagent
+assignment and contains related jobs grouped by business module, files, and
+graph connectivity. The payload also includes context_packs keyed by unit_id
+and the focus-specific finder prompt text for each focus.
 
 Your task:
-1. Spawn subagents inside this Codex session to review finder jobs concurrently.
+1. Spawn subagents inside this Codex session to review job_groups concurrently.
 2. Use at most finder_subagent_limit subagents at one time.
-3. Assign one finder job to each subagent.
-4. If there are more jobs than finder_subagent_limit, run additional waves inside
-   this same Codex session.
+3. Assign one job_group to each subagent. A subagent must process every job
+   listed in that group.
+4. Do not create extra waves for individual jobs. The worker has already shaped
+   this turn to the available subagent budget.
 5. Wait for all subagents to finish.
 6. Return one finder result per input job, preserving unit_id and focus.
 
@@ -722,9 +727,10 @@ referenced by that context. Reuse module-level code reading across jobs with the
 same module_key. If required context is missing, return context_requests with
 exact repository-relative files instead of inventing evidence.
 
-If one job is too broad or blocked, return an empty candidates list plus
-context_requests or a warning for that job. Do not let one long-tail job block
-the whole batch.
+If one job_group is broad, first build a concise module map from the supplied
+context packs, then review the highest-risk paths inside that group. If a single
+job is blocked, return an empty candidates list plus context_requests or a
+warning for that job. Do not let one long-tail job block the whole batch.
 
 Hard rules:
 - Do not modify repository files.

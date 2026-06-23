@@ -3503,6 +3503,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     "contextTimeoutSeconds": 240,
                     "finderMaxParallel": 7,
                     "finderTurnParallel": 4,
+                    "finderMaxTurnsPerScan": 5,
+                    "finderMaxJobsPerSubagent": 24,
                     "finderTimeoutSeconds": 300,
                     "reproMaxParallel": 3,
                     "reproTimeoutSeconds": 600,
@@ -3534,6 +3536,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["context"]["timeout_seconds"], 240)
         self.assertEqual(payload["finders"]["max_workers"], 6)
         self.assertEqual(payload["finders"]["turn_parallel"], 4)
+        self.assertEqual(payload["finders"]["max_turns_per_scan"], 5)
+        self.assertEqual(payload["finders"]["max_jobs_per_subagent"], 24)
         self.assertEqual(payload["finders"]["timeout_seconds"], 300)
         self.assertEqual(payload["repro"]["max_workers"], 3)
         self.assertEqual(payload["repro"]["timeout_seconds"], 600)

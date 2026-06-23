@@ -640,11 +640,11 @@ def test_run_finders_batches_tasks_into_single_app_server_waves(tmp_path: Path, 
 
     results = run_finders_parallel(checkout, run, tasks, config)
 
-    assert len(calls) == 2
-    assert sorted(
-        len(json.loads(call["prompt"].split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0])["jobs"])
-        for call in calls
-    ) == [1, 6]
+    assert len(calls) == 1
+    payload = json.loads(calls[0]["prompt"].split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0])
+    assert len(payload["jobs"]) == 7
+    assert len(payload["job_groups"]) == 1
+    assert payload["job_groups"][0]["job_count"] == 7
     assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
     assert all(item["status"] == "ok" for item in results)
 
@@ -654,17 +654,30 @@ def test_run_finders_runs_batches_as_parallel_app_server_turns(tmp_path: Path, m
     run = checkout / ".codereview" / "runs" / "run_1"
     checkout.mkdir(parents=True)
     ensure_project_files(checkout)
-    tasks = [FinderTask(unit_id=f"component:{index}", focus="correctness", unit_type="component") for index in range(12)]
+    modules = ["auth", "billing", "orders", "reports"]
+    tasks = [
+        FinderTask(unit_id=f"component:{module}-{index}", focus="correctness", unit_type="component")
+        for module in modules
+        for index in range(3)
+    ]
     write_review_units(
         run,
         [
-            {"unit_id": task.unit_id, "unit_type": task.unit_type, "review_pass": task.review_pass, "risk_tags": [], "context": {}}
+            {
+                "unit_id": task.unit_id,
+                "unit_type": task.unit_type,
+                "review_pass": task.review_pass,
+                "risk_tags": [],
+                "context_files": [{"path": f"src/{task.unit_id.split(':', 1)[1].split('-', 1)[0]}/file.py"}],
+                "context": {},
+            }
             for task in tasks
         ],
     )
     config = ReviewConfig()
     config.finders.max_workers = 6
     config.finders.turn_parallel = 2
+    config.finders.max_jobs_per_subagent = 1
     lock = threading.Lock()
     second_turn_started = threading.Event()
     started_turns = 0
@@ -699,6 +712,56 @@ def test_run_finders_runs_batches_as_parallel_app_server_turns(tmp_path: Path, m
     assert all(item["status"] == "ok" for item in results)
 
 
+def test_run_finders_caps_scan_to_three_codex_turns_with_grouped_subagents(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    tasks = [FinderTask(unit_id=f"component:module-{index}", focus="correctness", unit_type="component") for index in range(244)]
+    write_review_units(
+        run,
+        [
+            {
+                "unit_id": task.unit_id,
+                "unit_type": task.unit_type,
+                "review_pass": task.review_pass,
+                "risk_tags": [],
+                "context_files": [{"path": f"src/module_{index % 37}/file_{index}.py"}],
+                "context": {},
+            }
+            for index, task in enumerate(tasks)
+        ],
+    )
+    config = ReviewConfig()
+    config.finders.max_workers = 6
+    config.finders.max_turns_per_scan = 3
+    config.finders.max_jobs_per_subagent = 18
+    calls: list[dict] = []
+
+    def fake_run_codex_turn(**kwargs):
+        prompt = kwargs["prompt"]
+        payload_text = prompt.split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(payload_text)
+        calls.append(payload)
+        assert len(payload["job_groups"]) <= 6
+        results = [
+            {"unit_id": job["unit_id"], "focus": job["focus"], "context_requests": [], "candidates": []}
+            for job in payload["jobs"]
+        ]
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(json.dumps({"results": results, "warnings": []}), encoding="utf-8")
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = run_finders_parallel(checkout, run, tasks, config)
+
+    assert len(calls) == 3
+    assert sum(len(call["jobs"]) for call in calls) == 244
+    assert len(results) == 244
+    assert all(item["status"] == "ok" for item in results)
+
+
 def test_run_finders_groups_module_context_before_batching(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     run = checkout / ".codereview" / "runs" / "run_1"
@@ -719,13 +782,14 @@ def test_run_finders_groups_module_context_before_batching(tmp_path: Path, monke
     )
     config = ReviewConfig()
     config.finders.max_workers = 2
-    calls: list[list[str]] = []
+    calls: list[list[list[str]]] = []
 
     def fake_run_codex_turn(**kwargs):
         prompt = kwargs["prompt"]
         payload_text = prompt.split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0]
         payload = json.loads(payload_text)
-        calls.append([job["unit_id"] for job in payload["jobs"]])
+        jobs_by_id = {job["task_id"]: job["unit_id"] for job in payload["jobs"]}
+        calls.append([[jobs_by_id[job_id] for job_id in group["jobs"]] for group in payload["job_groups"]])
         results = [
             {"unit_id": job["unit_id"], "focus": job["focus"], "context_requests": [], "candidates": []}
             for job in payload["jobs"]
@@ -745,7 +809,7 @@ def test_run_finders_groups_module_context_before_batching(tmp_path: Path, monke
 
     results = run_finders_parallel(checkout, run, tasks, config)
 
-    assert sorted(calls) == sorted([["component:auth-a", "component:auth-b"], ["component:billing"]])
+    assert calls == [[["component:auth-a", "component:auth-b"], ["component:billing"]]]
     assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
 
 

@@ -35,6 +35,8 @@ class FinderConfig:
     timeout_seconds: int = 600
     max_workers: int = 6
     turn_parallel: int = 1
+    max_turns_per_scan: int = 3
+    max_jobs_per_subagent: int = 18
 
 
 @dataclass
@@ -112,7 +114,7 @@ class ReviewUnitConfig:
     default_downstream_depth: int = 1
     high_risk_upstream_depth: int = 2
     high_risk_downstream_depth: int = 2
-    max_unit_nodes: int = 100
+    max_unit_nodes: int = 500
     max_unit_paths: int = 30
     max_context_chars: int = 80000
 
@@ -239,7 +241,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
             default_downstream_depth=max(0, int(units.get("default_downstream_depth") or 1)),
             high_risk_upstream_depth=max(0, int(units.get("high_risk_upstream_depth") or 2)),
             high_risk_downstream_depth=max(0, int(units.get("high_risk_downstream_depth") or 2)),
-            max_unit_nodes=max(1, int(units.get("max_unit_nodes") or 100)),
+            max_unit_nodes=max(1, int(units.get("max_unit_nodes") or 500)),
             max_unit_paths=max(1, int(units.get("max_unit_paths") or 30)),
             max_context_chars=max(1000, int(units.get("max_context_chars") or 80000)),
         ),
@@ -265,6 +267,8 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
             timeout_seconds=int(finders.get("timeout_seconds") or agents.get("finder_timeout_seconds") or 600),
             max_workers=max(1, int(finders.get("max_workers") or agents.get("finder_parallel") or 6)),
             turn_parallel=max(1, min(6, int(finders.get("turn_parallel") or agents.get("finder_turn_parallel") or 1))),
+            max_turns_per_scan=max(1, int(finders.get("max_turns_per_scan") or agents.get("finder_max_turns_per_scan") or 3)),
+            max_jobs_per_subagent=max(1, int(finders.get("max_jobs_per_subagent") or agents.get("finder_max_jobs_per_subagent") or 18)),
         ),
         repro=ReproConfig(
             enabled=bool(repro.get("enabled", True)),
