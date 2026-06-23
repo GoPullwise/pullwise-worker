@@ -241,7 +241,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "double_map_high_risk": True,
         "max_repair_rounds": 2,
         "use_sqlite_index": True,
-        "codex_census": True,
+        "codex_census": False,
         "codex_mappers": False,
         "mapper_subagent_limit": 6,
         "map_parallel": 2,

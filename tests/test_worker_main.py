@@ -2805,6 +2805,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertNotIn("codegraph", payload)
         self.assertEqual(payload["graph"]["target_shards"], 12)
         self.assertEqual(payload["graph"]["mapper_subagent_limit"], 6)
+        self.assertIs(payload["graph"]["codex_census"], False)
         self.assertIs(payload["graph"]["codex_mappers"], False)
         self.assertEqual(payload["graph"]["map_parallel"], 2)
         self.assertEqual(payload["graph"]["graph_timeout_seconds"], 960)
