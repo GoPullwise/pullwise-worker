@@ -1,13 +1,31 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 
+MAX_EVENT_STREAM_BYTES = 2 * 1024 * 1024
+
+
 def event_stream_text(path: Path) -> str:
-    if not path.is_file():
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
         return ""
-    return path.read_text(encoding="utf-8", errors="replace")
+    if not stat.S_ISREG(mode) or path.parent.is_symlink():
+        return ""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ""
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(MAX_EVENT_STREAM_BYTES)
+    return data.decode("utf-8", errors="replace")
 
 
 def command_mentioned(events_text: str, command: str) -> bool:
