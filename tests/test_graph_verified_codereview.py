@@ -24,6 +24,7 @@ from codereview.graph.audit import audit_graph
 from codereview.graph.census import run_repository_census
 from codereview.graph.link import _valid_link_result
 from codereview.graph import mapper as graph_mapper_module
+from codereview.graph import tool_extractor as graph_tool_extractor_module
 from codereview.graph.merge import merge_graph_results, normalize_graph_for_inventory
 from codereview.graph.scheduler import plan_graph_tasks
 from codereview.inventory.git_inventory import analyzable_files, build_git_inventory
@@ -135,14 +136,21 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert config["graph"]["schema_version"] == "3"
     assert config["graph"]["target_shards"] == 12
     assert config["graph"]["mapper_subagent_limit"] == 6
+    assert config["graph"]["codex_tool_extractor"] is True
+    assert config["graph"]["tool_extractor_max_rounds"] == 3
+    assert config["graph"]["tool_extractor_timeout_seconds"] == 180
+    assert config["graph"]["codex_census"] is False
     assert config["graph"]["codex_mappers"] is False
+    assert config["graph"]["codex_linker"] is False
     assert config["graph"]["map_parallel"] == 2
     assert config["graph"]["graph_timeout_seconds"] == 960
     assert config["finders"]["turn_parallel"] == 1
     assert "impact" not in config
     assert set(schema["required"]) == set(schema["properties"])
     assert (tmp_path / ".codereview" / "schemas" / "graph-shard-batch.schema.json").is_file()
+    assert (tmp_path / ".codereview" / "schemas" / "graph-extractor-tool.schema.json").is_file()
     assert (tmp_path / ".codereview" / "schemas" / "finder-batch.schema.json").is_file()
+    assert (tmp_path / ".codereview" / "prompts" / "graph-tool-extractor.md").is_file()
     assert (tmp_path / ".codereview" / "prompts" / "graph-mapper-coordinator.md").is_file()
     assert (tmp_path / ".codereview" / "prompts" / "finder-batch-coordinator.md").is_file()
     graph_props = schema["properties"]["candidates"]["items"]["properties"]["graph_evidence"]["properties"]
@@ -163,6 +171,92 @@ def test_init_rejects_symlinked_codereview_directory(tmp_path: Path) -> None:
         raise AssertionError("expected symlinked .codereview directory to be rejected")
 
     assert not (outside / "schemas").exists()
+
+
+def test_graph_tool_extractor_repairs_script_until_output_valid(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    app = checkout / "app.py"
+    app.write_text("def handle(value):\n    return value.strip()\n", encoding="utf-8")
+    inventory = {
+        "summary": {"files": 1},
+        "files": [
+            {
+                "path": "app.py",
+                "scope": "analyze",
+                "size_bytes": app.stat().st_size,
+                "line_count": 2,
+                "content_hash": "",
+                "extension": ".py",
+            }
+        ],
+    }
+    config = ReviewConfig()
+    config.graph.tool_extractor_max_rounds = 2
+    config.graph.tool_extractor_timeout_seconds = 10
+    run = tmp_path / "run"
+    run.mkdir()
+    prompts: list[str] = []
+
+    fixed_script = """
+import argparse
+import json
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--inventory", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    result = {
+        "nodes": [],
+        "edges": [],
+        "unresolved_refs": [],
+        "coverage": {"assigned_files": ["app.py"], "mapped_files": ["app.py"]},
+        "warnings": [],
+    }
+    with open(args.output, "w", encoding="utf-8") as handle:
+        json.dump(result, handle)
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+    def fake_run_codex_turn(**kwargs):
+        prompts.append(str(kwargs["prompt"]))
+        script = "raise SystemExit(3)\n" if len(prompts) == 1 else fixed_script
+        write_json(kwargs["output_file"], {"script": script, "summary": "test extractor", "assumptions": []})
+        return ProcessResult(
+            command=["codex"],
+            cwd=str(checkout),
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr(graph_tool_extractor_module, "run_codex_turn", fake_run_codex_turn)
+
+    result = graph_tool_extractor_module.run_graph_tool_extractor(
+        checkout,
+        run,
+        inventory,
+        {"census_source": "deterministic"},
+        [{"task_id": "graph-map-0001", "shard_id": "shard-0001", "files": ["app.py"]}],
+        config,
+    )
+
+    history = json.loads((run / "workers" / "graph-tool-extractor" / "history.json").read_text(encoding="utf-8"))
+    assert result is not None
+    assert result["coverage"]["mapped_files"] == ["app.py"]
+    assert result["tool_extractor"]["round"] == 2
+    assert len(prompts) == 2
+    assert "extractor exited 3" in prompts[1]
+    assert history["status"] == "ok"
+    assert history["attempts"][0]["validation"]["phase"] == "execute"
 
 
 def test_init_rejects_symlinked_schema_directory(tmp_path: Path) -> None:
@@ -2424,8 +2518,10 @@ def test_repository_census_failure_includes_process_output(tmp_path: Path, monke
         return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 1, "", stderr, 12)
 
     monkeypatch.setattr(census_module, "run_codex_turn", fake_run_codex_turn)
+    config = ReviewConfig()
+    config.graph.codex_census = True
     try:
-        run_repository_census(checkout, run, inventory, ReviewConfig())
+        run_repository_census(checkout, run, inventory, config)
     except RuntimeError as exc:
         message = str(exc)
     else:
@@ -2586,6 +2682,7 @@ def test_run_review_writes_full_repository_report_with_stubbed_repro(tmp_path: P
     subprocess.run(["git", "commit", "-m", "snapshot"], cwd=checkout, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     ensure_project_files(checkout)
     config = json.loads((checkout / ".codereview" / "config.json").read_text(encoding="utf-8"))
+    config["graph"]["codex_tool_extractor"] = False
     config["graph"]["codex_census"] = False
     config["graph"]["codex_mappers"] = False
     config["graph"]["use_sqlite_index"] = False

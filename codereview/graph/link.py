@@ -13,6 +13,8 @@ from .merge import build_inline_indexes
 
 def apply_cross_shard_linking(checkout: Path, run: Path, graph: dict, config: ReviewConfig) -> dict:
     linked = attach_link_candidates(graph)
+    if not getattr(config.graph, "codex_linker", False):
+        return linked
     prompt_file = checkout / ".codereview" / "prompts" / "graph-linker.md"
     schema = checkout / ".codereview" / "schemas" / "graph-link.schema.json"
     if not prompt_file.is_file() or not schema.is_file():

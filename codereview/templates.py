@@ -55,8 +55,12 @@ def ensure_project_files(checkout: Path) -> None:
                         "double_map_high_risk": True,
                         "max_repair_rounds": 2,
                         "use_sqlite_index": True,
-                        "codex_census": True,
+                        "codex_tool_extractor": True,
+                        "tool_extractor_max_rounds": 3,
+                        "tool_extractor_timeout_seconds": 180,
+                        "codex_census": False,
                         "codex_mappers": False,
+                        "codex_linker": False,
                         "mapper_subagent_limit": 6,
                         "map_parallel": 2,
                         "graph_timeout_seconds": 960,
@@ -109,6 +113,7 @@ def ensure_project_files(checkout: Path) -> None:
         "finder-batch.schema.json": codex_output_schema(finder_batch_schema()),
         "context_result.schema.json": codex_output_schema(context_result_schema()),
         "repo-census.schema.json": codex_output_schema(repo_census_schema()),
+        "graph-extractor-tool.schema.json": codex_output_schema(graph_extractor_tool_schema()),
         "graph-shard.schema.json": codex_output_schema(graph_shard_schema()),
         "graph-shard-batch.schema.json": codex_output_schema(graph_shard_batch_schema()),
         "graph-link.schema.json": codex_output_schema(graph_link_schema()),
@@ -128,6 +133,7 @@ def ensure_project_files(checkout: Path) -> None:
     prompts = {
         "finder-batch-coordinator.md": FINDER_BATCH_COORDINATOR_PROMPT,
         "repo-census.md": REPO_CENSUS_PROMPT,
+        "graph-tool-extractor.md": GRAPH_TOOL_EXTRACTOR_PROMPT,
         "graph-mapper.md": GRAPH_MAPPER_PROMPT,
         "graph-mapper-coordinator.md": GRAPH_MAPPER_COORDINATOR_PROMPT,
         "graph-linker.md": GRAPH_LINKER_PROMPT,
@@ -367,6 +373,22 @@ def repo_census_schema() -> dict:
 
 def graph_shard_schema() -> dict:
     return graph_shard_result_schema(include_identity=False)
+
+
+def graph_extractor_tool_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["script", "summary", "assumptions"],
+        "additionalProperties": True,
+        "properties": {
+            "script": {
+                "type": "string",
+                "description": "A complete Python 3.10+ extractor script that accepts --repo, --inventory, and --output.",
+            },
+            "summary": {"type": "string"},
+            "assumptions": {"type": "array", "items": {"type": "string"}},
+        },
+    }
 
 
 def graph_shard_batch_schema() -> dict:
@@ -736,6 +758,36 @@ Hard rules:
 - Do not invent files that are not in the inventory.
 - Do not omit analyzable files from shards.
 - Mark uncertain framework entrypoints as candidates, not resolved routes.
+"""
+
+
+GRAPH_TOOL_EXTRACTOR_PROMPT = """You are writing a repository-specific graph extractor tool.
+
+Codex is not the graph generator. Your job is to write a deterministic Python
+3.10+ script that the worker will execute against an immutable repository
+snapshot. The script must inspect source files and emit graph-shard JSON.
+
+The generated script must:
+- Use only the Python standard library.
+- Accept --repo, --inventory, and --output arguments.
+- Treat --repo as read-only and never modify repository files.
+- Never import or execute the target project's modules.
+- Read files as text, parse with static tools such as ast/json/tomllib/regex,
+  and use repository manifests/configuration to infer framework structure.
+- Produce graph-shard JSON with nodes, edges, unresolved_refs, coverage, and
+  warnings.
+- Include every analyzable inventory file in coverage.assigned_files and
+  coverage.mapped_files when it was inspected.
+- Add source evidence for every node and edge using repository-relative paths
+  and real line ranges.
+- Return unresolved_refs instead of guessing relationships that the script
+  cannot prove.
+
+If prior execution feedback is provided, repair the script based on that
+feedback. Do not ask the caller to run commands; the worker will run the script
+and send the result back if it fails.
+
+Return JSON only matching graph-extractor-tool.schema.json.
 """
 
 

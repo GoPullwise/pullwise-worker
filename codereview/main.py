@@ -24,6 +24,7 @@ from .graph.mapper import map_graph_task, map_graph_tasks
 from .graph.merge import merge_graph_results, normalize_graph_for_inventory, write_graph_artifacts
 from .graph.repair import plan_repairs
 from .graph.scheduler import plan_graph_tasks
+from .graph.tool_extractor import run_graph_tool_extractor
 from .inventory.git_inventory import analyzable_files, build_git_inventory
 from .judge.runner import run_judges_parallel
 from .repo import inspect_repo
@@ -82,50 +83,65 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
 
     graph_tasks = plan_graph_tasks(census, inventory, config)
     write_jsonl(run / "artifacts" / "graph" / "tasks.jsonl", graph_tasks)
-    baseline_config = _deterministic_graph_config(config)
-    _emit_progress(progress, "graph", f"Graph: deterministic baseline 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
-    shard_results = _map_graph_tasks_with_progress(
+    tool_result = run_graph_tool_extractor(
         snapshot_repo,
-        graph_tasks,
+        run,
         inventory,
-        baseline_config,
-        run=run,
-        progress=progress,
-        progress_label="Graph: deterministic baseline",
+        census,
+        graph_tasks,
+        config,
+        progress=_progress_with_run_id(progress, run) if progress is not None else None,
     )
     enrichment_history: list[dict] = []
-    if config.graph.codex_mappers:
-        _emit_progress(progress, "graph", f"Graph: Codex enrichment 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
-        enrichment_results = _map_graph_tasks_with_progress(
+    backfill_history: list[dict] = []
+    if tool_result is not None:
+        shard_results = [tool_result]
+        enrichment_history.append({"round": 1, "source": "python-tool-extractor", "results": [tool_result]})
+    else:
+        if getattr(config.graph, "codex_tool_extractor", True):
+            _emit_progress(progress, "graph", "Graph: Python extractor failed; falling back to deterministic baseline", run_id=run_id)
+        baseline_config = _deterministic_graph_config(config)
+        _emit_progress(progress, "graph", f"Graph: deterministic baseline 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
+        shard_results = _map_graph_tasks_with_progress(
             snapshot_repo,
             graph_tasks,
             inventory,
-            config,
+            baseline_config,
             run=run,
             progress=progress,
-            progress_label="Graph: Codex enrichment",
+            progress_label="Graph: deterministic baseline",
         )
-        enrichment_history.append({"round": 1, "results": enrichment_results})
-        shard_results.extend(enrichment_results)
-    backfill_history: list[dict] = []
-    backfill_results = _deterministic_graph_coverage_backfill(
-        snapshot_repo,
-        shard_results,
-        inventory,
-        config,
-        start_index=len(graph_tasks) + 1,
-    )
-    if backfill_results:
-        _emit_progress(
-            progress,
-            "graph",
-            f"Graph: deterministic coverage backfill {len(backfill_results)} task(s)",
-            current=len(backfill_results),
-            total=len(backfill_results),
-            run_id=run_id,
+        if config.graph.codex_mappers:
+            _emit_progress(progress, "graph", f"Graph: Codex enrichment 0/{len(graph_tasks)}", current=0, total=len(graph_tasks), run_id=run_id)
+            enrichment_results = _map_graph_tasks_with_progress(
+                snapshot_repo,
+                graph_tasks,
+                inventory,
+                config,
+                run=run,
+                progress=progress,
+                progress_label="Graph: Codex enrichment",
+            )
+            enrichment_history.append({"round": 1, "source": "codex-shard-mapper", "results": enrichment_results})
+            shard_results.extend(enrichment_results)
+        backfill_results = _deterministic_graph_coverage_backfill(
+            snapshot_repo,
+            shard_results,
+            inventory,
+            config,
+            start_index=len(graph_tasks) + 1,
         )
-        backfill_history.append({"round": 1, "results": backfill_results})
-        shard_results.extend(backfill_results)
+        if backfill_results:
+            _emit_progress(
+                progress,
+                "graph",
+                f"Graph: deterministic coverage backfill {len(backfill_results)} task(s)",
+                current=len(backfill_results),
+                total=len(backfill_results),
+                run_id=run_id,
+            )
+            backfill_history.append({"round": 1, "results": backfill_results})
+            shard_results.extend(backfill_results)
     write_jsonl(run / "artifacts" / "graph" / "shard-results.jsonl", shard_results)
     _emit_progress(progress, "graph", "Graph: merging shard results", run_id=run_id)
     graph = merge_graph_results(shard_results)
