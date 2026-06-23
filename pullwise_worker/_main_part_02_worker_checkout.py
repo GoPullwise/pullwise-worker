@@ -174,6 +174,42 @@ def graph_verified_summary_findings(report: dict) -> list[dict]:
     return findings
 
 
+def deterministic_summary_findings(findings: object) -> list[dict]:
+    if not isinstance(findings, list):
+        return []
+    summary_findings = []
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            continue
+        summary_findings.append(
+            {
+                "id": clean_protocol_text(finding.get("id")) or f"static-{index + 1}",
+                "severity": graph_verified_severity(finding.get("severity")),
+            }
+        )
+    return summary_findings
+
+
+def graph_verified_report_with_deterministic_findings(report: dict, findings: object) -> dict:
+    if not isinstance(report, dict):
+        report = {}
+    deterministic = [finding for finding in findings if isinstance(finding, dict)] if isinstance(findings, list) else []
+    if not deterministic:
+        return report
+    merged = dict(report)
+    final_json = dict(merged.get("finalJson")) if isinstance(merged.get("finalJson"), dict) else {}
+    final_json["deterministicFindings"] = deterministic
+    merged["finalJson"] = final_json
+    merged["deterministicCount"] = len(deterministic)
+    merged["confirmedCount"] = graph_verified_report_int(merged.get("confirmedCount")) + len(deterministic)
+    summary = dict(merged.get("summary")) if isinstance(merged.get("summary"), dict) else {}
+    static_summary = dict(summary.get("deterministic")) if isinstance(summary.get("deterministic"), dict) else {}
+    static_summary["confirmed"] = len(deterministic)
+    summary["deterministic"] = static_summary
+    merged["summary"] = summary
+    return merged
+
+
 def graph_verified_severity(value: object) -> str:
     text = clean_protocol_text(value).lower()
     return text if text in {"critical", "high", "medium", "low", "info"} else "info"
@@ -182,8 +218,9 @@ def graph_verified_severity(value: object) -> str:
 def graph_verified_completion_error(report: dict | None, projected_findings: list[dict] | None = None) -> str:
     if not isinstance(report, dict) or not report:
         return "GraphVerified review did not produce a report."
+    visible_findings = len(projected_findings) if isinstance(projected_findings, list) else 0
     blocked_count = graph_verified_report_int(report.get("blockedCount"))
-    if blocked_count and not report.get("runId"):
+    if blocked_count and not report.get("runId") and visible_findings == 0:
         return (
             protocol_multiline_text(report.get("debugMarkdown"))
             or "GraphVerified review failed before producing a run report."
@@ -201,7 +238,6 @@ def graph_verified_completion_error(report: dict | None, projected_findings: lis
     confirmed = graph_verified_report_int(report.get("confirmedCount")) or graph_verified_report_int(reports.get("confirmed"))
     rejected = graph_verified_report_int(report.get("rejectedCount")) or graph_verified_report_int(reports.get("rejected"))
     blocked_total = blocked_count or graph_verified_report_int(reports.get("blocked"))
-    visible_findings = len(projected_findings) if isinstance(projected_findings, list) else 0
     if confirmed > 0 and visible_findings == 0:
         return "GraphVerified confirmed findings, but none were safe to show in the worker result payload."
 
@@ -477,7 +513,7 @@ class Worker:
                 self.collect_result_uploads()
                 self.collect_cleanup()
                 job_running = running_future is not None
-                ready = self.refresh_readiness_if_due()
+                ready = not job_running
                 loop_error = False
                 claimed_jobs = 0
                 heartbeat_payload: dict = {}
@@ -523,6 +559,8 @@ class Worker:
                         return
                 if self.cleanup_is_running():
                     ready = False
+                if not job_running and not loop_error and ready:
+                    ready = self.refresh_readiness_if_due()
                 if ready and not job_running:
                     job = None
                     if not loop_error:
@@ -974,7 +1012,7 @@ class Worker:
                 "Cloning repository",
                 config=job_config,
             )
-            resolved_commit = clone_repository(job, checkout_dir)
+            resolved_commit = clone_repository(job, checkout_dir, limits_config=job_config)
             job["resolved_commit"] = resolved_commit
             job["commit"] = resolved_commit
             self.report_progress(
@@ -993,6 +1031,7 @@ class Worker:
                 config=job_config,
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
+            deterministic_findings = run_deterministic_repository_checks(job, checkout_dir)
             self.report_progress(
                 job_id,
                 "index",
@@ -1033,7 +1072,12 @@ class Worker:
                 checkout_dir,
                 progress_callback=report_graph_verified_progress,
             )
+            graph_verified_report = graph_verified_report_with_deterministic_findings(
+                graph_verified_report,
+                deterministic_findings,
+            )
             projected_findings = graph_verified_summary_findings(graph_verified_report)
+            projected_findings.extend(deterministic_summary_findings(deterministic_findings))
             summary = summarize(projected_findings)
             logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
             effective_agent_config = configured_agent
@@ -1065,6 +1109,7 @@ class Worker:
                 "attempt_id": attempt_id,
                 "preflight": preflight,
                 "effectiveAgentConfig": effective_agent_config,
+                "deterministicFindings": deterministic_findings,
                 "graphVerifiedReport": graph_verified_report,
             }
             if result_status == "failed":
@@ -1478,11 +1523,35 @@ def remove_checkout_dir(checkout_dir: Path) -> None:
     if not checkout_dir.exists():
         return
 
-    def retry_readonly_remove(function, path, _exc_info):
+    root_path = os.path.abspath(os.fspath(checkout_dir))
+
+    def checkout_cleanup_path_is_inside(path: object) -> bool:
         try:
-            os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            candidate = os.path.abspath(os.fspath(path))
+            return os.path.commonpath([root_path, candidate]) == root_path
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def chmod_no_follow(path: object, mode_bits: int) -> None:
+        try:
+            stat_result = os.lstat(path)
         except OSError:
+            return
+        if stat.S_ISLNK(stat_result.st_mode):
+            return
+        mode = stat_result.st_mode | mode_bits
+        try:
+            os.chmod(path, mode, follow_symlinks=False)
+        except (NotImplementedError, OSError):
             pass
+
+    def retry_readonly_remove(function, path, _exc_info):
+        if not checkout_cleanup_path_is_inside(path):
+            raise RuntimeError(f"Refusing to chmod path outside checkout cleanup root: {path}")
+        chmod_no_follow(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        parent = Path(path).parent
+        if checkout_cleanup_path_is_inside(parent):
+            chmod_no_follow(parent, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
         function(path)
 
     shutil.rmtree(checkout_dir, onerror=retry_readonly_remove)
@@ -1490,7 +1559,7 @@ def remove_checkout_dir(checkout_dir: Path) -> None:
         raise RuntimeError(f"Failed to remove previous checkout directory: {checkout_dir}")
 
 
-def clone_repository(job: dict, checkout_dir: Path) -> str:
+def clone_repository(job: dict, checkout_dir: Path, *, limits_config: WorkerConfig | None = None) -> str:
     remove_checkout_dir(checkout_dir)
     checkout_dir.parent.mkdir(parents=True, exist_ok=True)
     clone_token = job.get("clone_token")
@@ -1509,6 +1578,8 @@ def clone_repository(job: dict, checkout_dir: Path) -> str:
         try:
             ensure_repository_mirror(mirror_dir, clone_url, git_env)
             resolved_commit, mirror_ref = fetch_repository_ref(mirror_dir, branch=branch, commit=commit, env=git_env)
+            if limits_config is not None:
+                enforce_repository_tree_limits(limits_config, job, mirror_dir, resolved_commit)
             clone_checkout_from_mirror(mirror_dir, checkout_dir, clone_url=clone_url, mirror_ref=mirror_ref)
             break
         except RuntimeError:
@@ -1788,6 +1859,8 @@ def worker_github_web_url() -> str:
         raise RuntimeError("PULLWISE_GITHUB_WEB_URL must be an absolute GitHub web HTTP(S) origin.")
     if parsed.params or parsed.query or parsed.fragment:
         raise RuntimeError("PULLWISE_GITHUB_WEB_URL must be an absolute GitHub web HTTP(S) origin.")
+    if parsed.scheme == "http" and not env_bool("PULLWISE_ALLOW_INSECURE_GITHUB_WEB_URL", False):
+        raise RuntimeError("PULLWISE_GITHUB_WEB_URL must use HTTPS unless PULLWISE_ALLOW_INSECURE_GITHUB_WEB_URL=1.")
     return raw
 
 
@@ -1828,6 +1901,8 @@ def trusted_clone_url_for_repo(repo: object, clone_url: object) -> str:
     allowed = urllib.parse.urlparse(worker_github_web_url())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise RuntimeError("Repository clone URL must be an HTTP(S) URL.")
+    if parsed.scheme == "http" and not env_bool("PULLWISE_ALLOW_INSECURE_GITHUB_WEB_URL", False):
+        raise RuntimeError("Repository clone URL must use HTTPS unless PULLWISE_ALLOW_INSECURE_GITHUB_WEB_URL=1.")
     if parsed.netloc.lower() != allowed.netloc.lower():
         raise RuntimeError("Repository clone URL host does not match configured GitHub host.")
     if parsed.params or parsed.query or parsed.fragment:

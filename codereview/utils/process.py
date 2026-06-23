@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -134,6 +135,20 @@ def run_process(
     stamp = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
     stdout_path = log_root / f"{prefix}-{stamp}.stdout.log"
     stderr_path = log_root / f"{prefix}-{stamp}.stderr.log"
+    def kill_process_tree(process: subprocess.Popen) -> int:
+        if process.poll() is not None:
+            return process.returncode
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+        return process.wait()
+
     try:
         with _create_log_file(stdout_path) as stdout_file, _create_log_file(stderr_path) as stderr_file:
             stdin_pipe = subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL
@@ -144,6 +159,7 @@ def run_process(
                 stdin=stdin_pipe,
                 stdout=stdout_file,
                 stderr=stderr_file,
+                start_new_session=(os.name == "posix"),
             )
             if process_cancel_event() is None:
                 try:
@@ -154,7 +170,7 @@ def run_process(
                         returncode = process.wait(timeout=timeout)
                     timed_out = False
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    kill_process_tree(process)
                     if stdin_text is not None:
                         process.communicate()
                         returncode = process.returncode
@@ -177,14 +193,12 @@ def run_process(
                         break
                     if process_cancel_requested():
                         cancelled = True
-                        process.kill()
-                        returncode = process.wait()
+                        returncode = kill_process_tree(process)
                         break
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         timed_out = True
-                        process.kill()
-                        returncode = process.wait()
+                        returncode = kill_process_tree(process)
                         break
                     time.sleep(min(0.2, max(0.01, remaining)))
                 if cancelled:

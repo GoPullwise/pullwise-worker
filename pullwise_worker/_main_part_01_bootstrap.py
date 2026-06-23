@@ -15,6 +15,7 @@ import os
 import platform
 import random
 import re
+import select
 import shlex
 import shutil
 import socket

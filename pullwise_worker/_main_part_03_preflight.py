@@ -188,6 +188,119 @@ def repository_limit_preflight_metadata(config: WorkerConfig, job: dict, checkou
     }
 
 
+def repository_tree_resource_stats(git_dir: Path, ref: str, limits: dict | None = None) -> dict:
+    file_count = 0
+    total_bytes = 0
+    max_files = positive_limit_int(limits.get("maxFiles"), 0) if isinstance(limits, dict) else 0
+    max_bytes = positive_limit_int(limits.get("maxBytes"), 0) if isinstance(limits, dict) else 0
+    stopped_early = False
+    timeout_seconds = env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600)
+    command = ["git", "-C", str(git_dir), "ls-tree", "-r", "-l", "-z", str(ref)]
+    log_worker_git_event("tree-limit", "start", command=command, detail=f"timeout={timeout_seconds}s")
+    started = time.monotonic()
+    pending = b""
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        try:
+            if process.stdout is None:
+                returncode = process.wait()
+            else:
+                stdout_fd = process.stdout.fileno()
+                while True:
+                    if time.monotonic() - started > timeout_seconds:
+                        process.kill()
+                        raise RuntimeError(f"git tree-limit timed out after {timeout_seconds}s")
+                    ready, _, _ = select.select([stdout_fd], [], [], 0.2)
+                    if not ready:
+                        if process.poll() is not None:
+                            break
+                        continue
+                    chunk = os.read(stdout_fd, 65536)
+                    if not chunk:
+                        break
+                    pending += chunk
+                    records = pending.split(b"\x00")
+                    pending = records.pop()
+                    for record in records:
+                        if not record:
+                            continue
+                        header = record.split(b"\t", 1)[0].decode("utf-8", errors="replace")
+                        parts = header.split()
+                        if len(parts) < 4:
+                            continue
+                        file_count += 1
+                        try:
+                            size = int(parts[3])
+                        except ValueError:
+                            size = 0
+                        total_bytes += max(0, size)
+                        if (max_files and file_count > max_files) or (max_bytes and total_bytes > max_bytes):
+                            stopped_early = True
+                            process.kill()
+                            break
+                    if stopped_early:
+                        break
+                returncode = process.wait()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
+    if returncode != 0 and not stopped_early:
+        log_worker_git_event("tree-limit", "failed", command=command, detail=f"git exited with status {returncode}")
+        raise RuntimeError(f"git tree-limit failed: git exited with status {returncode}")
+    log_worker_git_event("tree-limit", "done", command=command)
+    stats = {"fileCount": file_count, "totalBytes": total_bytes}
+    if stopped_early:
+        stats["scanStoppedEarly"] = True
+    return stats
+
+
+def repository_tree_limit_preflight_metadata(config: WorkerConfig, job: dict, git_dir: Path, ref: str) -> dict:
+    limits = repository_limits_metadata(config)
+    stats = repository_tree_resource_stats(git_dir, ref, limits=limits)
+    exceeded = repository_limit_exceeded(stats, limits)
+    summary = (
+        "Repository git tree exceeds Pullwise worker repository limits; checkout was not materialized."
+        if exceeded
+        else "Repository git tree is within Pullwise worker repository limits."
+    )
+    return {
+        "mode": "static",
+        "execution": "repository_tree_limit_check",
+        "summary": summary,
+        "repo": str(job.get("repo") or ""),
+        "branch": str(job.get("branch") or "main"),
+        "commit": str(ref or job.get("commit") or "pending"),
+        "workerVersion": __version__,
+        "provider": str(getattr(config, "provider", "") or ""),
+        "repositoryStats": stats,
+        "repositoryLimits": limits,
+        "repositoryLimitExceeded": bool(exceeded),
+        "repositoryLimitReasons": exceeded,
+        "limitations": [
+            "The worker checked the fetched git tree before materializing the checkout.",
+        ],
+    }
+
+
+def enforce_repository_tree_limits(config: WorkerConfig, job: dict, git_dir: Path, ref: str) -> dict:
+    preflight = repository_tree_limit_preflight_metadata(config, job, git_dir, ref)
+    exceeded = preflight.get("repositoryLimitReasons") if isinstance(preflight.get("repositoryLimitReasons"), list) else []
+    if not exceeded:
+        return preflight
+    stats = preflight["repositoryStats"]
+    limits = preflight["repositoryLimits"]
+    raise RepositoryTooLargeError(
+        (
+            "Repository is too large for Pullwise scanning before checkout "
+            f"({stats['fileCount']} files / {stats['totalBytes']} bytes; "
+            f"limits {limits['maxFiles']} files / {limits['maxBytes']} bytes)."
+        ),
+        preflight,
+    )
+
+
 def enforce_repository_limits(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
     preflight = repository_limit_preflight_metadata(config, job, checkout_dir)
     exceeded = preflight.get("repositoryLimitReasons") if isinstance(preflight.get("repositoryLimitReasons"), list) else []

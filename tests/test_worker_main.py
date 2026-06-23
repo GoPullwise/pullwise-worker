@@ -6,6 +6,7 @@ import io
 import json
 import hashlib
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1256,6 +1257,54 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             run_job.assert_not_called()
             self.assertIn("job claim failed", worker.last_error or "")
 
+    def test_worker_once_heartbeats_before_expensive_readiness_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_readiness_order",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024,
+                machine_metrics_interval_seconds=10**9,
+                cleanup_interval_seconds=10**9,
+                readiness_check_seconds=0,
+                poll_seconds=0,
+                max_backoff_seconds=1,
+                poll_jitter_seconds=0,
+                lifecycle_watcher_enabled=False,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            calls: list[str] = []
+
+            def heartbeat(**_kwargs: object) -> dict:
+                calls.append("heartbeat")
+                return {"worker": {"status": "idle"}}
+
+            def readiness() -> bool:
+                calls.append("readiness")
+                return True
+
+            with patch.object(worker, "refresh_readiness_if_due", side_effect=readiness), patch.object(
+                worker.client,
+                "heartbeat",
+                side_effect=heartbeat,
+            ), patch.object(worker.client, "claim", return_value=None):
+                worker.run(once=True)
+
+            self.assertEqual(calls, ["heartbeat", "readiness"])
+
     def test_worker_once_does_not_start_claimed_job_with_unsafe_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1580,6 +1629,85 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("Running GraphVerified review", summary_text)
             self.assertIn('"status": "done"', summary_text)
 
+    def test_run_job_uploads_deterministic_findings_with_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_static",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_static",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+            static_finding = {
+                "id": "static_secret_1",
+                "severity": "high",
+                "title": "Committed token",
+                "file": "app.env",
+                "line": 1,
+                "verificationStatus": "static_proof",
+                "affectedLocations": [{"file": "app.env", "startLine": 1, "endLine": 1}],
+            }
+
+            with patch.object(worker.client, "progress"), patch.object(
+                worker_main,
+                "clone_repository",
+                return_value="abc123",
+            ), patch.object(worker_main, "enforce_repository_limits"), patch.object(
+                worker_main,
+                "collect_preflight_metadata",
+                return_value={"summary": "preflight ok"},
+            ), patch.object(
+                worker_main,
+                "run_deterministic_repository_checks",
+                return_value=[static_finding],
+            ), patch.object(
+                worker_main,
+                "run_graph_verified_review_payload",
+                return_value={
+                    "version": "graph-verified-code-review/1",
+                    "runId": "gv_run",
+                    "confirmedCount": 0,
+                    "rejectedCount": 0,
+                    "blockedCount": 0,
+                    "debugMarkdown": "",
+                    "finalJson": {"confirmed": []},
+                },
+            ), patch.object(worker_main, "graph_verified_summary_findings", return_value=[]), patch.object(
+                worker,
+                "upload_result_once_or_defer",
+                return_value=True,
+            ) as upload:
+                worker.run_job(job)
+
+            payload = upload.call_args.args[1]
+            self.assertEqual(payload["summary"]["high"], 1)
+            self.assertEqual(payload["deterministicFindings"], [static_finding])
+            self.assertEqual(payload["graphVerifiedReport"]["deterministicCount"], 1)
+            self.assertEqual(payload["graphVerifiedReport"]["finalJson"]["deterministicFindings"], [static_finding])
+
     def test_run_job_cleanup_unlinks_checkout_symlink_without_touching_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1616,7 +1744,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             target.mkdir()
             (target / "keep.txt").write_text("keep", encoding="utf-8")
 
-            def fake_clone(_job: dict, checkout_dir: Path) -> str:
+            def fake_clone(_job: dict, checkout_dir: Path, **_kwargs: object) -> str:
                 checkout_dir.parent.mkdir(parents=True, exist_ok=True)
                 checkout_dir.symlink_to(target, target_is_directory=True)
                 return "abc123"
@@ -1645,9 +1773,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 worker,
                 "upload_result_once_or_defer",
                 return_value=True,
-            ):
+            ) as upload:
                 worker.run_job(job)
 
+            upload.assert_called_once()
             checkout = worker_main.checkout_dir_for_job(config.work_dir, "job_cleanup_symlink")
             self.assertFalse(checkout.exists())
             self.assertFalse(checkout.is_symlink())
@@ -1823,6 +1952,38 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             finally:
                 clear_process_cancel_event()
 
+    def test_process_runner_kills_process_group_on_timeout(self) -> None:
+        if os.name != "posix":
+            self.skipTest("process-group termination is POSIX-specific")
+
+        class FakeProcess:
+            pid = 12345
+            returncode = None
+            stdin = None
+
+            def wait(self, timeout=None):
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired(["fake"], timeout)
+                self.returncode = -9
+                return self.returncode
+
+            def poll(self):
+                return self.returncode
+
+        fake_process = FakeProcess()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("codereview.utils.process.subprocess.Popen", return_value=fake_process) as popen, patch(
+                "codereview.utils.process.os.killpg"
+            ) as killpg:
+                result = run_process([sys.executable, "-c", "pass"], cwd=Path(tmp_dir), timeout=1)
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.returncode, 124)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        killpg.assert_called_once()
+        self.assertEqual(killpg.call_args.args[0], fake_process.pid)
+
     def test_process_runner_rejects_symlinked_log_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1835,6 +1996,26 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 run_process([sys.executable, "-c", "print('ok')"], cwd=root, log_dir=log_dir)
 
             self.assertEqual(list(outside_logs.iterdir()), [])
+
+    def test_process_runner_kills_background_child_on_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            child_pid_file = root / "child.pid"
+            result = run_process(
+                [
+                    "sh",
+                    "-c",
+                    f"sleep 30 & echo $! > {child_pid_file}; wait",
+                ],
+                cwd=root,
+                timeout=1,
+            )
+            child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+            time.sleep(0.2)
+
+            self.assertTrue(result.timed_out)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
 
     def test_run_job_marks_all_blocked_graph_verified_report_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1922,6 +2103,26 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             summary_text = (config.log_dir / "scan-summary.log").read_text(encoding="utf-8")
             self.assertIn('"status": "failed"', summary_text)
             self.assertIn("codex app-server request thread/start timed out", summary_text)
+
+    def test_graph_verified_report_merges_deterministic_findings(self) -> None:
+        report = {
+            "confirmedCount": 2,
+            "finalJson": {"confirmed": []},
+            "summary": {"existing": True},
+        }
+        deterministic = [
+            {"id": "static_1", "severity": "high", "message": "missing script"},
+            {"id": "static_2", "severity": "low", "message": "missing source"},
+        ]
+
+        merged = worker_main.graph_verified_report_with_deterministic_findings(report, deterministic)
+        summary = worker_main.deterministic_summary_findings(deterministic)
+
+        self.assertEqual(merged["confirmedCount"], 4)
+        self.assertEqual(merged["deterministicCount"], 2)
+        self.assertEqual(merged["finalJson"]["deterministicFindings"], deterministic)
+        self.assertEqual(merged["summary"]["deterministic"]["confirmed"], 2)
+        self.assertEqual(summary, [{"id": "static_1", "severity": "high"}, {"id": "static_2", "severity": "low"}])
 
     def test_run_job_fails_when_confirmed_graph_verified_items_are_not_reportable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2417,6 +2618,25 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(outside.read_text(encoding="utf-8"), "0123456789")
 
+    def test_remove_checkout_dir_does_not_chmod_symlink_target_on_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            checkout = root / "checkout"
+            locked = checkout / "locked"
+            locked.mkdir(parents=True)
+            outside = root / "outside.txt"
+            outside.write_text("outside", encoding="utf-8")
+            outside.chmod(0o600)
+            link = locked / "link-to-outside"
+            link.symlink_to(outside)
+            locked.chmod(0o500)
+            before_mode = stat.S_IMODE(outside.stat().st_mode)
+
+            worker_main.remove_checkout_dir(checkout)
+
+            self.assertEqual(stat.S_IMODE(outside.stat().st_mode), before_mode)
+            self.assertFalse(checkout.exists())
+
     def test_clone_repository_uses_shallow_mirror_cache_for_commit_checkouts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2532,6 +2752,23 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             run_git.assert_not_called()
 
+    def test_clone_repository_rejects_http_clone_url_by_default_before_git(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            checkout = Path(tmp_dir) / "work" / "job_1"
+            job = {
+                "repo": "owner/repo",
+                "clone_url": "http://github.com/owner/repo.git",
+                "branch": "main",
+                "commit": "pending",
+                "clone_token": {"repo": "owner/repo", "token": "ghs_secret"},
+            }
+
+            with patch.object(worker_main, "run_git_command") as run_git:
+                with self.assertRaisesRegex(RuntimeError, "must use HTTPS"):
+                    worker_main.clone_repository(job, checkout)
+
+            run_git.assert_not_called()
+
     def test_clone_repository_rejects_invalid_git_ref_inputs_before_fetch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2556,6 +2793,29 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     worker_main.clone_repository(invalid_commit_job, checkout)
 
             run_git.assert_not_called()
+
+    def test_clone_repository_checks_git_tree_limits_before_materializing_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source, first_commit, _second_commit = self.make_git_repo(root)
+            checkout = root / "work" / "job_1"
+            job = {
+                "repo": "owner/repo",
+                "clone_url": str(source),
+                "branch": "master",
+                "commit": first_commit,
+            }
+            config = SimpleNamespace(max_repo_files=0, max_repo_bytes=1, provider="codex")
+
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+                worker_main,
+                "clone_checkout_from_mirror",
+            ) as checkout_from_mirror:
+                with self.assertRaises(worker_main.RepositoryTooLargeError):
+                    worker_main.clone_repository(job, checkout, limits_config=config)
+
+            checkout_from_mirror.assert_not_called()
+            self.assertFalse(checkout.exists())
 
     def test_git_logging_redacts_url_credentials(self) -> None:
         self.assertEqual(
