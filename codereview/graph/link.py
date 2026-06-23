@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
-from ..utils.jsonl import write_json, write_text
+from ..utils.jsonl import read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir
 from .ids import stable_edge_id
 from .merge import build_inline_indexes
@@ -151,8 +151,8 @@ def _run_linker(
     if process.returncode != 0 or not output.is_file():
         return {"status": "still_unresolved", "reason": f"linker exited {process.returncode}", "process": process_payload}
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        parsed = read_json_strict(output)
+    except (OSError, json.JSONDecodeError) as exc:
         return {"status": "still_unresolved", "reason": f"invalid linker JSON: {exc}", "process": process_payload}
     if not isinstance(parsed, dict):
         return {"status": "still_unresolved", "reason": "non-object linker JSON", "process": process_payload}

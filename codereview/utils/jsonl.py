@@ -25,6 +25,10 @@ def read_json(path: Path, default: object = None) -> object:
     return json.loads(text)
 
 
+def read_json_strict(path: Path) -> object:
+    return json.loads(read_text(path))
+
+
 def write_jsonl(path: Path, rows: list[object]) -> None:
     write_text(
         path,

@@ -6,7 +6,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..inventory.git_inventory import analyzable_files
-from ..utils.jsonl import write_json, write_text
+from ..utils.jsonl import read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir
 from ..utils.process import compact_process_output
 from .contracts import language_for_path, risk_tags_for_path
@@ -81,8 +81,8 @@ def run_repository_census(checkout: Path, run: Path, inventory: dict, config: Re
         detail = compact_process_output(process)
         raise RuntimeError(f"repository census agent did not produce an output file: {detail}")
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        parsed = read_json_strict(output)
+    except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"repository census agent produced invalid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("repository census agent produced non-object JSON")

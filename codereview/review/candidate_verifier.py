@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
-from ..utils.jsonl import write_json, write_text
+from ..utils.jsonl import read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir, safe_path_component
 from ..utils.process import raise_if_cancelled_callback_exception
 
@@ -146,8 +146,8 @@ def verify_candidate(
     if process.returncode != 0 or not output.is_file():
         return {**local, "process": process_payload, "verifier_source": "local_fallback"}
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        parsed = read_json_strict(output)
+    except (OSError, json.JSONDecodeError):
         return {**local, "process": process_payload, "verifier_source": "local_fallback"}
     if _valid_verification(parsed, candidate_id):
         parsed["process"] = process_payload

@@ -6,7 +6,7 @@ from pathlib import Path
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
 from ..inventory.git_inventory import analyzable_files
-from ..utils.jsonl import write_json, write_text
+from ..utils.jsonl import read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir
 from .validate import validate_graph
 
@@ -138,8 +138,8 @@ def run_agent_graph_audit(checkout: Path, run: Path, graph: dict, inventory: dic
     if process.returncode != 0 or not output.is_file():
         return {"status": "blocked", "reason": f"graph auditor exited {process.returncode}", "repairs": [], "process": process_payload}
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        parsed = read_json_strict(output)
+    except (OSError, json.JSONDecodeError) as exc:
         return {"status": "blocked", "reason": f"graph auditor produced invalid JSON: {exc}", "repairs": [], "process": process_payload}
     if not isinstance(parsed, dict):
         return {"status": "blocked", "reason": "graph auditor produced non-object JSON", "repairs": [], "process": process_payload}

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
+from ..utils.jsonl import read_json_strict
 from ..utils.paths import ensure_dir, safe_path_component
 from ..utils.process import raise_if_cancelled_callback_exception
 from .validate import local_judge, validate_judge_result
@@ -134,8 +135,8 @@ def run_judge(run: Path, candidate: dict, repro: dict, checkout: Path, config: R
     if process.returncode != 0 or not output.is_file():
         return local
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        parsed = read_json_strict(output)
+    except (OSError, json.JSONDecodeError):
         return local
     violations = validate_judge_result(parsed, expected_candidate_id=str(local.get("candidate_id") or ""))
     if violations:

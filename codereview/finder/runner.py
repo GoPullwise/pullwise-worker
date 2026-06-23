@@ -9,7 +9,7 @@ from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig
 from ..graph.ids import short_hash
 from ..units.context import unit_file_stem
-from ..utils.jsonl import write_json, write_text
+from ..utils.jsonl import read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir
 from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception
 from .tasks import FinderTask
@@ -136,7 +136,7 @@ def read_review_unit(run: Path | None, unit_id: str) -> dict:
     if not path.is_file():
         return {}
     try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = read_json_strict(path)
     except (OSError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
@@ -235,8 +235,8 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
     if not output.is_file():
         return blocked_finder_batch_results(tasks, process_payload, "finder batch did not produce an output file")
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        parsed = read_json_strict(output)
+    except (OSError, json.JSONDecodeError) as exc:
         return blocked_finder_batch_results(tasks, process_payload, f"finder batch produced invalid JSON: {exc}")
     return finder_batch_results(run, tasks, parsed, process_payload)
 
@@ -387,8 +387,8 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
     parsed = {}
     if output.is_file():
         try:
-            parsed = json.loads(output.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+            parsed = read_json_strict(output)
+        except (OSError, json.JSONDecodeError) as exc:
             return {
                 "task": task.__dict__,
                 "process": process_payload,

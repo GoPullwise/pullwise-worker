@@ -25,6 +25,14 @@ class JsonlUtilsTest(unittest.TestCase):
 
         self.assertEqual(value, {"ok": True})
 
+    def test_read_json_strict_rejects_oversized_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "large.json"
+            path.write_bytes(b"x" * (jsonl.READ_TEXT_MAX_BYTES + 1))
+
+            with self.assertRaisesRegex(OSError, "oversized JSON file"):
+                jsonl.read_json_strict(path)
+
     def test_read_jsonl_returns_empty_for_oversized_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "large.jsonl"

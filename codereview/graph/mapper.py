@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..codex_runner import base_env, run_codex_turn
 from ..config import ReviewConfig, auxiliary_codex_config
-from ..utils.jsonl import read_json, write_json, write_text
+from ..utils.jsonl import read_json, read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir
 from ..utils.process import raise_if_cancelled_callback_exception
 from .cache import graph_cache_key
@@ -234,8 +234,8 @@ def run_codex_graph_mapper(checkout: Path, run: Path, task: dict, inventory_by_p
             "blocked_reason": f"codex graph mapper exited {process.returncode}",
         }
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8")) if output.is_file() else {}
-    except json.JSONDecodeError as exc:
+        parsed = read_json_strict(output) if output.is_file() else {}
+    except (OSError, json.JSONDecodeError) as exc:
         parsed = {}
         parse_error = str(exc)
     else:
@@ -307,8 +307,8 @@ def run_codex_graph_mapper_coordinator(
             for task in tasks
         ]
     try:
-        parsed = json.loads(output.read_text(encoding="utf-8")) if output.is_file() else {}
-    except json.JSONDecodeError as exc:
+        parsed = read_json_strict(output) if output.is_file() else {}
+    except (OSError, json.JSONDecodeError) as exc:
         return [
             _blocked_task_result(task, f"codex graph mapper coordinator produced invalid JSON: {exc}", process=process_payload)
             for task in tasks

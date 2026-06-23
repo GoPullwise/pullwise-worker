@@ -12,6 +12,7 @@ from ..judge.precheck import verify_repro_events_and_paths
 from ..judge.validate import validate_repro_result
 from ..units.context import unit_file_stem
 from ..utils.paths import ensure_dir, safe_path_component
+from ..utils.jsonl import read_json_strict
 from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception, run_process
 from .filesystem_guard import guard_worker_result
 from .worker_dir import create_worker_dir
@@ -144,8 +145,8 @@ def run_repro_worker(checkout: Path, run: Path, candidate: dict, config: ReviewC
     parsed = {}
     if output.is_file():
         try:
-            parsed = json.loads(output.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
+            parsed = read_json_strict(output)
+        except (OSError, json.JSONDecodeError) as exc:
             parsed = blocked_repro_result(issue_id, f"repro produced invalid JSON: {exc}")
     else:
         parsed = blocked_repro_result(issue_id, "repro did not produce an output file")
