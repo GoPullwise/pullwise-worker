@@ -3117,6 +3117,18 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("python3.10", bin_path.read_text(encoding="utf-8"))
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
 
+    def test_worker_wrapper_target_path_is_service_scoped(self) -> None:
+        service_name = "pullwise-worker-test"
+
+        self.assertEqual(
+            worker_main.worker_wrapper_target_path(Path("/usr/local/bin/pullwise-worker-test"), service_name),
+            Path("/usr/local/bin/pullwise-worker-test"),
+        )
+        with self.assertRaisesRegex(ValueError, "unexpected worker wrapper path"):
+            worker_main.worker_wrapper_target_path(Path("/tmp/pullwise-worker-test"), service_name)
+        with self.assertRaisesRegex(ValueError, "unexpected worker wrapper path"):
+            worker_main.worker_wrapper_target_path(Path("/usr/local/bin/other-worker"), service_name)
+
     def test_append_missing_env_values_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3202,9 +3214,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             )
 
             with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
-                worker_main.subprocess,
-                "run",
-            ) as run:
+                worker_main,
+                "worker_wrapper_target_path",
+                return_value=bin_path,
+            ), patch.object(worker_main.subprocess, "run") as run:
                 status = worker_main.update_worker(config)
 
             self.assertEqual(status, 1)
@@ -3241,16 +3254,41 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
 
             with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
-                worker_main.subprocess,
-                "run",
-                side_effect=fake_run,
-            ):
+                worker_main,
+                "worker_wrapper_target_path",
+                return_value=bin_path,
+            ), patch.object(worker_main.subprocess, "run", side_effect=fake_run):
                 status = worker_main.update_worker(config)
 
             self.assertEqual(status, 7)
             self.assertIn(["systemctl", "restart", "pullwise-worker-test"], run_calls)
             self.assertTrue(backup_path.is_symlink())
             self.assertEqual(outside_backup.read_text(encoding="utf-8"), "PULLWISE_EXISTING=old\n")
+
+    def test_update_worker_rejects_unexpected_wrapper_path_before_system_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            env_path = root / "worker.env"
+            env_path.write_text("PULLWISE_EXISTING=1\n", encoding="utf-8")
+            config = SimpleNamespace(
+                service_name="pullwise-worker-test",
+                service_user="pw-worker-test",
+                service_home=str(root / "home"),
+                service_path="/usr/bin",
+                worker_env_file=str(env_path),
+                worker_env_backup_file=str(root / "worker.env.bak"),
+                worker_bin_path=str(root / "not-worker"),
+            )
+
+            with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
+                worker_main.subprocess,
+                "run",
+            ) as run:
+                status = worker_main.update_worker(config)
+
+            self.assertEqual(status, 2)
+            run.assert_not_called()
+            self.assertFalse((root / "not-worker").exists())
 
     def test_ensure_lifecycle_watcher_service_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

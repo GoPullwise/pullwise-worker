@@ -681,6 +681,21 @@ def write_worker_wrapper(bin_path: Path, env_path: Path) -> None:
     bin_path.chmod(0o755)
 
 
+def worker_wrapper_target_path(path: Path, service_name: str) -> Path:
+    safe_service_name = safe_worker_service_name(service_name)
+    resolved = path.resolve(strict=False)
+    allowed = Path("/usr/local/bin").resolve(strict=False)
+    try:
+        resolved.relative_to(allowed)
+    except ValueError as exc:
+        raise ValueError(f"refusing to write unexpected worker wrapper path: {path}") from exc
+    if resolved.name != safe_service_name:
+        raise ValueError(f"refusing to write unexpected worker wrapper path: {path}")
+    if path_is_root(resolved):
+        raise ValueError(f"refusing to write unexpected worker wrapper path: {path}")
+    return path
+
+
 def systemd_unit_path_text(value: object, label: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -827,6 +842,11 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE", "").strip() or config.worker_env_file)
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", "").strip() or config.worker_env_backup_file)
     bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH", "").strip() or config.worker_bin_path)
+    try:
+        worker_wrapper_target_path(bin_path, service_name)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     install_command = [
         python_bin,
         "-m",
