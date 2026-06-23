@@ -774,8 +774,8 @@ class PullwiseResponse:
 def read_pullwise_response_body(response: object) -> bytes:
     try:
         body = response.read(WORKER_HTTP_RESPONSE_MAX_BYTES + 1)
-    except TypeError:
-        body = response.read()
+    except TypeError as exc:
+        raise PullwiseRequestError("response body reader must support bounded reads") from exc
     if len(body) > WORKER_HTTP_RESPONSE_MAX_BYTES:
         raise PullwiseRequestError("response body too large")
     return body

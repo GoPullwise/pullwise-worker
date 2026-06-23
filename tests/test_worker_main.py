@@ -260,7 +260,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -297,7 +297,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -837,7 +837,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -872,7 +872,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -939,7 +939,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -971,7 +971,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -1004,7 +1004,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -1038,7 +1038,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b"{}"
 
         def fake_urlopen(request, timeout):
@@ -1070,7 +1070,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b'{"job": "not-an-object"}'
 
         with patch.object(worker_main.urllib.request, "urlopen", return_value=Response()):
@@ -1095,7 +1095,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self) -> bytes:
+            def read(self, size=-1) -> bytes:
                 return b'["not", "an", "object"]'
 
         with patch.object(worker_main.urllib.request, "urlopen", return_value=Response()):
@@ -1130,6 +1130,31 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 client.claim()
 
         self.assertEqual(captured["size"], worker_main.WORKER_HTTP_RESPONSE_MAX_BYTES + 1)
+
+    def test_client_rejects_unbounded_response_reader(self) -> None:
+        config = SimpleNamespace(
+            server_url="https://pullwise.example",
+            worker_token="secret-token",
+            worker_id="wk_single",
+            provider="codex",
+            provider_chain=["codex"],
+            result_upload_compress_min_bytes=1024,
+        )
+        client = worker_main.PullwiseClient(config)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b"{}"
+
+        with patch.object(worker_main.urllib.request, "urlopen", return_value=Response()):
+            with self.assertRaisesRegex(worker_main.PullwiseRequestError, "bounded reads"):
+                client.claim()
 
     def test_client_http_error_includes_server_error_body(self) -> None:
         config = SimpleNamespace(
