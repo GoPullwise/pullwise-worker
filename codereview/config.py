@@ -95,6 +95,7 @@ class GraphConfig:
     codex_census: bool = False
     codex_mappers: bool = False
     codex_linker: bool = False
+    codex_graph_audit: bool = False
     mapper_subagent_limit: int = 6
     map_parallel: int = 2
     graph_timeout_seconds: int = 960
@@ -223,6 +224,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
             codex_census=bool(graph.get("codex_census", False)),
             codex_mappers=codex_mappers_enabled,
             codex_linker=bool(graph.get("codex_linker", False)),
+            codex_graph_audit=bool(graph.get("codex_graph_audit", False)),
             mapper_subagent_limit=mapper_subagent_limit,
             map_parallel=max(1, int(graph.get("map_parallel") or agents.get("graph_map_parallel") or 2)),
             graph_timeout_seconds=max(30, int(graph.get("graph_timeout_seconds") or agents.get("graph_timeout_seconds") or 960)),

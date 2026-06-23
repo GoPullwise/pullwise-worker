@@ -257,6 +257,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "codex_census": graph_config.get("codexCensus") is True,
         "codex_mappers": graph_config.get("codexMappers") is True,
         "codex_linker": graph_config.get("codexLinker") is True,
+        "codex_graph_audit": graph_config.get("codexGraphAudit") is True,
         "mapper_subagent_limit": 6,
         "map_parallel": 2,
         "graph_timeout_seconds": 960,

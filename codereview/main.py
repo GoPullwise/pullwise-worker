@@ -183,8 +183,11 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     if config.graph.use_sqlite_index:
         _emit_progress(progress, "graph", "Graph: rebuilding query index", run_id=run_id)
         rebuild_sqlite_index(graph, graph_dir / "graph.sqlite3")
-    _emit_progress(progress, "graph", "Graph: agent audit", run_id=run_id)
-    agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
+    if getattr(config.graph, "codex_graph_audit", False):
+        _emit_progress(progress, "graph", "Graph: agent audit", run_id=run_id)
+        agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
+    else:
+        agent_audit = {"status": "skipped", "reason": "graph is used as a navigation index; Codex graph audit is disabled by default", "repairs": []}
     write_json(graph_dir / "audit.json", audit)
     write_json(graph_dir / "agent-audit.json", agent_audit)
     write_json(graph_dir / "coverage-backfill-history.json", backfill_history)
@@ -245,7 +248,10 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         if not audit.get("quality_gate_passed"):
             _emit_progress(progress, "graph", _graph_quality_gate_failure_message(audit), run_id=run_id)
             raise RuntimeError(f"graph quality gate failed after context repair: {'; '.join(audit.get('quality_errors') or [])}")
-        agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
+        if getattr(config.graph, "codex_graph_audit", False):
+            agent_audit = run_agent_graph_audit(snapshot_repo, run, graph, inventory, audit, config)
+        else:
+            agent_audit = {"status": "skipped", "reason": "graph is used as a navigation index; Codex graph audit is disabled by default", "repairs": []}
         write_json(graph_dir / "agent-audit.json", agent_audit)
         previous_finder_tasks = finder_tasks
         previous_raw_candidates = raw_candidates

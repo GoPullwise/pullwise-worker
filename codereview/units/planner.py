@@ -32,40 +32,64 @@ def build_all_review_units(graph: dict, inventory: dict, census: dict, config: R
 
 def _entrypoint_flow_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig, covered: set[str]) -> list[dict]:
     units = []
-    for node in _nodes(graph, kinds=ENTRYPOINT_KINDS):
-        node_id = str(node.get("id") or "")
-        downstream = index.walk(node_id, direction="downstream", max_depth=config.units.high_risk_downstream_depth, edge_types=CALL_EDGE_TYPES | STATE_EDGE_TYPES | {"reads_env", "reads_config"}, max_nodes=config.units.max_unit_nodes)
-        node_ids = _bounded_unique([node_id, *downstream], config.units.max_unit_nodes)
-        covered.update(_production_nodes(index, node_ids))
-        units.append(_unit(index, graph, "entrypoint_flow", f"flow:{node_id}", node_ids, ["public-entrypoint", *_risk_tags(index, node_ids)]))
+    groups = _group_node_ids_by_package(_nodes(graph, kinds=ENTRYPOINT_KINDS))
+    for package, node_ids in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
+            expanded = list(chunk)
+            for node_id in chunk:
+                remaining = max(0, config.units.max_unit_nodes - len(expanded))
+                if remaining <= 0:
+                    break
+                downstream = index.walk(
+                    node_id,
+                    direction="downstream",
+                    max_depth=config.units.high_risk_downstream_depth,
+                    edge_types=CALL_EDGE_TYPES | STATE_EDGE_TYPES | {"reads_env", "reads_config"},
+                    max_nodes=remaining,
+                )
+                expanded.extend(downstream)
+            unit_nodes = _bounded_unique(expanded, config.units.max_unit_nodes)
+            covered.update(_production_nodes(index, unit_nodes))
+            units.append(_unit(index, graph, "entrypoint_flow", f"flow:{package}:{chunk_index}", unit_nodes, ["public-entrypoint", *_risk_tags(index, unit_nodes)]))
     return units
 
 
 def _component_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig, covered: set[str]) -> list[dict]:
     units = []
+    groups: dict[str, list[str]] = {}
     for node in _nodes(graph, kinds=PRODUCTION_SYMBOL_KINDS):
         node_id = str(node.get("id") or "")
         if node_id in covered:
             continue
-        downstream = index.walk(node_id, direction="downstream", max_depth=config.units.default_downstream_depth, edge_types=CALL_EDGE_TYPES | STATE_EDGE_TYPES | {"reads_env", "reads_config"}, max_nodes=config.units.max_unit_nodes)
-        upstream = index.walk(node_id, direction="upstream", max_depth=config.units.default_upstream_depth, edge_types=CALL_EDGE_TYPES | {"defines"}, max_nodes=config.units.max_unit_nodes)
-        node_ids = _bounded_unique([*upstream[:10], node_id, *downstream[:50]], config.units.max_unit_nodes)
-        covered.add(node_id)
-        units.append(_unit(index, graph, "component", f"component:{node_id}", node_ids, _risk_tags(index, node_ids)))
+        groups.setdefault(_package(node.get("file")) or ".", []).append(node_id)
+    for package, node_ids in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
+            unit_nodes = _bounded_unique(chunk, config.units.max_unit_nodes)
+            covered.update(_production_nodes(index, unit_nodes))
+            units.append(_unit(index, graph, "component_area", f"component-area:{package}:{chunk_index}", unit_nodes, _risk_tags(index, unit_nodes)))
     return units
 
 
 def _state_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig) -> list[dict]:
     units = []
-    for node in _nodes(graph, kinds=STATE_KINDS):
-        node_id = str(node.get("id") or "")
-        upstream = index.walk(node_id, direction="upstream", max_depth=config.units.high_risk_upstream_depth, edge_types=STATE_EDGE_TYPES | CALL_EDGE_TYPES | {"references"}, max_nodes=config.units.max_unit_nodes)
-        units.append(_unit(index, graph, "state", f"state:{node_id}", _bounded_unique([*upstream, node_id], config.units.max_unit_nodes), ["state", *_risk_tags(index, [node_id])]))
+    groups = _group_node_ids_by_package(_nodes(graph, kinds=STATE_KINDS))
+    for package, node_ids in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
+            expanded = list(chunk)
+            for node_id in chunk:
+                remaining = max(0, config.units.max_unit_nodes - len(expanded))
+                if remaining <= 0:
+                    break
+                upstream = index.walk(node_id, direction="upstream", max_depth=config.units.high_risk_upstream_depth, edge_types=STATE_EDGE_TYPES | CALL_EDGE_TYPES | {"references"}, max_nodes=remaining)
+                expanded.extend(upstream)
+            unit_nodes = _bounded_unique(expanded, config.units.max_unit_nodes)
+            units.append(_unit(index, graph, "state", f"state:{package}:{chunk_index}", unit_nodes, ["state", *_risk_tags(index, unit_nodes)]))
     return units
 
 
 def _trust_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig) -> list[dict]:
     units = []
+    groups: dict[str, list[str]] = {}
     for node in graph.get("nodes", []) or []:
         if not isinstance(node, dict):
             continue
@@ -73,26 +97,37 @@ def _trust_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig) -> 
         attrs = {str(tag) for tag in node.get("attributes", []) if str(tag)}
         if not attrs & TRUST_TAGS:
             continue
-        downstream = index.walk(node_id, direction="downstream", max_depth=config.units.high_risk_downstream_depth, edge_types=CALL_EDGE_TYPES | STATE_EDGE_TYPES | {"reads_env", "reads_config"}, max_nodes=config.units.max_unit_nodes)
-        units.append(_unit(index, graph, "trust_boundary", f"trust:{node_id}", _bounded_unique([node_id, *downstream], config.units.max_unit_nodes), ["trust-boundary", *sorted(attrs)]))
+        groups.setdefault(_package(node.get("file")) or ".", []).append(node_id)
+    for package, node_ids in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
+            expanded = list(chunk)
+            for node_id in chunk:
+                remaining = max(0, config.units.max_unit_nodes - len(expanded))
+                if remaining <= 0:
+                    break
+                downstream = index.walk(node_id, direction="downstream", max_depth=config.units.high_risk_downstream_depth, edge_types=CALL_EDGE_TYPES | STATE_EDGE_TYPES | {"reads_env", "reads_config"}, max_nodes=remaining)
+                expanded.extend(downstream)
+            unit_nodes = _bounded_unique(expanded, config.units.max_unit_nodes)
+            units.append(_unit(index, graph, "trust_boundary", f"trust:{package}:{chunk_index}", unit_nodes, ["trust-boundary", *_risk_tags(index, unit_nodes)]))
     return units
 
 
 def _config_build_units(index: MemoryGraphIndex, graph: dict, inventory: dict, config: ReviewConfig) -> list[dict]:
-    del inventory, config
+    del inventory
     units = []
-    for node in _nodes(graph, kinds=CONFIG_KINDS):
-        node_id = str(node.get("id") or "")
-        units.append(_unit(index, graph, "config_build", f"config:{node_id}", [node_id], ["configuration"]))
+    groups = _group_node_ids_by_package(_nodes(graph, kinds=CONFIG_KINDS))
+    for package, node_ids in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
+            units.append(_unit(index, graph, "config_build", f"config:{package}:{chunk_index}", chunk, ["configuration"]))
     return units
 
 
 def _test_integrity_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig) -> list[dict]:
-    del config
     units = []
-    for node in _nodes(graph, kinds={"test_file", "test_case"}):
-        node_id = str(node.get("id") or "")
-        units.append(_unit(index, graph, "test_integrity", f"test:{node_id}", [node_id], ["test-only", "test-integrity"]))
+    groups = _group_node_ids_by_package(_nodes(graph, kinds={"test_file", "test_case"}))
+    for package, node_ids in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(_chunks(node_ids, config.units.max_unit_nodes)):
+            units.append(_unit(index, graph, "test_integrity", f"test:{package}:{chunk_index}", chunk, ["test-only", "test-integrity"]))
     return units
 
 
@@ -109,7 +144,7 @@ def _orphan_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig, co
 def _cross_boundary_units(index: MemoryGraphIndex, graph: dict, config: ReviewConfig) -> list[dict]:
     if not config.units.require_boundary_review:
         return []
-    units = []
+    groups: dict[str, list[str]] = {}
     for edge in graph.get("edges", []) or []:
         if not isinstance(edge, dict):
             continue
@@ -119,9 +154,15 @@ def _cross_boundary_units(index: MemoryGraphIndex, graph: dict, config: ReviewCo
             continue
         source_node = index.get_node(source) or {}
         target_node = index.get_node(target) or {}
-        if _package(source_node.get("file")) == _package(target_node.get("file")):
+        source_package = _package(source_node.get("file"))
+        target_package = _package(target_node.get("file"))
+        if source_package == target_package:
             continue
-        units.append(_unit(index, graph, "cross_boundary", f"boundary:{source}:{target}", [source, target], ["cross-boundary"]))
+        groups.setdefault(f"{source_package}->{target_package}", []).extend([source, target])
+    units = []
+    for package_pair, node_ids in sorted(groups.items()):
+        for chunk_index, chunk in enumerate(_chunks(_bounded_unique(node_ids, len(node_ids)), config.units.max_unit_nodes)):
+            units.append(_unit(index, graph, "cross_boundary", f"boundary:{package_pair}:{chunk_index}", chunk, ["cross-boundary", *_risk_tags(index, chunk)]))
     return units
 
 
@@ -240,6 +281,21 @@ def _node_label(index: MemoryGraphIndex, node_id: str) -> str:
 def _unresolved_for_nodes(graph: dict, node_ids: list[str]) -> list[dict]:
     ids = set(node_ids)
     return [ref for ref in graph.get("unresolved_refs", []) if isinstance(ref, dict) and ref.get("source_node") in ids][:50]
+
+
+def _group_node_ids_by_package(nodes: list[dict]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        if not node_id:
+            continue
+        groups.setdefault(_package(node.get("file")) or ".", []).append(node_id)
+    return groups
+
+
+def _chunks(values: list[str], limit: int) -> list[list[str]]:
+    size = max(1, int(limit or 1))
+    return [values[offset : offset + size] for offset in range(0, len(values), size)]
 
 
 def _dedupe_units(units: list[dict]) -> list[dict]:

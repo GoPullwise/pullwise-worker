@@ -61,6 +61,7 @@ def ensure_project_files(checkout: Path) -> None:
                         "codex_census": False,
                         "codex_mappers": False,
                         "codex_linker": False,
+                        "codex_graph_audit": False,
                         "mapper_subagent_limit": 6,
                         "map_parallel": 2,
                         "graph_timeout_seconds": 960,

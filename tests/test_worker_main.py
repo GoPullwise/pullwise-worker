@@ -3525,6 +3525,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIs(payload["graph"]["codex_census"], False)
         self.assertIs(payload["graph"]["codex_mappers"], False)
         self.assertIs(payload["graph"]["codex_linker"], False)
+        self.assertIs(payload["graph"]["codex_graph_audit"], False)
         self.assertEqual(payload["graph"]["map_parallel"], 2)
         self.assertEqual(payload["graph"]["graph_timeout_seconds"], 960)
         self.assertEqual(payload["codex"]["reasoning_effort"], "medium")

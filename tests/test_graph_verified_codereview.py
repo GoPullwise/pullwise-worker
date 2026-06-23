@@ -142,6 +142,7 @@ def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     assert config["graph"]["codex_census"] is False
     assert config["graph"]["codex_mappers"] is False
     assert config["graph"]["codex_linker"] is False
+    assert config["graph"]["codex_graph_audit"] is False
     assert config["graph"]["map_parallel"] == 2
     assert config["graph"]["graph_timeout_seconds"] == 960
     assert config["finders"]["turn_parallel"] == 1
@@ -1690,7 +1691,37 @@ def test_fast_profile_does_not_cap_full_review_unit_coverage() -> None:
 
     assert coverage["production_symbols"] == 20
     assert coverage["covered_production_symbols"] == 20
-    assert coverage["review_units"] >= 20
+    assert coverage["review_units"] < 20
+
+
+def test_review_unit_planner_aggregates_graph_nodes_as_navigation_context() -> None:
+    config = ReviewConfig()
+    config.units.require_global_review = False
+    config.units.require_boundary_review = False
+    config.units.max_unit_nodes = 100
+    nodes = [
+        {
+            "id": f"sym:python:src/service.py::func_{index}::function::{index}",
+            "kind": "function",
+            "name": f"func_{index}",
+            "qualified_name": f"func_{index}",
+            "file": "src/service.py",
+            "span": {"start_line": index + 1, "end_line": index + 1},
+            "attributes": ["source"],
+        }
+        for index in range(250)
+    ]
+    graph = {"nodes": nodes, "edges": [], "unresolved_refs": []}
+    inventory = {"files": [{"path": "src/service.py", "scope": "analyze"}]}
+
+    units = build_all_review_units(graph, inventory, {"packages": []}, config)
+    coverage = build_unit_coverage(graph, inventory, units)
+    finder_tasks = plan_finder_tasks(units)
+
+    assert coverage["production_symbols"] == 250
+    assert coverage["covered_production_symbols"] == 250
+    assert [unit["unit_type"] for unit in units] == ["component_area", "component_area", "component_area"]
+    assert len(finder_tasks) == 3
 
 
 def test_candidate_pipeline_requires_unit_graph_evidence(tmp_path: Path) -> None:
