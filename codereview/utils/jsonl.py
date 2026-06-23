@@ -8,6 +8,9 @@ from pathlib import Path
 from .paths import ensure_dir
 
 
+READ_TEXT_MAX_BYTES = 32 * 1024 * 1024
+
+
 def write_json(path: Path, value: object) -> None:
     write_text(path, json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
@@ -49,8 +52,20 @@ def read_text(path: Path) -> str:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags)
-    with os.fdopen(fd, "r", encoding="utf-8") as handle:
-        return handle.read()
+    try:
+        size = os.fstat(fd).st_size
+        if size > READ_TEXT_MAX_BYTES:
+            raise OSError(f"refusing to read oversized JSON file: {path}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            data = handle.read(READ_TEXT_MAX_BYTES + 1)
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    if len(data) > READ_TEXT_MAX_BYTES:
+        raise OSError(f"refusing to read oversized JSON file: {path}")
+    return data.decode("utf-8")
 
 
 def write_text(path: Path, text: str) -> None:
