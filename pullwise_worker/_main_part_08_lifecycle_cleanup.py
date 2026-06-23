@@ -707,6 +707,28 @@ def worker_service_unit_target_path(path: Path, service_name: str) -> Path:
     return path
 
 
+def worker_env_target_paths(env_path: Path, backup_path: Path) -> tuple[Path, Path]:
+    env_text = str(env_path or "").strip()
+    backup_text = str(backup_path or "").strip()
+    if not env_text or not backup_text:
+        raise ValueError("worker env and backup paths are required")
+    if any(char in env_text + backup_text for char in "\r\n\x00"):
+        raise ValueError("worker env and backup paths must be single-line")
+    env_resolved = env_path.resolve(strict=False)
+    backup_resolved = backup_path.resolve(strict=False)
+    allowed_root = Path("/etc/pullwise-worker").resolve(strict=False)
+    try:
+        env_resolved.relative_to(allowed_root)
+        backup_resolved.relative_to(allowed_root)
+    except ValueError as exc:
+        raise ValueError("refusing to write worker env outside /etc/pullwise-worker") from exc
+    if path_is_root(env_resolved) or path_is_root(backup_resolved):
+        raise ValueError("refusing to write unsafe worker env path")
+    if backup_resolved.parent != env_resolved.parent or backup_resolved.name != f"{env_resolved.name}.bak":
+        raise ValueError("worker env backup path must be the env path with .bak suffix")
+    return env_path, backup_path
+
+
 def systemd_unit_path_text(value: object, label: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -855,6 +877,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", "").strip() or config.worker_env_backup_file)
     bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH", "").strip() or config.worker_bin_path)
     try:
+        worker_env_target_paths(env_path, backup_path)
         worker_wrapper_target_path(bin_path, service_name)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

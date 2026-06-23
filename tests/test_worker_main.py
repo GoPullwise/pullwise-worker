@@ -3144,6 +3144,16 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected worker service unit path"):
             worker_main.worker_service_unit_target_path(Path("/etc/systemd/system/other.service"), service_name)
 
+    def test_worker_env_target_paths_are_config_scoped(self) -> None:
+        env_path = Path("/etc/pullwise-worker/worker.env")
+        backup_path = Path("/etc/pullwise-worker/worker.env.bak")
+
+        self.assertEqual(worker_main.worker_env_target_paths(env_path, backup_path), (env_path, backup_path))
+        with self.assertRaisesRegex(ValueError, "outside /etc/pullwise-worker"):
+            worker_main.worker_env_target_paths(Path("/tmp/worker.env"), Path("/tmp/worker.env.bak"))
+        with self.assertRaisesRegex(ValueError, "backup path"):
+            worker_main.worker_env_target_paths(env_path, Path("/etc/pullwise-worker/other.bak"))
+
     def test_append_missing_env_values_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3230,6 +3240,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
                 worker_main,
+                "worker_env_target_paths",
+                return_value=(env_path, backup_path),
+            ), patch.object(
+                worker_main,
                 "worker_wrapper_target_path",
                 return_value=bin_path,
             ), patch.object(worker_main.subprocess, "run") as run:
@@ -3270,6 +3284,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
                 worker_main,
+                "worker_env_target_paths",
+                return_value=(env_path, backup_path),
+            ), patch.object(
+                worker_main,
                 "worker_wrapper_target_path",
                 return_value=bin_path,
             ), patch.object(worker_main.subprocess, "run", side_effect=fake_run):
@@ -3279,6 +3297,30 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn(["systemctl", "restart", "pullwise-worker-test"], run_calls)
             self.assertTrue(backup_path.is_symlink())
             self.assertEqual(outside_backup.read_text(encoding="utf-8"), "PULLWISE_EXISTING=old\n")
+
+    def test_update_worker_rejects_unexpected_env_path_before_system_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            env_path = root / "worker.env"
+            env_path.write_text("PULLWISE_EXISTING=1\n", encoding="utf-8")
+            config = SimpleNamespace(
+                service_name="pullwise-worker-test",
+                service_user="pw-worker-test",
+                service_home=str(root / "home"),
+                service_path="/usr/bin",
+                worker_env_file=str(env_path),
+                worker_env_backup_file=str(root / "worker.env.bak"),
+                worker_bin_path="/usr/local/bin/pullwise-worker-test",
+            )
+
+            with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
+                worker_main.subprocess,
+                "run",
+            ) as run:
+                status = worker_main.update_worker(config)
+
+            self.assertEqual(status, 2)
+            run.assert_not_called()
 
     def test_update_worker_rejects_unexpected_wrapper_path_before_system_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3296,6 +3338,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             )
 
             with patch.object(worker_main, "install_ubuntu_2204_dependencies", return_value=(True, "ok")), patch.object(
+                worker_main,
+                "worker_env_target_paths",
+                return_value=(env_path, Path(config.worker_env_backup_file)),
+            ), patch.object(
                 worker_main.subprocess,
                 "run",
             ) as run:
