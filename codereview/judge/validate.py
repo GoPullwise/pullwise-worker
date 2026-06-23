@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..utils.paths import is_within
+from .logs import read_worker_log_text, worker_log_path_error
 
 
 DENIED_COMMAND_MARKERS = {
@@ -232,13 +232,13 @@ def validate_log(worker: Path | None, log_path: str, observable: str) -> str:
         return "log path missing"
     if worker is None:
         return ""
-    resolved = (worker / log_path).resolve(strict=False)
-    if not is_within(resolved, worker):
-        return f"log path outside worker directory: {log_path}"
-    if not resolved.is_file():
-        return f"log path missing: {log_path}"
+    _resolved, path_error = worker_log_path_error(worker, log_path)
+    if path_error:
+        return path_error
     if observable:
-        text = resolved.read_text(encoding="utf-8", errors="replace")
+        text, read_error = read_worker_log_text(worker, log_path)
+        if read_error:
+            return read_error
         if observable[:200] not in text and text[:200] not in observable:
             return "observable output is not supported by log"
     return ""

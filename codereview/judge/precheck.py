@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .logs import read_worker_log_text, worker_log_path_error
 from ..repro.event_parser import command_mentioned, event_stream_text
 
 
@@ -111,14 +112,15 @@ def _log_excerpt_mismatch(repro: dict, commands: list[object], log_excerpt: str)
         log_path = str(command.get("log_path") or "").strip()
         if not log_path:
             continue
-        resolved = (worker / log_path).resolve(strict=False)
-        try:
-            resolved.relative_to(worker)
-        except ValueError:
-            return f"command log path outside worker: {log_path}"
-        if not resolved.is_file():
-            return f"command log path missing: {log_path}"
-        text = resolved.read_text(encoding="utf-8", errors="replace")
+        _resolved, path_error = worker_log_path_error(worker, log_path)
+        if path_error:
+            return path_error.replace("log path outside worker directory", "command log path outside worker").replace(
+                "log path missing",
+                "command log path missing",
+            )
+        text, read_error = read_worker_log_text(worker, log_path)
+        if read_error:
+            return read_error.replace("log path missing", "command log path missing")
         if log_excerpt[:500] not in text and text[:500] not in log_excerpt:
             return f"proof log_excerpt is not supported by command log: {log_path}"
     return ""
