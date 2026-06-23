@@ -186,6 +186,38 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(config.uninstall_marker_file, "/run/pullwise-worker-wk_1/uninstall-requested")
         self.assertEqual(config.watcher_service_name, "pullwise-worker-wk_1-watcher")
 
+    def test_worker_config_rejects_unsafe_service_home_and_path(self) -> None:
+        args = SimpleNamespace(
+            server_url="http://localhost:8080",
+            worker_token="",
+            worker_id="wk_test",
+            provider="codex",
+            poll_seconds=None,
+            checkout_root=None,
+            work_dir=None,
+            log_dir=None,
+            codex_command=None,
+            codex_timeout_seconds=None,
+        )
+
+        with patch.dict(worker_main.os.environ, {"PULLWISE_SERVICE_HOME": "relative/home"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "PULLWISE_SERVICE_HOME"):
+                worker_main.WorkerConfig(args, require_worker_token=False)
+
+        with patch.dict(worker_main.os.environ, {"PULLWISE_SERVICE_PATH": "/usr/bin\n/tmp/bin"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "PULLWISE_SERVICE_PATH"):
+                worker_main.WorkerConfig(args, require_worker_token=False)
+
+        with patch.dict(worker_main.os.environ, {"PULLWISE_SERVICE_PATH": "/usr/bin:relative/bin"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "PULLWISE_SERVICE_PATH"):
+                worker_main.WorkerConfig(args, require_worker_token=False)
+
+    def test_provider_process_env_rejects_unsafe_service_home_on_direct_config(self) -> None:
+        cfg = SimpleNamespace(service_home="relative/home", service_path="/usr/bin")
+
+        with self.assertRaisesRegex(ValueError, "PULLWISE_SERVICE_HOME"):
+            worker_main.provider_process_env(cfg)
+
     def git(self, repo: Path, *args: str) -> str:
         completed = subprocess.run(
             ["git", *args],

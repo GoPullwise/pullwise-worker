@@ -223,6 +223,28 @@ def dependency_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
+def safe_service_home_path(value: object) -> str:
+    text = str(value or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    if any(char in text for char in "\r\n\x00"):
+        raise ValueError("PULLWISE_SERVICE_HOME must be single-line")
+    path = Path(text)
+    if not path.is_absolute() or text == path.anchor:
+        raise ValueError("PULLWISE_SERVICE_HOME must be an absolute non-root path")
+    return text.rstrip("/") or text
+
+
+def safe_service_path(value: object) -> str:
+    text = str(value or DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
+    if any(char in text for char in "\r\n\x00"):
+        raise ValueError("PULLWISE_SERVICE_PATH must be single-line")
+    parts = [part for part in text.split(":") if part]
+    if not parts:
+        raise ValueError("PULLWISE_SERVICE_PATH must include at least one absolute path")
+    if any(not Path(part).is_absolute() or part == Path(part).anchor for part in parts):
+        raise ValueError("PULLWISE_SERVICE_PATH entries must be absolute non-root paths")
+    return ":".join(dict.fromkeys(parts))
+
+
 def dependency_packages(requirements: list[str]) -> list[str]:
     packages: list[str] = []
     for requirement in requirements:
@@ -324,7 +346,7 @@ def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool =
 
 def service_user_command(config: WorkerConfig | None, command: list[str]) -> str:
     service_user = str(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
-    service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    service_home = safe_service_home_path(getattr(config, "service_home", None))
     path = provider_tool_path(config)
     quoted_command = " ".join(shlex.quote(str(part)) for part in command if str(part))
     shell_command = f'cd "$HOME" && exec {quoted_command}'
@@ -343,8 +365,8 @@ def service_user_command(config: WorkerConfig | None, command: list[str]) -> str
 
 
 def provider_tool_path(config: WorkerConfig | None) -> str:
-    service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
-    service_path = str(getattr(config, "service_path", None) or DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
+    service_home = safe_service_home_path(getattr(config, "service_home", None))
+    service_path = safe_service_path(getattr(config, "service_path", None))
     path_parts = [
         f"{service_home}/.local/bin",
         f"{service_home}/.codex/bin",
@@ -354,14 +376,12 @@ def provider_tool_path(config: WorkerConfig | None) -> str:
 
 
 def provider_home_path(service_home: str, *parts: str) -> str:
-    home = str(service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
-    if home.startswith("/"):
-        return "/".join([home.rstrip("/"), *(part.strip("/") for part in parts if part)])
-    return str(Path(home).joinpath(*parts))
+    home = safe_service_home_path(service_home)
+    return "/".join([home.rstrip("/"), *(part.strip("/") for part in parts if part)])
 
 
 def provider_process_env(config: WorkerConfig) -> dict[str, str]:
-    service_home = str(config.service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    service_home = safe_service_home_path(config.service_home)
     codex_sqlite_home = provider_home_path(service_home, ".codex-sqlite")
     env = {
         key: os.environ[key]
@@ -388,7 +408,7 @@ def codex_login_command(config: WorkerConfig) -> str:
 
 
 def default_provider_command(service_home: str, provider: str) -> str:
-    home = str(service_home or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    home = safe_service_home_path(service_home)
     return f"{home.rstrip('/')}/.{provider}/bin/{provider}"
 
 
@@ -646,8 +666,8 @@ class WorkerConfig:
         log_dir = getattr(args, "log_dir", None) or os.environ.get("PULLWISE_LOG_DIR")
         self.log_dir = Path(log_dir) if log_dir else Path(tempfile.gettempdir()) / "pullwise-worker-logs"
         self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
-        self.service_home = os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
-        self.service_path = os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
+        self.service_home = safe_service_home_path(os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME))
+        self.service_path = safe_service_path(os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH))
         self.service_name = safe_worker_service_name(
             os.environ.get("PULLWISE_SERVICE_NAME", DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
         )
