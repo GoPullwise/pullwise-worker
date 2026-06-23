@@ -107,6 +107,8 @@ def verify_candidate(
     run: Path | None = None,
 ) -> dict:
     local = local_verify_candidate(candidate, graph, config)
+    if local.get("verdict") != "reproducible":
+        return local
     if checkout is None or run is None:
         return local
     prompt_file = checkout / ".codereview" / "prompts" / "candidate-verifier.md"

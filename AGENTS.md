@@ -58,6 +58,18 @@ login flows, but the review pipeline must not start CLI review commands.
   single server process. App-server turns may run concurrently when bounded by
   config such as `finders.turn_parallel`; this is not process-level CLI
   concurrency.
+- The current implementation supports bounded concurrent app-server turns by
+  sharing one `CodexAppServerClient` per worker provider environment. Concurrent
+  callers get separate app-server threads/turn ids while the client serializes
+  only JSON writes to the app-server stdio pipe.
+- Keep the default conservative unless the server plan explicitly enables more:
+  `graphVerified.finderTurnParallel` maps to `finders.turn_parallel`, defaults
+  to `1`, and is capped at `6`. `graphVerified.finderMaxParallel` controls how
+  many finder subagents are batched into one turn, also capped at `6`.
+- Increasing `finders.turn_parallel` is the supported way to parallelize
+  GraphVerified model work for one job under app-server mode. It does not
+  permit multiple local jobs, a local job queue, or multiple Codex CLI
+  executions for one worker identity.
 - Do not start multiple app-server processes for one worker identity.
 - Do not add process-level Codex parallelism to a worker identity. Add more
   worker instances when more throughput is needed.
@@ -66,6 +78,13 @@ login flows, but the review pipeline must not start CLI review commands.
   `CODEX_SQLITE_HOME`, `HOME`, or credential store. The desktop app can keep
   the default `~/.codex/sqlite` state locked, so worker app-server runs must use
   worker-owned SQLite state.
+- Treat auth and token refresh as shared state for all concurrent turns in the
+  worker's single app-server. If Codex reports markers such as `401
+  Unauthorized`, `Failed to refresh token`, or `refresh token was already used`,
+  the worker must degrade readiness/cool down rather than launching extra CLI or
+  app-server processes to work around the failure. Reduce
+  `finderTurnParallel` before raising it again if token refresh failures appear
+  under load.
 - Prefer stdio or an instance-scoped Unix socket for app-server transport. If a
   TCP/WebSocket listener is ever used, bind it to a worker-specific local port
   and require app-server WebSocket auth; do not expose unauthenticated
@@ -177,7 +196,9 @@ static-analysis, parser, or database dependencies for this pipeline.
   split one module into repeated context reads when the jobs can share one
   context pack, and do not force unrelated modules into the same batch. Multiple
   finder batch turns may run concurrently through the same app-server, bounded
-  by `finders.turn_parallel`.
+  by `finders.turn_parallel`. This is the app-server replacement for the old
+  serialized `codex exec` CLI path; do not reintroduce CLI commands to get
+  parallelism.
 - `.codereview/runs/<run_id>/` is checkout-scoped run state. Keep graph JSONL,
   review units, candidate artifacts, worker task files, reports, and debug data
   there. Do not move repository context or review run data under `service_home`.

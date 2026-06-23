@@ -1483,6 +1483,33 @@ def test_core_candidate_verifier_keeps_plan_reasoning_effort(tmp_path: Path, mon
     assert result["verifier_source"] == "codex"
 
 
+def test_candidate_verifier_skips_codex_for_local_reject(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    ensure_project_files(checkout)
+    run = tmp_path / "run"
+    config = ReviewConfig()
+    candidate = {
+        "candidate_id": "issue_1",
+        "claim": "missing required verification evidence",
+        "graph_evidence": {"context_files": [], "path_summary": []},
+        "minimal_repro_idea": "",
+    }
+    graph = {"nodes": [], "edges": [], "unresolved_refs": []}
+
+    def fail_if_called(**kwargs):
+        del kwargs
+        raise AssertionError("candidate verifier should not call app-server for local reject")
+
+    monkeypatch.setattr(candidate_verifier_module, "run_codex_turn", fail_if_called)
+
+    result = candidate_verifier_module.verify_candidate(candidate, graph, config, checkout, run)
+
+    assert result["verdict"] == "reject"
+    assert result["verifier_source"] == "local"
+    assert "missing graph path summary" in result["rejection_reason"]
+
+
 def test_candidate_verifier_parallel_blocks_one_exception_and_keeps_others(monkeypatch: _MonkeyPatch) -> None:
     config = ReviewConfig()
     candidates = [{"issue_id": "bad"}, {"issue_id": "ok"}]

@@ -32,7 +32,7 @@ from .repository.symbols import map_repository_symbols
 from .report.render import collect_confirmed, collect_rejected, render_debug_report, render_final_report
 from .review.candidate_verifier import run_candidate_verifiers_parallel, select_reproducible_candidates
 from .repro.runner import run_repro_workers_parallel
-from .snapshot import capture_source_state, create_immutable_snapshot, source_state_changed
+from .snapshot import capture_source_state, create_immutable_snapshot, source_state_changed, source_state_from_inventory
 from .templates import ensure_project_files
 from .units.context import write_review_units
 from .units.coverage import build_unit_coverage, require_full_unit_coverage
@@ -55,13 +55,13 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     write_json(run / "meta.json", {"run_id": run_id, "mode": config.mode, "scan_mode": config.scan.mode, "scope": "full-repository"})
     _emit_progress(progress, "setup", "GraphVerified: preparing run", run_id=run_id)
 
-    source_state_before = capture_source_state(checkout, include_untracked=config.scan.include_untracked)
-    write_json(run / "source_state_before.json", source_state_before)
     repo_state = inspect_repo(checkout)
     write_json(run / "repo_state.json", repo_state)
 
     _emit_progress(progress, "inventory", "GraphVerified: building repository inventory", run_id=run_id)
     inventory = build_git_inventory(checkout, include_untracked=config.scan.include_untracked)
+    source_state_before = source_state_from_inventory(inventory)
+    write_json(run / "source_state_before.json", source_state_before)
     write_json(run / "artifacts" / "inventory" / "inventory.json", inventory)
 
     _emit_progress(progress, "snapshot", "GraphVerified: creating immutable snapshot", run_id=run_id)

@@ -1629,6 +1629,96 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("Running GraphVerified review", summary_text)
             self.assertIn('"status": "done"', summary_text)
 
+    def test_run_job_throttles_graph_verified_task_progress_uploads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_progress",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_progress_throttle",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+            progress_messages: list[str] = []
+
+            def fake_progress(_job_id: str, _phase: str, _progress: int, message: str = "", logs_summary: str = "") -> None:
+                del _job_id, _phase, _progress, logs_summary
+                progress_messages.append(message)
+
+            def fake_graph_verified(_config: object, _job: dict, _checkout_dir: Path, progress_callback=None) -> dict:
+                del _config, _job, _checkout_dir
+                for index in range(1, 6):
+                    progress_callback(
+                        {
+                            "stage": "graph",
+                            "message": f"Graph: mapping shards {index}/5",
+                            "current": index,
+                            "total": 5,
+                        }
+                    )
+                return {
+                    "version": "graph-verified-code-review/1",
+                    "runId": "gv_run",
+                    "confirmedCount": 0,
+                    "rejectedCount": 0,
+                    "blockedCount": 0,
+                    "debugMarkdown": "",
+                    "finalJson": {"confirmed": []},
+                }
+
+            with patch.object(worker.client, "progress", side_effect=fake_progress), patch.object(
+                worker_main,
+                "GRAPH_VERIFIED_PROGRESS_UPLOAD_MIN_SECONDS",
+                999.0,
+            ), patch.object(
+                worker_main,
+                "clone_repository",
+                return_value="abc123",
+            ), patch.object(worker_main, "enforce_repository_limits"), patch.object(
+                worker_main,
+                "collect_preflight_metadata",
+                return_value={"summary": "preflight ok"},
+            ), patch.object(
+                worker_main,
+                "run_graph_verified_review_payload",
+                side_effect=fake_graph_verified,
+            ), patch.object(worker_main, "graph_verified_summary_findings", return_value=[]), patch.object(
+                worker,
+                "upload_result_once_or_defer",
+                return_value=True,
+            ):
+                worker.run_job(job)
+
+            self.assertIn("Graph: mapping shards 1/5", progress_messages)
+            self.assertIn("Graph: mapping shards 5/5", progress_messages)
+            self.assertNotIn("Graph: mapping shards 2/5", progress_messages)
+            self.assertNotIn("Graph: mapping shards 3/5", progress_messages)
+            self.assertNotIn("Graph: mapping shards 4/5", progress_messages)
+            summary_text = (config.log_dir / "scan-summary.log").read_text(encoding="utf-8")
+            self.assertIn("Graph: mapping shards 4/5", summary_text)
+
     def test_run_job_uploads_deterministic_findings_with_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

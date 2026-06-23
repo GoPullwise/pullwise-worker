@@ -8,6 +8,7 @@ AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
 PROTOCOL_TEXT_MAX_LENGTH = 4000
 PROTOCOL_SINGLE_LINE_TEXT_MAX_LENGTH = 500
+GRAPH_VERIFIED_PROGRESS_UPLOAD_MIN_SECONDS = 2.0
 
 
 class WorkerJobCancelled(RuntimeError):
@@ -403,6 +404,8 @@ class Worker:
         self._pending_result_uploads_lock = Lock()
         self._job_cancel_events: dict[str, threading.Event] = {}
         self._job_cancel_events_lock = Lock()
+        self._graph_verified_progress_upload_at = 0.0
+        self._graph_verified_progress_upload_stage = ""
         self.log_tailers: dict[str, WorkerLogStreamTailer] = {}
 
     def handle_log_session(self, session: object) -> None:
@@ -932,6 +935,42 @@ class Worker:
         self.last_error = f"result upload deferred for {job_id}: {redact_secrets(str(error), self.config)}"[:500]
         return False
 
+    def graph_verified_progress_upload_due(self, event: object) -> bool:
+        if not isinstance(event, dict):
+            return True
+        current = event.get("current")
+        total = event.get("total")
+        stage = clean_protocol_text(event.get("stage"), 80)
+        if not isinstance(current, int) or not isinstance(total, int) or total <= 0:
+            return True
+        if current <= 0 or current >= total:
+            return True
+        now = time.monotonic()
+        if stage != self._graph_verified_progress_upload_stage:
+            self._graph_verified_progress_upload_stage = stage
+            self._graph_verified_progress_upload_at = now
+            return True
+        if now - self._graph_verified_progress_upload_at >= GRAPH_VERIFIED_PROGRESS_UPLOAD_MIN_SECONDS:
+            self._graph_verified_progress_upload_at = now
+            return True
+        return False
+
+    def record_local_progress(
+        self,
+        config: WorkerConfig,
+        job_id: str,
+        phase: str,
+        progress: int,
+        message: str = "",
+        logs_summary: str = "",
+    ) -> None:
+        if self.job_cancel_requested(job_id):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+        try:
+            write_scan_progress_summary(config, job_id, phase, progress, message, logs_summary)
+        except Exception:
+            pass
+
     def report_progress(
         self,
         job_id: str,
@@ -1057,12 +1096,24 @@ class Worker:
             )
 
             def report_graph_verified_progress(event: object) -> None:
+                message = graph_verified_progress_message(event)
+                event_logs_summary = graph_verified_progress_logs_summary(event)
+                self.record_local_progress(
+                    job_config,
+                    job_id,
+                    "ai",
+                    PHASE_PROGRESS["ai"],
+                    message,
+                    event_logs_summary,
+                )
+                if not self.graph_verified_progress_upload_due(event):
+                    return
                 self.report_progress(
                     job_id,
                     "ai",
                     PHASE_PROGRESS["ai"],
-                    graph_verified_progress_message(event),
-                    graph_verified_progress_logs_summary(event),
+                    message,
+                    event_logs_summary,
                     config=job_config,
                 )
 

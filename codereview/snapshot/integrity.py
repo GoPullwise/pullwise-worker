@@ -9,6 +9,10 @@ from ..inventory.git_inventory import build_git_inventory
 
 def capture_source_state(checkout: Path, *, include_untracked: bool = True) -> dict:
     inventory = build_git_inventory(checkout, include_untracked=include_untracked)
+    return source_state_from_inventory(inventory)
+
+
+def source_state_from_inventory(inventory: dict) -> dict:
     files = [
         {
             "path": item.get("path"),

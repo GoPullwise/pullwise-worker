@@ -4,10 +4,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codereview.snapshot import create_immutable_snapshot
+from codereview.snapshot import create_immutable_snapshot, source_state_from_inventory
 
 
 class ImmutableSnapshotTest(unittest.TestCase):
+    def test_source_state_from_inventory_uses_analyzable_hashes(self) -> None:
+        inventory = {
+            "files": [
+                {"path": "app.py", "content_hash": "sha256:aaa", "scope": "analyze"},
+                {"path": "dist/app.js", "content_hash": "sha256:bbb", "scope": "excluded"},
+            ],
+            "summary": {"files": 2, "analyzable_files": 1},
+        }
+
+        state = source_state_from_inventory(inventory)
+
+        self.assertTrue(str(state["manifest_hash"]).startswith("sha256:"))
+        self.assertEqual(state["files"], [{"path": "app.py", "content_hash": "sha256:aaa", "scope": "analyze"}])
+        self.assertEqual(state["summary"], inventory["summary"])
+
     def test_snapshot_rejects_inventory_paths_outside_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
