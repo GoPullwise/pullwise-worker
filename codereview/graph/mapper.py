@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import concurrent.futures
 import json
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -34,6 +35,7 @@ _JS_IMPORT_RE = re.compile(r"^\s*import\b.*?\bfrom\s+['\"]([^'\"]+)['\"]|^\s*(?:
 _JS_ROUTE_RE = re.compile(r"\b(?:app|router|server)\.(get|post|put|patch|delete|options|head)\s*\(\s*['\"]([^'\"]+)['\"]")
 _CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
 _SQL_TABLE_RE = re.compile(r"\b(?:from|into|update|join)\s+([A-Za-z_][\w.]*)", re.IGNORECASE)
+DETERMINISTIC_MAPPER_FILE_MAX_BYTES = 5 * 1024 * 1024
 
 
 def map_graph_tasks(
@@ -588,7 +590,7 @@ def map_graph_task(checkout: Path, task: dict, inventory_by_path: dict[str, dict
 def map_file(checkout: Path, rel: str, file_info: dict, worker_id: str) -> dict:
     path = checkout / rel
     language = language_for_path(rel)
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines() if path.is_file() else []
+    lines = read_mapper_file_lines(path) if path.is_file() else []
     nodes = [_file_node(rel, file_info, language, worker_id)]
     edges: list[dict] = []
     unresolved: list[dict] = []
@@ -611,6 +613,27 @@ def map_file(checkout: Path, rel: str, file_info: dict, worker_id: str) -> dict:
         nodes.extend(sql["nodes"])
         edges.extend(sql["edges"])
     return {"nodes": nodes, "edges": edges, "unresolved_refs": unresolved}
+
+
+def read_mapper_file_lines(path: Path, *, max_bytes: int = DETERMINISTIC_MAPPER_FILE_MAX_BYTES) -> list[str]:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        size = os.fstat(fd).st_size
+        if size > max_bytes:
+            raise OSError(f"file too large for deterministic mapper: {path}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            data = handle.read(max_bytes + 1)
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        raise
+    if len(data) > max_bytes:
+        raise OSError(f"file too large for deterministic mapper: {path}")
+    return data.decode("utf-8", errors="replace").splitlines()
 
 
 def _file_node(rel: str, file_info: dict, language: str, worker_id: str) -> dict:
