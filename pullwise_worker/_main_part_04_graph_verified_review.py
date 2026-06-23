@@ -59,7 +59,7 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         if isinstance(pipeline_summary, dict) and isinstance(pipeline_summary.get("reports"), dict)
         else {}
     )
-    run_id = final_path.parent.parent.name
+    run_id = graph_verified_run_id(final_path.parent.parent.name)
     return {
         "version": "graph-verified-code-review/1",
         "runId": run_id,
@@ -88,6 +88,10 @@ def graph_verified_failed_report(mode: str, scan_mode: str, error: object) -> di
         "debugMarkdown": f"Graph-verified review failed before confirmation: {clean_protocol_text(error, 1000)}",
         "finalJson": {"confirmed": []},
     }
+
+
+def graph_verified_run_id(value: object) -> str:
+    return clean_protocol_text(value, 128) or "run"
 
 
 def graph_verified_report_artifact_error(final_path: Path, checkout_dir: Path | None = None) -> str:

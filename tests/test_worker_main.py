@@ -3864,6 +3864,32 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["blockedCount"], 2)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["candidate_id"], "c1")
 
+    def test_run_graph_verified_review_payload_bounds_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            dirty_run_id = f"run_dirty\nignored-{'x' * 200}"
+            reports = root / ".codereview" / "runs" / dirty_run_id / "reports"
+            reports.mkdir(parents=True)
+            final_md = reports / "final.md"
+            final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
+            (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
+            (reports / "confirmed.json").write_text("[]", encoding="utf-8")
+            (reports / "rejected.json").write_text("[]", encoding="utf-8")
+            (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
+            (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
+            codereview_main = importlib.import_module("codereview.main")
+
+            with patch.object(codereview_main, "run_review", return_value=final_md):
+                payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    root,
+                )
+
+        self.assertEqual(payload["runId"], "run_dirty")
+        self.assertLessEqual(len(payload["runId"]), 128)
+
     def test_run_graph_verified_review_payload_bounds_markdown_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
