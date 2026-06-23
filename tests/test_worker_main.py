@@ -92,6 +92,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(config.failed_checkout_retention_seconds, 0)
         self.assertEqual(config.scan_summary_log_max_bytes, 10 * 1024 * 1024)
 
+    def test_worker_config_bounds_resource_environment_values(self) -> None:
+        args = SimpleNamespace(
+            server_url="http://localhost:8080",
+            worker_token="",
+            worker_id="wk_test",
+            provider="codex",
+            poll_seconds=None,
+            checkout_root=None,
+            work_dir=None,
+            log_dir=None,
+            codex_command=None,
+            codex_timeout_seconds=None,
+        )
+        env = {
+            "PULLWISE_RESULT_UPLOAD_ATTEMPTS": "100000",
+            "PULLWISE_MAX_CHECKOUT_BYTES": str(10**15),
+            "PULLWISE_MAX_LOG_BYTES": str(10**15),
+            "PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES": str(10**15),
+        }
+
+        with patch.dict(worker_main.os.environ, env, clear=False):
+            config = worker_main.WorkerConfig(args, require_worker_token=False)
+
+        self.assertEqual(config.result_upload_attempts, 20)
+        self.assertEqual(config.max_checkout_bytes, 100 * 1024 * 1024 * 1024)
+        self.assertEqual(config.max_log_bytes, 10 * 1024 * 1024 * 1024)
+        self.assertEqual(config.scan_summary_log_max_bytes, 100 * 1024 * 1024)
+
     def test_worker_config_rejects_unsafe_worker_id(self) -> None:
         args = SimpleNamespace(
             server_url="http://localhost:8080",

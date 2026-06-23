@@ -409,11 +409,14 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() not in _ENV_FALSE_VALUES
 
 
-def env_int(name: str, default: int, *, minimum: int = 1) -> int:
+def env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
     try:
-        return max(minimum, int(os.environ.get(name) or default))
+        value = max(minimum, int(os.environ.get(name) or default))
     except (TypeError, ValueError, OverflowError):
-        return max(minimum, int(default))
+        value = max(minimum, int(default))
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
 
 
 def safe_worker_id(worker_id: object) -> str:
@@ -699,16 +702,25 @@ class WorkerConfig:
             DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS,
             minimum=1,
         )
-        self.result_upload_attempts = env_int("PULLWISE_RESULT_UPLOAD_ATTEMPTS", 5)
+        self.result_upload_attempts = env_int("PULLWISE_RESULT_UPLOAD_ATTEMPTS", 5, maximum=20)
         self.result_upload_compress_min_bytes = env_int("PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES", 1024, minimum=0)
         self.failed_checkout_retention_seconds = env_int("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS", 0, minimum=0)
-        self.max_checkout_bytes = env_int("PULLWISE_MAX_CHECKOUT_BYTES", 20 * 1024 * 1024 * 1024)
+        self.max_checkout_bytes = env_int(
+            "PULLWISE_MAX_CHECKOUT_BYTES",
+            20 * 1024 * 1024 * 1024,
+            maximum=100 * 1024 * 1024 * 1024,
+        )
         self.max_repo_files = _DEFAULT_MAX_REPO_FILES
         self.max_repo_bytes = _DEFAULT_MAX_REPO_BYTES
         self.cleanup_interval_seconds = env_int("PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS", 3600, minimum=60)
         self.log_retention_seconds = env_int("PULLWISE_LOG_RETENTION_SECONDS", 14 * 24 * 60 * 60, minimum=0)
-        self.max_log_bytes = env_int("PULLWISE_MAX_LOG_BYTES", 1024 * 1024 * 1024)
-        self.scan_summary_log_max_bytes = env_int("PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES", 10 * 1024 * 1024, minimum=1024)
+        self.max_log_bytes = env_int("PULLWISE_MAX_LOG_BYTES", 1024 * 1024 * 1024, maximum=10 * 1024 * 1024 * 1024)
+        self.scan_summary_log_max_bytes = env_int(
+            "PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES",
+            10 * 1024 * 1024,
+            minimum=1024,
+            maximum=100 * 1024 * 1024,
+        )
         if require_worker_token and not self.worker_token:
             raise ValueError("PULLWISE_WORKER_TOKEN is required")
 
