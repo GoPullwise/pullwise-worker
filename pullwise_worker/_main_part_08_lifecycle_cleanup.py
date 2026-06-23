@@ -27,11 +27,29 @@ def service_action(
 def tail_text_lines(path: Path, lines: int) -> list[str]:
     if not regular_log_file(path):
         return []
+    safe_lines = max(1, min(1000, int(lines or 1)))
+    max_bytes = env_int("PULLWISE_WORKER_LOG_TAIL_MAX_BYTES", 256 * 1024, minimum=4096, maximum=4 * 1024 * 1024)
     try:
-        with open_log_file_no_follow(path, "r", encoding="utf-8", errors="replace") as handle:
-            return handle.read().splitlines()[-lines:]
+        with open_log_file_no_follow(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            remaining = max_bytes
+            chunks: list[bytes] = []
+            newline_count = 0
+            while position > 0 and remaining > 0 and newline_count <= safe_lines:
+                read_size = min(8192, position, remaining)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+                newline_count += chunk.count(b"\n")
     except OSError:
         return []
+    text = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+    return text.splitlines()[-safe_lines:]
 
 
 def worker_logs(config: WorkerConfig, *, lines: int = 120, follow: bool = False, dry_run: bool = False) -> int:

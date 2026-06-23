@@ -2737,6 +2737,20 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn("scan summary log not found or empty", text)
             self.assertNotIn("outside secret", text)
 
+    def test_tail_text_lines_bounds_scan_summary_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "scan-summary.log"
+            path.write_text("old secret\n" + ("x" * (2 * 1024 * 1024)) + "\nlast one\nlast two\n", encoding="utf-8")
+
+            with patch.dict(
+                worker_main.os.environ,
+                {"PULLWISE_WORKER_LOG_TAIL_MAX_BYTES": "4096"},
+                clear=False,
+            ):
+                lines = worker_main.tail_text_lines(path, 2)
+
+        self.assertEqual(lines, ["last one", "last two"])
+
     def test_lifecycle_watcher_uploads_active_log_session_lines(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
