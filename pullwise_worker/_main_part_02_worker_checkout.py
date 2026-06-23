@@ -1582,6 +1582,9 @@ def clone_repository(job: dict, checkout_dir: Path, *, limits_config: WorkerConf
                 enforce_repository_tree_limits(limits_config, job, mirror_dir, resolved_commit)
             clone_checkout_from_mirror(mirror_dir, checkout_dir, clone_url=clone_url, mirror_ref=mirror_ref)
             break
+        except RepositoryTooLargeError:
+            remove_checkout_dir(checkout_dir)
+            raise
         except RuntimeError:
             remove_checkout_dir(checkout_dir)
             if attempt == 0:
