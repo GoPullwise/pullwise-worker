@@ -3757,6 +3757,22 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(test_file.is_symlink())
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
 
+    def test_command_ok_bounds_captured_output(self) -> None:
+        ok, detail = worker_main.command_ok(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 20000)"]
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(len(detail), 500)
+
+    def test_command_ok_bounds_captured_stderr(self) -> None:
+        ok, detail = worker_main.command_ok(
+            [sys.executable, "-c", "import sys; sys.stderr.write('e' * 20000); raise SystemExit(7)"]
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(len(detail), 500)
+
     def test_worker_home_isolation_rejects_normalized_default_home(self) -> None:
         cfg = SimpleNamespace(service_home=f"{worker_main.DEFAULT_SERVICE_HOME}/.")
 

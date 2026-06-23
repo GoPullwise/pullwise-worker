@@ -284,21 +284,38 @@ def run_doctor(config: WorkerConfig) -> bool:
 
 
 def command_ok(command: list[str], *, env: dict[str, str] | None = None) -> tuple[bool, str]:
+    output_limit = 8192
     try:
-        completed = subprocess.run(
-            command,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=20,
-        )
-        detail = (completed.stdout or completed.stderr).strip().splitlines()
+        with tempfile.TemporaryFile("w+b") as stdout, tempfile.TemporaryFile("w+b") as stderr:
+            completed = subprocess.run(
+                command,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=20,
+            )
+            detail = command_output_detail(stdout, stderr, output_limit)
         return completed.returncode == 0, detail[0] if detail else f"exit {completed.returncode}"
     except FileNotFoundError:
         return False, "not found"
     except Exception as exc:
         return False, str(exc)
+
+
+def command_output_detail(stdout, stderr, max_bytes: int) -> list[str]:
+    output = read_command_output_excerpt(stdout, max_bytes) or read_command_output_excerpt(stderr, max_bytes)
+    return output.strip().splitlines()
+
+
+def read_command_output_excerpt(handle, max_bytes: int) -> str:
+    try:
+        limit = max(1, int(max_bytes or 0))
+    except (TypeError, ValueError, OverflowError):
+        limit = 8192
+    handle.seek(0)
+    data = handle.read(limit + 1)
+    text = data[:limit].decode("utf-8", errors="replace")
+    return clean_protocol_text(text, 500)
 
 
 
