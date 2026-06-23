@@ -3235,6 +3235,40 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIsNot(run.call_args.kwargs["stderr"], worker_main.subprocess.PIPE)
         self.assertNotIn("text", run.call_args.kwargs)
 
+    def test_git_inventory_capture_bounds_output_without_pipe(self) -> None:
+        from codereview.inventory import git_inventory as git_inventory_module
+
+        captured = {}
+
+        def fake_run(_command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            captured.update(kwargs)
+            stdout_file = kwargs["stdout"]
+            stdout_file.write(b"app.py\x00")
+            stdout_file.flush()
+            return subprocess.CompletedProcess(["git"], 0)
+
+        with patch.object(git_inventory_module.subprocess, "run", side_effect=fake_run):
+            output = git_inventory_module._run_git_capture(["git", "ls-files", "-z"], cwd=Path("/tmp"), timeout=30)
+
+        self.assertEqual(output, "app.py\x00")
+        self.assertIsNot(captured["stdout"], subprocess.PIPE)
+        self.assertIsNot(captured["stderr"], subprocess.PIPE)
+        self.assertNotIn("text", captured)
+
+    def test_git_inventory_capture_rejects_oversized_output(self) -> None:
+        from codereview.inventory import git_inventory as git_inventory_module
+
+        def fake_run(_command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            stdout_file = kwargs["stdout"]
+            stdout_file.write(b"x" * (git_inventory_module.GIT_CAPTURE_MAX_BYTES + 1))
+            stdout_file.flush()
+            return subprocess.CompletedProcess(["git"], 0)
+
+        with patch.object(git_inventory_module.subprocess, "run", side_effect=fake_run):
+            output = git_inventory_module._run_git_capture(["git", "ls-files", "-z"], cwd=Path("/tmp"), timeout=30)
+
+        self.assertIsNone(output)
+
     def test_preflight_reads_do_not_follow_symlink_after_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

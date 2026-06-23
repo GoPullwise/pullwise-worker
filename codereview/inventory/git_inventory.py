@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ..utils.paths import safe_relative_path
@@ -57,6 +58,7 @@ ANALYZABLE_EXTENSIONS = {
     ".html",
     ".css",
 }
+GIT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024
 
 
 def build_git_inventory(checkout: Path, *, include_untracked: bool = True) -> dict:
@@ -136,20 +138,31 @@ def _git_status(checkout: Path) -> dict[str, str]:
 
 def _run_git_capture(command: list[str], *, cwd: Path, timeout: int) -> str | None:
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(cwd),
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
+        with tempfile.TemporaryFile("w+b") as stdout, tempfile.TemporaryFile("w+b") as stderr:
+            completed = subprocess.run(
+                command,
+                cwd=str(cwd),
+                check=False,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout,
+            )
+            if completed.returncode != 0:
+                return None
+            output = _bounded_command_output(stdout, max_bytes=GIT_CAPTURE_MAX_BYTES)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if completed.returncode != 0:
+    if output is None:
         return None
-    return completed.stdout or ""
+    return output
+
+
+def _bounded_command_output(handle, *, max_bytes: int) -> str | None:
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() > max_bytes:
+        return None
+    handle.seek(0)
+    return handle.read(max_bytes + 1).decode("utf-8", errors="replace")
 
 
 def _file_entry(checkout: Path, rel: str, status: str) -> dict:

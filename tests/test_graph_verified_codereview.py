@@ -27,6 +27,7 @@ from codereview.graph import mapper as graph_mapper_module
 from codereview.graph.merge import merge_graph_results, normalize_graph_for_inventory
 from codereview.graph.scheduler import plan_graph_tasks
 from codereview.inventory.git_inventory import analyzable_files, build_git_inventory
+from codereview.inventory import git_inventory as git_inventory_module
 from codereview.judge import runner as judge_runner_module
 from codereview.judge.runner import run_judge
 from codereview.judge.precheck import verify_repro_events_and_paths
@@ -670,6 +671,40 @@ def test_git_inventory_reads_full_large_git_file_lists(tmp_path: Path) -> None:
 
     assert len(paths) == total
     assert "ijklmnopqrstuvwxyz.py" not in paths
+
+
+def test_git_inventory_capture_uses_bounded_temp_files(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+
+    def fake_run(command: list[str], **kwargs):
+        captured.update(kwargs)
+        stdout_file = kwargs["stdout"]
+        stdout_file.write(b"app.py\x00")
+        stdout_file.flush()
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(git_inventory_module.subprocess, "run", fake_run)
+
+    output = git_inventory_module._run_git_capture(["git", "ls-files", "-z"], cwd=tmp_path, timeout=30)
+
+    assert output == "app.py\x00"
+    assert captured["stdout"] is not subprocess.PIPE
+    assert captured["stderr"] is not subprocess.PIPE
+    assert "text" not in captured
+
+
+def test_git_inventory_capture_rejects_oversized_output(monkeypatch, tmp_path: Path) -> None:
+    def fake_run(command: list[str], **kwargs):
+        stdout_file = kwargs["stdout"]
+        stdout_file.write(b"x" * (git_inventory_module.GIT_CAPTURE_MAX_BYTES + 1))
+        stdout_file.flush()
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(git_inventory_module.subprocess, "run", fake_run)
+
+    output = git_inventory_module._run_git_capture(["git", "ls-files", "-z"], cwd=tmp_path, timeout=30)
+
+    assert output is None
 
 
 def test_unit_coverage_does_not_count_blocked_baseline_review() -> None:
