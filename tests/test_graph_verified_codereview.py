@@ -621,6 +621,63 @@ def test_run_finders_groups_module_context_before_batching(tmp_path: Path, monke
     assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
 
 
+def test_finder_batch_blocks_oversized_context_pack_before_codex(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    task = FinderTask(unit_id="component:handle", focus="correctness", unit_type="component")
+    write_review_units(
+        run,
+        [{"unit_id": task.unit_id, "unit_type": task.unit_type, "review_pass": task.review_pass, "risk_tags": [], "context": {}}],
+    )
+    context_file = run / "artifacts" / "review-units" / "component_handle.context.md"
+    context_file.write_text("x" * 64, encoding="utf-8")
+    config = ReviewConfig()
+
+    def fake_run_codex_turn(**kwargs):
+        raise AssertionError("codex should not run for unreadable finder input")
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+    monkeypatch.setattr(finder_runner_module, "FINDER_CONTEXT_PACK_MAX_BYTES", 16)
+
+    results = finder_runner_module.run_finder_batch(checkout, run, [task], config)
+
+    assert len(results) == 1
+    assert results[0]["status"] == "blocked"
+    assert "oversized text file" in results[0]["blocked_reason"]
+    assert "component_handle.context.md" in results[0]["blocked_reason"]
+
+
+def test_run_finder_blocks_symlinked_context_pack_before_codex(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    task = FinderTask(unit_id="component:handle", focus="correctness", unit_type="component")
+    write_review_units(
+        run,
+        [{"unit_id": task.unit_id, "unit_type": task.unit_type, "review_pass": task.review_pass, "risk_tags": [], "context": {}}],
+    )
+    context_file = run / "artifacts" / "review-units" / "component_handle.context.md"
+    context_file.unlink()
+    outside = tmp_path / "outside-context.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    context_file.symlink_to(outside)
+    config = ReviewConfig()
+
+    def fake_run_codex_turn(**kwargs):
+        raise AssertionError("codex should not run for unreadable finder input")
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+
+    result = run_finder(checkout, run, task, config)
+
+    assert result["status"] == "blocked"
+    assert result["result"]["candidates"] == []
+    assert "finder input unreadable" in result["blocked_reason"]
+
+
 def test_context_repair_reruns_only_requesting_or_new_finder_tasks() -> None:
     old_tasks = [
         FinderTask(unit_id="component:a", focus="correctness"),

@@ -12,10 +12,13 @@ from ..units.context import unit_file_stem
 from ..utils.jsonl import read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir
 from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception
+from ..utils.text import read_bounded_text
 from .tasks import FinderTask
 
 
 MAX_FINDER_SUBAGENTS = 6
+FINDER_PROMPT_MAX_BYTES = 256 * 1024
+FINDER_CONTEXT_PACK_MAX_BYTES = 2 * 1024 * 1024
 
 
 def run_finders_parallel(
@@ -211,8 +214,25 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
         return []
     worker = run / "finder-batches" / finder_batch_id(tasks, batch_index=batch_index)
     ensure_dir(worker)
-    payload = finder_batch_payload(checkout, run, tasks, config)
-    prompt = finder_batch_prompt(checkout, payload)
+    try:
+        payload = finder_batch_payload(checkout, run, tasks, config)
+        prompt = finder_batch_prompt(checkout, payload)
+    except OSError as exc:
+        process_payload = {
+            "command": ["codex", "app-server", "turn/start"],
+            "cwd": str(checkout),
+            "returncode": 1,
+            "stdout": "",
+            "stderr": str(exc),
+            "duration_ms": 0,
+            "timed_out": False,
+            "stdout_path": "",
+            "stderr_path": "",
+            "queueWaitMs": 0,
+            "execDurationMs": 0,
+        }
+        write_json(worker / "process.json", process_payload)
+        return blocked_finder_batch_results(tasks, process_payload, f"finder batch input unreadable: {exc}")
     write_json(worker / "task.json", payload)
     write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
@@ -256,7 +276,7 @@ def finder_batch_timeout_seconds(task_count: int, config: ReviewConfig) -> int:
 
 def finder_batch_payload(checkout: Path, run: Path, tasks: list[FinderTask], config: ReviewConfig) -> dict:
     focus_prompts = {
-        focus: (checkout / ".codereview" / "prompts" / f"finder_{focus}.md").read_text(encoding="utf-8")
+        focus: read_bounded_text(checkout / ".codereview" / "prompts" / f"finder_{focus}.md", max_bytes=FINDER_PROMPT_MAX_BYTES)
         for focus in sorted({task.focus for task in tasks})
     }
     jobs = []
@@ -264,7 +284,7 @@ def finder_batch_payload(checkout: Path, run: Path, tasks: list[FinderTask], con
     for task in tasks:
         stem = unit_file_stem(task.unit_id)
         context_file = run / "artifacts" / "review-units" / f"{stem}.context.md"
-        context_packs.setdefault(task.unit_id, context_file.read_text(encoding="utf-8"))
+        context_packs.setdefault(task.unit_id, read_bounded_text(context_file, max_bytes=FINDER_CONTEXT_PACK_MAX_BYTES))
         jobs.append(
             {
                 "task_id": finder_task_id(task),
@@ -287,7 +307,7 @@ def finder_batch_payload(checkout: Path, run: Path, tasks: list[FinderTask], con
 
 def finder_batch_prompt(checkout: Path, payload: dict) -> str:
     prompt_file = checkout / ".codereview" / "prompts" / "finder-batch-coordinator.md"
-    prefix = prompt_file.read_text(encoding="utf-8") if prompt_file.is_file() else "You are a graph-verified finder coordinator."
+    prefix = read_bounded_text(prompt_file, max_bytes=FINDER_PROMPT_MAX_BYTES) if prompt_file.is_file() else "You are a graph-verified finder coordinator."
     return f"{prefix}\n\nAssigned finder batch JSON:\n```json\n{json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)}\n```"
 
 
@@ -360,7 +380,20 @@ def run_finder(checkout: Path, run: Path, task: FinderTask, config: ReviewConfig
     prompt_file = checkout / ".codereview" / "prompts" / f"finder_{task.focus}.md"
     stem = unit_file_stem(task.unit_id)
     context_file = run / "artifacts" / "review-units" / f"{stem}.context.md"
-    prompt = prompt_file.read_text(encoding="utf-8") + "\n\nInput context pack:\n" + context_file.read_text(encoding="utf-8")
+    try:
+        prompt = (
+            read_bounded_text(prompt_file, max_bytes=FINDER_PROMPT_MAX_BYTES)
+            + "\n\nInput context pack:\n"
+            + read_bounded_text(context_file, max_bytes=FINDER_CONTEXT_PACK_MAX_BYTES)
+        )
+    except OSError as exc:
+        return {
+            "task": task.__dict__,
+            "process": {},
+            "result": {"candidates": []},
+            "status": "blocked",
+            "blocked_reason": f"finder input unreadable: {exc}",
+        }
     output = run / "finder" / task.focus / f"{stem}.result.json"
     ensure_dir(output.parent)
     events = output.with_suffix(".events.jsonl")
