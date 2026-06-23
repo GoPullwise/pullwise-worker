@@ -7,6 +7,8 @@ from pathlib import Path
 def read_bounded_text(path: Path, *, max_bytes: int, errors: str = "replace") -> str:
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
+    if path.is_symlink():
+        raise OSError(f"refusing to follow symlink: {path}")
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW

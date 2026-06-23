@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codereview.utils.process import ProcessCancelled, ProcessResult, clear_process_cancel_event, run_process, set_process_cancel_event
+from codereview.utils.process import ProcessCancelled, ProcessResult, clear_process_cancel_event, process_cancel_requested, run_process, set_process_cancel_event
 
 worker_main = importlib.import_module("pullwise_worker.main")
 
@@ -661,6 +661,16 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(worker.pending_result_job_ids(), ["job_retry"])
 
+    def test_worker_job_slot_merges_pending_and_running_active_job_ids(self) -> None:
+        slot = worker_main.WorkerJobSlot()
+        slot.job = {"job_id": "job_running"}
+
+        self.assertEqual(slot.active_job_ids(["job_pending"]), ["job_pending", "job_running"])
+        self.assertEqual(slot.active_job_ids(["job_running"]), ["job_running"])
+
+        slot.job = {"job_id": "../escape"}
+        self.assertEqual(slot.active_job_ids(["job_pending"]), ["job_pending"])
+
     def test_successful_pending_result_upload_clears_matching_upload_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
@@ -706,6 +716,35 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             worker.collect_result_uploads()
 
             self.assertEqual(worker.last_error, "worker cleanup failed: disk busy")
+
+    def test_deferred_result_upload_keeps_cancel_event_until_collected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_pending_cancel")
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            event = worker.job_cancel_event("job_pending_cancel")
+            worker._pending_result_uploads["job_pending_cancel"] = (future, pending_path)
+
+            worker.clear_job_cancel_event("job_pending_cancel", event)
+            worker.cancel_server_jobs(["job_pending_cancel"])
+
+            self.assertTrue(event.is_set())
+
+            future.set_result(None)
+            worker.collect_result_uploads()
+
+            self.assertEqual(worker.pending_result_job_ids(), [])
+            self.assertFalse(worker.job_cancel_requested("job_pending_cancel"))
 
     def test_cancelled_pending_result_upload_is_not_sent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1286,16 +1325,35 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             worker = worker_main.Worker(config)
             self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
             self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            worker._set_readiness_snapshot(
+                worker_main.WorkerReadinessSnapshot(
+                    checked_at=111,
+                    doctor_status="ok",
+                    codex_ready=True,
+                    ready_providers=("codex",),
+                    ready_for_claim=True,
+                )
+            )
             calls: list[str] = []
+            heartbeat_payload: dict[str, object] = {}
 
-            def heartbeat(**_kwargs: object) -> dict:
+            def heartbeat(**kwargs: object) -> dict:
+                heartbeat_payload.update(kwargs)
                 calls.append("heartbeat")
                 return {"worker": {"status": "idle"}}
 
             def readiness() -> bool:
                 calls.append("readiness")
+                worker._set_readiness_snapshot(
+                    worker_main.WorkerReadinessSnapshot(
+                        checked_at=222,
+                        doctor_status="degraded",
+                        codex_ready=False,
+                        ready_providers=(),
+                        ready_for_claim=False,
+                    )
+                )
                 return True
-
             with patch.object(worker, "refresh_readiness_if_due", side_effect=readiness), patch.object(
                 worker.client,
                 "heartbeat",
@@ -1304,6 +1362,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 worker.run(once=True)
 
             self.assertEqual(calls, ["heartbeat", "readiness"])
+            self.assertEqual(heartbeat_payload["doctor_status"], "ok")
+            self.assertIs(heartbeat_payload["codex_ready"], True)
+            self.assertEqual(heartbeat_payload["ready_providers"], ["codex"])
+            self.assertEqual(heartbeat_payload["doctor_checked_at"], 111)
 
     def test_worker_once_does_not_start_claimed_job_with_unsafe_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2041,6 +2103,16 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     )
             finally:
                 clear_process_cancel_event()
+
+    def test_process_cancel_event_is_visible_to_worker_threads(self) -> None:
+        cancel_event = threading.Event()
+        set_process_cancel_event(cancel_event)
+        try:
+            cancel_event.set()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                self.assertTrue(executor.submit(process_cancel_requested).result(timeout=2))
+        finally:
+            clear_process_cancel_event()
 
     def test_process_runner_kills_process_group_on_timeout(self) -> None:
         if os.name != "posix":
@@ -4520,6 +4592,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 return_value=["codex"],
             ), patch.object(
                 worker_main,
+                "provider_process_env",
+                return_value={},
+            ), patch.object(
+                worker_main,
                 "command_ok",
                 return_value=(True, "ok"),
             ), patch.object(
@@ -4599,13 +4675,102 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(detail, cfg.service_home)
 
+    def test_codex_readiness_issue_kind_classifies_common_account_failures(self) -> None:
+        cases = {
+            "401 Unauthorized": "codex_auth_required",
+            "access token expired or revoked": "codex_auth_expired",
+            "403 - Unauthorized. Contact your ChatGPT administrator for access.": "codex_authorization_failed",
+            "Your ChatGPT subscription has expired": "codex_subscription_inactive",
+            "insufficient_quota: no credits remaining": "codex_quota_exhausted",
+            "Usage limit reached; rate limit exceeded": "codex_quota_exhausted",
+            "unknown subcommand 'app-server'": "codex_version_unsupported",
+            "codex app-server: unrecognized option '--listen'": "codex_version_unsupported",
+        }
+
+        for detail, expected in cases.items():
+            with self.subTest(detail=detail):
+                self.assertEqual(worker_main.codex_readiness_issue_kind(detail), expected)
+
+    def test_codex_readiness_issue_detail_redacts_worker_token(self) -> None:
+        cfg = SimpleNamespace(worker_token="secret-token")
+
+        detail = worker_main.codex_readiness_issue_detail(
+            "insufficient_quota for token secret-token",
+            cfg,
+        )
+
+        self.assertIn("codex_quota_exhausted", detail)
+        self.assertIn("[redacted]", detail)
+        self.assertNotIn("secret-token", detail)
+
+    def test_codex_ready_check_uses_cached_classified_failure_without_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = config_for(Path(tmp_dir))
+            cfg.codex_auth_failure_cooldown_seconds = 3600
+            worker_main.clear_codex_auth_failure()
+            worker_main.mark_codex_auth_failure(cfg, "insufficient_quota: no credits remaining")
+            with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
+                worker_main,
+                "provider_process_env",
+            ) as provider_env, patch.object(
+                worker_main,
+                "run_codex_app_server_turn",
+            ) as app_server_turn:
+                ok, detail = worker_main.codex_ready_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertIn("codex_quota_exhausted", detail)
+        provider_env.assert_not_called()
+        app_server_turn.assert_not_called()
+        worker_main.clear_codex_auth_failure()
+    def test_codex_ready_check_reports_quota_and_version_failures(self) -> None:
+        failures = {
+            "insufficient_quota: no credits remaining": "codex_quota_exhausted",
+            "codex app-server: unknown subcommand 'app-server'": "codex_version_unsupported",
+        }
+        for stderr, expected in failures.items():
+            with self.subTest(stderr=stderr), tempfile.TemporaryDirectory() as tmp_dir:
+                cfg = config_for(Path(tmp_dir))
+                with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
+                    worker_main,
+                    "provider_process_env",
+                    return_value={},
+                ), patch.object(
+                    worker_main,
+                    "run_codex_app_server_turn",
+                    return_value=ProcessResult(["codex", "app-server"], str(Path(tmp_dir)), 1, "", stderr, 1),
+                ):
+                    ok, detail = worker_main.codex_ready_check(cfg)
+
+                self.assertFalse(ok)
+                self.assertIn(expected, detail)
+
+    def test_codex_ready_check_marks_expired_auth_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = config_for(Path(tmp_dir))
+            cfg.codex_auth_failure_cooldown_seconds = 3600
+            worker_main.clear_codex_auth_failure()
+            with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
+                worker_main,
+                "provider_process_env",
+                return_value={},
+            ), patch.object(
+                worker_main,
+                "run_codex_app_server_turn",
+                return_value=ProcessResult(["codex", "app-server"], str(Path(tmp_dir)), 1, "", "access token expired", 1),
+            ):
+                ok, detail = worker_main.codex_ready_check(cfg)
+
+        self.assertFalse(ok)
+        self.assertIn("codex_auth_expired", detail)
+        self.assertGreater(worker_main._codex_auth_failure_until, 0)
     def test_codex_ready_check_clears_auth_failure_state_on_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
-            cfg.codex_auth_failure_cooldown_seconds = 3600
+            cfg.codex_auth_failure_cooldown_seconds = 0
             worker_main.mark_codex_auth_failure(cfg, "401 Unauthorized")
-            self.assertGreater(worker_main._codex_auth_failure_until, 0)
+            self.assertIn("codex_auth_required", worker_main._codex_auth_failure_detail)
 
             def fake_app_server_turn(**kwargs):
                 self.assertEqual(kwargs["prompt"], 'Return only JSON: {"ok": true}')

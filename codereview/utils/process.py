@@ -15,6 +15,8 @@ from .paths import ensure_dir
 
 
 _PROCESS_CANCEL_STATE = threading.local()
+_PROCESS_CANCEL_LOCK = threading.Lock()
+_PROCESS_CANCEL_EVENT: object | None = None
 
 
 class ProcessCancelled(RuntimeError):
@@ -92,16 +94,26 @@ def compact_process_output(result: object, *, limit: int = 700) -> str:
 
 
 def set_process_cancel_event(event: object | None) -> None:
+    global _PROCESS_CANCEL_EVENT
     _PROCESS_CANCEL_STATE.event = event
+    with _PROCESS_CANCEL_LOCK:
+        _PROCESS_CANCEL_EVENT = event
 
 
 def clear_process_cancel_event() -> None:
+    global _PROCESS_CANCEL_EVENT
     if hasattr(_PROCESS_CANCEL_STATE, "event"):
         delattr(_PROCESS_CANCEL_STATE, "event")
+    with _PROCESS_CANCEL_LOCK:
+        _PROCESS_CANCEL_EVENT = None
 
 
 def process_cancel_event() -> object | None:
-    return getattr(_PROCESS_CANCEL_STATE, "event", None)
+    event = getattr(_PROCESS_CANCEL_STATE, "event", None)
+    if event is not None:
+        return event
+    with _PROCESS_CANCEL_LOCK:
+        return _PROCESS_CANCEL_EVENT
 
 
 def process_cancel_requested() -> bool:

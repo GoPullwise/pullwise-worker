@@ -218,8 +218,11 @@ def readiness_check_ok(checks: list[tuple[str, bool, str]], name: str) -> bool:
 
 def readiness_error_message(check: tuple[str, bool, str], config: WorkerConfig) -> str:
     name, _ok, detail = check
+    if name in {"codex", "codex_ready"}:
+        diagnostic = codex_readiness_issue_detail(detail, config)
+        if diagnostic:
+            detail = diagnostic
     return f"worker not ready: {name}: {redact_secrets(detail, config)}"[:500]
-
 
 def writable_path_check(path: Path) -> tuple[bool, str]:
     try:
@@ -416,6 +419,9 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
     scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
     if not scope_ok:
         return False, scope_detail
+    cached_failure = cached_codex_readiness_failure_detail()
+    if cached_failure:
+        return False, cached_failure
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         output_path = tmp_path / "codex-ready.json"
@@ -454,7 +460,11 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         except subprocess.TimeoutExpired:
             return False, "codex app-server ready check timed out"
         except Exception as exc:
-            return False, str(exc)
+            detail = redact_secrets(str(exc), config)
+            diagnostic = codex_readiness_issue_detail(detail, config)
+            if diagnostic and codex_readiness_failure_cacheable(detail):
+                mark_codex_auth_failure(config, detail)
+            return False, diagnostic or detail
         output = redact_secrets((result.stderr or result.stdout).strip(), config)
         detail = output.splitlines()[0] if output else f"exit {result.returncode}"
         if result.returncode == 0:
@@ -466,11 +476,16 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
                 return False, "codex app-server ready check did not confirm model response"
             clear_codex_auth_failure()
             return True, "ready"
+        diagnostic = codex_readiness_issue_detail(output or detail, config)
+        if diagnostic:
+            if codex_readiness_failure_cacheable(output or detail):
+                mark_codex_auth_failure(config, output or detail)
+            return False, diagnostic
         if looks_like_codex_auth_failure(output):
             mark_codex_auth_failure(config, output)
         lowered = output.lower()
         if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
-            return False, "not logged in"
+            return False, codex_readiness_issue_detail(f"not authenticated: {output}", config) or "not logged in"
         if codex_node_runtime_error(output):
             node_ok, node_detail = node_version_check(env=provider_env)
             if not node_ok:

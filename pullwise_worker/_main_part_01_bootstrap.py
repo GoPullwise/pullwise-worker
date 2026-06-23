@@ -105,6 +105,81 @@ _CODEX_AUTH_FAILURE_MARKERS = (
     "access token could not be refreshed",
     "refresh token was already used",
 )
+_CODEX_AUTH_EXPIRED_MARKERS = (
+    "access token expired",
+    "session expired",
+    "token expired",
+    "expired token",
+    "token was revoked",
+    "revoked token",
+    "failed to refresh token",
+    "access token could not be refreshed",
+    "refresh token was already used",
+    "please log out and sign in again",
+)
+_CODEX_AUTH_REQUIRED_MARKERS = (
+    "not authenticated",
+    "authentication required",
+    "login required",
+    "please log in",
+    "please login",
+    "sign in",
+    "missing api key",
+    "invalid api key",
+    "api key required",
+    "401 unauthorized",
+)
+_CODEX_AUTHORIZATION_MARKERS = (
+    "403",
+    "forbidden",
+    "workspace disabled",
+    "codex local disabled",
+    "contact your chatgpt administrator",
+    "not authorized",
+    "unauthorized workspace",
+)
+_CODEX_SUBSCRIPTION_MARKERS = (
+    "subscription expired",
+    "subscription inactive",
+    "subscription required",
+    "plan expired",
+    "plan inactive",
+    "payment required",
+    "billing issue",
+)
+_CODEX_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "insufficient quota",
+    "quota exceeded",
+    "quota exhausted",
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "no credits",
+    "credits exhausted",
+    "out of credits",
+    "429",
+)
+_CODEX_VERSION_MARKERS = (
+    "unknown subcommand",
+    "unrecognized subcommand",
+    "unknown command",
+    "unrecognized command",
+    "unknown option",
+    "unrecognized option",
+    "unexpected argument",
+    "invalid argument",
+)
+_CODEX_READINESS_ISSUE_MESSAGES = {
+    "codex_auth_required": "codex_auth_required: sign in with the worker service user's Codex account",
+    "codex_auth_expired": "codex_auth_expired: refresh the worker service user's Codex login",
+    "codex_authorization_failed": "codex_authorization_failed: Codex account or workspace is not authorized",
+    "codex_subscription_inactive": "codex_subscription_inactive: ChatGPT subscription is inactive or lacks Codex access",
+    "codex_quota_exhausted": "codex_quota_exhausted: Codex usage quota or credits are exhausted",
+    "codex_version_unsupported": "codex_version_unsupported: installed Codex CLI does not support the required app-server interface",
+}
+_CODEX_READINESS_FAILURE_CACHEABLE_ISSUES = set(_CODEX_READINESS_ISSUE_MESSAGES)
 _CODEX_AUTH_FAILURE_LOCK = Lock()
 _codex_auth_failure_until = 0.0
 _codex_auth_failure_detail = ""
@@ -121,20 +196,84 @@ _DEPENDENCY_INSTALL_DISABLED_VALUES = {"0", "false", "no", "off"}
 _ENV_FALSE_VALUES = {"", "0", "false", "no", "off"}
 
 
-def looks_like_codex_auth_failure(output: object) -> bool:
-    text = str(output or "")
+def codex_readiness_issue_kind(detail: object) -> str:
+    text = str(detail or "")
     if not text:
-        return False
+        return ""
     lowered = text.lower()
-    return any(marker.lower() in lowered for marker in _CODEX_AUTH_FAILURE_MARKERS)
+    if any(marker in lowered for marker in _CODEX_SUBSCRIPTION_MARKERS) or (
+        "subscription" in lowered
+        and any(marker in lowered for marker in ("expired", "inactive", "required", "renew", "payment", "billing"))
+    ):
+        return "codex_subscription_inactive"
+    if any(marker in lowered for marker in _CODEX_QUOTA_MARKERS):
+        return "codex_quota_exhausted"
+    if any(marker in lowered for marker in _CODEX_AUTH_EXPIRED_MARKERS):
+        return "codex_auth_expired"
+    if any(marker in lowered for marker in _CODEX_AUTHORIZATION_MARKERS):
+        return "codex_authorization_failed"
+    if any(marker in lowered for marker in _CODEX_AUTH_REQUIRED_MARKERS):
+        return "codex_auth_required"
+    if "app-server" in lowered and any(marker in lowered for marker in _CODEX_VERSION_MARKERS):
+        return "codex_version_unsupported"
+    return ""
+
+
+def codex_readiness_issue_detail(detail: object, config: object) -> str:
+    kind = codex_readiness_issue_kind(detail)
+    if not kind:
+        return ""
+    clean_detail = clean_protocol_text(redact_secrets(str(detail or ""), config), 500)
+    if clean_detail.lower().startswith(f"{kind}:"):
+        return clean_detail[:500]
+    message = _CODEX_READINESS_ISSUE_MESSAGES[kind]
+    if kind in {"codex_auth_required", "codex_auth_expired"}:
+        message = f"{message}; run codex login --device-auth as the worker service user"
+    if kind == "codex_authorization_failed":
+        message = f"{message}; check ChatGPT workspace/admin access and Codex Local availability"
+    if kind == "codex_quota_exhausted":
+        message = f"{message}; check the signed-in ChatGPT plan, usage limits, or API-key billing path"
+    if kind == "codex_subscription_inactive":
+        message = f"{message}; renew or switch the Codex login to an account with Codex access"
+    if kind == "codex_version_unsupported":
+        message = f"{message}; upgrade the Codex CLI installed for the worker service user"
+    if clean_detail:
+        message = f"{message}; detail: {clean_detail}"
+    return message[:500]
+
+
+def codex_readiness_failure_cacheable(detail: object) -> bool:
+    return codex_readiness_issue_kind(detail) in _CODEX_READINESS_FAILURE_CACHEABLE_ISSUES
+
+
+def looks_like_codex_auth_failure(output: object) -> bool:
+    kind = codex_readiness_issue_kind(output)
+    if kind in {"codex_auth_required", "codex_auth_expired", "codex_authorization_failed"}:
+        return True
+    text = str(output or "")
+    lowered = text.lower()
+    return bool(text) and any(marker.lower() in lowered for marker in _CODEX_AUTH_FAILURE_MARKERS)
 
 
 def mark_codex_auth_failure(config: object, detail: object) -> None:
     global _codex_auth_failure_until, _codex_auth_failure_detail
     cooldown = max(0, int(getattr(config, "codex_auth_failure_cooldown_seconds", 0) or 0))
+    diagnostic = codex_readiness_issue_detail(detail, config) or clean_protocol_text(redact_secrets(str(detail or ""), config), 500)
     with _CODEX_AUTH_FAILURE_LOCK:
         _codex_auth_failure_until = time.time() + cooldown if cooldown else 0.0
-        _codex_auth_failure_detail = str(detail or "")[:500]
+        _codex_auth_failure_detail = diagnostic[:500]
+
+
+def cached_codex_readiness_failure_detail() -> str:
+    global _codex_auth_failure_until, _codex_auth_failure_detail
+    with _CODEX_AUTH_FAILURE_LOCK:
+        if not _codex_auth_failure_detail or not _codex_auth_failure_until:
+            return ""
+        if time.time() >= _codex_auth_failure_until:
+            _codex_auth_failure_until = 0.0
+            _codex_auth_failure_detail = ""
+            return ""
+        return _codex_auth_failure_detail
 
 
 def clear_codex_auth_failure() -> None:

@@ -619,7 +619,7 @@ def parse_non_negative_int(value: object, default: int) -> int:
 
 def app_server_launch_args(command: str, env: dict[str, str] | None) -> list[str]:
     executable = resolve_app_server_command(command, env)
-    args = [executable, "app-server", "--stdio"]
+    args = [executable, "app-server"]
     if os.name != "nt":
         return args
     suffix = Path(executable).suffix.lower()
@@ -629,7 +629,7 @@ def app_server_launch_args(command: str, env: dict[str, str] | None) -> list[str
     if suffix == ".ps1":
         shell = (env or {}).get("SystemRoot") or os.environ.get("SystemRoot") or r"C:\Windows"
         powershell = str(Path(shell) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-        return [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable, "app-server", "--stdio"]
+        return [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable, "app-server"]
     return args
 
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 # Loaded by main.py; definitions are executed in that module's globals.
 
+from dataclasses import dataclass
+
 from codereview.utils.process import ProcessCancelled, clear_process_cancel_event, set_process_cancel_event
 
 AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
@@ -11,6 +13,49 @@ PROTOCOL_SINGLE_LINE_TEXT_MAX_LENGTH = 500
 GRAPH_VERIFIED_PROGRESS_UPLOAD_MIN_SECONDS = 2.0
 
 
+@dataclass(frozen=True)
+class WorkerReadinessSnapshot:
+    checked_at: float = 0.0
+    doctor_status: str = "not_ready"
+    codex_ready: bool = False
+    ready_providers: tuple[str, ...] = ()
+    ready_for_claim: bool = False
+    last_error: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ready_providers", tuple(self.ready_providers or ()))
+
+    def with_values(
+        self,
+        *,
+        checked_at: float | None = None,
+        doctor_status: str | None = None,
+        codex_ready: bool | None = None,
+        ready_providers: object = None,
+        ready_for_claim: bool | None = None,
+        last_error: str | None = None,
+        keep_last_error: bool = True,
+    ) -> "WorkerReadinessSnapshot":
+        providers = (
+            self.ready_providers
+            if ready_providers is None
+            else tuple(str(provider) for provider in ready_providers or [])
+        )
+        return WorkerReadinessSnapshot(
+            checked_at=self.checked_at if checked_at is None else float(checked_at),
+            doctor_status=self.doctor_status if doctor_status is None else str(doctor_status or "not_ready"),
+            codex_ready=self.codex_ready if codex_ready is None else bool(codex_ready),
+            ready_providers=providers,
+            ready_for_claim=self.ready_for_claim if ready_for_claim is None else bool(ready_for_claim),
+            last_error=self.last_error if keep_last_error and last_error is None else last_error,
+        )
+
+    def ready_provider_list(self) -> list[str]:
+        return list(self.ready_providers)
+
+    def has_codex_ready_evidence(self) -> bool:
+        return self.doctor_status == "ok" or self.codex_ready or bool(self.ready_providers)
+
 class WorkerJobCancelled(RuntimeError):
     pass
 
@@ -18,6 +63,328 @@ class WorkerJobCancelled(RuntimeError):
 class PendingResultUploadRecordError(PullwiseRequestError):
     pass
 
+
+class JobCancellationRegistry:
+    def __init__(self) -> None:
+        self._events: dict[str, threading.Event] = {}
+        self._lock = Lock()
+
+    def event(self, job_id: str) -> threading.Event:
+        job_id = safe_job_id(job_id)
+        with self._lock:
+            event = self._events.get(job_id)
+            if event is None:
+                event = threading.Event()
+                self._events[job_id] = event
+            return event
+
+    def cancel(self, job_ids: object) -> None:
+        if not isinstance(job_ids, list):
+            return
+        with self._lock:
+            for value in job_ids:
+                try:
+                    job_id = safe_job_id(value)
+                except ValueError:
+                    continue
+                event = self._events.get(job_id)
+                if event is None:
+                    event = threading.Event()
+                    self._events[job_id] = event
+                event.set()
+
+    def clear_if_matches(self, job_id: str, event: threading.Event) -> None:
+        try:
+            job_id = safe_job_id(job_id)
+        except ValueError:
+            return
+        with self._lock:
+            if self._events.get(job_id) is event:
+                self._events.pop(job_id, None)
+
+    def clear(self, job_id: str) -> None:
+        try:
+            job_id = safe_job_id(job_id)
+        except ValueError:
+            return
+        with self._lock:
+            self._events.pop(job_id, None)
+
+    def is_cancelled(self, job_id: str) -> bool:
+        try:
+            job_id = safe_job_id(job_id)
+        except ValueError:
+            return False
+        with self._lock:
+            event = self._events.get(job_id)
+        return bool(event is not None and event.is_set())
+
+
+class WorkerJobSlot:
+    def __init__(self) -> None:
+        self.future: concurrent.futures.Future[None] | None = None
+        self.job: dict | None = None
+
+    def is_running(self) -> bool:
+        return self.future is not None
+
+    def start(self, executor: concurrent.futures.Executor, job_runner: object, job: dict) -> None:
+        self.job = job
+        self.future = executor.submit(job_runner, job)
+
+    def wait(self, *, timeout: float | None = None) -> None:
+        if self.future is None:
+            return
+        wait_kwargs = {}
+        if timeout is not None:
+            wait_kwargs["timeout"] = timeout
+            wait_kwargs["return_when"] = concurrent.futures.FIRST_COMPLETED
+        concurrent.futures.wait([self.future], **wait_kwargs)
+
+    def collect_finished(self) -> tuple[dict, Exception | None] | None:
+        if self.future is None or not self.future.done():
+            return None
+        future = self.future
+        job = self.job or {}
+        self.future = None
+        self.job = None
+        try:
+            future.result()
+        except Exception as exc:
+            return job, exc
+        return job, None
+
+    def active_job_ids(self, pending_job_ids: list[str]) -> list[str]:
+        active_job_ids = list(pending_job_ids)
+        if self.job is None:
+            return active_job_ids
+        try:
+            active_job_id = safe_job_id(self.job.get("job_id"))
+        except ValueError:
+            return active_job_ids
+        if active_job_id not in active_job_ids:
+            active_job_ids.append(active_job_id)
+        return active_job_ids
+
+
+class ResultUploadManager:
+    def __init__(self, worker: object) -> None:
+        self.worker = worker
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="pullwise-result-upload",
+        )
+        self.pending_uploads: dict[str, tuple[concurrent.futures.Future[None], Path]] = {}
+        self.lock = Lock()
+
+    @property
+    def config(self) -> object:
+        return self.worker.config
+
+    @property
+    def client(self) -> object:
+        return self.worker.client
+
+    def upload_with_retry(self, job_id: str, payload: dict) -> None:
+        last_error: Exception | None = None
+        for attempt in range(1, self.config.result_upload_attempts + 1):
+            if self.worker.job_cancel_requested(job_id):
+                raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+            try:
+                self.client.result(job_id, payload)
+                return
+            except PullwiseHTTPError as exc:
+                if exc.status_code == 409:
+                    raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates") from exc
+                if exc.status_code < 500 or attempt >= self.config.result_upload_attempts:
+                    raise
+                last_error = exc
+            except PullwiseRequestError as exc:
+                last_error = exc
+                if attempt >= self.config.result_upload_attempts:
+                    raise
+            if self.worker.job_cancel_requested(job_id):
+                raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+            if attempt < self.config.result_upload_attempts:
+                self.wait_before_retry(job_id, min(30, 2 ** (attempt - 1)))
+        if last_error:
+            raise last_error
+
+    def wait_before_retry(self, job_id: str, delay_seconds: float) -> None:
+        event = self.worker.job_cancel_event(job_id)
+        if event.wait(max(0.0, float(delay_seconds or 0))):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+
+    def load_pending(self) -> None:
+        pending_dir = result_upload_dir(self.config.work_dir)
+        if not pending_dir.exists():
+            return
+        if pending_dir.is_symlink():
+            self.worker.last_error = f"pending result upload directory must not be a symlink: {pending_dir.name}"
+            return
+        for path in sorted(pending_dir.glob("*.json")):
+            try:
+                job_id, _payload = self.record(path)
+            except PendingResultUploadRecordError as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.worker.last_error = (
+                    f"pending result upload record permanently invalid for {path.name}: "
+                    f"{redact_secrets(str(exc), self.config)}"
+                )[:500]
+                continue
+            self.worker.schedule_pending_result_upload(job_id, path)
+
+    def pending_job_ids(self) -> list[str]:
+        with self.lock:
+            return list(self.pending_uploads.keys())
+
+    def has_pending(self, job_id: str) -> bool:
+        try:
+            job_id = safe_job_id(job_id)
+        except ValueError:
+            return False
+        with self.lock:
+            return job_id in self.pending_uploads
+
+    def collect(self) -> None:
+        done_uploads: list[tuple[str, concurrent.futures.Future[None], Path]] = []
+        with self.lock:
+            for job_id, (future, path) in list(self.pending_uploads.items()):
+                if future.done():
+                    done_uploads.append((job_id, future, path))
+                    self.pending_uploads.pop(job_id, None)
+        for job_id, future, path in done_uploads:
+            try:
+                future.result()
+                self.worker.clear_job_cancel_event_by_id(job_id)
+                self.clear_error(job_id)
+            except PendingResultUploadRecordError as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.worker.clear_job_cancel_event_by_id(job_id)
+                self.worker.last_error = (
+                    f"pending result upload record permanently invalid for {job_id}: "
+                    f"{redact_secrets(str(exc), self.config)}"
+                )[:500]
+            except WorkerJobCancelled as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.worker.clear_job_cancel_event_by_id(job_id)
+                self.worker.last_error = redact_secrets(str(exc), self.config)[:500]
+            except PullwiseHTTPError as exc:
+                if exc.status_code < 500:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    self.worker.clear_job_cancel_event_by_id(job_id)
+                    self.worker.last_error = (
+                        f"result upload permanently failed for {job_id}: "
+                        f"{redact_secrets(str(exc), self.config)}"
+                    )[:500]
+                    continue
+                self.worker.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                self.worker.schedule_pending_result_upload(job_id, path)
+            except PullwiseRequestError as exc:
+                self.worker.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                self.worker.schedule_pending_result_upload(job_id, path)
+            except Exception as exc:
+                self.worker.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
+                self.worker.schedule_pending_result_upload(job_id, path)
+
+    def clear_error(self, job_id: str) -> None:
+        if not self.worker.last_error:
+            return
+        prefixes = (
+            f"result upload retry failed for {job_id}:",
+            f"result upload failed for {job_id}:",
+            f"result upload deferred for {job_id}:",
+        )
+        if any(self.worker.last_error.startswith(prefix) for prefix in prefixes):
+            self.worker.last_error = None
+
+    def schedule(self, job_id: str, path: Path) -> None:
+        job_id = safe_job_id(job_id)
+        with self.lock:
+            current = self.pending_uploads.get(job_id)
+            if current and not current[0].done():
+                return
+            future = self.executor.submit(self.worker.upload_pending_result_file, path)
+            self.pending_uploads[job_id] = (future, path)
+
+    def upload_file(self, path: Path) -> None:
+        job_id, payload = self.record(path)
+        self.worker.upload_result_with_retry(job_id, payload)
+        path.unlink(missing_ok=True)
+
+    def record(self, path: Path) -> tuple[str, dict]:
+        if path.parent.is_symlink():
+            raise PendingResultUploadRecordError("pending result upload directory must not be a symlink")
+        if path.is_symlink():
+            raise PendingResultUploadRecordError("pending result upload record must not be a symlink")
+        try:
+            record = json.loads(read_no_follow_text_file(path, max_bytes=_PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PendingResultUploadRecordError(f"pending result upload record is unreadable: {exc}") from exc
+        if not isinstance(record, dict):
+            raise PendingResultUploadRecordError("pending result upload record must be an object")
+        try:
+            job_id = safe_job_id(record.get("job_id"))
+        except ValueError as exc:
+            raise PendingResultUploadRecordError(f"pending result upload job_id is invalid: {exc}") from exc
+        expected_path = result_upload_file(self.config.work_dir, job_id)
+        if path.resolve(strict=False) != expected_path.resolve(strict=False):
+            raise PendingResultUploadRecordError("pending result upload filename does not match job_id")
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise PendingResultUploadRecordError("pending result upload payload must be an object")
+        return job_id, payload
+
+    def write_record(self, path: Path, record: dict) -> None:
+        payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        if len(payload.encode("utf-8")) > _PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES:
+            raise RuntimeError("pending result upload record is too large")
+        write_no_follow_text_file(path, payload)
+
+    def defer(self, job_id: str, payload: dict) -> Path:
+        pending_dir = result_upload_dir(self.config.work_dir)
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        path = result_upload_file(self.config.work_dir, job_id)
+        self.write_record(
+            path,
+            {
+                "job_id": safe_job_id(job_id),
+                "created_at": int(time.time()),
+                "payload": payload,
+            },
+        )
+        self.worker.schedule_pending_result_upload(job_id, path)
+        return path
+
+    def upload_once_or_defer(self, job_id: str, payload: dict) -> bool:
+        if self.worker.job_cancel_requested(job_id):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+        try:
+            self.client.result(job_id, payload)
+            return True
+        except PullwiseHTTPError as exc:
+            if exc.status_code < 500:
+                raise
+            error = exc
+        except PullwiseRequestError as exc:
+            error = exc
+        if self.worker.job_cancel_requested(job_id):
+            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+        self.worker.defer_result_upload(job_id, payload)
+        self.worker.last_error = f"result upload deferred for {job_id}: {redact_secrets(str(error), self.config)}"[:500]
+        return False
 
 def protocol_multiline_text(value: object, max_length: int = PROTOCOL_TEXT_MAX_LENGTH) -> str:
     if value is None:
@@ -383,10 +750,7 @@ class Worker:
         self.config = config
         self.client = PullwiseClient(config)
         self.last_error: str | None = None
-        self._readiness_checked_at = 0.0
-        self._doctor_status = "not_ready"
-        self._codex_ready = False
-        self._ready_providers: list[str] = []
+        self._readiness_snapshot = WorkerReadinessSnapshot()
         self._empty_poll_count = 0
         self._error_poll_count = 0
         self._last_cleanup_at = 0.0
@@ -396,17 +760,62 @@ class Worker:
             max_workers=1,
             thread_name_prefix="pullwise-cleanup",
         )
-        self._result_upload_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="pullwise-result-upload",
-        )
-        self._pending_result_uploads: dict[str, tuple[concurrent.futures.Future[None], Path]] = {}
-        self._pending_result_uploads_lock = Lock()
-        self._job_cancel_events: dict[str, threading.Event] = {}
-        self._job_cancel_events_lock = Lock()
+        self.result_uploads = ResultUploadManager(self)
+        self._result_upload_executor = self.result_uploads.executor
+        self._pending_result_uploads = self.result_uploads.pending_uploads
+        self._pending_result_uploads_lock = self.result_uploads.lock
+        self._job_cancellations = JobCancellationRegistry()
         self._graph_verified_progress_upload_at = 0.0
         self._graph_verified_progress_upload_stage = ""
         self.log_tailers: dict[str, WorkerLogStreamTailer] = {}
+
+    def _set_readiness_snapshot(self, snapshot: WorkerReadinessSnapshot) -> None:
+        self._readiness_snapshot = snapshot
+
+    def _update_readiness_snapshot(self, **values: object) -> None:
+        snapshot = self._readiness_snapshot
+        self._readiness_snapshot = snapshot.with_values(
+            checked_at=values.get("checked_at") if "checked_at" in values else None,
+            doctor_status=values.get("doctor_status") if "doctor_status" in values else None,
+            codex_ready=values.get("codex_ready") if "codex_ready" in values else None,
+            ready_providers=values.get("ready_providers") if "ready_providers" in values else None,
+            ready_for_claim=values.get("ready_for_claim") if "ready_for_claim" in values else None,
+            last_error=values.get("last_error") if "last_error" in values else None,
+            keep_last_error="last_error" not in values,
+        )
+
+    @property
+    def _readiness_checked_at(self) -> float:
+        return self._readiness_snapshot.checked_at
+
+    @_readiness_checked_at.setter
+    def _readiness_checked_at(self, value: object) -> None:
+        self._update_readiness_snapshot(checked_at=float(value or 0.0))
+
+    @property
+    def _doctor_status(self) -> str:
+        return self._readiness_snapshot.doctor_status
+
+    @_doctor_status.setter
+    def _doctor_status(self, value: object) -> None:
+        status = str(value or "not_ready")
+        self._update_readiness_snapshot(doctor_status=status, ready_for_claim=status == "ok")
+
+    @property
+    def _codex_ready(self) -> bool:
+        return self._readiness_snapshot.codex_ready
+
+    @_codex_ready.setter
+    def _codex_ready(self, value: object) -> None:
+        self._update_readiness_snapshot(codex_ready=bool(value))
+
+    @property
+    def _ready_providers(self) -> list[str]:
+        return self._readiness_snapshot.ready_provider_list()
+
+    @_ready_providers.setter
+    def _ready_providers(self, value: object) -> None:
+        self._update_readiness_snapshot(ready_providers=value or [])
 
     def handle_log_session(self, session: object) -> None:
         session_id = log_stream_session_id(session if isinstance(session, dict) else None)
@@ -434,78 +843,39 @@ class Worker:
             self.last_error = f"log stream checkpoint failed: {redact_secrets(str(exc), self.config)}"[:500]
 
     def job_cancel_event(self, job_id: str) -> threading.Event:
-        job_id = safe_job_id(job_id)
-        with self._job_cancel_events_lock:
-            event = self._job_cancel_events.get(job_id)
-            if event is None:
-                event = threading.Event()
-                self._job_cancel_events[job_id] = event
-            return event
+        return self._job_cancellations.event(job_id)
 
     def cancel_server_jobs(self, job_ids: object) -> None:
-        if not isinstance(job_ids, list):
-            return
-        with self._job_cancel_events_lock:
-            for value in job_ids:
-                try:
-                    job_id = safe_job_id(value)
-                except ValueError:
-                    continue
-                event = self._job_cancel_events.get(job_id)
-                if event is None:
-                    event = threading.Event()
-                    self._job_cancel_events[job_id] = event
-                event.set()
+        self._job_cancellations.cancel(job_ids)
 
     def clear_job_cancel_event(self, job_id: str, event: threading.Event) -> None:
-        try:
-            job_id = safe_job_id(job_id)
-        except ValueError:
+        if self.has_pending_result_upload(job_id):
             return
-        with self._job_cancel_events_lock:
-            if self._job_cancel_events.get(job_id) is event:
-                self._job_cancel_events.pop(job_id, None)
+        self._job_cancellations.clear_if_matches(job_id, event)
 
     def clear_job_cancel_event_by_id(self, job_id: str) -> None:
-        try:
-            job_id = safe_job_id(job_id)
-        except ValueError:
-            return
-        with self._job_cancel_events_lock:
-            self._job_cancel_events.pop(job_id, None)
+        self._job_cancellations.clear(job_id)
 
     def job_cancel_requested(self, job_id: str) -> bool:
-        try:
-            job_id = safe_job_id(job_id)
-        except ValueError:
-            return False
-        with self._job_cancel_events_lock:
-            event = self._job_cancel_events.get(job_id)
-        return bool(event is not None and event.is_set())
+        return self._job_cancellations.is_cancelled(job_id)
 
     def run(self, *, once: bool = False) -> None:
         self.config.work_dir.mkdir(parents=True, exist_ok=True)
         self.load_pending_result_uploads()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            running_future: concurrent.futures.Future[None] | None = None
-            running_job: dict | None = None
+            job_slot = WorkerJobSlot()
 
             def collect_finished_job() -> None:
-                nonlocal running_future, running_job
-                if running_future is None or not running_future.done():
+                finished = job_slot.collect_finished()
+                if finished is None:
                     return
-                future = running_future
-                job = running_job or {}
-                running_future = None
-                running_job = None
-                try:
-                    future.result()
-                except Exception as exc:
+                job, exc = finished
+                if exc is not None:
                     self.last_error = f"job {job.get('job_id')} failed unexpectedly: {exc}"[:500]
 
             def collect_once_background_work(active_job_ids: list[str], *, claimed_jobs: int, loop_error: bool) -> None:
                 self.collect_result_uploads()
-                if running_future is None and not claimed_jobs and not loop_error:
+                if not job_slot.is_running() and not claimed_jobs and not loop_error:
                     self.schedule_cleanup_resources_if_due(active_job_ids)
                     if self._cleanup_future is not None:
                         concurrent.futures.wait([self._cleanup_future])
@@ -515,29 +885,23 @@ class Worker:
                 collect_finished_job()
                 self.collect_result_uploads()
                 self.collect_cleanup()
-                job_running = running_future is not None
+                job_running = job_slot.is_running()
                 ready = not job_running
                 loop_error = False
                 claimed_jobs = 0
                 heartbeat_payload: dict = {}
+                readiness_snapshot = self._readiness_snapshot
                 machine_metrics = self.machine_metrics_if_due()
-                active_job_ids = self.pending_result_job_ids()
-                if running_job is not None:
-                    try:
-                        active_job_id = safe_job_id(running_job.get("job_id"))
-                        if active_job_id not in active_job_ids:
-                            active_job_ids.append(active_job_id)
-                    except ValueError:
-                        pass
+                active_job_ids = job_slot.active_job_ids(self.pending_result_job_ids())
                 try:
                     heartbeat_response = self.client.heartbeat(
                         running_jobs=1 if job_running else 0,
                         active_job_ids=active_job_ids,
                         last_error=self.last_error,
-                        doctor_status=self._doctor_status,
-                        codex_ready=self._codex_ready,
-                        ready_providers=self._ready_providers,
-                        doctor_checked_at=int(self._readiness_checked_at) if self._readiness_checked_at else None,
+                        doctor_status=readiness_snapshot.doctor_status,
+                        codex_ready=readiness_snapshot.codex_ready,
+                        ready_providers=readiness_snapshot.ready_provider_list(),
+                        doctor_checked_at=int(readiness_snapshot.checked_at) if readiness_snapshot.checked_at else None,
                         machine_metrics=machine_metrics,
                     )
                     if isinstance(heartbeat_response, dict):
@@ -579,34 +943,27 @@ class Worker:
                             loop_error = True
                             job = None
                     if job:
-                        running_job = job
-                        running_future = executor.submit(self.run_job, job)
+                        job_slot.start(executor, self.run_job, job)
                     claimed_jobs = 1 if job else 0
                     if once:
-                        if running_future is not None:
-                            concurrent.futures.wait([running_future])
+                        job_slot.wait()
                         collect_finished_job()
                         collect_once_background_work(active_job_ids, claimed_jobs=claimed_jobs, loop_error=loop_error)
                         return
                 elif once:
-                    if running_future is not None:
-                        concurrent.futures.wait([running_future])
+                    job_slot.wait()
                     collect_finished_job()
                     collect_once_background_work(active_job_ids, claimed_jobs=claimed_jobs, loop_error=loop_error)
                     return
-                if running_future is None and not claimed_jobs and not loop_error:
+                if not job_slot.is_running() and not claimed_jobs and not loop_error:
                     self.schedule_cleanup_resources_if_due(active_job_ids)
                 sleep_seconds = self.next_poll_sleep(
                     claimed_jobs=claimed_jobs,
                     loop_error=loop_error,
-                    worker_busy=running_future is not None,
+                    worker_busy=job_slot.is_running(),
                 )
-                if running_future is not None:
-                    concurrent.futures.wait(
-                        [running_future],
-                        timeout=sleep_seconds,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
-                    )
+                if job_slot.is_running():
+                    job_slot.wait(timeout=sleep_seconds)
                 else:
                     time.sleep(sleep_seconds)
 
@@ -718,223 +1075,87 @@ class Worker:
 
     def refresh_readiness_if_due(self) -> bool:
         current = time.time()
-        if current - self._readiness_checked_at < self.config.readiness_check_seconds:
-            return self._doctor_status == "ok"
+        snapshot = self._readiness_snapshot
+        if current - snapshot.checked_at < self.config.readiness_check_seconds:
+            return snapshot.ready_for_claim
         try:
             checks, _provider_ready, ready_providers = worker_readiness_state(self.config)
         except Exception as exc:
-            self._codex_ready = False
-            self._ready_providers = []
-            self._doctor_status = "degraded"
-            self._readiness_checked_at = current
-            self.last_error = f"worker not ready: readiness check failed: {redact_secrets(str(exc), self.config)}"[:500]
+            last_error = f"worker not ready: readiness check failed: {redact_secrets(str(exc), self.config)}"[:500]
+            self._set_readiness_snapshot(
+                WorkerReadinessSnapshot(
+                    checked_at=current,
+                    doctor_status="degraded",
+                    codex_ready=False,
+                    ready_providers=(),
+                    ready_for_claim=False,
+                    last_error=last_error,
+                )
+            )
+            self.last_error = last_error
             return False
         failed_check = first_failed_check(checks)
         if (
             failed_check is not None
             and failed_check[0] == "codex_ready"
             and "deferred" in str(failed_check[2] or "").lower()
-            and (self._doctor_status == "ok" or self._codex_ready or self._ready_providers)
+            and snapshot.has_codex_ready_evidence()
         ):
-            self._readiness_checked_at = current
+            self._set_readiness_snapshot(snapshot.with_values(checked_at=current))
             return True
-        self._codex_ready = readiness_check_ok(checks, "codex_ready")
-        self._ready_providers = ready_providers
-        self._doctor_status = "degraded" if failed_check else "ok"
-        self._readiness_checked_at = current
-        self.last_error = None if failed_check is None else readiness_error_message(failed_check, self.config)
+        codex_ready = readiness_check_ok(checks, "codex_ready")
+        last_error = None if failed_check is None else readiness_error_message(failed_check, self.config)
+        self._set_readiness_snapshot(
+            WorkerReadinessSnapshot(
+                checked_at=current,
+                doctor_status="degraded" if failed_check else "ok",
+                codex_ready=codex_ready,
+                ready_providers=tuple(ready_providers),
+                ready_for_claim=failed_check is None,
+                last_error=last_error,
+            )
+        )
+        self.last_error = last_error
         return failed_check is None
 
     def upload_result_with_retry(self, job_id: str, payload: dict) -> None:
-        last_error: Exception | None = None
-        for attempt in range(1, self.config.result_upload_attempts + 1):
-            if self.job_cancel_requested(job_id):
-                raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
-            try:
-                self.client.result(job_id, payload)
-                return
-            except PullwiseHTTPError as exc:
-                if exc.status_code == 409:
-                    raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates") from exc
-                if exc.status_code < 500 or attempt >= self.config.result_upload_attempts:
-                    raise
-                last_error = exc
-            except PullwiseRequestError as exc:
-                last_error = exc
-                if attempt >= self.config.result_upload_attempts:
-                    raise
-            if self.job_cancel_requested(job_id):
-                raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
-            if attempt < self.config.result_upload_attempts:
-                self.wait_before_result_upload_retry(job_id, min(30, 2 ** (attempt - 1)))
-        if last_error:
-            raise last_error
+        self.result_uploads.upload_with_retry(job_id, payload)
 
     def wait_before_result_upload_retry(self, job_id: str, delay_seconds: float) -> None:
-        event = self.job_cancel_event(job_id)
-        if event.wait(max(0.0, float(delay_seconds or 0))):
-            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+        self.result_uploads.wait_before_retry(job_id, delay_seconds)
 
     def load_pending_result_uploads(self) -> None:
-        pending_dir = result_upload_dir(self.config.work_dir)
-        if not pending_dir.exists():
-            return
-        if pending_dir.is_symlink():
-            self.last_error = f"pending result upload directory must not be a symlink: {pending_dir.name}"
-            return
-        for path in sorted(pending_dir.glob("*.json")):
-            try:
-                job_id, _payload = self.pending_result_upload_record(path)
-            except PendingResultUploadRecordError as exc:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.last_error = (
-                    f"pending result upload record permanently invalid for {path.name}: "
-                    f"{redact_secrets(str(exc), self.config)}"
-                )[:500]
-                continue
-            self.schedule_pending_result_upload(job_id, path)
+        self.result_uploads.load_pending()
 
     def pending_result_job_ids(self) -> list[str]:
-        with self._pending_result_uploads_lock:
-            return list(self._pending_result_uploads.keys())
+        return self.result_uploads.pending_job_ids()
+
+    def has_pending_result_upload(self, job_id: str) -> bool:
+        return self.result_uploads.has_pending(job_id)
 
     def collect_result_uploads(self) -> None:
-        done_uploads: list[tuple[str, concurrent.futures.Future[None], Path]] = []
-        with self._pending_result_uploads_lock:
-            for job_id, (future, path) in list(self._pending_result_uploads.items()):
-                if future.done():
-                    done_uploads.append((job_id, future, path))
-                    self._pending_result_uploads.pop(job_id, None)
-        for job_id, future, path in done_uploads:
-            try:
-                future.result()
-                self.clear_result_upload_error(job_id)
-            except PendingResultUploadRecordError as exc:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.last_error = (
-                    f"pending result upload record permanently invalid for {job_id}: "
-                    f"{redact_secrets(str(exc), self.config)}"
-                )[:500]
-            except WorkerJobCancelled as exc:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.clear_job_cancel_event_by_id(job_id)
-                self.last_error = redact_secrets(str(exc), self.config)[:500]
-            except PullwiseHTTPError as exc:
-                if exc.status_code < 500:
-                    try:
-                        path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    self.last_error = (
-                        f"result upload permanently failed for {job_id}: "
-                        f"{redact_secrets(str(exc), self.config)}"
-                    )[:500]
-                    continue
-                self.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
-                self.schedule_pending_result_upload(job_id, path)
-            except PullwiseRequestError as exc:
-                self.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
-                self.schedule_pending_result_upload(job_id, path)
-            except Exception as exc:
-                self.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
-                self.schedule_pending_result_upload(job_id, path)
+        self.result_uploads.collect()
 
     def clear_result_upload_error(self, job_id: str) -> None:
-        if not self.last_error:
-            return
-        prefixes = (
-            f"result upload retry failed for {job_id}:",
-            f"result upload failed for {job_id}:",
-            f"result upload deferred for {job_id}:",
-        )
-        if any(self.last_error.startswith(prefix) for prefix in prefixes):
-            self.last_error = None
+        self.result_uploads.clear_error(job_id)
 
     def schedule_pending_result_upload(self, job_id: str, path: Path) -> None:
-        job_id = safe_job_id(job_id)
-        with self._pending_result_uploads_lock:
-            current = self._pending_result_uploads.get(job_id)
-            if current and not current[0].done():
-                return
-            future = self._result_upload_executor.submit(self.upload_pending_result_file, path)
-            self._pending_result_uploads[job_id] = (future, path)
+        self.result_uploads.schedule(job_id, path)
 
     def upload_pending_result_file(self, path: Path) -> None:
-        job_id, payload = self.pending_result_upload_record(path)
-        self.upload_result_with_retry(job_id, payload)
-        path.unlink(missing_ok=True)
+        self.result_uploads.upload_file(path)
 
     def pending_result_upload_record(self, path: Path) -> tuple[str, dict]:
-        if path.parent.is_symlink():
-            raise PendingResultUploadRecordError("pending result upload directory must not be a symlink")
-        if path.is_symlink():
-            raise PendingResultUploadRecordError("pending result upload record must not be a symlink")
-        try:
-            record = json.loads(read_no_follow_text_file(path, max_bytes=_PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise PendingResultUploadRecordError(f"pending result upload record is unreadable: {exc}") from exc
-        if not isinstance(record, dict):
-            raise PendingResultUploadRecordError("pending result upload record must be an object")
-        try:
-            job_id = safe_job_id(record.get("job_id"))
-        except ValueError as exc:
-            raise PendingResultUploadRecordError(f"pending result upload job_id is invalid: {exc}") from exc
-        expected_path = result_upload_file(self.config.work_dir, job_id)
-        if path.resolve(strict=False) != expected_path.resolve(strict=False):
-            raise PendingResultUploadRecordError("pending result upload filename does not match job_id")
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            raise PendingResultUploadRecordError("pending result upload payload must be an object")
-        return job_id, payload
+        return self.result_uploads.record(path)
 
     def write_pending_result_upload_record(self, path: Path, record: dict) -> None:
-        payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
-        if len(payload.encode("utf-8")) > _PENDING_RESULT_UPLOAD_RECORD_MAX_BYTES:
-            raise RuntimeError("pending result upload record is too large")
-        write_no_follow_text_file(path, payload)
+        self.result_uploads.write_record(path, record)
 
     def defer_result_upload(self, job_id: str, payload: dict) -> Path:
-        pending_dir = result_upload_dir(self.config.work_dir)
-        pending_dir.mkdir(parents=True, exist_ok=True)
-        path = result_upload_file(self.config.work_dir, job_id)
-        self.write_pending_result_upload_record(
-            path,
-            {
-                "job_id": safe_job_id(job_id),
-                "created_at": int(time.time()),
-                "payload": payload,
-            },
-        )
-        self.schedule_pending_result_upload(job_id, path)
-        return path
+        return self.result_uploads.defer(job_id, payload)
 
     def upload_result_once_or_defer(self, job_id: str, payload: dict) -> bool:
-        if self.job_cancel_requested(job_id):
-            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
-        try:
-            self.client.result(job_id, payload)
-            return True
-        except PullwiseHTTPError as exc:
-            if exc.status_code < 500:
-                raise
-            error = exc
-        except PullwiseRequestError as exc:
-            error = exc
-        if self.job_cancel_requested(job_id):
-            raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
-        self.defer_result_upload(job_id, payload)
-        self.last_error = f"result upload deferred for {job_id}: {redact_secrets(str(error), self.config)}"[:500]
-        return False
-
+        return self.result_uploads.upload_once_or_defer(job_id, payload)
     def graph_verified_progress_upload_due(self, event: object) -> bool:
         if not isinstance(event, dict):
             return True
@@ -1451,6 +1672,12 @@ def write_failed_checkout_marker(marker: Path, expires_at: int) -> None:
     write_no_follow_text_file(marker, str(int(expires_at)))
 
 
+def path_is_symlink_no_follow(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
 def write_no_follow_text_file(path: Path, text: str) -> None:
     if path.parent.is_symlink():
         raise RuntimeError(f"refusing to write through symlinked directory: {path.parent}")
@@ -1482,11 +1709,15 @@ def read_no_follow_text_file(path: Path, max_bytes: int | None = None) -> str:
     if max_bytes is None:
         max_bytes = default_limit
     byte_limit = positive_limit_int(max_bytes, default_limit, minimum=1)
+    if path_is_symlink_no_follow(path):
+        raise OSError(f"refusing to follow symlink: {path}")
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags)
     try:
+        if path_is_symlink_no_follow(path):
+            raise OSError(f"refusing to follow symlink: {path}")
         stat_result = os.fstat(fd)
         if not stat.S_ISREG(stat_result.st_mode):
             raise OSError(f"not a regular file: {path}")
@@ -1507,7 +1738,6 @@ def read_no_follow_text_file(path: Path, max_bytes: int | None = None) -> str:
     finally:
         if fd >= 0:
             os.close(fd)
-
 
 def append_no_follow_text_file(path: Path, text: str) -> None:
     if path.parent.is_symlink():

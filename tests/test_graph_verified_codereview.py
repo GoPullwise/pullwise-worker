@@ -92,6 +92,39 @@ def _run_test_function(func: object) -> None:
                 patcher.undo()
 
 
+def test_app_server_launch_args_use_default_stdio_transport(tmp_path: Path) -> None:
+    command = str(tmp_path / "bin" / "codex")
+    args = app_server_runner.app_server_launch_args(command, {})
+
+    assert args == [command, "app-server"]
+    assert "--stdio" not in args
+
+
+def test_app_server_launch_args_drop_stdio_for_windows_cmd_wrapper(tmp_path: Path) -> None:
+    command = str(tmp_path / "bin" / "codex.cmd")
+    args = app_server_runner.app_server_launch_args(command, {"ComSpec": r"C:\Windows\System32\cmd.exe"})
+
+    assert "--stdio" not in args
+    assert args[:4] == [r"C:\Windows\System32\cmd.exe", "/d", "/s", "/c"]
+    assert "app-server" in args[-1]
+    assert "--stdio" not in args[-1]
+
+
+def test_app_server_launch_args_drop_stdio_for_windows_ps1_wrapper(tmp_path: Path) -> None:
+    command = str(tmp_path / "bin" / "codex.ps1")
+    args = app_server_runner.app_server_launch_args(command, {"SystemRoot": r"C:\Windows"})
+
+    assert args == [
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        command,
+        "app-server",
+    ]
+    assert "--stdio" not in args
+
 def test_init_writes_v3_codereview_assets(tmp_path: Path) -> None:
     ensure_project_files(tmp_path)
 

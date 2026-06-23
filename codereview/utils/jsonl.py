@@ -52,6 +52,8 @@ def read_jsonl(path: Path) -> list[object]:
 
 
 def read_text(path: Path) -> str:
+    if path.is_symlink():
+        raise OSError(f"refusing to follow symlink: {path}")
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
