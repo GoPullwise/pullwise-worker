@@ -60,6 +60,7 @@ def run_finders_parallel(
                     current=completed,
                     total=total,
                     task_id=f"{task.focus}:{task.unit_id}",
+                    task_result=result,
                 )
     return [result for result in results_by_index if result is not None]
 
@@ -234,23 +235,46 @@ def _emit_task_progress(
     current: int,
     total: int,
     task_id: object,
+    task_result: object | None = None,
 ) -> None:
     if progress is None:
         return
+    payload = {
+        "stage": stage,
+        "message": message,
+        "current": current,
+        "total": total,
+        "taskId": str(task_id or ""),
+    }
+    payload.update(finder_task_progress_fields(task_result))
     try:
-        progress(
-            {
-                "stage": stage,
-                "message": message,
-                "current": current,
-                "total": total,
-                "taskId": str(task_id or ""),
-            }
-        )
+        progress(payload)
     except Exception as exc:
         raise_if_cancelled_callback_exception(exc)
         return
 
+
+def finder_task_progress_fields(task_result: object | None) -> dict[str, object]:
+    if not isinstance(task_result, dict):
+        return {}
+    fields: dict[str, object] = {}
+    status = str(task_result.get("status") or "")
+    if status:
+        fields["taskStatus"] = status
+    blocked_reason = str(task_result.get("blocked_reason") or "")
+    if blocked_reason:
+        fields["blockedReason"] = blocked_reason
+    result = task_result.get("result") if isinstance(task_result.get("result"), dict) else {}
+    candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
+    context_requests = result.get("context_requests") if isinstance(result.get("context_requests"), list) else []
+    fields["candidateCount"] = len(candidates)
+    fields["contextRequestCount"] = len(context_requests)
+    process = task_result.get("process") if isinstance(task_result.get("process"), dict) else {}
+    if "returncode" in process:
+        fields["exitCode"] = process.get("returncode")
+    if process.get("timed_out") is True:
+        fields["timedOut"] = True
+    return fields
 
 def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config: ReviewConfig, *, batch_index: int = 1) -> list[dict]:
     if not tasks:

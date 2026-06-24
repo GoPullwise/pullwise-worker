@@ -21,6 +21,8 @@ def build_unit_coverage(graph: dict, inventory: dict, units: list[dict], review_
     }
     boundary_units = [unit for unit in units if unit.get("unit_type") == "cross_boundary"]
     global_units = [unit for unit in units if unit.get("unit_type") == "global_invariant"]
+    baseline_reviewed_unit_ids = sorted(unit_ids & baseline_reviewed)
+    missing_baseline_unit_ids = sorted(unit_ids - baseline_reviewed)
     return {
         "inventory_files": len(inventory.get("files", []) or []),
         "analyzed_files": sum(1 for item in inventory.get("files", []) if isinstance(item, dict) and item.get("scope") == "analyze"),
@@ -29,7 +31,10 @@ def build_unit_coverage(graph: dict, inventory: dict, units: list[dict], review_
         "covered_production_symbols": len(production & unit_node_ids),
         "uncovered_production_symbols": sorted(production - unit_node_ids)[:200],
         "review_units": len(units),
-        "baseline_reviewed_units": len(unit_ids & baseline_reviewed),
+        "baseline_reviewed_units": len(baseline_reviewed_unit_ids),
+        "baseline_reviewed_unit_ids": baseline_reviewed_unit_ids,
+        "missing_baseline_review_unit_ids": missing_baseline_unit_ids[:200],
+        "missing_baseline_review_unit_count": len(missing_baseline_unit_ids),
         "high_risk_units": len(high_risk),
         "specialist_reviewed_high_risk_units": sum(1 for unit in high_risk if str(unit.get("unit_id") or "") in specialist_reviewed),
         "cross_boundary_reviews": len(boundary_units),
@@ -43,7 +48,13 @@ def require_full_unit_coverage(coverage: dict, *, require_baseline_review: bool 
     if coverage.get("production_symbols") != coverage.get("covered_production_symbols"):
         errors.append("not all production symbols are assigned to review units")
     if require_baseline_review and coverage.get("review_units") != coverage.get("baseline_reviewed_units"):
-        errors.append("not all review units received baseline correctness review")
+        missing = coverage.get("missing_baseline_review_unit_ids") if isinstance(coverage.get("missing_baseline_review_unit_ids"), list) else []
+        missing_count = coverage.get("missing_baseline_review_unit_count") or len(missing)
+        sample = ", ".join(str(item) for item in missing[:10] if str(item))
+        detail = f"missing={missing_count}"
+        if sample:
+            detail = f"{detail} sample={sample}"
+        errors.append(f"not all review units received baseline correctness review ({detail})")
     if errors:
         raise RuntimeError("; ".join(errors))
 

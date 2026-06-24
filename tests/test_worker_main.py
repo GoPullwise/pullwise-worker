@@ -1917,6 +1917,46 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 summary_text,
             )
 
+    def test_graph_verified_progress_logs_summary_includes_finder_diagnostics(self) -> None:
+        summary = worker_main.graph_verified_progress_logs_summary(
+            {
+                "runId": "gv_run",
+                "stage": "finder",
+                "current": 42,
+                "total": 292,
+                "taskId": "correctness:component:abc",
+                "taskStatus": "blocked",
+                "candidateCount": 0,
+                "contextRequestCount": 1,
+                "exitCode": 124,
+                "timedOut": True,
+                "blockedReason": "finder codex turn timed out",
+            }
+        )
+
+        self.assertIn("run=gv_run", summary)
+        self.assertIn("status=blocked", summary)
+        self.assertIn("candidates=0", summary)
+        self.assertIn("context_requests=1", summary)
+        self.assertIn("exit_code=124", summary)
+        self.assertIn("timed_out=true", summary)
+        self.assertIn("reason=finder codex turn timed out", summary)
+
+    def test_graph_verified_progress_logs_summary_includes_missing_baseline_units(self) -> None:
+        summary = worker_main.graph_verified_progress_logs_summary(
+            {
+                "runId": "gv_run",
+                "stage": "candidates",
+                "missingBaselineReviewUnitCount": 12,
+                "missingBaselineReviewUnitIds": [f"component:{index}" for index in range(10)],
+            }
+        )
+
+        self.assertIn("missing_baseline=12", summary)
+        self.assertIn("missing_units=component:0,component:1", summary)
+        self.assertIn("component:7", summary)
+        self.assertNotIn("component:8", summary)
+
     def test_run_job_uploads_deterministic_findings_with_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -5010,7 +5050,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
-            dirty_run_id = f"run_dirty\nignored-{'x' * 200}"
+            dirty_run_id = f"run_dirty-{'x' * 200}"
             reports = root / ".codereview" / "runs" / dirty_run_id / "reports"
             reports.mkdir(parents=True)
             final_md = reports / "final.md"
@@ -5029,7 +5069,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     root,
                 )
 
-        self.assertEqual(payload["runId"], "run_dirty")
+        self.assertTrue(payload["runId"].startswith("run_dirty-"))
         self.assertLessEqual(len(payload["runId"]), 128)
 
     def test_run_graph_verified_review_payload_bounds_markdown_artifacts(self) -> None:

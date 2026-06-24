@@ -162,7 +162,7 @@ def graph_verified_regular_file(path: Path) -> bool:
 
 
 def graph_verified_read_text_artifact(path: Path, max_bytes: int) -> str:
-    if not graph_verified_regular_file(path):
+    if not graph_verified_regular_file(path) or path.is_symlink():
         return ""
     try:
         limit = max(0, int(max_bytes or 0))
@@ -176,6 +176,8 @@ def graph_verified_read_text_artifact(path: Path, max_bytes: int) -> str:
     fd = -1
     try:
         fd = os.open(path, flags)
+        if path.is_symlink():
+            return ""
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             return handle.read(limit + 1)[:limit].decode("utf-8", errors="replace")
@@ -215,6 +217,8 @@ def graph_verified_progress_logs_summary(value: object) -> str:
     stage = clean_protocol_text(source.get("stage"), 80)
     task_id = clean_protocol_text(source.get("taskId") or source.get("task_id"), 160)
     run_id = clean_protocol_text(source.get("runId") or source.get("run_id"), 80)
+    task_status = clean_protocol_text(source.get("taskStatus") or source.get("task_status"), 40)
+    blocked_reason = clean_protocol_text(source.get("blockedReason") or source.get("blocked_reason"), 320)
     current = source.get("current")
     total = source.get("total")
     parts = []
@@ -226,8 +230,39 @@ def graph_verified_progress_logs_summary(value: object) -> str:
         parts.append(f"progress={graph_verified_count(current)}/{graph_verified_count(total)}")
     if task_id:
         parts.append(f"task={task_id}")
+    if task_status:
+        parts.append(f"status={task_status}")
+    if "candidateCount" in source or "candidate_count" in source:
+        parts.append(f"candidates={graph_verified_count(source.get('candidateCount', source.get('candidate_count')))}")
+    if "contextRequestCount" in source or "context_request_count" in source:
+        parts.append(f"context_requests={graph_verified_count(source.get('contextRequestCount', source.get('context_request_count')))}")
+    if "exitCode" in source or "exit_code" in source:
+        parts.append(f"exit_code={graph_verified_count(source.get('exitCode', source.get('exit_code')))}")
+    if source.get("timedOut") is True or source.get("timed_out") is True:
+        parts.append("timed_out=true")
+    if "missingBaselineReviewUnitCount" in source or "missing_baseline_review_unit_count" in source:
+        parts.append(
+            f"missing_baseline={graph_verified_count(source.get('missingBaselineReviewUnitCount', source.get('missing_baseline_review_unit_count')))}"
+        )
+    missing_units = graph_verified_clean_list(source.get("missingBaselineReviewUnitIds") or source.get("missing_baseline_review_unit_ids"), 8, 80)
+    if missing_units:
+        parts.append(f"missing_units={','.join(missing_units)}")
+    if blocked_reason:
+        parts.append(f"reason={blocked_reason}")
     return " ".join(parts)
 
+
+def graph_verified_clean_list(value: object, limit: int, item_max_chars: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    output = []
+    for item in value:
+        text = clean_protocol_text(item, item_max_chars)
+        if text:
+            output.append(text)
+        if len(output) >= limit:
+            break
+    return output
 
 def graph_verified_progress_percent(value: object) -> int:
     source = value if isinstance(value, dict) else {}

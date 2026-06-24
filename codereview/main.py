@@ -15,7 +15,7 @@ from .candidates.select import select_for_repro
 from .context_adapter import preflight_context
 from .config import load_config
 from .finder.runner import estimate_finder_turns, run_finders_parallel
-from .finder.tasks import plan_finder_tasks
+from .finder.tasks import FinderTask, plan_finder_tasks
 from .graph.audit import audit_graph, run_agent_graph_audit
 from .graph.census import run_repository_census, validate_census_coverage
 from .graph.index_sqlite import rebuild_sqlite_index
@@ -294,13 +294,26 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         repair_config = _finder_turn_limit_config(config, remaining_finder_turns)
         repaired_raw_candidates = _run_finders_with_progress(snapshot_repo, run, repair_finder_tasks, repair_config, progress) if repair_finder_tasks else []
         raw_candidates = [*kept_raw_candidates, *repaired_raw_candidates]
+    raw_candidates = _backfill_missing_baseline_reviews(snapshot_repo, run, graph, inventory, review_units, raw_candidates, config, progress)
     write_jsonl(run / "candidates" / "raw.jsonl", raw_candidates)
 
     _emit_progress(progress, "candidates", "Candidates: normalizing and scoring", run_id=run_id)
     executed_coverage = build_unit_coverage(graph, inventory, review_units, raw_candidates)
     executed_coverage["critical_unresolved_graph_edges"] = audit.get("critical_unresolved", 0)
-    require_full_unit_coverage(executed_coverage, require_baseline_review=config.units.require_baseline_for_every_unit)
     write_json(run / "artifacts" / "review-units" / "coverage-executed.json", executed_coverage)
+    executed_missing_baseline = _coverage_missing_baseline_unit_ids(executed_coverage)
+    if executed_missing_baseline:
+        _emit_progress(
+            progress,
+            "candidates",
+            f"Coverage: missing baseline correctness reviews {len(executed_missing_baseline)}",
+            run_id=run_id,
+            extra={
+                "missingBaselineReviewUnitCount": len(executed_missing_baseline),
+                "missingBaselineReviewUnitIds": executed_missing_baseline[:20],
+            },
+        )
+    require_full_unit_coverage(executed_coverage, require_baseline_review=config.units.require_baseline_for_every_unit)
 
     normalized = normalize_candidates(raw_candidates, checkout=snapshot_repo, run=run)
     deduped = dedupe_candidates(normalized)
@@ -406,6 +419,7 @@ def _emit_progress(
     current: int | None = None,
     total: int | None = None,
     run_id: str = "",
+    extra: dict[str, object] | None = None,
 ) -> None:
     if progress is None:
         return
@@ -416,12 +430,13 @@ def _emit_progress(
         payload["total"] = total
     if run_id:
         payload["runId"] = run_id
+    if extra:
+        payload.update(extra)
     try:
         progress(payload)
     except Exception as exc:
         raise_if_cancelled_callback_exception(exc)
         return
-
 
 def _graph_quality_gate_failure_message(audit: dict) -> str:
     errors = [str(item) for item in audit.get("quality_errors", []) if str(item)]
@@ -556,6 +571,57 @@ def _run_finders_with_progress(checkout: Path, run: Path, tasks: list[object], c
         return run_finders_parallel(checkout, run, tasks, config)
     return run_finders_parallel(checkout, run, tasks, config, progress=_progress_with_run_id(progress, run))
 
+
+def _backfill_missing_baseline_reviews(
+    checkout: Path,
+    run: Path,
+    graph: dict,
+    inventory: dict,
+    review_units: list[dict],
+    raw_candidates: list[dict],
+    config: object,
+    progress: ProgressCallback | None,
+) -> list[dict]:
+    units_config = getattr(config, "units", object())
+    if not getattr(units_config, "require_baseline_for_every_unit", True):
+        return raw_candidates
+    coverage = build_unit_coverage(graph, inventory, review_units, raw_candidates)
+    missing_unit_ids = _coverage_missing_baseline_unit_ids(coverage)
+    if not missing_unit_ids:
+        return raw_candidates
+    units_by_id = {str(unit.get("unit_id") or ""): unit for unit in review_units if isinstance(unit, dict)}
+    tasks = []
+    for unit_id in missing_unit_ids:
+        unit = units_by_id.get(unit_id)
+        if not unit:
+            continue
+        tasks.append(
+            FinderTask(
+                unit_id=unit_id,
+                focus="correctness",
+                unit_type=str(unit.get("unit_type") or ""),
+                review_pass="baseline",
+                risk_tags=[str(tag) for tag in (unit.get("risk_tags") or []) if str(tag)],
+            )
+        )
+    if not tasks:
+        return raw_candidates
+    _emit_progress(
+        progress,
+        "finder",
+        f"Finder: baseline backfill 0/{len(tasks)}",
+        current=0,
+        total=len(tasks),
+        run_id=run.name,
+        extra={
+            "missingBaselineReviewUnitCount": len(missing_unit_ids),
+            "missingBaselineReviewUnitIds": missing_unit_ids[:20],
+        },
+    )
+    backfilled = _run_finders_with_progress(checkout, run, tasks, config, progress)
+    backfill_keys = {_finder_task_key(task) for task in tasks}
+    kept = [item for item in raw_candidates if _finder_result_key(item) not in backfill_keys]
+    return [*kept, *backfilled]
 
 def _run_candidate_verifiers_with_progress(
     candidates: list[dict],
@@ -744,6 +810,19 @@ def _repair_task_count(history: list[dict]) -> int:
     return total
 
 
+def _coverage_missing_baseline_unit_ids(coverage: dict) -> list[str]:
+    if not isinstance(coverage, dict):
+        return []
+    unit_ids = coverage.get("unit_ids")
+    reviewed = coverage.get("baseline_reviewed_unit_ids")
+    if isinstance(unit_ids, list) and isinstance(reviewed, list):
+        reviewed_set = {str(item) for item in reviewed if str(item)}
+        return [str(item) for item in unit_ids if str(item) and str(item) not in reviewed_set]
+    missing = coverage.get("missing_baseline_review_unit_ids")
+    if isinstance(missing, list):
+        return [str(item) for item in missing if str(item)]
+    return []
+
 def _finder_context_repair_tasks(raw_candidates: list[dict], *, start_index: int) -> list[dict]:
     files: list[str] = []
     for item in raw_candidates:
@@ -777,19 +856,27 @@ def _finder_context_repair_rerun_plan(raw_candidates: list[dict], old_tasks: lis
     requested_units = _finder_context_request_unit_ids(raw_candidates)
     old_keys = {_finder_task_key(task) for task in old_tasks}
     new_keys = {_finder_task_key(task) for task in new_tasks}
-    rerun_tasks = [
-        task
-        for task in new_tasks
-        if _finder_task_unit_id(task) in requested_units or _finder_task_key(task) not in old_keys
-    ]
+    successful_old_keys = {
+        _finder_result_key(item)
+        for item in raw_candidates
+        if _finder_result_is_successful(item)
+    }
+    rerun_tasks = []
+    for task in new_tasks:
+        task_key = _finder_task_key(task)
+        if (
+            _finder_task_unit_id(task) in requested_units
+            or task_key not in old_keys
+            or task_key not in successful_old_keys
+        ):
+            rerun_tasks.append(task)
     rerun_keys = {_finder_task_key(task) for task in rerun_tasks}
     kept = [
         item
         for item in raw_candidates
-        if _finder_result_key(item) in new_keys and _finder_result_key(item) not in rerun_keys
+        if _finder_result_key(item) in new_keys and _finder_result_key(item) not in rerun_keys and _finder_result_is_successful(item)
     ]
     return rerun_tasks, kept
-
 
 def _finder_context_request_unit_ids(raw_candidates: list[dict]) -> set[str]:
     units: set[str] = set()
@@ -802,6 +889,12 @@ def _finder_context_request_unit_ids(raw_candidates: list[dict]) -> set[str]:
                 units.add(unit_id)
     return units
 
+
+def _finder_result_is_successful(item: object) -> bool:
+    if not isinstance(item, dict) or item.get("status") != "ok":
+        return False
+    unit_id, focus = _finder_result_key(item)
+    return bool(unit_id and focus)
 
 def _finder_result_key(item: object) -> tuple[str, str]:
     source = item if isinstance(item, dict) else {}

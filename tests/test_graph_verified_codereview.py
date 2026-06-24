@@ -43,7 +43,7 @@ from codereview.repro.worker_dir import create_worker_dir
 from codereview.review import candidate_verifier as candidate_verifier_module
 from codereview.snapshot import create_immutable_snapshot
 from codereview.templates import ensure_project_files
-from codereview.units.coverage import build_unit_coverage
+from codereview.units.coverage import build_unit_coverage, require_full_unit_coverage
 from codereview.units.context import write_review_units
 from codereview.units.planner import build_all_review_units
 from codereview.units.risk_tags import choose_finders
@@ -909,6 +909,105 @@ def test_context_repair_reruns_only_requesting_or_new_finder_tasks() -> None:
         ("component:c", "correctness"),
     ]
     assert [(item["task"]["unit_id"], item["task"]["focus"]) for item in kept] == [("component:b", "correctness")]
+
+
+def test_context_repair_reruns_unsuccessful_existing_finder_tasks() -> None:
+    old_tasks = [
+        FinderTask(unit_id="component:a", focus="correctness"),
+        FinderTask(unit_id="component:b", focus="correctness"),
+        FinderTask(unit_id="component:b", focus="api_contract", review_pass="specialist"),
+    ]
+    raw_candidates = [
+        {"task": old_tasks[0].__dict__, "result": {"unit_id": "component:a", "focus": "correctness", "candidates": []}, "status": "ok"},
+        {
+            "task": old_tasks[1].__dict__,
+            "result": {"unit_id": "component:b", "focus": "correctness", "context_requests": [], "candidates": []},
+            "status": "blocked",
+            "blocked_reason": "finder batch did not return a result for this task",
+        },
+        {"task": old_tasks[2].__dict__, "result": {"unit_id": "component:b", "focus": "api_contract", "candidates": []}, "status": "ok"},
+    ]
+
+    rerun, kept = codereview_main._finder_context_repair_rerun_plan(raw_candidates, old_tasks, old_tasks)
+
+    assert [(task.unit_id, task.focus) for task in rerun] == [("component:b", "correctness")]
+    assert [(item["task"]["unit_id"], item["task"]["focus"]) for item in kept] == [
+        ("component:a", "correctness"),
+        ("component:b", "api_contract"),
+    ]
+
+
+def test_baseline_backfill_reruns_missing_correctness_reviews(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    config = ReviewConfig()
+    checkout = tmp_path / "repo"
+    run = tmp_path / "run"
+    checkout.mkdir()
+    run.mkdir()
+    review_units = [
+        {"unit_id": "component:a", "unit_type": "component_area", "risk_tags": ["source"]},
+        {"unit_id": "component:b", "unit_type": "component_area", "risk_tags": ["source"]},
+    ]
+    raw_candidates = [
+        {"task": {"unit_id": "component:a", "focus": "correctness"}, "result": {"unit_id": "component:a", "focus": "correctness", "candidates": []}, "status": "ok"},
+        {"task": {"unit_id": "component:b", "focus": "correctness"}, "result": {"unit_id": "component:b", "focus": "correctness", "candidates": []}, "status": "blocked"},
+    ]
+    seen_tasks: list[tuple[str, str]] = []
+
+    def fake_run_finders(checkout_arg: Path, run_arg: Path, tasks: list[FinderTask], config_arg: ReviewConfig, progress: object) -> list[dict]:
+        del checkout_arg, run_arg, config_arg, progress
+        seen_tasks.extend((task.unit_id, task.focus) for task in tasks)
+        return [
+            {
+                "task": task.__dict__,
+                "result": {"unit_id": task.unit_id, "focus": task.focus, "context_requests": [], "candidates": []},
+                "status": "ok",
+            }
+            for task in tasks
+        ]
+
+    monkeypatch.setattr(codereview_main, "_run_finders_with_progress", fake_run_finders)
+
+    repaired = codereview_main._backfill_missing_baseline_reviews(checkout, run, {}, {}, review_units, raw_candidates, config, None)
+    coverage = build_unit_coverage({}, {}, review_units, repaired)
+
+    assert seen_tasks == [("component:b", "correctness")]
+    assert coverage["baseline_reviewed_units"] == 2
+    assert coverage["missing_baseline_review_unit_ids"] == []
+    assert all(item.get("status") == "ok" for item in repaired)
+
+
+def test_unit_coverage_error_names_missing_baseline_units() -> None:
+    coverage = build_unit_coverage(
+        {},
+        {},
+        [{"unit_id": "component:a"}, {"unit_id": "component:b"}],
+        [{"task": {"unit_id": "component:a", "focus": "correctness"}, "status": "ok"}],
+    )
+
+    try:
+        require_full_unit_coverage(coverage, require_baseline_review=True)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected missing baseline coverage error")
+
+    assert "missing=1" in message
+    assert "component:b" in message
+
+
+def test_missing_baseline_helper_reconstructs_full_missing_units_from_coverage_ids() -> None:
+    coverage = {
+        "unit_ids": [f"component:{index:03d}" for index in range(205)],
+        "baseline_reviewed_unit_ids": ["component:000"],
+        "missing_baseline_review_unit_ids": [f"component:{index:03d}" for index in range(1, 201)],
+        "missing_baseline_review_unit_count": 204,
+    }
+
+    missing = codereview_main._coverage_missing_baseline_unit_ids(coverage)
+
+    assert len(missing) == 204
+    assert missing[0] == "component:001"
+    assert missing[-1] == "component:204"
 
 
 def test_git_inventory_reads_full_large_git_file_lists(tmp_path: Path) -> None:
