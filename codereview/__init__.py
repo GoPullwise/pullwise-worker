@@ -1,5 +1,3 @@
-"""Graph-verified code review orchestrator."""
+from .simple_review import main, run_review
 
-from .main import main
-
-__all__ = ["main"]
+__all__ = ["main", "run_review"]

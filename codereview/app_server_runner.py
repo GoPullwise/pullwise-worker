@@ -323,6 +323,22 @@ def run_codex_app_server_turn(
     if events_file is not None:
         write_text(events_file, events_text)
     if turn.error:
+        error_lower = turn.error.lower()
+        auth_error = any(
+            marker in error_lower
+            for marker in (
+                "unauthorized",
+                "failed to refresh token",
+                "access token could not be refreshed",
+                "refresh token was already used",
+                "not authenticated",
+                "authentication required",
+                "login required",
+                "please log out and sign in again",
+            )
+        )
+        if client is not None and auth_error:
+            client.close()
         return ProcessResult(process_command, str(cd), 1, events_text[-65536:], turn.error, duration_ms, stdout_path=str(events_file or ""))
     text = final_assistant_text(turn)
     if not text:

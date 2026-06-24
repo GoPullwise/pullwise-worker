@@ -1,3 +1,3 @@
-from .main import main
+from .simple_review import main
 
 raise SystemExit(main())

@@ -553,13 +553,6 @@ def install_evidence_file(checkout_dir: Path) -> str:
     return "package.json"
 
 
-def run_deterministic_repository_checks(job: dict, checkout_dir: Path) -> list[dict]:
-    findings: list[dict] = []
-    findings.extend(readme_missing_package_script_findings(job, checkout_dir))
-    findings.extend(workflow_missing_package_script_findings(job, checkout_dir))
-    findings.extend(dockerfile_missing_source_findings(job, checkout_dir))
-    findings.extend(committed_secret_findings(job, checkout_dir))
-    return findings[:25]
 
 
 def readme_missing_package_script_findings(job: dict, checkout_dir: Path) -> list[dict]:

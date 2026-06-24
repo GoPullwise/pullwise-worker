@@ -542,40 +542,8 @@ def graph_verified_summary_findings(report: dict) -> list[dict]:
     return findings
 
 
-def deterministic_summary_findings(findings: object) -> list[dict]:
-    if not isinstance(findings, list):
-        return []
-    summary_findings = []
-    for index, finding in enumerate(findings):
-        if not isinstance(finding, dict):
-            continue
-        summary_findings.append(
-            {
-                "id": clean_protocol_text(finding.get("id")) or f"static-{index + 1}",
-                "severity": graph_verified_severity(finding.get("severity")),
-            }
-        )
-    return summary_findings
 
 
-def graph_verified_report_with_deterministic_findings(report: dict, findings: object) -> dict:
-    if not isinstance(report, dict):
-        report = {}
-    deterministic = [finding for finding in findings if isinstance(finding, dict)] if isinstance(findings, list) else []
-    if not deterministic:
-        return report
-    merged = dict(report)
-    final_json = dict(merged.get("finalJson")) if isinstance(merged.get("finalJson"), dict) else {}
-    final_json["deterministicFindings"] = deterministic
-    merged["finalJson"] = final_json
-    merged["deterministicCount"] = len(deterministic)
-    merged["confirmedCount"] = graph_verified_report_int(merged.get("confirmedCount")) + len(deterministic)
-    summary = dict(merged.get("summary")) if isinstance(merged.get("summary"), dict) else {}
-    static_summary = dict(summary.get("deterministic")) if isinstance(summary.get("deterministic"), dict) else {}
-    static_summary["confirmed"] = len(deterministic)
-    summary["deterministic"] = static_summary
-    merged["summary"] = summary
-    return merged
 
 
 def graph_verified_severity(value: object) -> str:
@@ -1291,7 +1259,8 @@ class Worker:
                 config=job_config,
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
-            deterministic_findings = run_deterministic_repository_checks(job, checkout_dir)
+            # Public findings now come only from confirmed runtime evidence produced by the simple engine.
+            deterministic_findings: list[dict] = []
             self.report_progress(
                 job_id,
                 "index",
@@ -1345,12 +1314,7 @@ class Worker:
                 checkout_dir,
                 progress_callback=report_graph_verified_progress,
             )
-            graph_verified_report = graph_verified_report_with_deterministic_findings(
-                graph_verified_report,
-                deterministic_findings,
-            )
             projected_findings = graph_verified_summary_findings(graph_verified_report)
-            projected_findings.extend(deterministic_summary_findings(deterministic_findings))
             summary = summarize(projected_findings)
             logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
             effective_agent_config = configured_agent
@@ -1366,6 +1330,29 @@ class Worker:
             summary = summarize(projected_findings)
             duration_ms = int((time.monotonic() - started) * 1000)
             completion_error = graph_verified_completion_error(graph_verified_report, projected_findings)
+            completion_error_code = "GRAPH_VERIFIED_COMPLETION_FAILED"
+            if completion_error and codex_readiness_failure_cacheable(completion_error):
+                readiness_kind = codex_readiness_issue_kind(completion_error)
+                completion_error_code = {
+                    "codex_auth_required": "CODEX_AUTH_REQUIRED",
+                    "codex_auth_expired": "CODEX_AUTH_EXPIRED",
+                    "codex_authorization_failed": "CODEX_AUTHORIZATION_FAILED",
+                    "codex_subscription_inactive": "CODEX_SUBSCRIPTION_INACTIVE",
+                    "codex_quota_exhausted": "CODEX_QUOTA_EXHAUSTED",
+                    "codex_version_unsupported": "CODEX_VERSION_UNSUPPORTED",
+                }.get(readiness_kind, completion_error_code)
+                mark_codex_auth_failure(job_config, completion_error)
+                auth_detail = codex_readiness_issue_detail(completion_error, job_config) or completion_error
+                self._set_readiness_snapshot(
+                    WorkerReadinessSnapshot(
+                        checked_at=time.time(),
+                        doctor_status="degraded",
+                        codex_ready=False,
+                        ready_providers=(),
+                        ready_for_claim=False,
+                        last_error=auth_detail[:500],
+                    )
+                )
             result_status = "failed" if completion_error else "done"
             if completion_error:
                 logs_summary = completion_error[-1000:]
@@ -1382,13 +1369,12 @@ class Worker:
                 "attempt_id": attempt_id,
                 "preflight": preflight,
                 "effectiveAgentConfig": effective_agent_config,
-                "deterministicFindings": deterministic_findings,
                 "graphVerifiedReport": graph_verified_report,
             }
             if result_status == "failed":
                 payload["error"] = completion_error or "GraphVerified completion gate failed."
-                payload["error_code"] = "GRAPH_VERIFIED_COMPLETION_FAILED"
-                payload["errorCode"] = "GRAPH_VERIFIED_COMPLETION_FAILED"
+                payload["error_code"] = completion_error_code
+                payload["errorCode"] = completion_error_code
             if ai_usage:
                 payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)

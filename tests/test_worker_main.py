@@ -1965,84 +1965,6 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("component:7", summary)
         self.assertNotIn("component:8", summary)
 
-    def test_run_job_uploads_deterministic_findings_with_summary(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            config = SimpleNamespace(
-                server_url="https://pullwise.example",
-                worker_token="secret-token",
-                worker_id="wk_static",
-                work_dir=root / "work",
-                log_dir=root / "logs",
-                service_home=str(root / "home"),
-                provider="codex",
-                provider_chain=["codex"],
-                codex_command="codex",
-                codex_model="gpt-5",
-                codex_reasoning_effort="high",
-                failed_checkout_retention_seconds=0,
-                scan_summary_log_max_bytes=1024 * 1024,
-                result_upload_compress_min_bytes=1024 * 1024,
-            )
-            worker = worker_main.Worker(config)
-            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
-            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
-            job = {
-                "job_id": "job_static",
-                "attempt": 1,
-                "agentConfig": {
-                    "provider": "codex",
-                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
-                    "graphVerified": {},
-                },
-                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
-            }
-            static_finding = {
-                "id": "static_secret_1",
-                "severity": "high",
-                "title": "Committed token",
-                "file": "app.env",
-                "line": 1,
-                "verificationStatus": "static_proof",
-                "affectedLocations": [{"file": "app.env", "startLine": 1, "endLine": 1}],
-            }
-
-            with patch.object(worker.client, "progress"), patch.object(
-                worker_main,
-                "clone_repository",
-                return_value="abc123",
-            ), patch.object(worker_main, "enforce_repository_limits"), patch.object(
-                worker_main,
-                "collect_preflight_metadata",
-                return_value={"summary": "preflight ok"},
-            ), patch.object(
-                worker_main,
-                "run_deterministic_repository_checks",
-                return_value=[static_finding],
-            ), patch.object(
-                worker_main,
-                "run_graph_verified_review_payload",
-                return_value={
-                    "version": "graph-verified-code-review/1",
-                    "runId": "gv_run",
-                    "confirmedCount": 0,
-                    "rejectedCount": 0,
-                    "blockedCount": 0,
-                    "debugMarkdown": "",
-                    "finalJson": {"confirmed": []},
-                },
-            ), patch.object(worker_main, "graph_verified_summary_findings", return_value=[]), patch.object(
-                worker,
-                "upload_result_once_or_defer",
-                return_value=True,
-            ) as upload:
-                worker.run_job(job)
-
-            payload = upload.call_args.args[1]
-            self.assertEqual(payload["summary"]["high"], 1)
-            self.assertEqual(payload["deterministicFindings"], [static_finding])
-            self.assertEqual(payload["graphVerifiedReport"]["deterministicCount"], 1)
-            self.assertEqual(payload["graphVerifiedReport"]["finalJson"]["deterministicFindings"], [static_finding])
 
     def test_run_job_cleanup_unlinks_checkout_symlink_without_touching_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2450,25 +2372,6 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertIn('"status": "failed"', summary_text)
             self.assertIn("codex app-server request thread/start timed out", summary_text)
 
-    def test_graph_verified_report_merges_deterministic_findings(self) -> None:
-        report = {
-            "confirmedCount": 2,
-            "finalJson": {"confirmed": []},
-            "summary": {"existing": True},
-        }
-        deterministic = [
-            {"id": "static_1", "severity": "high", "message": "missing script"},
-            {"id": "static_2", "severity": "low", "message": "missing source"},
-        ]
-
-        merged = worker_main.graph_verified_report_with_deterministic_findings(report, deterministic)
-        summary = worker_main.deterministic_summary_findings(deterministic)
-
-        self.assertEqual(merged["confirmedCount"], 4)
-        self.assertEqual(merged["deterministicCount"], 2)
-        self.assertEqual(merged["finalJson"]["deterministicFindings"], deterministic)
-        self.assertEqual(merged["summary"]["deterministic"]["confirmed"], 2)
-        self.assertEqual(summary, [{"id": "static_1", "severity": "high"}, {"id": "static_2", "severity": "low"}])
 
     def test_run_job_fails_when_confirmed_graph_verified_items_are_not_reportable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3637,7 +3540,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertFalse(hasattr(worker_main, "convergence_context_for_job"))
         self.assertFalse(hasattr(worker_main, "reportability_rejection_reason"))
 
-    def test_write_graph_verified_codereview_config_uses_plan_schema(self) -> None:
+
+
+
+    def test_write_graph_verified_codereview_config_uses_simple_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
@@ -3647,99 +3553,36 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 cfg,
                 root,
                 {
-                    "contextTimeoutSeconds": 240,
-                    "finderMaxParallel": 7,
-                    "finderTurnParallel": 4,
                     "finderMaxTurnsPerScan": 5,
-                    "finderMaxJobsPerSubagent": 24,
+                    "finderTurnParallel": 4,
                     "finderTimeoutSeconds": 300,
                     "codexMaxInputChars": 12345,
                     "reproMaxParallel": 3,
                     "reproTimeoutSeconds": 600,
                     "maxRepro": 20,
-                    "requireRedGreen": True,
-                    "minScoreForRepro": 9,
                 },
                 "deep",
+                job={"review_output_language_label": "Chinese"},
             )
 
             payload = json.loads((root / ".codereview" / "config.json").read_text(encoding="utf-8"))
 
         self.assertEqual(payload["mode"], "deep")
-        self.assertNotIn("codegraph", payload)
-        self.assertEqual(payload["graph"]["target_shards"], 12)
-        self.assertEqual(payload["graph"]["mapper_subagent_limit"], 6)
-        self.assertIs(payload["graph"]["codex_tool_extractor"], True)
-        self.assertEqual(payload["graph"]["tool_extractor_max_rounds"], 3)
-        self.assertEqual(payload["graph"]["tool_extractor_timeout_seconds"], 180)
-        self.assertIs(payload["graph"]["codex_census"], False)
-        self.assertIs(payload["graph"]["codex_mappers"], False)
-        self.assertIs(payload["graph"]["codex_linker"], False)
-        self.assertIs(payload["graph"]["codex_graph_audit"], False)
-        self.assertEqual(payload["graph"]["map_parallel"], 2)
-        self.assertEqual(payload["graph"]["graph_timeout_seconds"], 960)
+        self.assertNotIn("graph", payload)
+        self.assertNotIn("finders", payload)
+        self.assertNotIn("repro", payload)
+        self.assertNotIn("review", payload)
         self.assertEqual(payload["codex"]["reasoning_effort"], "medium")
         self.assertEqual(payload["codex"]["max_input_chars"], 12345)
         self.assertEqual(payload["codex"]["env"]["CODEX_SQLITE_HOME"], str(root / "home" / ".codex-sqlite"))
-        self.assertTrue(payload["context"]["enabled"])
-        self.assertEqual(payload["context"]["timeout_seconds"], 240)
-        self.assertEqual(payload["finders"]["max_workers"], 6)
-        self.assertEqual(payload["finders"]["turn_parallel"], 4)
-        self.assertEqual(payload["finders"]["max_turns_per_scan"], 5)
-        self.assertEqual(payload["finders"]["max_jobs_per_subagent"], 24)
-        self.assertEqual(payload["finders"]["timeout_seconds"], 300)
-        self.assertEqual(payload["repro"]["max_workers"], 3)
-        self.assertEqual(payload["repro"]["timeout_seconds"], 600)
-        self.assertEqual(payload["repro"]["max_repro"], 20)
-        self.assertTrue(payload["repro"]["require_red_green"])
-        self.assertEqual(payload["candidates"]["max_total_for_reproduction"], 20)
-        self.assertEqual(payload["scoring"]["min_score_for_repro"], 9)
-        self.assertEqual(payload["scoring"]["always_repro_severities"], ["critical", "high"])
-
-    def test_write_graph_verified_codereview_config_does_not_inherit_repo_config(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            cfg = config_for(root)
-            config_dir = root / ".codereview"
-            config_dir.mkdir()
-            (config_dir / "config.json").write_text(
-                json.dumps(
-                    {
-                        "codegraph": {"enabled": True},
-                        "impact": {"enabled": True},
-                        "codex": {"dangerous": "repo-value"},
-                        "context": {"repoInjected": True},
-                        "finders": {"repoInjected": True},
-                        "repro": {"repoInjected": True},
-                        "scan": {"repoInjected": True},
-                        "scope": {"repoInjected": True},
-                        "scoring": {"repoInjected": True},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            worker_main.write_graph_verified_codereview_config(cfg, root, {"maxRepro": 0}, "standard")
-
-            payload = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
-
-        self.assertNotIn("codegraph", payload)
-        self.assertNotIn("impact", payload)
-        for section in ("codex", "context", "finders", "repro", "scan", "scope", "scoring"):
-            self.assertNotIn("repoInjected", payload[section])
-        self.assertNotIn("dangerous", payload["codex"])
-
-    def test_write_graph_verified_codereview_config_uses_standard_repro_default(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            cfg = config_for(root)
-
-            worker_main.write_graph_verified_codereview_config(cfg, root, {"maxRepro": 0}, "standard")
-
-            payload = json.loads((root / ".codereview" / "config.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["repro"]["max_repro"], 20)
-        self.assertEqual(payload["candidates"]["max_total_for_reproduction"], 20)
+        self.assertEqual(payload["simple"]["engine"], "simple-full-repository/1")
+        self.assertEqual(payload["simple"]["discovery_turns"], 5)
+        self.assertEqual(payload["simple"]["discovery_parallel"], 2)
+        self.assertEqual(payload["simple"]["verification_parallel"], 2)
+        self.assertEqual(payload["simple"]["max_candidates"], 20)
+        self.assertEqual(payload["simple"]["discovery_timeout_seconds"], 300)
+        self.assertEqual(payload["simple"]["verification_timeout_seconds"], 600)
+        self.assertEqual(payload["simple"]["output_language"], "Chinese")
 
     def test_write_graph_verified_codereview_config_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3810,28 +3653,6 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(limits["maxFiles"], worker_main._MAX_REPO_LIMIT_FILES)
         self.assertEqual(limits["maxBytes"], worker_main._MAX_REPO_LIMIT_BYTES)
 
-    def test_preflight_ignores_symlinked_repository_manifests(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            checkout = root / "checkout"
-            outside = root / "outside"
-            checkout.mkdir()
-            outside.mkdir()
-            (outside / "package.json").write_text(
-                json.dumps({"scripts": {"build": "vite"}, "packageManager": "npm@10.0.0"}),
-                encoding="utf-8",
-            )
-            (outside / "Dockerfile").write_text("COPY missing-file /app/\n", encoding="utf-8")
-            (checkout / "README.md").write_text("Run npm run missing-script\n", encoding="utf-8")
-            (checkout / "package.json").symlink_to(outside / "package.json")
-            (checkout / "Dockerfile").symlink_to(outside / "Dockerfile")
-
-            metadata = worker_main.repository_preflight_metadata(checkout)
-            findings = worker_main.run_deterministic_repository_checks({"job_id": "job_symlink"}, checkout)
-
-        self.assertEqual(metadata["manifests"], [])
-        self.assertEqual(metadata["packageManagers"], [])
-        self.assertEqual(findings, [])
 
     def test_safe_tool_version_bounds_command_output_without_pipe(self) -> None:
         def fake_run(_command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
@@ -4723,7 +4544,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             first_checkout.mkdir()
             second_checkout.mkdir()
             review_calls: list[tuple[Path, str, str]] = []
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             def fake_run_review(checkout_dir: Path, *, mode: str, scan_mode: str = "") -> Path:
                 review_calls.append((Path(checkout_dir), mode, scan_mode))
@@ -4759,7 +4580,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(first_config["mode"], "fast")
             self.assertEqual(second_config["mode"], "deep")
             self.assertEqual(second_config["scan"]["mode"], "full-strict")
-            self.assertFalse(second_config["graph"]["incremental"])
+            self.assertEqual(second_config["simple"]["engine"], "simple-full-repository/1")
             self.assertNotEqual(first_checkout, second_checkout)
 
     def test_readiness_state_marks_codex_ready_without_graph_mcp(self) -> None:
@@ -5036,7 +4857,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").write_text(json.dumps([{"candidate_id": "r1"}]), encoding="utf-8")
             (reports / "final.json").write_text(json.dumps({"confirmed": [{"candidate": {"candidate_id": "c1"}}]}), encoding="utf-8")
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 2}}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5070,7 +4891,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").write_text("[]", encoding="utf-8")
             (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5098,7 +4919,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").write_text("[]", encoding="utf-8")
             (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5123,7 +4944,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").write_text("[]", encoding="utf-8")
             (reports / "final.json").write_bytes(b'{"confirmed":[],"debug":"' + b"x" * worker_main.GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES + b'"}')
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5152,7 +4973,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").write_text("[]", encoding="utf-8")
             (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
             events: list[dict] = []
 
             def fake_run_review(checkout_dir: Path, *, mode: str, scan_mode: str = "", progress=None) -> Path:
@@ -5181,7 +5002,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "confirmed.json").write_text("[]", encoding="utf-8")
             (reports / "rejected.json").write_text("[]", encoding="utf-8")
             (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5212,7 +5033,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").write_text("[]", encoding="utf-8")
             (reports / "final.json").write_text(json.dumps({"confirmed": []}), encoding="utf-8")
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5255,7 +5076,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").symlink_to(outside_rejected)
             (reports / "final.json").symlink_to(outside_final_json)
             (reports / "summary.json").symlink_to(outside_summary)
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md), patch.object(
                 worker_main,
@@ -5289,7 +5110,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (outside_reports / "rejected.json").write_text("[]", encoding="utf-8")
             (outside_reports / "final.json").write_text(json.dumps({"confirmed": [{"candidate": {"candidate_id": "outside"}}]}), encoding="utf-8")
             (outside_reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5319,7 +5140,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             run_dir = root / ".codereview" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
             (run_dir / "reports").symlink_to(outside_reports, target_is_directory=True)
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=run_dir / "reports" / "final.md"):
                 payload = worker_main.run_graph_verified_review_payload(
@@ -5337,7 +5158,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
-            codereview_main = importlib.import_module("codereview.main")
+            codereview_main = importlib.import_module("codereview.simple_review")
             with patch.object(codereview_main, "run_review", side_effect=RuntimeError("failed with secret-token")):
                 payload = worker_main.run_graph_verified_review_payload(
                     cfg,

@@ -28,7 +28,6 @@ GENERATED_SUFFIXES = {
     ".min.js",
     ".bundle.js",
     ".map",
-    ".lock",
     ".png",
     ".jpg",
     ".jpeg",
@@ -39,24 +38,6 @@ GENERATED_SUFFIXES = {
     ".zip",
     ".gz",
     ".tar",
-}
-ANALYZABLE_EXTENSIONS = {
-    ".py",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".mjs",
-    ".cjs",
-    ".json",
-    ".toml",
-    ".yaml",
-    ".yml",
-    ".md",
-    ".sql",
-    ".sh",
-    ".html",
-    ".css",
 }
 GIT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024
 
@@ -189,9 +170,6 @@ def _file_entry(checkout: Path, rel: str, status: str) -> dict:
     elif suffix.lower() in GENERATED_SUFFIXES or ext.lower() in GENERATED_SUFFIXES:
         scope = "excluded"
         reason = "generated-or-binary-extension"
-    elif ext and ext.lower() not in ANALYZABLE_EXTENSIONS:
-        scope = "excluded"
-        reason = "unsupported-extension"
     return {
         "path": rel,
         "size_bytes": path.stat().st_size if is_regular_file else 0,

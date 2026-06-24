@@ -49,14 +49,14 @@ def graph_verified_toml_string(value: object) -> str:
 
 
 def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, progress_callback=None) -> dict:
-    from codereview.main import run_review
+    from codereview.simple_review import run_review
 
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
     graph_config = agent_config.get("graphVerified") if isinstance(agent_config.get("graphVerified"), dict) else {}
     mode = graph_verified_mode(graph_config.get("mode") or "standard")
     scan_mode = graph_verified_scan_mode(graph_config.get("scanMode") or "full-cached")
     try:
-        write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode)
+        write_graph_verified_codereview_config(config, checkout_dir, graph_config, mode, job=job)
         if progress_callback is None:
             final_path = run_review(checkout_dir, mode=mode, scan_mode=scan_mode)
         else:
@@ -64,7 +64,10 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     except ProcessCancelled as exc:
         raise WorkerJobCancelled(str(exc)) from exc
     except Exception as exc:
-        return graph_verified_failed_report(mode, scan_mode, redact_secrets(str(exc), config))
+        detail = redact_secrets(str(exc), config)
+        if codex_readiness_failure_cacheable(detail):
+            mark_codex_auth_failure(config, detail)
+        return graph_verified_failed_report(mode, scan_mode, detail)
     reports = final_path.parent
     report_error = graph_verified_report_artifact_error(final_path, checkout_dir)
     if report_error:
@@ -296,7 +299,14 @@ def graph_verified_progress_percent(value: object) -> int:
     return max(0, min(100, progress))
 
 
-def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: Path, graph_config: dict, mode: str) -> None:
+def write_graph_verified_codereview_config(
+    config: WorkerConfig,
+    checkout_dir: Path,
+    graph_config: dict,
+    mode: str,
+    *,
+    job: dict | None = None,
+) -> None:
     root = checkout_dir / ".codereview"
     root.mkdir(parents=True, exist_ok=True)
     path = root / "config.json"
@@ -313,62 +323,6 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "max_text_file_bytes": 1000000,
         "inventory_excluded_files": True,
     }
-    current["graph"] = {
-        "schema_version": "3",
-        "prompt_version": "graph-v3",
-        "full_inventory": True,
-        "incremental": scan_mode != "full-strict",
-        "target_shards": 12,
-        "max_shard_files": 25,
-        "max_shard_bytes": 500000,
-        "large_file_bytes": 120000,
-        "double_map_high_risk": True,
-        "max_repair_rounds": 2,
-        "use_sqlite_index": True,
-        "codex_tool_extractor": graph_config.get("codexToolExtractor") is not False,
-        "tool_extractor_max_rounds": graph_verified_positive_int(
-            graph_config.get("toolExtractorMaxRounds"),
-            default=3,
-            minimum=1,
-            maximum=8,
-        ),
-        "tool_extractor_timeout_seconds": graph_verified_positive_int(
-            graph_config.get("toolExtractorTimeoutSeconds"),
-            default=180,
-            minimum=30,
-            maximum=1800,
-        ),
-        "codex_census": graph_config.get("codexCensus") is True,
-        "codex_mappers": graph_config.get("codexMappers") is True,
-        "codex_linker": graph_config.get("codexLinker") is True,
-        "codex_graph_audit": graph_config.get("codexGraphAudit") is True,
-        "mapper_subagent_limit": 6,
-        "map_parallel": 2,
-        "graph_timeout_seconds": 960,
-    }
-    current["review"] = {
-        "require_baseline_for_every_unit": True,
-        "require_boundary_review": True,
-        "require_global_review": True,
-        "max_context_repair_rounds": 1,
-        "max_candidates_per_finder": 3,
-        "default_upstream_depth": 1,
-        "default_downstream_depth": 1,
-        "high_risk_upstream_depth": 2,
-        "high_risk_downstream_depth": 2,
-        "max_unit_nodes": 500,
-        "max_unit_paths": 30,
-        "max_context_chars": 80000,
-    }
-    current["context"] = {
-        "enabled": graph_config.get("contextEnabled") is not False,
-        "timeout_seconds": graph_verified_positive_int(
-            graph_config.get("contextTimeoutSeconds"),
-            default=300,
-            minimum=60,
-            maximum=1800,
-        ),
-    }
     current["codex"] = {
         "command": getattr(config, "codex_command", "") or "codex",
         "model": getattr(config, "codex_model", "") or "",
@@ -376,31 +330,74 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "env": graph_verified_codex_env(config),
         "max_input_chars": graph_verified_nonnegative_int(graph_config.get("codexMaxInputChars"), default=0),
     }
-    current["finders"] = {
-        "enabled": True,
-        "max_workers": graph_verified_positive_int(graph_config.get("finderMaxParallel"), default=6, minimum=1, maximum=6),
-        "turn_parallel": graph_verified_positive_int(graph_config.get("finderTurnParallel"), default=1, minimum=1, maximum=6),
-        "max_turns_per_scan": graph_verified_positive_int(graph_config.get("finderMaxTurnsPerScan"), default=3, minimum=1, maximum=12),
-        "max_jobs_per_subagent": graph_verified_positive_int(graph_config.get("finderMaxJobsPerSubagent"), default=18, minimum=1, maximum=200),
-        "timeout_seconds": graph_verified_positive_int(graph_config.get("finderTimeoutSeconds"), default=600, minimum=60, maximum=3600),
-    }
     repro_limit = graph_verified_repro_limit(graph_config.get("maxRepro"), mode)
-    current["repro"] = {
-        "enabled": True,
-        "max_workers": graph_verified_positive_int(graph_config.get("reproMaxParallel"), default=2, minimum=1, maximum=8),
-        "timeout_seconds": graph_verified_positive_int(graph_config.get("reproTimeoutSeconds"), default=900, minimum=60, maximum=7200),
-        "max_repro": repro_limit,
-        "require_red_green": graph_config.get("requireRedGreen") is True,
-    }
-    current["candidates"] = {
-        "max_per_finder_per_unit": 3,
-        "max_total_for_verification": 60,
-        "max_total_for_reproduction": repro_limit,
-        "require_expected_behavior_source": True,
-    }
-    current["scoring"] = {
-        "min_score_for_repro": graph_verified_positive_int(graph_config.get("minScoreForRepro"), default=8, minimum=0, maximum=50),
-        "always_repro_severities": ["critical", "high"],
+    job_source = job if isinstance(job, dict) else {}
+    output_language = graph_verified_text(
+        job_source.get("review_output_language_label")
+        or job_source.get("reviewOutputLanguageLabel")
+        or job_source.get("review_output_language")
+        or job_source.get("reviewOutputLanguage")
+    ) or "English"
+    current["simple"] = {
+        "engine": "simple-full-repository/1",
+        "discovery_turns": graph_verified_positive_int(
+            graph_config.get("finderMaxTurnsPerScan"),
+            default={"fast": 2, "standard": 3, "deep": 4}.get(graph_verified_mode(mode), 3),
+            minimum=1,
+            maximum=16,
+        ),
+        "max_discovery_turns": graph_verified_positive_int(
+            graph_config.get("simpleMaxDiscoveryTurns"),
+            default=48,
+            minimum=1,
+            maximum=64,
+        ),
+        "discovery_parallel": graph_verified_positive_int(
+            graph_config.get("simpleDiscoveryParallel") or graph_config.get("finderTurnParallel"),
+            default=1,
+            minimum=1,
+            maximum=2,
+        ),
+        "verification_parallel": graph_verified_positive_int(
+            graph_config.get("simpleVerificationParallel") or graph_config.get("reproMaxParallel"),
+            default=1,
+            minimum=1,
+            maximum=2,
+        ),
+        "subagents_per_turn": graph_verified_positive_int(
+            graph_config.get("subagentsPerTurn"),
+            default=3,
+            minimum=1,
+            maximum=4,
+        ),
+        "max_candidates": repro_limit,
+        "max_candidates_per_unit": graph_verified_positive_int(
+            graph_config.get("maxCandidatesPerUnit"),
+            default=2,
+            minimum=1,
+            maximum=4,
+        ),
+        "max_unit_files": 40,
+        "max_unit_bytes": 500000,
+        "max_batch_files": graph_verified_positive_int(
+            graph_config.get("simpleMaxBatchFiles"),
+            default=120,
+            minimum=10,
+            maximum=400,
+        ),
+        "max_batch_bytes": graph_verified_positive_int(
+            graph_config.get("simpleMaxBatchBytes"),
+            default=1500000,
+            minimum=100000,
+            maximum=5000000,
+        ),
+        "discovery_timeout_seconds": graph_verified_positive_int(
+            graph_config.get("finderTimeoutSeconds"), default=900, minimum=60, maximum=3600
+        ),
+        "verification_timeout_seconds": graph_verified_positive_int(
+            graph_config.get("reproTimeoutSeconds"), default=1200, minimum=60, maximum=7200
+        ),
+        "output_language": output_language,
     }
     write_no_follow_text_file(path, json.dumps(current, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
