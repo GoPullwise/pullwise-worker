@@ -4770,26 +4770,30 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         app_server_turn.assert_not_called()
         worker_main.clear_codex_auth_failure()
     def test_codex_ready_check_reports_quota_and_version_failures(self) -> None:
+        worker_main.clear_codex_auth_failure()
         failures = {
             "insufficient_quota: no credits remaining": "codex_quota_exhausted",
             "codex app-server: unknown subcommand 'app-server'": "codex_version_unsupported",
         }
-        for stderr, expected in failures.items():
-            with self.subTest(stderr=stderr), tempfile.TemporaryDirectory() as tmp_dir:
-                cfg = config_for(Path(tmp_dir))
-                with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
-                    worker_main,
-                    "provider_process_env",
-                    return_value={},
-                ), patch.object(
-                    worker_main,
-                    "run_codex_app_server_turn",
-                    return_value=ProcessResult(["codex", "app-server"], str(Path(tmp_dir)), 1, "", stderr, 1),
-                ):
-                    ok, detail = worker_main.codex_ready_check(cfg)
+        try:
+            for stderr, expected in failures.items():
+                with self.subTest(stderr=stderr), tempfile.TemporaryDirectory() as tmp_dir:
+                    cfg = config_for(Path(tmp_dir))
+                    with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
+                        worker_main,
+                        "provider_process_env",
+                        return_value={},
+                    ), patch.object(
+                        worker_main,
+                        "run_codex_app_server_turn",
+                        return_value=ProcessResult(["codex", "app-server"], str(Path(tmp_dir)), 1, "", stderr, 1),
+                    ):
+                        ok, detail = worker_main.codex_ready_check(cfg)
 
-                self.assertFalse(ok)
-                self.assertIn(expected, detail)
+                    self.assertFalse(ok)
+                    self.assertIn(expected, detail)
+        finally:
+            worker_main.clear_codex_auth_failure()
 
     def test_codex_ready_check_marks_expired_auth_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4810,6 +4814,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("codex_auth_expired", detail)
         self.assertGreater(worker_main._codex_auth_failure_until, 0)
+        worker_main.clear_codex_auth_failure()
     def test_codex_ready_check_clears_auth_failure_state_on_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -4836,6 +4841,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(worker_main._codex_auth_failure_detail, "")
 
     def test_codex_ready_check_reports_app_server_failure(self) -> None:
+        worker_main.clear_codex_auth_failure()
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg = config_for(Path(tmp_dir))
             with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(

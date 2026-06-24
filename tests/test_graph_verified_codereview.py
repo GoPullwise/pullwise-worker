@@ -9,7 +9,7 @@ import threading
 import tempfile
 import time
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Optional
 
 codereview_main = importlib.import_module("codereview.main")
@@ -101,7 +101,10 @@ def test_app_server_launch_args_use_default_stdio_transport(tmp_path: Path) -> N
     assert "--stdio" not in args
 
 
-def test_app_server_launch_args_drop_stdio_for_windows_cmd_wrapper(tmp_path: Path) -> None:
+def test_app_server_launch_args_drop_stdio_for_windows_cmd_wrapper(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    monkeypatch.setattr(app_server_runner.os, "name", "nt")
+    monkeypatch.setattr(app_server_runner, "Path", PureWindowsPath)
+    monkeypatch.setattr(app_server_runner, "resolve_app_server_command", lambda command, env: command)
     command = str(tmp_path / "bin" / "codex.cmd")
     args = app_server_runner.app_server_launch_args(command, {"ComSpec": r"C:\Windows\System32\cmd.exe"})
 
@@ -111,7 +114,10 @@ def test_app_server_launch_args_drop_stdio_for_windows_cmd_wrapper(tmp_path: Pat
     assert "--stdio" not in args[-1]
 
 
-def test_app_server_launch_args_drop_stdio_for_windows_ps1_wrapper(tmp_path: Path) -> None:
+def test_app_server_launch_args_drop_stdio_for_windows_ps1_wrapper(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    monkeypatch.setattr(app_server_runner.os, "name", "nt")
+    monkeypatch.setattr(app_server_runner, "Path", PureWindowsPath)
+    monkeypatch.setattr(app_server_runner, "resolve_app_server_command", lambda command, env: command)
     command = str(tmp_path / "bin" / "codex.ps1")
     args = app_server_runner.app_server_launch_args(command, {"SystemRoot": r"C:\Windows"})
 
