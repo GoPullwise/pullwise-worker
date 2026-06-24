@@ -1818,6 +1818,105 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             summary_text = (config.log_dir / "scan-summary.log").read_text(encoding="utf-8")
             self.assertIn("Graph: mapping shards 4/5", summary_text)
 
+    def test_run_job_maps_graph_verified_progress_to_scan_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_progress_percent",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_progress_percent",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+            progress_updates: list[dict] = []
+
+            def fake_progress(_job_id: str, _phase: str, progress: int, message: str = "", logs_summary: str = "") -> None:
+                del _job_id, _phase
+                progress_updates.append({"progress": progress, "message": message, "logs_summary": logs_summary})
+
+            def fake_graph_verified(_config: object, _job: dict, _checkout_dir: Path, progress_callback=None) -> dict:
+                del _config, _job, _checkout_dir
+                for index in (1, 2, 4):
+                    progress_callback(
+                        {
+                            "stage": "finder",
+                            "message": f"Finder: review tasks {index}/4",
+                            "current": index,
+                            "total": 4,
+                            "runId": "gv_run",
+                            "taskId": f"correctness:component:{index}",
+                        }
+                    )
+                return {
+                    "version": "graph-verified-code-review/1",
+                    "runId": "gv_run",
+                    "confirmedCount": 0,
+                    "rejectedCount": 0,
+                    "blockedCount": 0,
+                    "debugMarkdown": "",
+                    "finalJson": {"confirmed": []},
+                }
+
+            with patch.object(worker.client, "progress", side_effect=fake_progress), patch.object(
+                worker_main,
+                "GRAPH_VERIFIED_PROGRESS_UPLOAD_MIN_SECONDS",
+                999.0,
+            ), patch.object(
+                worker_main,
+                "clone_repository",
+                return_value="abc123",
+            ), patch.object(worker_main, "enforce_repository_limits"), patch.object(
+                worker_main,
+                "collect_preflight_metadata",
+                return_value={"summary": "preflight ok"},
+            ), patch.object(
+                worker_main,
+                "run_graph_verified_review_payload",
+                side_effect=fake_graph_verified,
+            ), patch.object(worker_main, "graph_verified_summary_findings", return_value=[]), patch.object(
+                worker,
+                "upload_result_once_or_defer",
+                return_value=True,
+            ):
+                worker.run_job(job)
+
+            finder_updates = [update for update in progress_updates if update["message"].startswith("Finder: review tasks")]
+            self.assertEqual(["Finder: review tasks 1/4", "Finder: review tasks 4/4"], [update["message"] for update in finder_updates])
+            self.assertLess(finder_updates[0]["progress"], finder_updates[1]["progress"])
+            self.assertNotEqual(worker_main.PHASE_PROGRESS["ai"], finder_updates[0]["progress"])
+            self.assertEqual(
+                worker_main.graph_verified_progress_percent({"stage": "finder", "current": 4, "total": 4}),
+                finder_updates[1]["progress"],
+            )
+            summary_text = (config.log_dir / "scan-summary.log").read_text(encoding="utf-8")
+            self.assertIn("Finder: review tasks 2/4", summary_text)
+            self.assertIn(
+                f'"progress": {worker_main.graph_verified_progress_percent({"stage": "finder", "current": 2, "total": 4})}',
+                summary_text,
+            )
+
     def test_run_job_uploads_deterministic_findings_with_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

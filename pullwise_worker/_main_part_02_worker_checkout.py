@@ -1310,7 +1310,7 @@ class Worker:
             self.report_progress(
                 job_id,
                 "ai",
-                PHASE_PROGRESS["ai"],
+                graph_verified_progress_percent({"stage": "setup"}),
                 "Running GraphVerified review",
                 protocol_multiline_text(preflight.get("summary")),
                 config=job_config,
@@ -1319,11 +1319,12 @@ class Worker:
             def report_graph_verified_progress(event: object) -> None:
                 message = graph_verified_progress_message(event)
                 event_logs_summary = graph_verified_progress_logs_summary(event)
+                event_progress = graph_verified_progress_percent(event)
                 self.record_local_progress(
                     job_config,
                     job_id,
                     "ai",
-                    PHASE_PROGRESS["ai"],
+                    event_progress,
                     message,
                     event_logs_summary,
                 )
@@ -1332,7 +1333,7 @@ class Worker:
                 self.report_progress(
                     job_id,
                     "ai",
-                    PHASE_PROGRESS["ai"],
+                    event_progress,
                     message,
                     event_logs_summary,
                     config=job_config,
@@ -1357,7 +1358,7 @@ class Worker:
             self.report_progress(
                 job_id,
                 "ai",
-                PHASE_PROGRESS["ai"],
+                graph_verified_progress_percent({"stage": "report", "current": 1, "total": 1}),
                 "GraphVerified review complete",
                 logs_summary,
                 config=job_config,

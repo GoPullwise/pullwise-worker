@@ -5,6 +5,23 @@ from __future__ import annotations
 GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES = 200_000
 GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES = 50_000
 GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES = 512_000
+GRAPH_VERIFIED_PROGRESS_START = PHASE_PROGRESS["index"] + 1
+GRAPH_VERIFIED_PROGRESS_COMPLETE = PHASE_PROGRESS["report"]
+GRAPH_VERIFIED_PROGRESS_RANGES = {
+    "setup": (GRAPH_VERIFIED_PROGRESS_START, 28),
+    "inventory": (28, 30),
+    "snapshot": (30, 32),
+    "census": (32, 34),
+    "graph": (34, 50),
+    "repository": (50, 53),
+    "review_units": (53, 55),
+    "finder": (55, 83),
+    "candidates": (83, 85),
+    "verification": (85, 89),
+    "reproduction": (89, 92),
+    "judge": (92, 94),
+    "report": (94, GRAPH_VERIFIED_PROGRESS_COMPLETE),
+}
 
 
 def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
@@ -210,6 +227,27 @@ def graph_verified_progress_logs_summary(value: object) -> str:
     if task_id:
         parts.append(f"task={task_id}")
     return " ".join(parts)
+
+
+def graph_verified_progress_percent(value: object) -> int:
+    source = value if isinstance(value, dict) else {}
+    stage = clean_protocol_text(source.get("stage"), 80)
+    start, end = GRAPH_VERIFIED_PROGRESS_RANGES.get(
+        stage,
+        (GRAPH_VERIFIED_PROGRESS_START, GRAPH_VERIFIED_PROGRESS_START),
+    )
+    current = source.get("current")
+    total = source.get("total")
+    try:
+        current_count = max(0, int(current))
+        total_count = max(0, int(total))
+    except (TypeError, ValueError):
+        return max(0, min(100, int(start)))
+    if total_count <= 0:
+        return max(0, min(100, int(start)))
+    fraction = max(0.0, min(1.0, current_count / total_count))
+    progress = int(round(start + ((end - start) * fraction)))
+    return max(0, min(100, progress))
 
 
 def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: Path, graph_config: dict, mode: str) -> None:
