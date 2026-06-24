@@ -102,7 +102,7 @@ def ensure_project_files(checkout: Path) -> None:
                         "require_expected_behavior_source": True,
                     },
                     "context": {"enabled": True, "timeout_seconds": 300},
-                    "codex": {"command": "codex", "reasoning_effort": "high"},
+                    "codex": {"command": "codex", "reasoning_effort": "high", "max_input_chars": 0},
                     "finders": {"enabled": True, "max_workers": 6, "turn_parallel": 1, "max_turns_per_scan": 3, "max_jobs_per_subagent": 18},
                     "scoring": {"min_score_for_repro": 8, "always_repro_severities": ["critical", "high"]},
                     "repro": {"enabled": True, "max_workers": 2, "max_repro": 0, "require_red_green": False},

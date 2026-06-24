@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import concurrent.futures
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from ..graph.ids import short_hash
 from ..units.context import unit_file_stem
 from ..utils.jsonl import read_json_strict, write_json, write_text
 from ..utils.paths import ensure_dir
-from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception
+from ..utils.process import ProcessResult, compact_process_output, raise_if_cancelled_callback_exception
 from ..utils.text import read_bounded_text
 from .tasks import FinderTask
 
@@ -19,6 +20,11 @@ from .tasks import FinderTask
 MAX_FINDER_SUBAGENTS = 6
 FINDER_PROMPT_MAX_BYTES = 256 * 1024
 FINDER_CONTEXT_PACK_MAX_BYTES = 2 * 1024 * 1024
+FINDER_INPUT_LIMIT_ENV_KEYS = ("PULLWISE_CODEX_MAX_INPUT_CHARS", "PULLWISE_CODEX_INPUT_MAX_CHARS")
+FINDER_INPUT_LIMIT_PATTERNS = (
+    re.compile(r"maximum length of\s+([0-9][0-9_,]*)\s+characters", re.IGNORECASE),
+    re.compile(r"max(?:imum)?\s+input(?:\s+length)?\D+([0-9][0-9_,]*)", re.IGNORECASE),
+)
 
 
 def run_finders_parallel(
@@ -274,16 +280,46 @@ def finder_task_progress_fields(task_result: object | None) -> dict[str, object]
         fields["exitCode"] = process.get("returncode")
     if process.get("timed_out") is True:
         fields["timedOut"] = True
+    if "prompt_chars" in process:
+        fields["promptChars"] = process.get("prompt_chars")
+    if "input_limit_chars" in process:
+        fields["inputLimitChars"] = process.get("input_limit_chars")
+    input_limit_source = str(process.get("input_limit_source") or "")
+    if input_limit_source:
+        fields["inputLimitSource"] = input_limit_source
+    if "batch_task_count" in process:
+        fields["batchTaskCount"] = process.get("batch_task_count")
     return fields
 
 def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config: ReviewConfig, *, batch_index: int = 1) -> list[dict]:
+    input_limit_chars, input_limit_source = finder_configured_input_limit(config)
+    return _run_finder_batch(
+        checkout,
+        run,
+        tasks,
+        config,
+        batch_index=batch_index,
+        input_limit_chars=input_limit_chars,
+        input_limit_source=input_limit_source,
+    )
+
+
+def _run_finder_batch(
+    checkout: Path,
+    run: Path,
+    tasks: list[FinderTask],
+    config: ReviewConfig,
+    *,
+    batch_index: int = 1,
+    input_limit_chars: int = 0,
+    input_limit_source: str = "",
+) -> list[dict]:
     if not tasks:
         return []
     worker = run / "finder-batches" / finder_batch_id(tasks, batch_index=batch_index)
     ensure_dir(worker)
     try:
-        payload = finder_batch_payload(checkout, run, tasks, config)
-        prompt = finder_batch_prompt(checkout, payload)
+        payload, prompt = finder_batch_input(checkout, run, tasks, config)
     except OSError as exc:
         process_payload = {
             "command": ["codex", "app-server", "turn/start"],
@@ -297,9 +333,36 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
             "stderr_path": "",
             "queueWaitMs": 0,
             "execDurationMs": 0,
+            "batch_task_count": len(tasks),
         }
         write_json(worker / "process.json", process_payload)
         return blocked_finder_batch_results(tasks, process_payload, f"finder batch input unreadable: {exc}")
+
+    effective_limit = max(0, int(input_limit_chars or 0))
+    if effective_limit and len(prompt) > effective_limit:
+        if len(tasks) > 1:
+            return split_finder_batch_by_input_limit(
+                checkout,
+                run,
+                tasks,
+                config,
+                batch_index=batch_index,
+                input_limit_chars=effective_limit,
+                input_limit_source=input_limit_source,
+            )
+        process_payload = finder_batch_local_process(
+            checkout,
+            prompt,
+            tasks,
+            f"finder batch prompt has {len(prompt)} chars, exceeding Codex input budget {effective_limit} (source={input_limit_source or 'runtime'})",
+            input_limit_chars=effective_limit,
+            input_limit_source=input_limit_source,
+        )
+        write_json(worker / "task.json", payload)
+        write_text(worker / "prompt.md", prompt)
+        write_json(worker / "process.json", process_payload)
+        return blocked_finder_batch_results(tasks, process_payload, process_payload["stderr"])
+
     write_json(worker / "task.json", payload)
     write_text(worker / "prompt.md", prompt)
     output = worker / "result.json"
@@ -315,9 +378,32 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
         env=base_env(checkout, config.codex),
         events_file=events,
     )
-    process_payload = {**process.to_dict(), "events_path": str(events)}
+    process_payload = {
+        **process.to_dict(),
+        "events_path": str(events),
+        **finder_batch_process_metadata(
+            prompt,
+            tasks,
+            input_limit_chars=effective_limit,
+            input_limit_source=input_limit_source,
+        ),
+    }
+    learned_limit = finder_input_limit_from_process(process)
+    if learned_limit:
+        process_payload["input_limit_chars"] = learned_limit
+        process_payload["input_limit_source"] = "app_server_error"
     write_json(worker / "process.json", process_payload)
     if process.returncode != 0:
+        if learned_limit and len(tasks) > 1:
+            return split_finder_batch_by_input_limit(
+                checkout,
+                run,
+                tasks,
+                config,
+                batch_index=batch_index,
+                input_limit_chars=learned_limit,
+                input_limit_source="app_server_error",
+            )
         return blocked_finder_batch_results(tasks, process_payload, process_failure_reason("finder batch codex turn", process))
     if not output.is_file():
         return blocked_finder_batch_results(tasks, process_payload, "finder batch did not produce an output file")
@@ -326,6 +412,108 @@ def run_finder_batch(checkout: Path, run: Path, tasks: list[FinderTask], config:
     except (OSError, json.JSONDecodeError) as exc:
         return blocked_finder_batch_results(tasks, process_payload, f"finder batch produced invalid JSON: {exc}")
     return finder_batch_results(run, tasks, parsed, process_payload)
+
+
+def finder_batch_input(checkout: Path, run: Path, tasks: list[FinderTask], config: ReviewConfig) -> tuple[dict, str]:
+    payload = finder_batch_payload(checkout, run, tasks, config)
+    return payload, finder_batch_prompt(checkout, payload)
+
+
+def split_finder_batch_by_input_limit(
+    checkout: Path,
+    run: Path,
+    tasks: list[FinderTask],
+    config: ReviewConfig,
+    *,
+    batch_index: int,
+    input_limit_chars: int,
+    input_limit_source: str,
+) -> list[dict]:
+    midpoint = max(1, len(tasks) // 2)
+    results: list[dict] = []
+    for child_tasks in (tasks[:midpoint], tasks[midpoint:]):
+        if child_tasks:
+            results.extend(
+                _run_finder_batch(
+                    checkout,
+                    run,
+                    child_tasks,
+                    config,
+                    batch_index=batch_index,
+                    input_limit_chars=input_limit_chars,
+                    input_limit_source=input_limit_source,
+                )
+            )
+    return results
+
+
+def finder_configured_input_limit(config: ReviewConfig) -> tuple[int, str]:
+    codex = getattr(config, "codex", None)
+    configured = parse_nonnegative_int(getattr(codex, "max_input_chars", 0))
+    if configured:
+        return configured, "config.codex.max_input_chars"
+    env = getattr(codex, "env", {}) if codex is not None else {}
+    if isinstance(env, dict):
+        for key in FINDER_INPUT_LIMIT_ENV_KEYS:
+            configured = parse_nonnegative_int(env.get(key))
+            if configured:
+                return configured, f"env.{key}"
+    return 0, ""
+
+
+def finder_input_limit_from_process(result: object) -> int:
+    text = "\n".join(str(getattr(result, name, "") or "") for name in ("stderr", "stdout"))
+    for pattern in FINDER_INPUT_LIMIT_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return parse_nonnegative_int(match.group(1).replace(",", "").replace("_", ""))
+    return 0
+
+
+def parse_nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(str(value if value is not None else "").strip() or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def finder_batch_process_metadata(
+    prompt: str,
+    tasks: list[FinderTask],
+    *,
+    input_limit_chars: int,
+    input_limit_source: str,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "prompt_chars": len(prompt),
+        "batch_task_count": len(tasks),
+    }
+    if input_limit_chars:
+        metadata["input_limit_chars"] = input_limit_chars
+    if input_limit_source:
+        metadata["input_limit_source"] = input_limit_source
+    return metadata
+
+
+def finder_batch_local_process(
+    checkout: Path,
+    prompt: str,
+    tasks: list[FinderTask],
+    stderr: str,
+    *,
+    input_limit_chars: int,
+    input_limit_source: str,
+) -> dict:
+    process = ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 2, "", stderr, 0)
+    return {
+        **process.to_dict(),
+        **finder_batch_process_metadata(
+            prompt,
+            tasks,
+            input_limit_chars=input_limit_chars,
+            input_limit_source=input_limit_source,
+        ),
+    }
 
 
 def finder_batch_id(tasks: list[FinderTask], *, batch_index: int) -> str:

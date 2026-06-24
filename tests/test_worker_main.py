@@ -1930,6 +1930,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 "contextRequestCount": 1,
                 "exitCode": 124,
                 "timedOut": True,
+                "promptChars": 4567,
+                "inputLimitChars": 5000,
+                "inputLimitSource": "app_server_error",
+                "batchTaskCount": 3,
                 "blockedReason": "finder codex turn timed out",
             }
         )
@@ -1940,6 +1944,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("context_requests=1", summary)
         self.assertIn("exit_code=124", summary)
         self.assertIn("timed_out=true", summary)
+        self.assertIn("prompt_chars=4567", summary)
+        self.assertIn("input_limit_chars=5000", summary)
+        self.assertIn("input_limit_source=app_server_error", summary)
+        self.assertIn("batch_tasks=3", summary)
         self.assertIn("reason=finder codex turn timed out", summary)
 
     def test_graph_verified_progress_logs_summary_includes_missing_baseline_units(self) -> None:
@@ -3645,6 +3653,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     "finderMaxTurnsPerScan": 5,
                     "finderMaxJobsPerSubagent": 24,
                     "finderTimeoutSeconds": 300,
+                    "codexMaxInputChars": 12345,
                     "reproMaxParallel": 3,
                     "reproTimeoutSeconds": 600,
                     "maxRepro": 20,
@@ -3670,6 +3679,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["graph"]["map_parallel"], 2)
         self.assertEqual(payload["graph"]["graph_timeout_seconds"], 960)
         self.assertEqual(payload["codex"]["reasoning_effort"], "medium")
+        self.assertEqual(payload["codex"]["max_input_chars"], 12345)
         self.assertEqual(payload["codex"]["env"]["CODEX_SQLITE_HOME"], str(root / "home" / ".codex-sqlite"))
         self.assertTrue(payload["context"]["enabled"])
         self.assertEqual(payload["context"]["timeout_seconds"], 240)

@@ -604,6 +604,16 @@ def test_load_config_does_not_follow_symlinked_config(tmp_path: Path) -> None:
     assert config.finders.max_workers == 6
 
 
+def test_load_config_reads_codex_input_budget(tmp_path: Path) -> None:
+    root = tmp_path / ".codereview"
+    root.mkdir()
+    (root / "config.json").write_text(json.dumps({"codex": {"max_input_chars": 12345}}), encoding="utf-8")
+
+    config = load_config(tmp_path)
+
+    assert config.codex.max_input_chars == 12345
+
+
 def test_run_finders_batches_tasks_into_single_app_server_waves(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
     checkout = tmp_path / "repo"
     run = checkout / ".codereview" / "runs" / "run_1"
@@ -817,6 +827,117 @@ def test_run_finders_groups_module_context_before_batching(tmp_path: Path, monke
 
     assert calls == [[["component:auth-a", "component:auth-b"], ["component:billing"]]]
     assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
+
+
+def test_finder_batch_splits_by_configured_input_budget_before_codex(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    tasks = [FinderTask(unit_id=f"component:budget-{index}", focus="correctness", unit_type="component") for index in range(3)]
+    write_review_units(
+        run,
+        [
+            {"unit_id": task.unit_id, "unit_type": task.unit_type, "review_pass": task.review_pass, "risk_tags": [], "context": {}}
+            for task in tasks
+        ],
+    )
+    for task in tasks:
+        context_file = run / "artifacts" / "review-units" / f"{finder_runner_module.unit_file_stem(task.unit_id)}.context.md"
+        context_file.write_text("x" * 400, encoding="utf-8")
+    config = ReviewConfig()
+    _payload, single_prompt = finder_runner_module.finder_batch_input(checkout, run, [tasks[0]], config)
+    config.codex.max_input_chars = len(single_prompt) + 200
+    _parent_payload, parent_prompt = finder_runner_module.finder_batch_input(checkout, run, tasks, config)
+    assert len(parent_prompt) > config.codex.max_input_chars
+    calls: list[int] = []
+
+    def fake_run_codex_turn(**kwargs):
+        prompt = kwargs["prompt"]
+        calls.append(len(prompt))
+        assert len(prompt) <= config.codex.max_input_chars
+        payload_text = prompt.split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(payload_text)
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {"unit_id": job["unit_id"], "focus": job["focus"], "context_requests": [], "candidates": []}
+                        for job in payload["jobs"]
+                    ],
+                    "warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = finder_runner_module.run_finder_batch(checkout, run, tasks, config)
+
+    assert len(calls) > 1
+    assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
+    assert all(item["status"] == "ok" for item in results)
+    assert all(item["process"]["input_limit_source"] == "config.codex.max_input_chars" for item in results)
+
+
+def test_finder_batch_retries_with_app_server_reported_input_limit(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:
+    checkout = tmp_path / "repo"
+    run = checkout / ".codereview" / "runs" / "run_1"
+    checkout.mkdir(parents=True)
+    ensure_project_files(checkout)
+    tasks = [FinderTask(unit_id=f"component:dynamic-{index}", focus="correctness", unit_type="component") for index in range(4)]
+    write_review_units(
+        run,
+        [
+            {"unit_id": task.unit_id, "unit_type": task.unit_type, "review_pass": task.review_pass, "risk_tags": [], "context": {}}
+            for task in tasks
+        ],
+    )
+    config = ReviewConfig()
+    call_job_counts: list[int] = []
+
+    def fake_run_codex_turn(**kwargs):
+        prompt = kwargs["prompt"]
+        payload_text = prompt.split("Assigned finder batch JSON:\n```json\n", 1)[1].split("\n```", 1)[0]
+        payload = json.loads(payload_text)
+        call_job_counts.append(len(payload["jobs"]))
+        if len(payload["jobs"]) > 1:
+            return ProcessResult(
+                ["codex", "app-server", "turn/start"],
+                str(checkout),
+                2,
+                "",
+                f"codex app-server turn failed: turn/start failed: Input exceeds the maximum length of {len(prompt) - 1} characters.",
+                1,
+            )
+        kwargs["output_file"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output_file"].write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {"unit_id": job["unit_id"], "focus": job["focus"], "context_requests": [], "candidates": []}
+                        for job in payload["jobs"]
+                    ],
+                    "warnings": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return ProcessResult(["codex", "app-server", "turn/start"], str(checkout), 0, "{}", "", 1)
+
+    monkeypatch.setattr(finder_runner_module, "run_codex_turn", fake_run_codex_turn)
+
+    results = finder_runner_module.run_finder_batch(checkout, run, tasks, config)
+
+    assert call_job_counts[0] == 4
+    assert call_job_counts.count(1) == 4
+    assert [item["task"]["unit_id"] for item in results] == [task.unit_id for task in tasks]
+    assert all(item["status"] == "ok" for item in results)
+    assert all(item["process"]["input_limit_source"] == "app_server_error" for item in results)
+    assert all(item["process"]["input_limit_chars"] > 0 for item in results)
 
 
 def test_finder_batch_blocks_oversized_context_pack_before_codex(tmp_path: Path, monkeypatch: _MonkeyPatch) -> None:

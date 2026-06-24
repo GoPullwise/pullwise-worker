@@ -37,6 +37,8 @@ def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
             "XDG_CACHE_HOME",
             "XDG_DATA_HOME",
             "PATH",
+            "PULLWISE_CODEX_MAX_INPUT_CHARS",
+            "PULLWISE_CODEX_INPUT_MAX_CHARS",
         )
         if provider_env.get(key)
     }
@@ -240,6 +242,15 @@ def graph_verified_progress_logs_summary(value: object) -> str:
         parts.append(f"exit_code={graph_verified_count(source.get('exitCode', source.get('exit_code')))}")
     if source.get("timedOut") is True or source.get("timed_out") is True:
         parts.append("timed_out=true")
+    if "promptChars" in source or "prompt_chars" in source:
+        parts.append(f"prompt_chars={graph_verified_count(source.get('promptChars', source.get('prompt_chars')))}")
+    if "inputLimitChars" in source or "input_limit_chars" in source:
+        parts.append(f"input_limit_chars={graph_verified_count(source.get('inputLimitChars', source.get('input_limit_chars')))}")
+    input_limit_source = clean_protocol_text(source.get("inputLimitSource") or source.get("input_limit_source"), 80)
+    if input_limit_source:
+        parts.append(f"input_limit_source={input_limit_source}")
+    if "batchTaskCount" in source or "batch_task_count" in source:
+        parts.append(f"batch_tasks={graph_verified_count(source.get('batchTaskCount', source.get('batch_task_count')))}")
     if "missingBaselineReviewUnitCount" in source or "missing_baseline_review_unit_count" in source:
         parts.append(
             f"missing_baseline={graph_verified_count(source.get('missingBaselineReviewUnitCount', source.get('missing_baseline_review_unit_count')))}"
@@ -363,6 +374,7 @@ def write_graph_verified_codereview_config(config: WorkerConfig, checkout_dir: P
         "model": getattr(config, "codex_model", "") or "",
         "reasoning_effort": getattr(config, "codex_reasoning_effort", "") or "high",
         "env": graph_verified_codex_env(config),
+        "max_input_chars": graph_verified_nonnegative_int(graph_config.get("codexMaxInputChars"), default=0),
     }
     current["finders"] = {
         "enabled": True,
@@ -426,6 +438,13 @@ def graph_verified_positive_int(value: object, *, default: int, minimum: int, ma
     except (TypeError, ValueError):
         number = default
     return max(minimum, min(maximum, number))
+
+
+def graph_verified_nonnegative_int(value: object, *, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, int(default or 0))
 
 
 def graph_verified_count(value: object) -> int:

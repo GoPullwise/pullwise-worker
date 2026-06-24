@@ -27,6 +27,7 @@ class CodexConfig:
     model: str = ""
     reasoning_effort: str = "high"
     env: dict[str, str] = field(default_factory=dict)
+    max_input_chars: int = 0
 
 
 @dataclass
@@ -261,6 +262,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
             model=str(codex.get("model") or ""),
             reasoning_effort=str(codex.get("reasoning_effort") or "high"),
             env=codex_env,
+            max_input_chars=max(0, int(codex.get("max_input_chars") or codex.get("maxInputChars") or 0)),
         ),
         finders=FinderConfig(
             enabled=bool(finders.get("enabled", True)),
