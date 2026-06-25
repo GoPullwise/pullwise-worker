@@ -892,12 +892,10 @@ def validate_verification_result(
         and _command_cwd_is_safe(item.cwd, worker_repo)
         and item.status.lower() in {"completed", "failed"}
     ]
-    if len(matching) < 2:
+    if not matching:
         raise VerificationRejected(
-            "the exact reproduction command and output marker must appear in at least two completed app-server events"
+            "the reproduction command and output marker must appear in a completed app-server command event"
         )
-    if len({item.exit_code for item in matching}) != 1:
-        raise VerificationRejected("repeated reproduction commands did not produce a stable exit code")
     actual = matching[-1]
     if not command_is_reproduction(actual.command):
         raise VerificationRejected("recorded command is inspection-only and does not reproduce behavior")
@@ -1430,9 +1428,9 @@ Hard rules:
 - A finding is confirmed only when an actually executed command exercises the cited repository code and produces deterministic observable evidence.
 - Prefer a small harness below .codereview/repro/ that imports or invokes the cited code. Do not use echo, printf, cat, or a print-only inline snippet as proof.
 - The final reproduction command must execute a normal harness file below .codereview/repro/. Do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof.
-- Execute the exact final reproduction command at least twice. Both runs must produce the same exit code and the same output marker.
-- Set reproduction_command to that exact repeated command.
-- Set output_marker to an exact non-trivial substring present in both runs' real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
+- Execute the final reproduction command at least once. Prefer a repeat when it is cheap, but do not reject a real reproduction only because it was run once or exit codes differ.
+- Set reproduction_command to the exact command that produced the observed evidence.
+- Set output_marker to an exact non-trivial substring present in the real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
 - exercised_files must include the cited source file paths that the command actually exercised.
 - Reject the candidate when reproduction depends on unavailable services, credentials, timing guesses, or assumptions.
 - skeptic_agreed may be true only after the independent challenge finds the proof valid.

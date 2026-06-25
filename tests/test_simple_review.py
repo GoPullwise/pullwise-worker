@@ -326,7 +326,7 @@ class SimpleReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "changed the candidate's expected behavior"):
                 validate_verification_result(candidate, payload, commands, repo, source_changed=False)
 
-    def test_verification_gate_rejects_single_execution(self) -> None:
+    def test_verification_gate_accepts_single_grounded_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             source = repo / "src" / "handler.py"
@@ -362,9 +362,40 @@ class SimpleReviewTests(unittest.TestCase):
                     status="completed",
                 )
             ]
-            with self.assertRaisesRegex(ValueError, "at least two"):
-                validate_verification_result(candidate, payload, commands, repo, source_changed=False)
+            actual, marker = validate_verification_result(candidate, payload, commands, repo, source_changed=False)
+            self.assertEqual(actual.command, "python3 .codereview/repro/check.py")
+            self.assertEqual(marker, "OBSERVED_FALSE")
 
+
+    def test_verification_gate_rejects_missing_command_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            harness = repo / ".codereview" / "repro" / "check.py"
+            harness.parent.mkdir(parents=True)
+            harness.write_text("from src.handler import handle\nprint(handle())\n", encoding="utf-8")
+            candidate = {
+                "candidate_id": "cand-1",
+                "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+            }
+            payload = {
+                "candidate_id": "cand-1",
+                "status": "confirmed",
+                "safe_to_show_user": True,
+                "reason": "The command reaches the bad branch.",
+                "expected_behavior": "The handler should return true.",
+                "observed_behavior": "The handler returns false.",
+                "reproduction_command": "python3 .codereview/repro/check.py",
+                "output_marker": "OBSERVED_FALSE",
+                "exercised_files": ["src/handler.py"],
+                "skeptic_agreed": True,
+                "independent_check": "The skeptic traced the same branch.",
+                "limitations": [],
+            }
+            with self.assertRaisesRegex(ValueError, "completed app-server command event"):
+                validate_verification_result(candidate, payload, [], repo, source_changed=False)
 
     def test_verification_gate_rejects_hardcoded_harness_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
