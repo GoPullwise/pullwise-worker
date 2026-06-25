@@ -5,6 +5,7 @@ from __future__ import annotations
 GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES = 200_000
 GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES = 50_000
 GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES = 512_000
+GRAPH_VERIFIED_INTERNAL_DIAGNOSTIC_MAX_ITEMS = 50
 GRAPH_VERIFIED_PROGRESS_START = PHASE_PROGRESS["index"] + 1
 GRAPH_VERIFIED_PROGRESS_COMPLETE = PHASE_PROGRESS["report"]
 GRAPH_VERIFIED_PROGRESS_RANGES = {
@@ -79,13 +80,16 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     rejected = graph_verified_read_json_artifact(reports / "rejected.json", [])
     final_json = graph_verified_read_json_artifact(reports / "final.json", {"confirmed": []})
     pipeline_summary = graph_verified_read_json_artifact(reports / "summary.json", {})
+    internal_diagnostics = graph_verified_internal_diagnostics(
+        graph_verified_read_json_artifact(reports / "diagnostics.json", {})
+    )
     report_counts = (
         pipeline_summary.get("reports")
         if isinstance(pipeline_summary, dict) and isinstance(pipeline_summary.get("reports"), dict)
         else {}
     )
     run_id = graph_verified_run_id(final_path.parent.parent.name)
-    return {
+    payload = {
         "version": "graph-verified-code-review/1",
         "runId": run_id,
         "mode": mode,
@@ -99,6 +103,99 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
         "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
+    if internal_diagnostics:
+        payload["internalDiagnostics"] = internal_diagnostics
+    return payload
+
+
+def graph_verified_internal_diagnostics(value: object) -> dict:
+    source = value if isinstance(value, dict) else {}
+    if not source:
+        return {}
+    reason_counts = graph_verified_internal_reason_counts(source.get("reasonCounts"))
+    internal_rejections = graph_verified_internal_rejections(source.get("internalRejections"))
+    selected_candidates = graph_verified_internal_selected_candidates(source.get("selectedCandidates"))
+    payload = {
+        "schemaVersion": graph_verified_count(source.get("schemaVersion")) or 1,
+        "selectedCandidateCount": graph_verified_count(source.get("selectedCandidateCount")),
+        "internalRejectionCount": graph_verified_count(source.get("internalRejectionCount")),
+    }
+    if reason_counts:
+        payload["reasonCounts"] = reason_counts
+    if internal_rejections:
+        payload["internalRejections"] = internal_rejections
+    if selected_candidates:
+        payload["selectedCandidates"] = selected_candidates
+    return payload if any(key in payload for key in ("reasonCounts", "internalRejections", "selectedCandidates")) else {}
+
+
+def graph_verified_internal_reason_counts(value: object) -> list[dict]:
+    raw_items = value if isinstance(value, list) else []
+    items = []
+    for raw_item in raw_items[:GRAPH_VERIFIED_INTERNAL_DIAGNOSTIC_MAX_ITEMS]:
+        if not isinstance(raw_item, dict):
+            continue
+        reason = clean_protocol_text(raw_item.get("reason"), 800)
+        count = graph_verified_count(raw_item.get("count"))
+        if not reason or not count:
+            continue
+        item = {"reason": reason, "count": count}
+        stage = clean_protocol_text(raw_item.get("stage"), 80)
+        if stage:
+            item["stage"] = stage
+        items.append(item)
+    return items
+
+
+def graph_verified_internal_rejections(value: object) -> list[dict]:
+    raw_items = value if isinstance(value, list) else []
+    items = []
+    for raw_item in raw_items[:GRAPH_VERIFIED_INTERNAL_DIAGNOSTIC_MAX_ITEMS]:
+        if not isinstance(raw_item, dict):
+            continue
+        reason = clean_protocol_text(raw_item.get("reason"), 800)
+        candidate_id = clean_protocol_text(raw_item.get("candidate_id"), 160)
+        if not reason and not candidate_id:
+            continue
+        item = {"reason": reason}
+        stage = clean_protocol_text(raw_item.get("stage"), 80)
+        if stage:
+            item["stage"] = stage
+        if candidate_id:
+            item["candidateId"] = candidate_id
+        items.append(item)
+    return items
+
+
+def graph_verified_internal_selected_candidates(value: object) -> list[dict]:
+    raw_items = value if isinstance(value, list) else []
+    items = []
+    for raw_item in raw_items[:GRAPH_VERIFIED_INTERNAL_DIAGNOSTIC_MAX_ITEMS]:
+        if not isinstance(raw_item, dict):
+            continue
+        candidate_id = clean_protocol_text(raw_item.get("candidate_id"), 160)
+        if not candidate_id:
+            continue
+        item = {"candidateId": candidate_id}
+        for source_key, target_key, limit in (
+            ("unit_id", "unitId", 160),
+            ("severity", "severity", 20),
+            ("category", "category", 80),
+            ("title", "title", 240),
+        ):
+            text = clean_protocol_text(raw_item.get(source_key), limit)
+            if text:
+                item[target_key] = text
+        evidence = raw_item.get("primaryEvidence") if isinstance(raw_item.get("primaryEvidence"), dict) else {}
+        evidence_payload = {}
+        for source_key, target_key, limit in (("file", "file", 300), ("line", "line", 40), ("symbol", "symbol", 160)):
+            text = clean_protocol_text(evidence.get(source_key), limit)
+            if text:
+                evidence_payload[target_key] = text
+        if evidence_payload:
+            item["primaryEvidence"] = evidence_payload
+        items.append(item)
+    return items
 
 
 def graph_verified_failed_report(mode: str, scan_mode: str, error: object) -> dict:
@@ -148,6 +245,16 @@ def graph_verified_report_artifact_error(final_path: Path, checkout_dir: Path | 
             return f"GraphVerified report artifact is unreadable: {filename}: {exc}."
         if not isinstance(payload, expected_type):
             return f"GraphVerified report artifact has invalid shape: {filename}."
+    diagnostics_path = reports / "diagnostics.json"
+    if diagnostics_path.exists():
+        if diagnostics_path.is_symlink():
+            return "GraphVerified report artifact must not be a symlink: diagnostics.json."
+        try:
+            payload = json.loads(read_no_follow_text_file(diagnostics_path, max_bytes=GRAPH_VERIFIED_JSON_ARTIFACT_MAX_BYTES))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return f"GraphVerified report artifact is unreadable: diagnostics.json: {exc}."
+        if not isinstance(payload, dict):
+            return "GraphVerified report artifact has invalid shape: diagnostics.json."
     return ""
 
 

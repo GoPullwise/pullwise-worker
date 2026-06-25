@@ -4859,6 +4859,29 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (reports / "rejected.json").write_text(json.dumps([{"candidate_id": "r1"}]), encoding="utf-8")
             (reports / "final.json").write_text(json.dumps({"confirmed": [{"candidate": {"candidate_id": "c1"}}]}), encoding="utf-8")
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 2}}), encoding="utf-8")
+            (reports / "diagnostics.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "selectedCandidateCount": 1,
+                        "internalRejectionCount": 1,
+                        "reasonCounts": [{"stage": "verification", "reason": "not reproducible", "count": 1}],
+                        "internalRejections": [
+                            {"stage": "verification", "candidate_id": "cand-x", "reason": "not reproducible"}
+                        ],
+                        "selectedCandidates": [
+                            {
+                                "candidate_id": "cand-x",
+                                "unit_id": "unit-1",
+                                "severity": "high",
+                                "title": "Candidate title",
+                                "primaryEvidence": {"file": "src/app.py", "line": "12"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             codereview_main = importlib.import_module("codereview.simple_review")
 
             with patch.object(codereview_main, "run_review", return_value=final_md):
@@ -4878,6 +4901,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["rejectedCount"], 1)
         self.assertEqual(payload["blockedCount"], 2)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["candidate_id"], "c1")
+        self.assertEqual(payload["internalDiagnostics"]["reasonCounts"][0]["reason"], "not reproducible")
+        self.assertEqual(payload["internalDiagnostics"]["internalRejections"][0]["candidateId"], "cand-x")
+        self.assertEqual(payload["internalDiagnostics"]["selectedCandidates"][0]["candidateId"], "cand-x")
 
     def test_run_graph_verified_review_payload_bounds_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

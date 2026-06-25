@@ -965,6 +965,12 @@ class SimpleReviewTests(unittest.TestCase):
             self.assertEqual(json.loads((reports / "rejected.json").read_text(encoding="utf-8")), [])
             internal = json.loads((run / "diagnostics" / "internal-rejections.json").read_text(encoding="utf-8"))
             self.assertEqual(internal[0]["candidate_id"], "cand-x")
+            diagnostics = json.loads((reports / "diagnostics.json").read_text(encoding="utf-8"))
+            self.assertEqual(diagnostics["internalRejections"][0]["candidate_id"], "cand-x")
+            self.assertEqual(diagnostics["reasonCounts"][0]["reason"], "not reproducible")
+            debug_markdown = (reports / "debug.md").read_text(encoding="utf-8")
+            self.assertIn("Internal rejection reason counts", debug_markdown)
+            self.assertIn("not reproducible", debug_markdown)
 
     def test_report_summary_marks_verification_budget_drops_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -986,6 +992,10 @@ class SimpleReviewTests(unittest.TestCase):
                 account={},
                 progress=None,
             )
+            diagnostics = json.loads(final.with_name("diagnostics.json").read_text(encoding="utf-8"))
+            self.assertEqual(diagnostics["selectedCandidateCount"], 1)
+            self.assertEqual(diagnostics["selectedCandidates"][0]["candidate_id"], "cand-1")
+            self.assertEqual(diagnostics["internalRejectionCount"], 1)
             summary = json.loads(final.with_name("summary.json").read_text(encoding="utf-8"))
             self.assertTrue(summary["coverage"]["discoveryComplete"])
             self.assertFalse(summary["coverage"]["verificationComplete"])

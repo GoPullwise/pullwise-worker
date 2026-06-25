@@ -34,6 +34,8 @@ MAX_EVENT_BYTES = 8 * 1024 * 1024
 MAX_EVENT_LINE_CHARS = 2 * 1024 * 1024
 MAX_COMMAND_OUTPUT_CHARS = 32_000
 MAX_DEBUG_REASON_CHARS = 800
+MAX_INTERNAL_DIAGNOSTIC_ITEMS = 50
+MAX_DEBUG_REASON_BUCKETS = 12
 MAX_REPORT_TEXT_CHARS = 4_000
 _AUTH_EXPIRED_MARKERS = (
     "failed to refresh token",
@@ -1611,7 +1613,12 @@ def _write_reports(
     ensure_dir(reports)
     diagnostics = run / "diagnostics"
     ensure_dir(diagnostics)
+    internal_diagnostics = build_internal_diagnostics(
+        selected_candidates=selected_candidates,
+        rejected=rejected,
+    )
     write_json(diagnostics / "internal-rejections.json", rejected)
+    write_json(reports / "diagnostics.json", internal_diagnostics)
     write_json(reports / "confirmed.json", confirmed)
     # Unconfirmed hypotheses remain internal. They are never part of the public report contract.
     write_json(reports / "rejected.json", [])
@@ -1661,6 +1668,7 @@ def render_final_markdown(confirmed: list[dict], *, mode: str, scan_mode: str) -
 
 
 def render_debug_markdown(summary: dict, rejected: list[dict]) -> str:
+    reason_counts = internal_rejection_reason_counts(rejected)
     lines = [
         "# Pullwise review diagnostics",
         "",
@@ -1675,8 +1683,73 @@ def render_debug_markdown(summary: dict, rejected: list[dict]) -> str:
         "",
         "Only runtime-confirmed findings are included. Unconfirmed hypotheses are not exposed.",
     ]
+    if reason_counts:
+        lines.extend(["", "Internal rejection reason counts:"])
+        for item in reason_counts[:MAX_DEBUG_REASON_BUCKETS]:
+            reason = _clean_text(item.get("reason"), MAX_DEBUG_REASON_CHARS)
+            count = _positive_int(item.get("count"))
+            if reason and count:
+                lines.append(f"- `{count}` x {reason}")
     return "\n".join(lines) + "\n"
 
+
+def build_internal_diagnostics(*, selected_candidates: list[dict], rejected: list[dict]) -> dict:
+    return {
+        "schemaVersion": 1,
+        "selectedCandidateCount": len(selected_candidates),
+        "internalRejectionCount": len(rejected),
+        "reasonCounts": internal_rejection_reason_counts(rejected),
+        "internalRejections": [internal_rejection_payload(item) for item in rejected[:MAX_INTERNAL_DIAGNOSTIC_ITEMS]],
+        "selectedCandidates": [
+            internal_candidate_summary(candidate)
+            for candidate in selected_candidates[:MAX_INTERNAL_DIAGNOSTIC_ITEMS]
+        ],
+    }
+
+
+def internal_rejection_reason_counts(rejected: list[dict]) -> list[dict]:
+    counts: dict[tuple[str, str], dict] = {}
+    for item in rejected:
+        if not isinstance(item, dict):
+            continue
+        stage = _clean_text(item.get("stage"), 80) or "unknown"
+        reason = _clean_text(item.get("reason"), MAX_DEBUG_REASON_CHARS) or "unspecified"
+        key = (stage, reason)
+        bucket = counts.setdefault(key, {"stage": stage, "reason": reason, "count": 0})
+        bucket["count"] += 1
+    return sorted(
+        counts.values(),
+        key=lambda value: (-_positive_int(value.get("count")), str(value.get("stage")), str(value.get("reason"))),
+    )
+
+
+def internal_rejection_payload(item: dict) -> dict:
+    source = item if isinstance(item, dict) else {}
+    return {
+        "stage": _clean_text(source.get("stage"), 80),
+        "candidate_id": _clean_text(source.get("candidate_id"), 160),
+        "reason": _clean_text(source.get("reason"), MAX_DEBUG_REASON_CHARS),
+    }
+
+
+def internal_candidate_summary(candidate: dict) -> dict:
+    source = candidate if isinstance(candidate, dict) else {}
+    evidence = source.get("evidence") if isinstance(source.get("evidence"), list) else []
+    first_evidence = next((item for item in evidence if isinstance(item, dict)), {})
+    summary = {
+        "candidate_id": _clean_text(source.get("candidate_id"), 160),
+        "unit_id": _clean_text(source.get("unit_id"), 160),
+        "severity": _clean_text(source.get("severity"), 20),
+        "category": _clean_text(source.get("category"), 80),
+        "title": _clean_text(source.get("title"), 240),
+    }
+    if first_evidence:
+        summary["primaryEvidence"] = {
+            "file": safe_relative_path(first_evidence.get("file")) or "",
+            "line": _clean_text(first_evidence.get("line"), 40),
+            "symbol": _clean_text(first_evidence.get("symbol"), 160),
+        }
+    return summary
 
 def init_project(checkout: Path) -> Path:
     root = checkout.resolve(strict=False) / ".codereview"
