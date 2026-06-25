@@ -908,11 +908,43 @@ class WorkerConfig:
         )
         self.result_upload_attempts = env_int("PULLWISE_RESULT_UPLOAD_ATTEMPTS", 5, maximum=20)
         self.result_upload_compress_min_bytes = env_int("PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES", 1024, minimum=0)
+        self.result_upload_pending_backoff_base_seconds = env_int(
+            "PULLWISE_RESULT_UPLOAD_PENDING_BACKOFF_BASE_SECONDS",
+            30,
+            minimum=1,
+        )
+        self.result_upload_pending_backoff_max_seconds = env_int(
+            "PULLWISE_RESULT_UPLOAD_PENDING_BACKOFF_MAX_SECONDS",
+            15 * 60,
+            minimum=1,
+        )
+        self.result_upload_pending_max_age_seconds = env_int(
+            "PULLWISE_RESULT_UPLOAD_PENDING_MAX_AGE_SECONDS",
+            7 * 24 * 60 * 60,
+            minimum=60,
+        )
+        self.result_upload_pending_max_attempts = env_int(
+            "PULLWISE_RESULT_UPLOAD_PENDING_MAX_ATTEMPTS",
+            100,
+            minimum=1,
+            maximum=10000,
+        )
         self.failed_checkout_retention_seconds = env_int("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS", 0, minimum=0)
         self.max_checkout_bytes = env_int(
             "PULLWISE_MAX_CHECKOUT_BYTES",
             20 * 1024 * 1024 * 1024,
             maximum=100 * 1024 * 1024 * 1024,
+        )
+        self.repo_cache_max_bytes = env_int(
+            "PULLWISE_REPO_CACHE_MAX_BYTES",
+            max(1, self.max_checkout_bytes // 2),
+            minimum=0,
+            maximum=100 * 1024 * 1024 * 1024,
+        )
+        self.repo_cache_ttl_seconds = env_int(
+            "PULLWISE_REPO_CACHE_TTL_SECONDS",
+            14 * 24 * 60 * 60,
+            minimum=0,
         )
         self.max_repo_files = _DEFAULT_MAX_REPO_FILES
         self.max_repo_bytes = _DEFAULT_MAX_REPO_BYTES

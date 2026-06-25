@@ -448,6 +448,12 @@ def write_graph_verified_codereview_config(
         or job_source.get("review_output_language")
         or job_source.get("reviewOutputLanguage")
     ) or "English"
+    discovery_parallel = graph_config.get("simpleDiscoveryParallel")
+    if discovery_parallel is None:
+        discovery_parallel = graph_config.get("finderTurnParallel")
+    verification_parallel = graph_config.get("simpleVerificationParallel")
+    if verification_parallel is None:
+        verification_parallel = graph_config.get("reproMaxParallel")
     current["simple"] = {
         "engine": "simple-full-repository/1",
         "discovery_turns": graph_verified_positive_int(
@@ -463,16 +469,16 @@ def write_graph_verified_codereview_config(
             maximum=64,
         ),
         "discovery_parallel": graph_verified_positive_int(
-            graph_config.get("simpleDiscoveryParallel") or graph_config.get("finderTurnParallel"),
-            default=1,
-            minimum=1,
-            maximum=2,
+            discovery_parallel,
+            default=0,
+            minimum=0,
+            maximum=4,
         ),
         "verification_parallel": graph_verified_positive_int(
-            graph_config.get("simpleVerificationParallel") or graph_config.get("reproMaxParallel"),
-            default=1,
-            minimum=1,
-            maximum=2,
+            verification_parallel,
+            default=0,
+            minimum=0,
+            maximum=4,
         ),
         "subagents_per_turn": graph_verified_positive_int(
             graph_config.get("subagentsPerTurn"),

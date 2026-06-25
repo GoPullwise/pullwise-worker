@@ -1112,6 +1112,7 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
         return
     if not checkout_root_is_owned(config.work_dir):
         return
+    cleanup_repository_mirror_cache(config)
     for marker in config.work_dir.glob(f"*{_FAILED_CHECKOUT_MARKER_SUFFIX}"):
         checkout = checkout_dir_from_failed_marker(marker)
         if checkout.name in protected:
@@ -1127,7 +1128,7 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
             if cleanup_checkout_path(checkout):
                 _unlink_path_ignore_errors(marker)
     entries = cleanup_checkout_candidates(config.work_dir, protected)
-    while directory_size(config.work_dir) > config.max_checkout_bytes and entries:
+    while checkout_directory_size(config.work_dir, protected) > safe_config_int(config, "max_checkout_bytes", 0) and entries:
         checkout = entries.pop(0)
         if cleanup_checkout_path(checkout):
             _unlink_path_ignore_errors(failed_checkout_marker(checkout))
@@ -1150,6 +1151,93 @@ def cleanup_checkout_candidates(work_dir: Path, protected: set[str]) -> list[Pat
             candidates.append((stat_result.st_mtime, path))
     return [path for _mtime, path in sorted(candidates, key=lambda item: item[0])]
 
+
+def safe_config_int(config: object, name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        value = int(getattr(config, name, default))
+    except (TypeError, ValueError, OverflowError):
+        value = default
+    return max(minimum, value)
+
+
+def checkout_directory_size(work_dir: Path, protected: set[str]) -> int:
+    total = 0
+    try:
+        entries = list(work_dir.iterdir())
+    except OSError:
+        return 0
+    for path in entries:
+        if path.name in protected:
+            continue
+        try:
+            stat_result = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(stat_result.st_mode):
+            total += stat_result.st_size
+        elif stat.S_ISDIR(stat_result.st_mode):
+            total += directory_size(path)
+        elif stat.S_ISLNK(stat_result.st_mode):
+            total += stat_result.st_size
+    return total
+
+
+def cleanup_repository_mirror_cache(config: WorkerConfig) -> None:
+    cache_root = config.work_dir / _REPO_CACHE_DIR_NAME
+    if not cache_root.exists() and not cache_root.is_symlink():
+        return
+    if cache_root.is_symlink():
+        _unlink_path_ignore_errors(cache_root)
+        return
+    if not cache_root.is_dir():
+        return
+    max_bytes = safe_config_int(
+        config,
+        "repo_cache_max_bytes",
+        max(1, safe_config_int(config, "max_checkout_bytes", 20 * 1024 * 1024 * 1024) // 2),
+    )
+    ttl_seconds = safe_config_int(config, "repo_cache_ttl_seconds", 14 * 24 * 60 * 60)
+    now_ts = int(time.time())
+    candidates = cleanup_repository_mirror_cache_candidates(cache_root)
+    remaining: list[Path] = []
+    for mtime, path in candidates:
+        if path.is_symlink():
+            cleanup_repository_mirror_cache_path(path)
+            continue
+        if ttl_seconds > 0 and mtime < now_ts - ttl_seconds:
+            cleanup_repository_mirror_cache_path(path)
+            continue
+        remaining.append(path)
+    while directory_size(cache_root) > max_bytes and remaining:
+        path = remaining.pop(0)
+        cleanup_repository_mirror_cache_path(path)
+
+
+def cleanup_repository_mirror_cache_candidates(cache_root: Path) -> list[tuple[float, Path]]:
+    candidates: list[tuple[float, Path]] = []
+    try:
+        entries = list(cache_root.iterdir())
+    except OSError:
+        return []
+    for path in entries:
+        try:
+            stat_result = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISDIR(stat_result.st_mode) or stat.S_ISLNK(stat_result.st_mode) or stat.S_ISREG(stat_result.st_mode):
+            candidates.append((stat_result.st_mtime, path))
+    return sorted(candidates, key=lambda item: item[0])
+
+
+def cleanup_repository_mirror_cache_path(path: Path) -> bool:
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+            return True
+        remove_checkout_dir(path)
+        return True
+    except Exception:
+        return False
 
 def cleanup_checkout_path(checkout: Path) -> bool:
     try:

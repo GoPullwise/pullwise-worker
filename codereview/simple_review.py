@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -110,6 +110,8 @@ _INLINE_CODE_FLAGS = {
 }
 _INLINE_SHELLS = {"bash", "sh", "zsh"}
 _MAX_HARNESS_BYTES = 256 * 1024
+_AUTO_PARALLELISM_SENTINEL = 0
+_SIMPLE_PARALLEL_MAX = 4
 
 
 DISCOVERY_SCHEMA = {
@@ -333,13 +335,12 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     _emit(progress, "snapshot", "Creating immutable full-repository snapshot", run_id=run_id)
     snapshot_manifest = create_immutable_snapshot(checkout, inventory, run)
     snapshot_repo = Path(str(snapshot_manifest["snapshot_repo"]))
-    snapshot_state_before = capture_source_state(snapshot_repo, include_untracked=True, max_text_file_bytes=config.scope.max_text_file_bytes)
+    snapshot_state_before = source_state_before
     write_json(run / "snapshot.json", snapshot_manifest)
     write_json(run / "snapshot-source-state-before.json", snapshot_state_before)
-
     account = codex_account_preflight(config.codex, snapshot_repo)
     write_json(run / "codex-account.json", account)
-
+    settings = tune_simple_parallelism(settings, inventory, account)
     inventory_by_path = {
         str(item.get("path") or ""): item
         for item in inventory_files
@@ -487,8 +488,8 @@ def load_simple_settings(raw_config: dict, config: ReviewConfig) -> SimpleSettin
     return SimpleSettings(
         discovery_turns=_bounded_int(simple.get("discovery_turns"), mode_defaults["turns"], 1, 16),
         max_discovery_turns=_bounded_int(simple.get("max_discovery_turns"), 48, 1, 64),
-        discovery_parallel=_bounded_int(simple.get("discovery_parallel"), 1, 1, 2),
-        verification_parallel=_bounded_int(simple.get("verification_parallel"), 1, 1, 2),
+        discovery_parallel=_bounded_int(simple.get("discovery_parallel"), _AUTO_PARALLELISM_SENTINEL, 0, _SIMPLE_PARALLEL_MAX),
+        verification_parallel=_bounded_int(simple.get("verification_parallel"), _AUTO_PARALLELISM_SENTINEL, 0, _SIMPLE_PARALLEL_MAX),
         subagents_per_turn=_bounded_int(simple.get("subagents_per_turn"), 3, 1, 4),
         max_candidates=_bounded_int(simple.get("max_candidates"), mode_defaults["candidates"], 1, 100),
         max_candidates_per_unit=_bounded_int(simple.get("max_candidates_per_unit"), 2, 1, 4),
@@ -501,6 +502,87 @@ def load_simple_settings(raw_config: dict, config: ReviewConfig) -> SimpleSettin
         scan_deadline_seconds=_bounded_int(simple.get("scan_deadline_seconds"), {"fast": 1800, "standard": 3600, "deep": 7200}.get(config.mode, 3600), 0, 21600),
         output_language=_clean_text(simple.get("output_language"), 80) or "English",
     )
+
+
+def tune_simple_parallelism(settings: SimpleSettings, inventory: dict, account: dict) -> SimpleSettings:
+    recommended = recommended_simple_parallelism(inventory, account)
+    discovery = recommended if settings.discovery_parallel <= 0 else settings.discovery_parallel
+    verification = recommended if settings.verification_parallel <= 0 else settings.verification_parallel
+    return replace(
+        settings,
+        discovery_parallel=max(1, min(_SIMPLE_PARALLEL_MAX, discovery)),
+        verification_parallel=max(1, min(_SIMPLE_PARALLEL_MAX, verification)),
+    )
+
+
+def recommended_simple_parallelism(inventory: dict, account: dict) -> int:
+    if not isinstance(account, dict) or not bool(account.get("shared_app_server")):
+        return 1
+    cpu_count = os.cpu_count() or 1
+    if cpu_count < 4:
+        cpu_budget = 1
+    elif cpu_count < 8:
+        cpu_budget = 2
+    elif cpu_count < 12:
+        cpu_budget = 3
+    else:
+        cpu_budget = _SIMPLE_PARALLEL_MAX
+
+    memory_gib = available_memory_gib()
+    if memory_gib <= 0:
+        memory_budget = _SIMPLE_PARALLEL_MAX
+    elif memory_gib < 4:
+        memory_budget = 1
+    elif memory_gib < 8:
+        memory_budget = 2
+    elif memory_gib < 16:
+        memory_budget = 3
+    else:
+        memory_budget = _SIMPLE_PARALLEL_MAX
+
+    file_count, byte_count = inventory_pressure(inventory)
+    if file_count < 25 and byte_count < 1_000_000:
+        repo_budget = 1
+    elif file_count < 250 and byte_count < 25_000_000:
+        repo_budget = 2
+    elif file_count < 1_000 and byte_count < 100_000_000:
+        repo_budget = 3
+    else:
+        repo_budget = _SIMPLE_PARALLEL_MAX
+    return max(1, min(_SIMPLE_PARALLEL_MAX, cpu_budget, memory_budget, repo_budget))
+
+
+def inventory_pressure(inventory: dict) -> tuple[int, int]:
+    if not isinstance(inventory, dict):
+        return 0, 0
+    files = analyzable_files(inventory)
+    summary = inventory.get("summary") if isinstance(inventory.get("summary"), dict) else {}
+    try:
+        file_count = int(summary.get("analyzable_files") or len(files))
+    except (TypeError, ValueError):
+        file_count = len(files)
+    byte_count = 0
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        try:
+            byte_count += max(0, int(item.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            continue
+    return max(0, file_count), byte_count
+
+
+def available_memory_gib() -> float:
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return max(0.0, int(parts[1]) / 1024 / 1024)
+    except (OSError, ValueError):
+        return 0.0
+    return 0.0
 
 
 def plan_review_units(files: list[dict], *, max_files: int, max_bytes: int) -> list[ReviewUnit]:
@@ -1490,14 +1572,15 @@ def _parallel_collect(
         return []
     completed = 0
     results_by_index: dict[int, object] = {}
-    if max_workers <= 1:
+    worker_count = max(1, min(_SIMPLE_PARALLEL_MAX, int(max_workers or 1), len(values)))
+    if worker_count <= 1:
         for index, item in enumerate(values):
             results_by_index[index] = worker(item)
             completed += 1
             progress(completed, len(values))
         return [results_by_index[index] for index in range(len(values))]
     executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(2, max_workers),
+        max_workers=worker_count,
         thread_name_prefix="pullwise-simple-review",
     )
     futures: dict[concurrent.futures.Future, int] = {}
@@ -1764,8 +1847,8 @@ def init_project(checkout: Path) -> Path:
                 "simple": {
                     "discovery_turns": 3,
                     "max_discovery_turns": 48,
-                    "discovery_parallel": 1,
-                    "verification_parallel": 1,
+                    "discovery_parallel": 0,
+                    "verification_parallel": 0,
                     "subagents_per_turn": 3,
                     "max_candidates": 10,
                     "scan_deadline_seconds": 3600,

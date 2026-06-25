@@ -20,11 +20,13 @@ from codereview.simple_review import (
     command_is_reproduction,
     limit_candidates_per_unit,
     load_simple_settings,
+    recommended_simple_parallelism,
     normalize_candidate,
     parse_command_events,
     plan_discovery_batches,
     plan_review_units,
     run_review,
+    tune_simple_parallelism,
     validate_discovery_payload,
     validate_unit_coverage,
     validate_verification_result,
@@ -32,8 +34,12 @@ from codereview.simple_review import (
 
 
 class SimpleReviewTests(unittest.TestCase):
-    def test_settings_cap_turn_parallelism_at_two(self) -> None:
+    def test_settings_allow_auto_parallelism_and_cap_explicit_values_at_four(self) -> None:
         config = ReviewConfig()
+        default_settings = load_simple_settings({"simple": {}}, config)
+        self.assertEqual(default_settings.discovery_parallel, 0)
+        self.assertEqual(default_settings.verification_parallel, 0)
+
         settings = load_simple_settings(
             {
                 "simple": {
@@ -44,9 +50,28 @@ class SimpleReviewTests(unittest.TestCase):
             },
             config,
         )
-        self.assertEqual(settings.discovery_parallel, 2)
-        self.assertEqual(settings.verification_parallel, 2)
+        self.assertEqual(settings.discovery_parallel, 4)
+        self.assertEqual(settings.verification_parallel, 4)
         self.assertEqual(settings.subagents_per_turn, 4)
+
+    def test_auto_parallelism_uses_app_server_and_resource_budget(self) -> None:
+        inventory = {
+            "files": [
+                {"path": f"src/file_{index}.py", "size_bytes": 200_000, "scope": "analyze"}
+                for index in range(1200)
+            ],
+            "summary": {"analyzable_files": 1200},
+        }
+        settings = load_simple_settings({"simple": {}}, ReviewConfig())
+        with (
+            patch("codereview.simple_review.os.cpu_count", return_value=16),
+            patch("codereview.simple_review.available_memory_gib", return_value=32.0),
+        ):
+            self.assertEqual(recommended_simple_parallelism(inventory, {"shared_app_server": True}), 4)
+            tuned = tune_simple_parallelism(settings, inventory, {"shared_app_server": True})
+        self.assertEqual(tuned.discovery_parallel, 4)
+        self.assertEqual(tuned.verification_parallel, 4)
+        self.assertEqual(tune_simple_parallelism(settings, inventory, {}).discovery_parallel, 1)
 
     def test_unit_and_batch_planners_cover_every_file_once(self) -> None:
         files = [

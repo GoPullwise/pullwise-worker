@@ -408,6 +408,102 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(record["payload"], payload)
             schedule_upload.assert_called_once_with("job_deferred", pending_path)
 
+    def test_retryable_pending_result_upload_persists_backoff_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                result_upload_pending_backoff_base_seconds=11,
+                result_upload_pending_backoff_max_seconds=60,
+                result_upload_pending_max_age_seconds=3600,
+                result_upload_pending_max_attempts=5,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_retry")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps(
+                    {
+                        "job_id": "job_retry",
+                        "created_at": 1000,
+                        "attempts": 1,
+                        "payload": {"status": "done"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_exception(worker_main.PullwiseRequestError("offline"))
+            worker._pending_result_uploads["job_retry"] = (future, pending_path)
+
+            with patch.object(worker_main.time, "time", return_value=2000), patch.object(
+                worker,
+                "schedule_pending_result_upload",
+            ) as schedule_upload:
+                worker.collect_result_uploads()
+
+            record = json.loads(pending_path.read_text(encoding="utf-8"))
+            self.assertEqual(record["attempts"], 2)
+            self.assertEqual(record["last_attempt_at"], 2000)
+            self.assertEqual(record["next_attempt_at"], 2022)
+            self.assertEqual(record["last_error"], "offline")
+            schedule_upload.assert_called_once_with("job_retry", pending_path)
+            self.assertIn("retry deferred", worker.last_error or "")
+
+    def test_retryable_pending_result_upload_dead_letters_after_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                result_upload_pending_backoff_base_seconds=1,
+                result_upload_pending_backoff_max_seconds=5,
+                result_upload_pending_max_age_seconds=60,
+                result_upload_pending_max_attempts=10,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_stale")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps(
+                    {
+                        "job_id": "job_stale",
+                        "created_at": 1000,
+                        "attempts": 2,
+                        "payload": {"status": "done"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_exception(worker_main.PullwiseRequestError("offline"))
+            worker._pending_result_uploads["job_stale"] = (future, pending_path)
+
+            with patch.object(worker_main.time, "time", return_value=1100), patch.object(
+                worker,
+                "schedule_pending_result_upload",
+            ) as schedule_upload:
+                worker.collect_result_uploads()
+
+            dead_path = worker_main.result_upload_dead_letter_file(work_dir, "job_stale")
+            dead_record = json.loads(dead_path.read_text(encoding="utf-8"))
+            self.assertFalse(pending_path.exists())
+            self.assertEqual(worker.pending_result_job_ids(), [])
+            self.assertEqual(dead_record["attempts"], 3)
+            self.assertIn("retention", dead_record["dead_letter_reason"])
+            schedule_upload.assert_not_called()
+            self.assertIn("dead-lettered", worker.last_error or "")
     def test_permanent_result_upload_failure_removes_pending_payload_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
@@ -2265,6 +2361,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(list(outside_logs.iterdir()), [])
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_process_runner_kills_background_child_on_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2777,6 +2874,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(batch_sizes, [500, 500, 201])
             self.assertEqual(tailer.committed, {"journal_cursor": "cursor-final", "summary_offset": 1201})
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_file_log_tailer_drops_partial_after_truncate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "scan-summary.log"
@@ -2823,6 +2921,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(offset, 0)
         self.assertEqual(partial, "")
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_file_log_tailer_read_does_not_follow_symlink_after_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2867,6 +2966,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             self.assertEqual(outside.read_text(encoding="utf-8"), "0123456789")
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_remove_checkout_dir_does_not_chmod_symlink_target_on_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3043,6 +3143,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             run_git.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_clone_repository_checks_git_tree_limits_before_materializing_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3281,6 +3382,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(detail, "NodeSource key response too large")
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_scan_summary_write_rejects_symlinked_log_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3578,8 +3680,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["codex"]["env"]["CODEX_SQLITE_HOME"], str(root / "home" / ".codex-sqlite"))
         self.assertEqual(payload["simple"]["engine"], "simple-full-repository/1")
         self.assertEqual(payload["simple"]["discovery_turns"], 5)
-        self.assertEqual(payload["simple"]["discovery_parallel"], 2)
-        self.assertEqual(payload["simple"]["verification_parallel"], 2)
+        self.assertEqual(payload["simple"]["discovery_parallel"], 4)
+        self.assertEqual(payload["simple"]["verification_parallel"], 3)
         self.assertEqual(payload["simple"]["max_candidates"], 20)
         self.assertEqual(payload["simple"]["discovery_timeout_seconds"], 300)
         self.assertEqual(payload["simple"]["verification_timeout_seconds"], 600)
@@ -3709,6 +3811,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertIsNone(output)
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_preflight_reads_do_not_follow_symlink_after_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -4138,6 +4241,85 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(status, 2)
         install.assert_not_called()
 
+    def test_cleanup_checkouts_keeps_checkouts_when_only_repo_cache_exceeds_checkout_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            checkout = work_dir / "job_keep"
+            checkout.mkdir()
+            (checkout / "small.txt").write_text("small", encoding="utf-8")
+            cache_root = work_dir / ".pullwise-repo-cache"
+            mirror = cache_root / "old.git"
+            mirror.mkdir(parents=True)
+            (mirror / "large.pack").write_text("x" * 512, encoding="utf-8")
+            config = SimpleNamespace(
+                work_dir=work_dir,
+                max_checkout_bytes=128,
+                repo_cache_max_bytes=1024,
+                repo_cache_ttl_seconds=0,
+            )
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertTrue(checkout.exists())
+            self.assertTrue(mirror.exists())
+
+    def test_cleanup_repository_mirror_cache_prunes_oldest_by_size_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            cache_root = work_dir / ".pullwise-repo-cache"
+            old_mirror = cache_root / "old.git"
+            new_mirror = cache_root / "new.git"
+            old_mirror.mkdir(parents=True)
+            new_mirror.mkdir()
+            (old_mirror / "pack").write_text("o" * 80, encoding="utf-8")
+            (new_mirror / "pack").write_text("n" * 80, encoding="utf-8")
+            os.utime(old_mirror, (1000, 1000))
+            os.utime(new_mirror, (2000, 2000))
+            config = SimpleNamespace(
+                work_dir=work_dir,
+                max_checkout_bytes=1024 * 1024,
+                repo_cache_max_bytes=100,
+                repo_cache_ttl_seconds=0,
+            )
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertFalse(old_mirror.exists())
+            self.assertTrue(new_mirror.exists())
+
+    def test_cleanup_repository_mirror_cache_prunes_expired_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            work_dir = root / "work"
+            work_dir.mkdir()
+            worker_main.checkout_root_sentinel(work_dir).write_text("pullwise-worker checkout root\n", encoding="utf-8")
+            cache_root = work_dir / ".pullwise-repo-cache"
+            expired_mirror = cache_root / "expired.git"
+            fresh_mirror = cache_root / "fresh.git"
+            expired_mirror.mkdir(parents=True)
+            fresh_mirror.mkdir()
+            (expired_mirror / "pack").write_text("old", encoding="utf-8")
+            (fresh_mirror / "pack").write_text("new", encoding="utf-8")
+            now = int(time.time())
+            os.utime(expired_mirror, (now - 100, now - 100))
+            os.utime(fresh_mirror, (now, now))
+            config = SimpleNamespace(
+                work_dir=work_dir,
+                max_checkout_bytes=1024 * 1024,
+                repo_cache_max_bytes=1024 * 1024,
+                repo_cache_ttl_seconds=60,
+            )
+
+            worker_main.cleanup_checkouts(config)
+
+            self.assertFalse(expired_mirror.exists())
+            self.assertTrue(fresh_mirror.exists())
     def test_cleanup_expired_failed_checkout_unlinks_symlink_without_touching_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -4330,6 +4512,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "wk_123\n")
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside")
 
+    @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_remote_uninstall_marker_rejects_path_outside_worker_roots(self) -> None:
         config = SimpleNamespace(
             service_name="pullwise-worker-wk_123",

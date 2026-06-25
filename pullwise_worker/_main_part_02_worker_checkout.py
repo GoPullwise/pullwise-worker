@@ -185,6 +185,25 @@ class ResultUploadManager:
     def client(self) -> object:
         return self.worker.client
 
+    def _config_int(self, name: str, default: int, *, minimum: int = 0) -> int:
+        try:
+            value = int(getattr(self.config, name, default))
+        except (TypeError, ValueError, OverflowError):
+            value = default
+        return max(minimum, value)
+
+    def pending_backoff_base_seconds(self) -> int:
+        return self._config_int("result_upload_pending_backoff_base_seconds", 30, minimum=1)
+
+    def pending_backoff_max_seconds(self) -> int:
+        return self._config_int("result_upload_pending_backoff_max_seconds", 15 * 60, minimum=1)
+
+    def pending_max_age_seconds(self) -> int:
+        return self._config_int("result_upload_pending_max_age_seconds", 7 * 24 * 60 * 60, minimum=60)
+
+    def pending_max_attempts(self) -> int:
+        return self._config_int("result_upload_pending_max_attempts", 100, minimum=1)
+
     def upload_with_retry(self, job_id: str, payload: dict) -> None:
         last_error: Exception | None = None
         for attempt in range(1, self.config.result_upload_attempts + 1):
@@ -222,9 +241,11 @@ class ResultUploadManager:
         if pending_dir.is_symlink():
             self.worker.last_error = f"pending result upload directory must not be a symlink: {pending_dir.name}"
             return
+        now = int(time.time())
         for path in sorted(pending_dir.glob("*.json")):
             try:
-                job_id, _payload = self.record(path)
+                record = self.read_record_data(path)
+                job_id = safe_job_id(record.get("job_id"))
             except PendingResultUploadRecordError as exc:
                 try:
                     path.unlink(missing_ok=True)
@@ -234,6 +255,11 @@ class ResultUploadManager:
                     f"pending result upload record permanently invalid for {path.name}: "
                     f"{redact_secrets(str(exc), self.config)}"
                 )[:500]
+                continue
+            reason = self.pending_dead_letter_reason(record, path, now)
+            if reason:
+                self.dead_letter(path, job_id, record, reason)
+                self.worker.last_error = f"result upload dead-lettered for {job_id}: {reason}"[:500]
                 continue
             self.worker.schedule_pending_result_upload(job_id, path)
 
@@ -290,22 +316,21 @@ class ResultUploadManager:
                         f"{redact_secrets(str(exc), self.config)}"
                     )[:500]
                     continue
-                self.worker.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
-                self.worker.schedule_pending_result_upload(job_id, path)
+                self.defer_failed_upload(job_id, path, exc)
             except PullwiseRequestError as exc:
-                self.worker.last_error = f"result upload retry failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
-                self.worker.schedule_pending_result_upload(job_id, path)
+                self.defer_failed_upload(job_id, path, exc)
             except Exception as exc:
-                self.worker.last_error = f"result upload failed for {job_id}: {redact_secrets(str(exc), self.config)}"[:500]
-                self.worker.schedule_pending_result_upload(job_id, path)
+                self.defer_failed_upload(job_id, path, exc)
 
     def clear_error(self, job_id: str) -> None:
         if not self.worker.last_error:
             return
         prefixes = (
             f"result upload retry failed for {job_id}:",
+            f"result upload retry deferred for {job_id}",
             f"result upload failed for {job_id}:",
             f"result upload deferred for {job_id}:",
+            f"result upload dead-lettered for {job_id}:",
         )
         if any(self.worker.last_error.startswith(prefix) for prefix in prefixes):
             self.worker.last_error = None
@@ -320,11 +345,22 @@ class ResultUploadManager:
             self.pending_uploads[job_id] = (future, path)
 
     def upload_file(self, path: Path) -> None:
-        job_id, payload = self.record(path)
+        record = self.read_record_data(path)
+        job_id = safe_job_id(record.get("job_id"))
+        delay_seconds = self.pending_retry_delay_seconds(record)
+        if delay_seconds > 0:
+            self.wait_before_retry(job_id, min(delay_seconds, self.pending_backoff_max_seconds()))
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise PendingResultUploadRecordError("pending result upload payload must be an object")
         self.worker.upload_result_with_retry(job_id, payload)
         path.unlink(missing_ok=True)
 
     def record(self, path: Path) -> tuple[str, dict]:
+        record = self.read_record_data(path)
+        return safe_job_id(record.get("job_id")), record["payload"]
+
+    def read_record_data(self, path: Path) -> dict:
         if path.parent.is_symlink():
             raise PendingResultUploadRecordError("pending result upload directory must not be a symlink")
         if path.is_symlink():
@@ -345,7 +381,10 @@ class ResultUploadManager:
         payload = record.get("payload")
         if not isinstance(payload, dict):
             raise PendingResultUploadRecordError("pending result upload payload must be an object")
-        return job_id, payload
+        normalized = dict(record)
+        normalized["job_id"] = job_id
+        normalized["payload"] = payload
+        return normalized
 
     def write_record(self, path: Path, record: dict) -> None:
         payload = json.dumps(record, ensure_ascii=False, sort_keys=True)
@@ -357,11 +396,14 @@ class ResultUploadManager:
         pending_dir = result_upload_dir(self.config.work_dir)
         pending_dir.mkdir(parents=True, exist_ok=True)
         path = result_upload_file(self.config.work_dir, job_id)
+        now = int(time.time())
         self.write_record(
             path,
             {
                 "job_id": safe_job_id(job_id),
-                "created_at": int(time.time()),
+                "created_at": now,
+                "attempts": 0,
+                "next_attempt_at": 0,
                 "payload": payload,
             },
         )
@@ -386,6 +428,89 @@ class ResultUploadManager:
         self.worker.last_error = f"result upload deferred for {job_id}: {redact_secrets(str(error), self.config)}"[:500]
         return False
 
+    def pending_record_int(self, record: dict, key: str, default: int) -> int:
+        try:
+            return int(record.get(key, default))
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    def pending_record_created_at(self, record: dict, path: Path, now: int) -> int:
+        created_at = self.pending_record_int(record, "created_at", 0)
+        if created_at > 0:
+            return created_at
+        try:
+            stat_result = path.lstat()
+            return int(stat_result.st_mtime)
+        except OSError:
+            return now
+
+    def pending_retry_delay_seconds(self, record: dict) -> int:
+        next_attempt_at = self.pending_record_int(record, "next_attempt_at", 0)
+        if next_attempt_at <= 0:
+            return 0
+        return max(0, next_attempt_at - int(time.time()))
+
+    def pending_backoff_seconds(self, attempts: int) -> int:
+        exponent = min(max(0, attempts - 1), 10)
+        return min(self.pending_backoff_max_seconds(), self.pending_backoff_base_seconds() * (2 ** exponent))
+
+    def pending_dead_letter_reason(self, record: dict, path: Path, now: int) -> str:
+        attempts = self.pending_record_int(record, "attempts", 0)
+        if attempts >= self.pending_max_attempts():
+            return f"exceeded {self.pending_max_attempts()} retry attempts"
+        created_at = self.pending_record_created_at(record, path, now)
+        max_age = self.pending_max_age_seconds()
+        if max_age > 0 and now - created_at >= max_age:
+            return f"exceeded {max_age} seconds pending retention"
+        return ""
+
+    def defer_failed_upload(self, job_id: str, path: Path, exc: Exception) -> None:
+        now = int(time.time())
+        error_text = redact_secrets(str(exc), self.config)
+        try:
+            record = self.read_record_data(path)
+        except PendingResultUploadRecordError as record_exc:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.worker.clear_job_cancel_event_by_id(job_id)
+            self.worker.last_error = (
+                f"pending result upload record permanently invalid for {job_id}: "
+                f"{redact_secrets(str(record_exc), self.config)}"
+            )[:500]
+            return
+        record["created_at"] = self.pending_record_created_at(record, path, now)
+        record["attempts"] = self.pending_record_int(record, "attempts", 0) + 1
+        record["last_attempt_at"] = now
+        record["last_error"] = error_text[:500]
+        reason = self.pending_dead_letter_reason(record, path, now)
+        if reason:
+            self.dead_letter(path, safe_job_id(job_id), record, reason)
+            self.worker.clear_job_cancel_event_by_id(job_id)
+            self.worker.last_error = f"result upload dead-lettered for {job_id}: {reason}; {error_text}"[:500]
+            return
+        delay_seconds = self.pending_backoff_seconds(self.pending_record_int(record, "attempts", 1))
+        record["next_attempt_at"] = now + delay_seconds
+        self.write_record(path, record)
+        self.worker.last_error = (
+            f"result upload retry deferred for {job_id} until {record['next_attempt_at']}: {error_text}"
+        )[:500]
+        self.worker.schedule_pending_result_upload(job_id, path)
+
+    def dead_letter(self, path: Path, job_id: str, record: dict, reason: str) -> Path:
+        pending_dir = result_upload_dir(self.config.work_dir)
+        dead_dir = result_upload_dead_letter_dir(self.config.work_dir)
+        if pending_dir.is_symlink() or dead_dir.is_symlink():
+            raise RuntimeError("pending result upload dead-letter directory must not be a symlink")
+        dead_dir.mkdir(parents=True, exist_ok=True)
+        dead_path = result_upload_dead_letter_file(self.config.work_dir, job_id)
+        dead_record = dict(record)
+        dead_record["dead_letter_at"] = int(time.time())
+        dead_record["dead_letter_reason"] = reason
+        self.write_record(dead_path, dead_record)
+        path.unlink(missing_ok=True)
+        return dead_path
 def protocol_multiline_text(value: object, max_length: int = PROTOCOL_TEXT_MAX_LENGTH) -> str:
     if value is None:
         return ""
@@ -1649,6 +1774,13 @@ def result_upload_file(work_dir: Path, job_id: str) -> Path:
     return result_upload_dir(work_dir) / f"{safe_job_id(job_id)}.json"
 
 
+def result_upload_dead_letter_dir(work_dir: Path) -> Path:
+    return result_upload_dir(work_dir) / _RESULT_UPLOAD_DEAD_LETTER_DIR_NAME
+
+
+def result_upload_dead_letter_file(work_dir: Path, job_id: str) -> Path:
+    return result_upload_dead_letter_dir(work_dir) / f"{safe_job_id(job_id)}.json"
+
 def failed_checkout_marker(checkout_dir: Path) -> Path:
     return checkout_dir.parent / f"{checkout_dir.name}{_FAILED_CHECKOUT_MARKER_SUFFIX}"
 
@@ -1847,6 +1979,7 @@ def clone_repository(job: dict, checkout_dir: Path, *, limits_config: WorkerConf
             if limits_config is not None:
                 enforce_repository_tree_limits(limits_config, job, mirror_dir, resolved_commit)
             clone_checkout_from_mirror(mirror_dir, checkout_dir, clone_url=clone_url, mirror_ref=mirror_ref)
+            touch_repository_mirror(mirror_dir)
             break
         except RepositoryTooLargeError:
             remove_checkout_dir(checkout_dir)
@@ -1899,6 +2032,13 @@ def ensure_repository_mirror(mirror_dir: Path, clone_url: str, env: dict[str, st
     else:
         run_git_command(["git", "-C", str(mirror_dir), "remote", "set-url", "origin", clone_url], phase="mirror-remote")
 
+
+def touch_repository_mirror(mirror_dir: Path) -> None:
+    try:
+        now = time.time()
+        os.utime(mirror_dir, (now, now), follow_symlinks=False)
+    except (NotImplementedError, OSError):
+        return
 
 def fetch_repository_ref(mirror_dir: Path, *, branch: str, commit: str, env: dict[str, str] | None) -> tuple[str, str]:
     requested_commit = str(commit or "").strip()
@@ -2228,6 +2368,7 @@ def git_auth_env(clone_token: object, clone_url: object = None, repo: object = N
 _PACKAGE_SCRIPT_NAMES = ["dev", "start", "build", "test", "lint", "typecheck", "check"]
 _REPO_CACHE_DIR_NAME = ".pullwise-repo-cache"
 _RESULT_UPLOAD_DIR_NAME = ".pullwise-result-uploads"
+_RESULT_UPLOAD_DEAD_LETTER_DIR_NAME = "dead-letter"
 _CHECKOUT_RUNTIME_DIR_NAMES.add(_REPO_CACHE_DIR_NAME)
 _CHECKOUT_RUNTIME_DIR_NAMES.add(_RESULT_UPLOAD_DIR_NAME)
 _LOCAL_TEXT_FILE_MAX_BYTES = 2 * 1024 * 1024
