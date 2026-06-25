@@ -1281,7 +1281,15 @@ class Worker:
         if self.job_cancel_requested(job_id):
             raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
         try:
-            write_scan_progress_summary(config, job_id, phase, progress, message, logs_summary)
+            write_scan_progress_summary(
+                config,
+                job_id,
+                phase,
+                progress,
+                message,
+                logs_summary,
+                log_time=int(time.time()),
+            )
         except Exception:
             pass
 
@@ -1299,13 +1307,22 @@ class Worker:
         active_config = config or self.config
         if self.job_cancel_requested(job_id):
             raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
+        log_time = int(time.time())
         if write_local:
             try:
-                write_scan_progress_summary(active_config, job_id, phase, progress, message, logs_summary)
+                write_scan_progress_summary(
+                    active_config,
+                    job_id,
+                    phase,
+                    progress,
+                    message,
+                    logs_summary,
+                    log_time=log_time,
+                )
             except Exception:
                 pass
         try:
-            self.client.progress(job_id, phase, progress, message, logs_summary)
+            self.client.progress(job_id, phase, progress, message, logs_summary, log_time=log_time)
             return True
         except PullwiseHTTPError as exc:
             if exc.status_code == 409:

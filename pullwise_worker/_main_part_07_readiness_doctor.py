@@ -59,6 +59,8 @@ def write_scan_progress_summary(
     progress: int,
     message: str = "",
     logs_summary: str = "",
+    *,
+    log_time: int | None = None,
 ) -> None:
     config.log_dir.mkdir(parents=True, exist_ok=True)
     path = config.log_dir / "scan-summary.log"
@@ -66,8 +68,12 @@ def write_scan_progress_summary(
         safe_progress = max(0, min(100, int(progress or 0)))
     except (TypeError, ValueError):
         safe_progress = 0
+    try:
+        safe_log_time = int(log_time if log_time is not None else time.time())
+    except (TypeError, ValueError):
+        safe_log_time = int(time.time())
     payload = {
-        "time": int(time.time()),
+        "time": safe_log_time,
         "job_id": job_id,
         "status": "progress",
         "phase": clean_protocol_text(phase, 80),

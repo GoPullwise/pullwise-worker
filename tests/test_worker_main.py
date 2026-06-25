@@ -16,7 +16,7 @@ import unittest
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from codereview.utils.process import ProcessCancelled, ProcessResult, clear_process_cancel_event, process_cancel_requested, run_process, set_process_cancel_event
 
@@ -392,6 +392,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 63,
                 "Discovery 1/3",
                 "run=gv stage=finder progress=1/3",
+                log_time=ANY,
             )
             self.assertEqual(summary.read_text(encoding="utf-8"), "already-recorded\n")
 
@@ -1224,10 +1225,19 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             return Response()
 
         with patch.object(worker_main.urllib.request, "urlopen", side_effect=fake_urlopen):
-            client.progress("job_1", "ai\nbad", 80, f"secret-token\n{'x' * 1000}", f"secret-token {'y' * 2000}")
+            client.progress(
+                "job_1",
+                "ai\nbad",
+                80,
+                f"secret-token\n{'x' * 1000}",
+                f"secret-token {'y' * 2000}",
+                log_time=1700000100,
+            )
 
         payload = captured["payload"]
         self.assertEqual(payload["phase"], "ai")
+        self.assertEqual(payload["started_at"], 1700000100)
+        self.assertEqual(payload["log_time"], 1700000100)
         self.assertEqual(payload["message"], "[redacted]")
         self.assertLessEqual(len(payload["logs_summary"]), 1000)
         self.assertNotIn("secret-token", payload["logs_summary"])
@@ -1896,8 +1906,16 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             }
             progress_messages: list[str] = []
 
-            def fake_progress(_job_id: str, _phase: str, _progress: int, message: str = "", logs_summary: str = "") -> None:
-                del _job_id, _phase, _progress, logs_summary
+            def fake_progress(
+                _job_id: str,
+                _phase: str,
+                _progress: int,
+                message: str = "",
+                logs_summary: str = "",
+                *,
+                log_time: int | None = None,
+            ) -> None:
+                del _job_id, _phase, _progress, logs_summary, log_time
                 progress_messages.append(message)
 
             def fake_graph_verified(_config: object, _job: dict, _checkout_dir: Path, progress_callback=None) -> dict:
@@ -1986,8 +2004,16 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             }
             progress_updates: list[dict] = []
 
-            def fake_progress(_job_id: str, _phase: str, progress: int, message: str = "", logs_summary: str = "") -> None:
-                del _job_id, _phase
+            def fake_progress(
+                _job_id: str,
+                _phase: str,
+                progress: int,
+                message: str = "",
+                logs_summary: str = "",
+                *,
+                log_time: int | None = None,
+            ) -> None:
+                del _job_id, _phase, log_time
                 progress_updates.append({"progress": progress, "message": message, "logs_summary": logs_summary})
 
             def fake_graph_verified(_config: object, _job: dict, _checkout_dir: Path, progress_callback=None) -> dict:
