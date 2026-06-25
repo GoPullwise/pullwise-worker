@@ -48,6 +48,9 @@ class AppServerTurn:
 _APP_SERVER_CLIENTS_LOCK = threading.Lock()
 _APP_SERVER_CLIENTS: dict[tuple[str, str, str, str, str], "CodexAppServerClient"] = {}
 _APP_SERVER_LOCK_FILE = ".pullwise-app-server.lock"
+MAX_STORED_TURN_EVENTS = 2000
+MAX_STORED_COMMAND_OUTPUT_CHARS = 32_000
+MAX_STORED_AGENT_MESSAGE_CHARS = 64_000
 
 
 def app_server_key(command: str, env: dict[str, str] | None) -> tuple[str, str, str, str, str]:
@@ -250,6 +253,17 @@ def app_server_state_lock_path(env: dict[str, str] | None) -> Path | None:
     return None
 
 
+def app_server_process_cwd(env: dict[str, str] | None, fallback: Path) -> Path:
+    source = env or {}
+    for key in ("HOME", "CODEX_HOME", "USERPROFILE"):
+        value = str(source.get(key) or "").strip()
+        if not value:
+            continue
+        path = Path(value)
+        if path.is_dir():
+            return path
+    return fallback
+
 def app_server_lock_timeout_seconds(env: dict[str, str] | None) -> int:
     return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_LOCK_TIMEOUT_SECONDS"), 60)
 
@@ -259,7 +273,7 @@ def get_codex_app_server_client(command: str, env: dict[str, str] | None, cwd: P
     with _APP_SERVER_CLIENTS_LOCK:
         client = _APP_SERVER_CLIENTS.get(key)
         if client is None or client.is_closed():
-            client = CodexAppServerClient(command=command, env=env, cwd=cwd)
+            client = CodexAppServerClient(command=command, env=env, cwd=app_server_process_cwd(env, cwd))
             _APP_SERVER_CLIENTS[key] = client
     client.ensure_started()
     return client
@@ -299,14 +313,12 @@ def run_codex_app_server_turn(
             )
             break
         except ProcessCancelled:
-            if client is not None:
-                client.close()
             raise
         except Exception as exc:
-            if client is not None:
-                client.close()
+            if client is not None and app_server_error_requires_restart(exc):
+                client.close(str(exc))
             if attempt == 0 and app_server_safe_to_retry(exc):
-                time.sleep(1)
+                time.sleep(app_server_retry_delay_seconds(attempt))
                 continue
             return ProcessResult(
                 process_command,
@@ -338,7 +350,7 @@ def run_codex_app_server_turn(
             )
         )
         if client is not None and auth_error:
-            client.close()
+            client.close(f"codex app-server terminal auth error: {turn.error}")
         return ProcessResult(process_command, str(cd), 1, events_text[-65536:], turn.error, duration_ms, stdout_path=str(events_file or ""))
     text = final_assistant_text(turn)
     if not text:
@@ -346,6 +358,29 @@ def run_codex_app_server_turn(
     write_text(output_file, text)
     return ProcessResult(process_command, str(cd), 0, events_text[-65536:], "", duration_ms, stdout_path=str(events_file or ""))
 
+
+def stored_app_server_event(message: dict) -> dict | None:
+    method = str(message.get("method") or "")
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    if method in {"turn/started", "turn/completed"}:
+        return message
+    if method != "item/completed":
+        return None
+    item = params.get("item") if isinstance(params.get("item"), dict) else {}
+    item_type = item.get("type")
+    if item_type == "commandExecution":
+        stored_item = dict(item)
+        stored_item["aggregatedOutput"] = str(stored_item.get("aggregatedOutput") or "")[-MAX_STORED_COMMAND_OUTPUT_CHARS:]
+    elif item_type == "agentMessage":
+        stored_item = {"type": "agentMessage", "text": str(item.get("text") or "")[-MAX_STORED_AGENT_MESSAGE_CHARS:]}
+    else:
+        return None
+    stored_params = {
+        "threadId": params.get("threadId"),
+        "turnId": params.get("turnId"),
+        "item": stored_item,
+    }
+    return {"method": method, "params": stored_params}
 
 def final_assistant_text(turn: AppServerTurn) -> str:
     for text in reversed(turn.assistant_messages):
@@ -374,6 +409,7 @@ class CodexAppServerClient:
         self._ready = False
         self._closed = False
         self._state_lock: AppServerStateLock | None = None
+        self._terminal_error = ""
 
     def ensure_started(self) -> None:
         with self._start_lock:
@@ -500,8 +536,9 @@ class CodexAppServerClient:
         return response.get("result") if isinstance(response.get("result"), dict) else {}
 
     def _start_locked(self) -> None:
-        self.close()
+        self.close("codex app-server restarting")
         self._closed = False
+        self._terminal_error = ""
         prepare_app_server_state(self.env)
         state_lock = AppServerStateLock(
             app_server_state_lock_path(self.env),
@@ -545,10 +582,10 @@ class CodexAppServerClient:
                 raise RuntimeError(f"failed to initialize codex app-server: {exc}; stderr: {details}") from exc
             raise
 
-    def close(self) -> None:
+    def close(self, reason: str = "codex app-server closed") -> None:
         self._closed = True
         self._ready = False
-        self._fail_pending("codex app-server closed")
+        self._fail_pending(reason)
         with self._lock:
             self._started_at = 0.0
             self._completed_turns = 0
@@ -628,6 +665,8 @@ class CodexAppServerClient:
                 self._handle_message(message)
         except (OSError, ValueError):
             pass
+        with self._lock:
+            self._terminal_error = "codex app-server stdout closed"
         self._fail_pending("codex app-server stdout closed")
 
     def _stderr_loop(self) -> None:
@@ -669,7 +708,11 @@ class CodexAppServerClient:
             turn = self._turns.get(thread_id)
         if turn is None:
             return
-        turn.events.append(message)
+        stored_event = stored_app_server_event(message)
+        if stored_event is not None:
+            turn.events.append(stored_event)
+            if len(turn.events) > MAX_STORED_TURN_EVENTS:
+                del turn.events[: len(turn.events) - MAX_STORED_TURN_EVENTS]
         method = str(message.get("method") or "")
         if method == "turn/started":
             turn.turn_id = str((params.get("turn") or {}).get("id") or turn.turn_id)
@@ -716,24 +759,50 @@ def app_server_control_timeout_seconds(timeout_seconds: int) -> int:
 
 
 def app_server_safe_to_retry(exc: Exception) -> bool:
-    text = str(exc)
+    text = str(exc).lower()
     return (
         "request initialize timed out" in text
         or "request thread/start timed out" in text
         or "initialize failed" in text
         or "stdout closed" in text
         or "database is locked" in text
-        or "disk I/O error" in text
+        or "disk i/o error" in text
         or "failed to load configuration" in text
+        or "overloaded" in text
+        or "too many requests" in text
+        or "429" in text
     )
 
 
+def app_server_error_requires_restart(exc: Exception) -> bool:
+    text = str(exc).lower()
+    terminal_markers = (
+        "stdout closed",
+        "database is locked",
+        "disk i/o error",
+        "failed to load configuration",
+        "failed to initialize codex app-server",
+        "unauthorized",
+        "failed to refresh token",
+        "access token could not be refreshed",
+        "refresh token was already used",
+        "not authenticated",
+        "authentication required",
+        "login required",
+    )
+    return any(marker in text for marker in terminal_markers)
+
+
+def app_server_retry_delay_seconds(attempt: int) -> float:
+    return min(8.0, 1.0 * (2 ** max(0, int(attempt)))) + (0.05 * (os.getpid() % 7))
+
+
 def app_server_max_age_seconds(env: dict[str, str] | None) -> int:
-    return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS"), 2400)
+    return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS"), 14400)
 
 
 def app_server_max_turns(env: dict[str, str] | None) -> int:
-    return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_TURNS"), 48)
+    return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_TURNS"), 512)
 
 
 def parse_non_negative_int(value: object, default: int) -> int:

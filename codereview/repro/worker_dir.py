@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def create_worker_dir(checkout: Path, worker: Path, candidate: dict) -> Path:
             if checkout_current.returncode != 0:
                 raise RuntimeError(f"worker checkout failed: {(checkout_current.stderr or checkout_current.stdout)[-500:]}")
     else:
-        shutil.copytree(checkout, repo, ignore=_copytree_ignore)
+        _copy_snapshot_tree(checkout, repo)
     for child in ("logs", "repro", "home", "tmp", "cache"):
         ensure_dir(worker / child)
     payload = json.dumps(candidate, ensure_ascii=False, indent=2)
@@ -37,6 +38,20 @@ def create_worker_dir(checkout: Path, worker: Path, candidate: dict) -> Path:
     write_text(worker / "candidate.json", payload)
     return worker
 
+
+
+def _copy_snapshot_tree(checkout: Path, repo: Path) -> None:
+    if os.name != "nt":
+        copied = run_process(
+            ["cp", "-a", "--reflink=auto", str(checkout), str(repo)],
+            cwd=checkout.parent,
+            timeout=600,
+        )
+        if copied.returncode == 0:
+            return
+        if repo.exists() and not repo.is_symlink():
+            shutil.rmtree(repo)
+    shutil.copytree(checkout, repo, ignore=_copytree_ignore)
 
 def _reset_worker_dir(worker: Path) -> None:
     if not worker.exists() and not worker.is_symlink():

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
 
 from ..utils.paths import safe_relative_path
-from .file_hashes import line_count, looks_binary, sha256_file
+from .file_hashes import analyze_file
 
 
 EXCLUDED_DIRS = {
@@ -42,14 +43,14 @@ GENERATED_SUFFIXES = {
 GIT_CAPTURE_MAX_BYTES = 16 * 1024 * 1024
 
 
-def build_git_inventory(checkout: Path, *, include_untracked: bool = True) -> dict:
+def build_git_inventory(checkout: Path, *, include_untracked: bool = True, max_text_file_bytes: int = 1_000_000) -> dict:
     checkout = checkout.resolve(strict=False)
     files = _git_files(checkout, include_untracked=include_untracked)
     source = "git" if files else "filesystem"
     if not files:
         files = _walk_files(checkout)
     statuses = _git_status(checkout)
-    entries = [_file_entry(checkout, rel, statuses.get(rel, "")) for rel in files]
+    entries = [_file_entry(checkout, rel, statuses.get(rel, ""), max_text_file_bytes=max_text_file_bytes) for rel in files]
     return {
         "source": source,
         "files": entries,
@@ -146,15 +147,24 @@ def _bounded_command_output(handle, *, max_bytes: int) -> str | None:
     return handle.read(max_bytes + 1).decode("utf-8", errors="replace")
 
 
-def _file_entry(checkout: Path, rel: str, status: str) -> dict:
+def _file_entry(checkout: Path, rel: str, status: str, *, max_text_file_bytes: int) -> dict:
     path = checkout / rel
     suffix = "".join(path.suffixes[-2:]) if path.suffixes[-2:] else path.suffix
     ext = path.suffix.lower()
     reason = ""
     scope = "analyze"
+    binary = False
+    size_bytes = 0
+    line_total = 0
+    content_hash = ""
     is_symlink = path.is_symlink()
-    is_regular_file = path.is_file() and not is_symlink
-    binary = looks_binary(path) if is_regular_file else False
+    is_regular_file = False
+    try:
+        metadata = path.stat() if not is_symlink else None
+        is_regular_file = bool(metadata is not None and stat.S_ISREG(metadata.st_mode))
+        size_bytes = int(metadata.st_size) if metadata is not None and is_regular_file else 0
+    except OSError:
+        metadata = None
     if _is_excluded_path(rel):
         scope = "excluded"
         reason = "excluded-path"
@@ -164,17 +174,26 @@ def _file_entry(checkout: Path, rel: str, status: str) -> dict:
     elif not is_regular_file:
         scope = "excluded"
         reason = "missing-or-non-file"
-    elif binary:
-        scope = "excluded"
-        reason = "binary-file"
     elif suffix.lower() in GENERATED_SUFFIXES or ext.lower() in GENERATED_SUFFIXES:
         scope = "excluded"
         reason = "generated-or-binary-extension"
+    elif size_bytes > max(0, int(max_text_file_bytes or 0)):
+        scope = "excluded"
+        reason = "oversized-text-file"
+    else:
+        analysis = analyze_file(path)
+        binary = analysis.binary
+        if binary:
+            scope = "excluded"
+            reason = "binary-file"
+        else:
+            line_total = analysis.line_count
+            content_hash = analysis.content_hash
     return {
         "path": rel,
-        "size_bytes": path.stat().st_size if is_regular_file else 0,
-        "line_count": line_count(path) if is_regular_file and not binary else 0,
-        "content_hash": sha256_file(path) if is_regular_file else "",
+        "size_bytes": size_bytes,
+        "line_count": line_total,
+        "content_hash": content_hash,
         "extension": ext,
         "git_status": status,
         "scope": scope,

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import sys
 import threading
@@ -30,6 +31,7 @@ from .utils.process import ProcessCancelled, process_cancel_requested, raise_if_
 ProgressCallback = Callable[[dict], None]
 ENGINE_VERSION = "simple-full-repository/1"
 MAX_EVENT_BYTES = 8 * 1024 * 1024
+MAX_EVENT_LINE_CHARS = 2 * 1024 * 1024
 MAX_COMMAND_OUTPUT_CHARS = 32_000
 MAX_DEBUG_REASON_CHARS = 800
 MAX_REPORT_TEXT_CHARS = 4_000
@@ -97,6 +99,14 @@ _SCRIPT_FILE_SUFFIXES = {
     ".sh",
     ".ts",
 }
+_INLINE_CODE_FLAGS = {
+    "node": {"-e", "--eval", "-p", "--print"},
+    "php": {"-r"},
+    "python": {"-c"},
+    "python3": {"-c"},
+    "ruby": {"-e"},
+}
+_INLINE_SHELLS = {"bash", "sh", "zsh"}
 _MAX_HARNESS_BYTES = 256 * 1024
 
 
@@ -252,6 +262,7 @@ class SimpleSettings:
     max_batch_bytes: int
     discovery_timeout_seconds: int
     verification_timeout_seconds: int
+    scan_deadline_seconds: int
     output_language: str
 
 
@@ -278,6 +289,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     raw_config = read_json(checkout / ".codereview" / "config.json", default={})
     raw_config = raw_config if isinstance(raw_config, dict) else {}
     settings = load_simple_settings(raw_config, config)
+    deadline_at = time.monotonic() + settings.scan_deadline_seconds if settings.scan_deadline_seconds > 0 else 0.0
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     run = checkout / ".codereview" / "runs" / run_id
     ensure_dir(run)
@@ -294,7 +306,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     _emit(progress, "setup", "Preparing simple full-repository review", run_id=run_id)
 
     _emit(progress, "inventory", "Building full repository inventory", run_id=run_id)
-    inventory = build_git_inventory(checkout, include_untracked=config.scan.include_untracked)
+    inventory = build_git_inventory(checkout, include_untracked=config.scan.include_untracked, max_text_file_bytes=config.scope.max_text_file_bytes)
     inventory_files = analyzable_files(inventory)
     if not inventory_files:
         return _write_reports(
@@ -319,7 +331,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     _emit(progress, "snapshot", "Creating immutable full-repository snapshot", run_id=run_id)
     snapshot_manifest = create_immutable_snapshot(checkout, inventory, run)
     snapshot_repo = Path(str(snapshot_manifest["snapshot_repo"]))
-    snapshot_state_before = capture_source_state(snapshot_repo, include_untracked=True)
+    snapshot_state_before = capture_source_state(snapshot_repo, include_untracked=True, max_text_file_bytes=config.scope.max_text_file_bytes)
     write_json(run / "snapshot.json", snapshot_manifest)
     write_json(run / "snapshot-source-state-before.json", snapshot_state_before)
 
@@ -422,6 +434,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         stop_event,
         progress,
         run_id,
+        deadline_at,
     )
     confirmed: list[dict] = []
     for result in verification_results:
@@ -436,11 +449,11 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
                 }
             )
 
-    snapshot_state_after = capture_source_state(snapshot_repo, include_untracked=True)
+    snapshot_state_after = capture_source_state(snapshot_repo, include_untracked=True, max_text_file_bytes=config.scope.max_text_file_bytes)
     write_json(run / "snapshot-source-state-after.json", snapshot_state_after)
     if source_state_changed(snapshot_state_before, snapshot_state_after):
         raise RuntimeError("immutable snapshot changed during simple full-repository review")
-    source_state_after = capture_source_state(checkout, include_untracked=config.scan.include_untracked)
+    source_state_after = capture_source_state(checkout, include_untracked=config.scan.include_untracked, max_text_file_bytes=config.scope.max_text_file_bytes)
     write_json(run / "source-state-after.json", source_state_after)
     if config.scan.fail_on_source_change and source_state_changed(source_state_before, source_state_after):
         raise RuntimeError("source checkout changed during simple full-repository review")
@@ -466,9 +479,9 @@ def load_simple_settings(raw_config: dict, config: ReviewConfig) -> SimpleSettin
     simple = raw_config.get("simple") if isinstance(raw_config.get("simple"), dict) else {}
     mode_defaults = {
         "fast": {"turns": 2, "candidates": 8},
-        "standard": {"turns": 3, "candidates": 20},
-        "deep": {"turns": 4, "candidates": 50},
-    }.get(config.mode, {"turns": 3, "candidates": 20})
+        "standard": {"turns": 3, "candidates": 10},
+        "deep": {"turns": 4, "candidates": 20},
+    }.get(config.mode, {"turns": 3, "candidates": 10})
     return SimpleSettings(
         discovery_turns=_bounded_int(simple.get("discovery_turns"), mode_defaults["turns"], 1, 16),
         max_discovery_turns=_bounded_int(simple.get("max_discovery_turns"), 48, 1, 64),
@@ -483,6 +496,7 @@ def load_simple_settings(raw_config: dict, config: ReviewConfig) -> SimpleSettin
         max_batch_bytes=_bounded_int(simple.get("max_batch_bytes"), 1_500_000, 100_000, 5_000_000),
         discovery_timeout_seconds=_bounded_int(simple.get("discovery_timeout_seconds"), 900, 60, 3600),
         verification_timeout_seconds=_bounded_int(simple.get("verification_timeout_seconds"), 1200, 60, 7200),
+        scan_deadline_seconds=_bounded_int(simple.get("scan_deadline_seconds"), {"fast": 1800, "standard": 3600, "deep": 7200}.get(config.mode, 3600), 0, 21600),
         output_language=_clean_text(simple.get("output_language"), 80) or "English",
     )
 
@@ -806,12 +820,14 @@ def parse_command_events(path: Path) -> list[CommandEvidence]:
         metadata = path.stat()
     except OSError:
         return []
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_EVENT_BYTES:
+    if not stat.S_ISREG(metadata.st_mode):
         return []
     commands: list[CommandEvidence] = []
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
+                if len(line) > MAX_EVENT_LINE_CHARS:
+                    continue
                 try:
                     message = json.loads(line)
                 except json.JSONDecodeError:
@@ -834,10 +850,11 @@ def parse_command_events(path: Path) -> list[CommandEvidence]:
                         status=str(item.get("status") or "").strip(),
                     )
                 )
+                if len(commands) > 400:
+                    del commands[:-200]
     except OSError:
         return []
     return commands[-200:]
-
 
 def validate_verification_result(
     candidate: dict,
@@ -882,6 +899,10 @@ def validate_verification_result(
     actual = matching[-1]
     if not command_is_reproduction(actual.command):
         raise VerificationRejected("recorded command is inspection-only and does not reproduce behavior")
+    if command_uses_inline_code(actual.command):
+        raise VerificationRejected("final reproduction command must execute a repro harness file, not inline code")
+    if not command_references_repro_harness(actual.command, worker_repo):
+        raise VerificationRejected("final reproduction command must execute a harness under .codereview/repro")
     exercised_files = [safe_relative_path(value) for value in payload.get("exercised_files", [])]
     exercised_files = [value for value in exercised_files if value]
     primary_files = [safe_relative_path(item.get("file")) for item in candidate.get("evidence", []) if isinstance(item, dict)]
@@ -918,6 +939,34 @@ def command_matches(declared: str, actual: str) -> bool:
 
 def command_is_reproduction(command: str) -> bool:
     return any(_segment_executes_code(segment) for segment in _shell_command_segments(command))
+
+
+def command_uses_inline_code(command: str) -> bool:
+    for segment in _shell_command_segments(command):
+        tokens = _unwrap_command_tokens(segment)
+        if not tokens:
+            continue
+        name = Path(tokens[0]).name.lower()
+        arguments = tokens[1:]
+        if name in _INLINE_SHELLS and "-c" in arguments:
+            return True
+        forbidden = _INLINE_CODE_FLAGS.get(name, set())
+        for argument in arguments:
+            lowered = argument.lower()
+            if lowered in forbidden or any(lowered.startswith(f"{flag}=") for flag in forbidden):
+                return True
+    return False
+
+
+def command_references_repro_harness(command: str, worker_repo: Path) -> bool:
+    for path in _command_referenced_files(command, worker_repo):
+        try:
+            relative = path.relative_to(worker_repo).as_posix()
+        except ValueError:
+            continue
+        if relative.startswith(".codereview/repro/"):
+            return True
+    return False
 
 
 def verification_source_is_grounded(
@@ -1163,22 +1212,48 @@ def _run_verifications(
     stop_event: threading.Event,
     progress: ProgressCallback | None,
     run_id: str,
+    deadline_at: float = 0.0,
 ) -> list[dict]:
     schema_path = run / "schemas" / "verification.schema.json"
     write_json(schema_path, VERIFICATION_SCHEMA)
+    reuse_lane = settings.verification_parallel <= 1
+    lane_root = run / "workers" / "verification-lanes" / "lane-0"
+    lane_repo = lane_root / "repo"
+    lane_source_state: dict | None = None
+
+    def prepare_workspace(candidate_id: str, candidate: dict) -> tuple[Path, Path, dict, bool]:
+        nonlocal lane_source_state
+        worker_root = run / "workers" / "verification" / candidate_id
+        _reset_verification_artifact_dir(worker_root)
+        write_json(worker_root / "input_candidate.json", candidate)
+        write_json(worker_root / "candidate.json", candidate)
+        if reuse_lane:
+            if lane_source_state is None or not lane_repo.is_dir():
+                create_worker_dir(snapshot_repo, lane_root, candidate)
+                lane_source_state = capture_source_state(lane_repo, include_untracked=True)
+            else:
+                _reset_lane_repro_dir(lane_repo)
+            return worker_root, lane_repo, lane_source_state, True
+        create_worker_dir(snapshot_repo, worker_root, candidate)
+        worker_repo = worker_root / "repo"
+        return worker_root, worker_repo, capture_source_state(worker_repo, include_untracked=True), False
 
     def execute(candidate: dict) -> dict:
+        nonlocal lane_source_state
         candidate_id = str(candidate.get("candidate_id") or "candidate")
         if stop_event.is_set() or process_cancel_requested():
             raise ProcessCancelled("verification cancelled")
-        worker_root = run / "workers" / "verification" / candidate_id
-        create_worker_dir(snapshot_repo, worker_root, candidate)
-        worker_repo = worker_root / "repo"
+        remaining_seconds = _deadline_remaining_seconds(deadline_at)
+        if deadline_at and remaining_seconds < 60:
+            return {"candidate_id": candidate_id, "confirmed": False, "reason": "global scan deadline exhausted before verification"}
+        verification_timeout = settings.verification_timeout_seconds
+        if deadline_at:
+            verification_timeout = min(verification_timeout, max(60, remaining_seconds))
+        worker_root, worker_repo, source_before, using_lane = prepare_workspace(candidate_id, candidate)
         candidate_dir = worker_repo / ".codereview" / "simple"
         ensure_dir(candidate_dir)
         candidate_path = candidate_dir / "candidate.json"
         write_json(candidate_path, candidate)
-        source_before = capture_source_state(worker_repo, include_untracked=True)
         output = worker_root / "output.json"
         events = worker_root / "events.jsonl"
         try:
@@ -1189,14 +1264,22 @@ def _run_verifications(
                 output_file=output,
                 events_file=events,
                 sandbox="workspace-write",
-                timeout_seconds=settings.verification_timeout_seconds,
+                timeout_seconds=verification_timeout,
                 codex=codex,
             )
+        except ProcessCancelled:
+            raise
         except Exception as exc:
+            if using_lane:
+                lane_source_state = None
             if _looks_like_readiness_error(str(exc)):
                 stop_event.set()
-            raise
+                raise
+            return {"candidate_id": candidate_id, "confirmed": False, "reason": f"verification turn failed: {_clean_text(str(exc), MAX_DEBUG_REASON_CHARS)}"}
         source_after = capture_source_state(worker_repo, include_untracked=True)
+        changed = source_state_changed(source_before, source_after)
+        if using_lane and changed:
+            lane_source_state = None
         commands = parse_command_events(events)
         try:
             actual, marker = validate_verification_result(
@@ -1204,10 +1287,12 @@ def _run_verifications(
                 payload,
                 commands,
                 worker_repo,
-                source_changed=source_state_changed(source_before, source_after),
+                source_changed=changed,
             )
         except VerificationRejected as exc:
             return {"candidate_id": candidate_id, "confirmed": False, "reason": str(exc)}
+        if using_lane:
+            lane_source_state = source_before
         event_log_path = f"workers/verification/{candidate_id}/events.jsonl"
         observed = _clean_text(payload.get("observed_behavior"), 2_000)
         expected = _clean_text(payload.get("expected_behavior"), 2_000)
@@ -1279,6 +1364,39 @@ def _run_verifications(
     )
 
 
+def _reset_verification_artifact_dir(worker_root: Path) -> None:
+    if worker_root.is_symlink():
+        worker_root.unlink()
+    elif worker_root.exists():
+        if not is_within(worker_root, worker_root.parent):
+            raise RuntimeError(f"refusing to reset verification artifact dir outside worker root: {worker_root}")
+        if worker_root.is_dir():
+            shutil.rmtree(worker_root)
+        else:
+            worker_root.unlink()
+    ensure_dir(worker_root)
+
+
+def _reset_lane_repro_dir(worker_repo: Path) -> None:
+    repro = worker_repo / ".codereview" / "repro"
+    if repro.is_symlink():
+        repro.unlink()
+    elif repro.exists():
+        if not is_within(repro, worker_repo):
+            raise RuntimeError(f"refusing to reset repro dir outside lane repo: {repro}")
+        if repro.is_dir():
+            shutil.rmtree(repro)
+        else:
+            repro.unlink()
+    ensure_dir(repro)
+
+
+def _deadline_remaining_seconds(deadline_at: float) -> int:
+    if not deadline_at:
+        return 0
+    return max(0, int(deadline_at - time.monotonic()))
+
+
 def discovery_prompt(assignment_path: str, batch: DiscoveryBatch, settings: SimpleSettings) -> str:
     return f"""You are the coordinator for a full-repository code review. This is not a diff review.
 
@@ -1309,6 +1427,7 @@ Hard rules:
 - Do not modify repository source files. Temporary harnesses may only be created below .codereview/repro/.
 - A finding is confirmed only when an actually executed command exercises the cited repository code and produces deterministic observable evidence.
 - Prefer a small harness below .codereview/repro/ that imports or invokes the cited code. Do not use echo, printf, cat, or a print-only inline snippet as proof.
+- The final reproduction command must execute a normal harness file below .codereview/repro/. Do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof.
 - Execute the exact final reproduction command at least twice. Both runs must produce the same exit code and the same output marker.
 - Set reproduction_command to that exact repeated command.
 - Set output_marker to an exact non-trivial substring present in both runs' real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
@@ -1424,6 +1543,11 @@ def _write_reports(
     }
     planned_files = sum(len(unit.files) for unit in units)
     coverage_complete = not units or len(reviewed_unit_ids) == len(units)
+    verification_budget_dropped = len(
+        [item for item in rejected if item.get("stage") in {"budget", "unit-budget"}]
+    )
+    verification_complete = verification_budget_dropped == 0
+    verification_rejected = len([item for item in rejected if item.get("stage") == "verification"])
     summary = {
         "engine": {
             "version": ENGINE_VERSION,
@@ -1440,7 +1564,13 @@ def _write_reports(
             "plannedUnits": len(units),
             "reviewedUnits": len(reviewed_unit_ids),
             "plannedFiles": planned_files,
-            "complete": coverage_complete,
+            "complete": coverage_complete and verification_complete,
+            "discoveryComplete": coverage_complete,
+            "discoveredCandidates": len(raw_candidates),
+            "validCandidates": len(valid_candidates),
+            "verifiedCandidates": len(selected_candidates),
+            "verificationBudgetDropped": verification_budget_dropped,
+            "verificationComplete": verification_complete,
         },
         "finder": {
             "tasks": len(discovery_results),
@@ -1458,7 +1588,7 @@ def _write_reports(
             "tasks": len(selected_candidates),
             "confirmed": len(confirmed),
             "rejected": 0,
-            "internalRejected": len([item for item in rejected if item.get("stage") == "verification"]),
+            "internalRejected": verification_rejected,
             "blocked": 0,
             "blockedItems": [],
         },
@@ -1473,7 +1603,7 @@ def _write_reports(
         "reports": {
             "confirmed": len(confirmed),
             "rejected": 0,
-            "blocked": 0 if coverage_complete else 1,
+            "blocked": 0 if coverage_complete and verification_complete else 1,
         },
         "codexAccount": account,
     }
@@ -1535,7 +1665,12 @@ def render_debug_markdown(summary: dict, rejected: list[dict]) -> str:
         "# Pullwise review diagnostics",
         "",
         f"- Coverage complete: `{bool((summary.get('coverage') or {}).get('complete'))}`",
+        f"- Discovery complete: `{bool((summary.get('coverage') or {}).get('discoveryComplete'))}`",
+        f"- Verification complete: `{bool((summary.get('coverage') or {}).get('verificationComplete'))}`",
         f"- Raw candidates: `{(summary.get('candidates') or {}).get('raw', 0)}`",
+        f"- Verified candidates: `{(summary.get('coverage') or {}).get('verifiedCandidates', 0)}`",
+        f"- Verification budget dropped: `{(summary.get('coverage') or {}).get('verificationBudgetDropped', 0)}`",
+        f"- Internal verification rejections: `{(summary.get('repro') or {}).get('internalRejected', 0)}`",
         f"- Confirmed: `{(summary.get('reports') or {}).get('confirmed', 0)}`",
         "",
         "Only runtime-confirmed findings are included. Unconfirmed hypotheses are not exposed.",
@@ -1561,7 +1696,8 @@ def init_project(checkout: Path) -> Path:
                     "discovery_parallel": 1,
                     "verification_parallel": 1,
                     "subagents_per_turn": 3,
-                    "max_candidates": 20,
+                    "max_candidates": 10,
+                    "scan_deadline_seconds": 3600,
                     "max_batch_files": 120,
                     "max_batch_bytes": 1500000,
                 },

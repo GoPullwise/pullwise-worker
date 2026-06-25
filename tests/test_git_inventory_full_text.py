@@ -34,6 +34,24 @@ class GitInventoryFullTextTest(unittest.TestCase):
             self.assertEqual(entries["binary.bin"]["scope"], "excluded")
             self.assertNotIn("node_modules/ignored.js", entries)
 
+    def test_max_text_file_bytes_excludes_oversized_text_before_hashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp)
+            (checkout / "small.py").write_text("print('ok')\n", encoding="utf-8")
+            (checkout / "large.json").write_text("x" * 128, encoding="utf-8")
+
+            inventory = build_git_inventory(checkout, include_untracked=True, max_text_file_bytes=64)
+            entries = {
+                str(item.get("path") or ""): item
+                for item in inventory.get("files", [])
+                if isinstance(item, dict)
+            }
+
+            self.assertEqual(entries["small.py"]["scope"], "analyze")
+            self.assertEqual(entries["large.json"]["scope"], "excluded")
+            self.assertEqual(entries["large.json"]["reason"], "oversized-text-file")
+            self.assertEqual(entries["large.json"]["content_hash"], "")
+            self.assertEqual(entries["large.json"]["line_count"], 0)
 
 if __name__ == "__main__":
     unittest.main()

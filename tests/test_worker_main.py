@@ -3559,6 +3559,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     "codexMaxInputChars": 12345,
                     "reproMaxParallel": 3,
                     "reproTimeoutSeconds": 600,
+                    "scanDeadlineSeconds": 1500,
                     "maxRepro": 20,
                 },
                 "deep",
@@ -3582,6 +3583,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["simple"]["max_candidates"], 20)
         self.assertEqual(payload["simple"]["discovery_timeout_seconds"], 300)
         self.assertEqual(payload["simple"]["verification_timeout_seconds"], 600)
+        self.assertEqual(payload["simple"]["scan_deadline_seconds"], 1500)
         self.assertEqual(payload["simple"]["output_language"], "Chinese")
 
     def test_write_graph_verified_codereview_config_does_not_follow_symlink(self) -> None:

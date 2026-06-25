@@ -7,8 +7,8 @@ from pathlib import Path
 from ..inventory.git_inventory import build_git_inventory
 
 
-def capture_source_state(checkout: Path, *, include_untracked: bool = True) -> dict:
-    inventory = build_git_inventory(checkout, include_untracked=include_untracked)
+def capture_source_state(checkout: Path, *, include_untracked: bool = True, max_text_file_bytes: int = 1_000_000) -> dict:
+    inventory = build_git_inventory(checkout, include_untracked=include_untracked, max_text_file_bytes=max_text_file_bytes)
     return source_state_from_inventory(inventory)
 
 

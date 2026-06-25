@@ -15,9 +15,9 @@ GRAPH_VERIFIED_PROGRESS_RANGES = {
     "graph": (34, 50),
     "repository": (50, 53),
     "review_units": (53, 55),
-    "finder": (55, 83),
-    "candidates": (83, 85),
-    "verification": (85, 89),
+    "finder": (55, 80),
+    "candidates": (80, 82),
+    "verification": (82, 94),
     "reproduction": (89, 92),
     "judge": (92, 94),
     "report": (94, GRAPH_VERIFIED_PROGRESS_COMPLETE),
@@ -39,6 +39,9 @@ def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
             "PATH",
             "PULLWISE_CODEX_MAX_INPUT_CHARS",
             "PULLWISE_CODEX_INPUT_MAX_CHARS",
+            "PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS",
+            "PULLWISE_CODEX_APP_SERVER_MAX_TURNS",
+            "PULLWISE_CODEX_APP_SERVER_LOCK_TIMEOUT_SECONDS",
         )
         if provider_env.get(key)
     }
@@ -397,6 +400,12 @@ def write_graph_verified_codereview_config(
         "verification_timeout_seconds": graph_verified_positive_int(
             graph_config.get("reproTimeoutSeconds"), default=1200, minimum=60, maximum=7200
         ),
+        "scan_deadline_seconds": graph_verified_positive_int(
+            graph_config.get("simpleScanDeadlineSeconds") or graph_config.get("scanDeadlineSeconds"),
+            default={"fast": 1800, "standard": 3600, "deep": 7200}.get(graph_verified_mode(mode), 3600),
+            minimum=0,
+            maximum=21600,
+        ),
         "output_language": output_language,
     }
     write_no_follow_text_file(path, json.dumps(current, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
@@ -419,7 +428,7 @@ def graph_verified_repro_limit(value: object, mode: object) -> int:
         number = 0
     if number > 0:
         return min(100, number)
-    return {"fast": 8, "standard": 20, "deep": 50}.get(graph_verified_mode(mode), 20)
+    return {"fast": 6, "standard": 10, "deep": 20}.get(graph_verified_mode(mode), 10)
 
 
 def graph_verified_text(value: object) -> str:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,7 @@ from codereview.simple_review import (
     CommandEvidence,
     DiscoveryBatch,
     ReviewUnit,
+    _run_verifications,
     _write_reports,
     codex_account_preflight,
     command_is_reproduction,
@@ -189,6 +192,28 @@ class SimpleReviewTests(unittest.TestCase):
             self.assertEqual(len(parsed), 1)
             self.assertEqual(parsed[0].exit_code, 0)
             self.assertIn("PULLWISE_REPRO", parsed[0].output)
+
+    def test_command_events_parse_commands_after_oversized_event_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            events = Path(tmp) / "events.jsonl"
+            command = "python3 .codereview/repro/check.py"
+            event = {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "commandExecution",
+                        "command": command,
+                        "cwd": tmp,
+                        "status": "completed",
+                        "exitCode": 0,
+                        "aggregatedOutput": "PULLWISE_REPRO:false",
+                    }
+                },
+            }
+            events.write_text(("x" * (9 * 1024 * 1024)) + "\n" + json.dumps(event) + "\n", encoding="utf-8")
+            parsed = parse_command_events(events)
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0].command, command)
 
     def test_verification_gate_requires_real_command_marker_and_source_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -390,6 +415,38 @@ class SimpleReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "do not ground execution"):
                 validate_verification_result(candidate, payload, commands, repo, source_changed=False)
 
+    def test_verification_gate_rejects_inline_marker_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            candidate = {
+                "candidate_id": "cand-1",
+                "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+            }
+            command = "python3 -c \"print('src/handler.py PULLWISE_REPRO:false')\""
+            payload = {
+                "candidate_id": "cand-1",
+                "status": "confirmed",
+                "safe_to_show_user": True,
+                "reason": "The command claims to reach the bad branch.",
+                "expected_behavior": "The handler should return true.",
+                "observed_behavior": "The handler returns false.",
+                "reproduction_command": command,
+                "output_marker": "PULLWISE_REPRO:false",
+                "exercised_files": ["src/handler.py"],
+                "skeptic_agreed": True,
+                "independent_check": "The skeptic accepted the proof.",
+                "limitations": [],
+            }
+            commands = [
+                CommandEvidence(command=command, cwd=str(repo), exit_code=0, output="src/handler.py PULLWISE_REPRO:false", status="completed"),
+                CommandEvidence(command=command, cwd=str(repo), exit_code=0, output="src/handler.py PULLWISE_REPRO:false", status="completed"),
+            ]
+            with self.assertRaisesRegex(ValueError, "inline code"):
+                validate_verification_result(candidate, payload, commands, repo, source_changed=False)
+
     def test_inspection_command_cannot_smuggle_runtime_name(self) -> None:
         self.assertFalse(command_is_reproduction('echo "python fake proof"'))
         self.assertFalse(command_is_reproduction("cat src/handler.py"))
@@ -416,8 +473,8 @@ class SimpleReviewTests(unittest.TestCase):
                 "summary": {"files": 1, "analyzable_files": 1},
             }
 
-            def source_state(root, include_untracked=True):
-                del include_untracked
+            def source_state(root, include_untracked=True, max_text_file_bytes=1_000_000):
+                del include_untracked, max_text_file_bytes
                 target = Path(root) / "src" / "handler.py"
                 return {"src/handler.py": target.read_text(encoding="utf-8")}
 
@@ -532,6 +589,264 @@ class SimpleReviewTests(unittest.TestCase):
             summary = json.loads(final.with_name("summary.json").read_text(encoding="utf-8"))
             self.assertTrue(summary["coverage"]["complete"])
             self.assertEqual(summary["reports"]["confirmed"], 1)
+    def test_sequential_verification_reuses_single_lane_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            source = snapshot / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            run = root / "run"
+            candidates = [
+                {
+                    "candidate_id": f"cand-{index}",
+                    "expected_behavior": "The handler should return true.",
+                    "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+                }
+                for index in range(2)
+            ]
+            settings = load_simple_settings({"simple": {"verification_parallel": 1}}, ReviewConfig())
+            copy_calls: list[Path] = []
+            codex_cwds: list[Path] = []
+
+            def fake_create_worker(snapshot_repo, worker_root, candidate):
+                del candidate
+                copy_calls.append(Path(worker_root))
+                worker_root = Path(worker_root)
+                if worker_root.exists():
+                    shutil.rmtree(worker_root)
+                worker_root.mkdir(parents=True)
+                shutil.copytree(Path(snapshot_repo), worker_root / "repo")
+                return worker_root
+
+            def fake_codex_json(**kwargs):
+                cd = Path(kwargs["cd"])
+                codex_cwds.append(cd)
+                candidate = json.loads((cd / ".codereview" / "simple" / "candidate.json").read_text(encoding="utf-8"))
+                harness = cd / ".codereview" / "repro" / "check.py"
+                harness.parent.mkdir(parents=True, exist_ok=True)
+                harness.write_text(
+                    "from src.handler import handle\n"
+                    "value = handle()\n"
+                    "print(f'OBSERVED_VALUE:{str(value).lower()}')\n",
+                    encoding="utf-8",
+                )
+                command = "python3 .codereview/repro/check.py"
+                event = {
+                    "method": "item/completed",
+                    "params": {"item": {"type": "commandExecution", "command": command, "cwd": str(cd), "status": "completed", "exitCode": 0, "aggregatedOutput": "OBSERVED_VALUE:false"}},
+                }
+                Path(kwargs["events_file"]).write_text(json.dumps(event) + "\n" + json.dumps(event) + "\n", encoding="utf-8")
+                return {
+                    "candidate_id": candidate["candidate_id"],
+                    "status": "confirmed",
+                    "safe_to_show_user": True,
+                    "reason": "The repeated command observes the same wrong value.",
+                    "expected_behavior": "The handler should return true.",
+                    "observed_behavior": "The handler returns false.",
+                    "reproduction_command": command,
+                    "output_marker": "OBSERVED_VALUE:false",
+                    "exercised_files": ["src/handler.py"],
+                    "skeptic_agreed": True,
+                    "independent_check": "The skeptic independently traced the return statement.",
+                    "limitations": [],
+                }
+
+            with (
+                patch("codereview.simple_review.create_worker_dir", side_effect=fake_create_worker),
+                patch("codereview.simple_review._run_codex_json", side_effect=fake_codex_json),
+            ):
+                results = _run_verifications(snapshot, run, candidates, CodexConfig(), settings, threading.Event(), None, "run-id")
+
+            self.assertEqual(len(copy_calls), 1)
+            self.assertTrue(all(result["confirmed"] for result in results))
+            self.assertEqual(len({path for path in codex_cwds}), 1)
+
+    def test_sequential_verification_rebuilds_lane_after_source_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            source = snapshot / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            run = root / "run"
+            candidates = [
+                {
+                    "candidate_id": "cand-dirty",
+                    "expected_behavior": "The handler should return true.",
+                    "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+                },
+                {
+                    "candidate_id": "cand-clean",
+                    "expected_behavior": "The handler should return true.",
+                    "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+                },
+            ]
+            settings = load_simple_settings({"simple": {"verification_parallel": 1}}, ReviewConfig())
+            copy_calls: list[Path] = []
+
+            def fake_create_worker(snapshot_repo, worker_root, candidate):
+                del candidate
+                copy_calls.append(Path(worker_root))
+                worker_root = Path(worker_root)
+                if worker_root.exists():
+                    shutil.rmtree(worker_root)
+                worker_root.mkdir(parents=True)
+                shutil.copytree(Path(snapshot_repo), worker_root / "repo")
+                return worker_root
+
+            def fake_codex_json(**kwargs):
+                cd = Path(kwargs["cd"])
+                candidate = json.loads((cd / ".codereview" / "simple" / "candidate.json").read_text(encoding="utf-8"))
+                if candidate["candidate_id"] == "cand-dirty":
+                    (cd / "src" / "handler.py").write_text("def handle():\n    return True\n", encoding="utf-8")
+                harness = cd / ".codereview" / "repro" / "check.py"
+                harness.parent.mkdir(parents=True, exist_ok=True)
+                harness.write_text(
+                    "from src.handler import handle\n"
+                    "value = handle()\n"
+                    "print(f'OBSERVED_VALUE:{str(value).lower()}')\n",
+                    encoding="utf-8",
+                )
+                command = "python3 .codereview/repro/check.py"
+                event = {
+                    "method": "item/completed",
+                    "params": {"item": {"type": "commandExecution", "command": command, "cwd": str(cd), "status": "completed", "exitCode": 0, "aggregatedOutput": "OBSERVED_VALUE:false"}},
+                }
+                Path(kwargs["events_file"]).write_text(json.dumps(event) + "\n" + json.dumps(event) + "\n", encoding="utf-8")
+                return {
+                    "candidate_id": candidate["candidate_id"],
+                    "status": "confirmed",
+                    "safe_to_show_user": True,
+                    "reason": "The repeated command observes the same wrong value.",
+                    "expected_behavior": "The handler should return true.",
+                    "observed_behavior": "The handler returns false.",
+                    "reproduction_command": command,
+                    "output_marker": "OBSERVED_VALUE:false",
+                    "exercised_files": ["src/handler.py"],
+                    "skeptic_agreed": True,
+                    "independent_check": "The skeptic independently traced the return statement.",
+                    "limitations": [],
+                }
+
+            with (
+                patch("codereview.simple_review.create_worker_dir", side_effect=fake_create_worker),
+                patch("codereview.simple_review._run_codex_json", side_effect=fake_codex_json),
+            ):
+                results = _run_verifications(snapshot, run, candidates, CodexConfig(), settings, threading.Event(), None, "run-id")
+
+            self.assertEqual(len(copy_calls), 2)
+            self.assertFalse(results[0]["confirmed"])
+            self.assertIn("modified repository source files", results[0]["reason"])
+            self.assertTrue(results[1]["confirmed"])
+
+    def test_verification_turn_failure_rejects_candidate_without_aborting_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            source = snapshot / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            run = root / "run"
+            candidates = [
+                {
+                    "candidate_id": "cand-fail",
+                    "expected_behavior": "The handler should return true.",
+                    "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+                },
+                {
+                    "candidate_id": "cand-pass",
+                    "expected_behavior": "The handler should return true.",
+                    "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+                },
+            ]
+            settings = load_simple_settings({"simple": {"verification_parallel": 1}}, ReviewConfig())
+
+            def fake_codex_json(**kwargs):
+                cd = Path(kwargs["cd"])
+                candidate = json.loads((cd / ".codereview" / "simple" / "candidate.json").read_text(encoding="utf-8"))
+                if candidate["candidate_id"] == "cand-fail":
+                    raise RuntimeError("Codex turn returned invalid structured JSON")
+                harness = cd / ".codereview" / "repro" / "check.py"
+                harness.parent.mkdir(parents=True, exist_ok=True)
+                harness.write_text(
+                    "from src.handler import handle\n"
+                    "value = handle()\n"
+                    "print(f'OBSERVED_VALUE:{str(value).lower()}')\n",
+                    encoding="utf-8",
+                )
+                command = "python3 .codereview/repro/check.py"
+                event = {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "commandExecution",
+                            "command": command,
+                            "cwd": str(cd),
+                            "status": "completed",
+                            "exitCode": 0,
+                            "aggregatedOutput": "OBSERVED_VALUE:false",
+                        }
+                    },
+                }
+                events = Path(kwargs["events_file"])
+                events.parent.mkdir(parents=True, exist_ok=True)
+                events.write_text(json.dumps(event) + "\n" + json.dumps(event) + "\n", encoding="utf-8")
+                return {
+                    "candidate_id": candidate["candidate_id"],
+                    "status": "confirmed",
+                    "safe_to_show_user": True,
+                    "reason": "The repeated command observes the same wrong value.",
+                    "expected_behavior": "The handler should return true.",
+                    "observed_behavior": "The handler returns false.",
+                    "reproduction_command": command,
+                    "output_marker": "OBSERVED_VALUE:false",
+                    "exercised_files": ["src/handler.py"],
+                    "skeptic_agreed": True,
+                    "independent_check": "The skeptic independently traced the return statement.",
+                    "limitations": [],
+                }
+
+            with patch("codereview.simple_review._run_codex_json", side_effect=fake_codex_json):
+                results = _run_verifications(
+                    snapshot,
+                    run,
+                    candidates,
+                    CodexConfig(),
+                    settings,
+                    threading.Event(),
+                    None,
+                    "run-id",
+                    0.0,
+                )
+
+            self.assertFalse(results[0]["confirmed"])
+            self.assertIn("verification turn failed", results[0]["reason"])
+            self.assertTrue(results[1]["confirmed"])
+
+    def test_verification_deadline_rejects_without_starting_codex_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            run = root / "run"
+            candidate = {"candidate_id": "cand-deadline", "evidence": []}
+            settings = load_simple_settings({"simple": {"verification_parallel": 1}}, ReviewConfig())
+            with patch("codereview.simple_review._run_codex_json") as codex_json:
+                results = _run_verifications(
+                    snapshot,
+                    run,
+                    [candidate],
+                    CodexConfig(),
+                    settings,
+                    threading.Event(),
+                    None,
+                    "run-id",
+                    time.monotonic() - 1,
+                )
+            codex_json.assert_not_called()
+            self.assertFalse(results[0]["confirmed"])
+            self.assertIn("global scan deadline", results[0]["reason"])
 
     def test_account_preflight_never_forces_token_refresh(self) -> None:
         class FakeClient:
@@ -651,6 +966,32 @@ class SimpleReviewTests(unittest.TestCase):
             internal = json.loads((run / "diagnostics" / "internal-rejections.json").read_text(encoding="utf-8"))
             self.assertEqual(internal[0]["candidate_id"], "cand-x")
 
+    def test_report_summary_marks_verification_budget_drops_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "run"
+            run.mkdir()
+            unit = ReviewUnit(unit_id="unit-1", area="src", files=("src/a.py",), size_bytes=10, line_count=1)
+            final = _write_reports(
+                run,
+                mode="standard",
+                scan_mode="full-cached",
+                inventory={"summary": {"files": 1, "analyzable_files": 1}},
+                units=[unit],
+                discovery_results=[{"reviewed_unit_ids": ["unit-1"], "candidates": []}],
+                raw_candidates=[{"candidate_id": "cand-1"}],
+                valid_candidates=[{"candidate_id": "cand-1"}, {"candidate_id": "cand-2"}],
+                selected_candidates=[{"candidate_id": "cand-1"}],
+                confirmed=[],
+                rejected=[{"stage": "budget", "candidate_id": "cand-2", "reason": "runtime verification budget exhausted"}],
+                account={},
+                progress=None,
+            )
+            summary = json.loads(final.with_name("summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary["coverage"]["discoveryComplete"])
+            self.assertFalse(summary["coverage"]["verificationComplete"])
+            self.assertFalse(summary["coverage"]["complete"])
+            self.assertEqual(summary["coverage"]["verificationBudgetDropped"], 1)
+            self.assertEqual(summary["reports"]["blocked"], 1)
 
 if __name__ == "__main__":
     unittest.main()

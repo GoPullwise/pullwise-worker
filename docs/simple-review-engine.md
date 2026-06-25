@@ -115,7 +115,8 @@ legacy-compatible graphVerifiedReport/1 payload
 - prompt 只包含规则和 assignment 文件路径，不复制整个源码或大段 manifest。
 - fast/standard/deep 的 discovery 基准 turn 数为 2/3/4；仓库较大时会按 120 文件或 1.5 MB 的批次上限自动增加顺序 turns，硬上限默认 48。
 - 每个 unit 默认最多产生 2 个候选。
-- runtime verification 默认 fast/standard/deep 最多 8/20/50 个候选。
+- runtime verification 默认 fast/standard/deep 最多 6/10/20 个候选；server 显式下发 maxRepro 时仍按计划配置覆盖。
+- 全局 scan deadline 默认 fast/standard/deep 为 30/60/120 分钟；deadline 耗尽后剩余候选进入内部拒绝，不触发整仓重跑。
 - 外层 turn 并发硬限制为 2，避免同时压入多个大上下文。
 - 超出验证预算的候选不会公开，也不会伪装成已审查问题。
 
