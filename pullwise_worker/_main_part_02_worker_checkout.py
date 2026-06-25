@@ -1259,8 +1259,6 @@ class Worker:
                 config=job_config,
             )
             preflight = collect_preflight_metadata(job_config, job, checkout_dir)
-            # Public findings now come only from confirmed runtime evidence produced by the simple engine.
-            deterministic_findings: list[dict] = []
             self.report_progress(
                 job_id,
                 "index",
@@ -2227,10 +2225,7 @@ def git_auth_env(clone_token: object, clone_url: object = None, repo: object = N
     return env
 
 
-_README_PACKAGE_SCRIPT_RE = re.compile(r"\b(npm|pnpm|yarn|bun)\s+run\s+([A-Za-z0-9:_-]+)\b")
-_HIGH_SIGNAL_PACKAGE_SCRIPTS = {"dev", "start", "build", "test"}
 _PACKAGE_SCRIPT_NAMES = ["dev", "start", "build", "test", "lint", "typecheck", "check"]
-_VERIFICATION_STATUSES = {"verified", "static_proof", "potential_risk", "unverified"}
 _REPO_CACHE_DIR_NAME = ".pullwise-repo-cache"
 _RESULT_UPLOAD_DIR_NAME = ".pullwise-result-uploads"
 _CHECKOUT_RUNTIME_DIR_NAMES.add(_REPO_CACHE_DIR_NAME)
@@ -2274,74 +2269,3 @@ _DOCKERFILE_SKIP_DIRS = {
     "vendor",
     "__tests__",
 }
-_SECRET_SCAN_MAX_BYTES = 256 * 1024
-_SECRET_SCAN_MAX_FILES = 3000
-_SECRET_SCAN_SKIP_DIRS = {
-    ".git",
-    ".pytest_cache",
-    ".tox",
-    ".venv",
-    "build",
-    "coverage",
-    "dist",
-    "docs",
-    "examples",
-    "fixtures",
-    "node_modules",
-    "target",
-    "test",
-    "tests",
-    "vendor",
-    "venv",
-    "__pycache__",
-    "__tests__",
-}
-_SECRET_SCAN_SKIP_FILES = {
-    "bun.lock",
-    "bun.lockb",
-    "Cargo.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "poetry.lock",
-    "yarn.lock",
-}
-_SECRET_SCAN_TEXT_SUFFIXES = {
-    ".bash",
-    ".conf",
-    ".config",
-    ".cs",
-    ".env",
-    ".go",
-    ".ini",
-    ".java",
-    ".js",
-    ".json",
-    ".jsx",
-    ".kt",
-    ".php",
-    ".properties",
-    ".ps1",
-    ".py",
-    ".rb",
-    ".rs",
-    ".sh",
-    ".swift",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".yaml",
-    ".yml",
-    ".zsh",
-}
-_SECRET_PATTERNS = [
-    {
-        "kind": "github_token",
-        "label": "GitHub token",
-        "regex": re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{36,255}\b"),
-    },
-    {
-        "kind": "slack_token",
-        "label": "Slack token",
-        "regex": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
-    },
-]

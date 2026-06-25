@@ -3714,97 +3714,28 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             root = Path(tmp_dir)
             outside = root / "outside"
             outside.mkdir()
-
-            package_checkout = root / "package-checkout"
-            package_checkout.mkdir()
+            checkout = root / "checkout"
+            checkout.mkdir()
             outside_package = outside / "package.json"
             outside_package.write_text(
                 json.dumps({"scripts": {"build": "vite"}, "packageManager": "npm@10.0.0"}),
                 encoding="utf-8",
             )
-            package_link = package_checkout / "package.json"
+            package_link = checkout / "package.json"
             package_link.symlink_to(outside_package)
-
-            readme_checkout = root / "readme-checkout"
-            readme_checkout.mkdir()
-            (readme_checkout / "package.json").write_text(
-                json.dumps({"scripts": {"build": "vite"}}),
-                encoding="utf-8",
-            )
-            outside_readme = outside / "README.md"
-            outside_readme.write_text("Run npm run missing-script\n", encoding="utf-8")
-            readme_link = readme_checkout / "README.md"
-            readme_link.symlink_to(outside_readme)
-
-            workflow_checkout = root / "workflow-checkout"
-            workflows_dir = workflow_checkout / ".github" / "workflows"
-            workflows_dir.mkdir(parents=True)
-            (workflow_checkout / "package.json").write_text(
-                json.dumps({"scripts": {"build": "vite"}}),
-                encoding="utf-8",
-            )
-            outside_workflow = outside / "ci.yml"
-            outside_workflow.write_text("run: npm run missing-script\n", encoding="utf-8")
-            workflow_link = workflows_dir / "ci.yml"
-            workflow_link.symlink_to(outside_workflow)
-
-            docker_checkout = root / "docker-checkout"
-            docker_checkout.mkdir()
-            outside_dockerfile = outside / "Dockerfile"
-            outside_dockerfile.write_text("COPY missing-file /app/\n", encoding="utf-8")
-            docker_link = docker_checkout / "Dockerfile"
-            docker_link.symlink_to(outside_dockerfile)
-
-            secret_checkout = root / "secret-checkout"
-            secret_checkout.mkdir()
-            outside_secret = outside / ".env"
-            outside_secret.write_text("OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890\n", encoding="utf-8")
-            secret_link = secret_checkout / ".env"
-            secret_link.symlink_to(outside_secret)
 
             original_regular_file = worker_main.repository_regular_file
 
             def regular_file_after_check(path: Path) -> bool:
                 path = Path(path)
-                if path in {package_link, readme_link, workflow_link, docker_link, secret_link}:
+                if path == package_link:
                     return True
                 return original_regular_file(path)
 
-            with patch.object(worker_main, "repository_regular_file", side_effect=regular_file_after_check), patch.object(
-                worker_main,
-                "first_existing_file",
-                return_value=readme_link,
-            ), patch.object(
-                worker_main,
-                "iter_secret_scan_files",
-                return_value=[secret_link],
-            ):
+            with patch.object(worker_main, "repository_regular_file", side_effect=regular_file_after_check):
                 package_data = worker_main.read_package_json(package_link)
-                package_line = worker_main.package_script_line(package_checkout, "build")
-                readme_findings = worker_main.readme_missing_package_script_findings(
-                    {"job_id": "job_readme_race"},
-                    readme_checkout,
-                )
-                workflow_findings = worker_main.workflow_missing_package_script_findings(
-                    {"job_id": "job_workflow_race"},
-                    workflow_checkout,
-                )
-                docker_findings = worker_main.dockerfile_missing_source_findings(
-                    {"job_id": "job_docker_race"},
-                    docker_checkout,
-                )
-                secret_findings = worker_main.committed_secret_findings(
-                    {"job_id": "job_secret_race"},
-                    secret_checkout,
-                )
 
         self.assertEqual(package_data, {})
-        self.assertEqual(package_line, 1)
-        self.assertEqual(readme_findings, [])
-        self.assertEqual(workflow_findings, [])
-        self.assertEqual(docker_findings, [])
-        self.assertEqual(secret_findings, [])
-
     def test_repository_text_reads_are_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3828,11 +3759,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             (ignored_dir / "Dockerfile").write_text("COPY ignored-missing /app/\n", encoding="utf-8")
 
             dockerfiles = [path.relative_to(checkout).as_posix() for path in worker_main.iter_dockerfiles(checkout)]
-            findings = worker_main.dockerfile_missing_source_findings({"job_id": "job_docker_skip"}, checkout)
-
         self.assertEqual(dockerfiles, ["app/Dockerfile"])
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["affectedLocations"][0]["file"], "app/Dockerfile")
 
     def test_worker_wrapper_exports_codex_sqlite_home(self) -> None:
         script = worker_main.worker_wrapper_script(Path("/etc/pullwise-worker/wk/worker.env"))
