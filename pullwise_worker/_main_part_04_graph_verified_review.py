@@ -53,6 +53,7 @@ def graph_verified_toml_string(value: object) -> str:
 
 
 def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, progress_callback=None) -> dict:
+    from codereview.app_server_runner import close_app_server_clients
     from codereview.simple_review import run_review
 
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
@@ -72,6 +73,8 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         if codex_readiness_failure_cacheable(detail):
             mark_codex_auth_failure(config, detail)
         return graph_verified_failed_report(mode, scan_mode, detail)
+    finally:
+        close_app_server_clients("GraphVerified review complete")
     reports = final_path.parent
     report_error = graph_verified_report_artifact_error(final_path, checkout_dir)
     if report_error:

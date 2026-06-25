@@ -5,11 +5,25 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codereview.app_server_runner import AppServerTurn, run_codex_app_server_turn
+from codereview.app_server_runner import (
+    AppServerTurn,
+    app_server_max_age_seconds,
+    app_server_max_turns,
+    run_codex_app_server_turn,
+)
 from codereview.config import CodexConfig
 
 
 class AppServerRunnerTests(unittest.TestCase):
+    def test_app_server_recycles_by_conservative_default_limits(self) -> None:
+        self.assertEqual(app_server_max_age_seconds({}), 1800)
+        self.assertEqual(app_server_max_turns({}), 8)
+        self.assertEqual(
+            app_server_max_age_seconds({"PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS": "45"}),
+            45,
+        )
+        self.assertEqual(app_server_max_turns({"PULLWISE_CODEX_APP_SERVER_MAX_TURNS": "3"}), 3)
+
     def test_turn_timeout_does_not_close_shared_app_server(self) -> None:
         class FakeClient:
             def __init__(self) -> None:

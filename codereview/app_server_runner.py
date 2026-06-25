@@ -48,6 +48,8 @@ class AppServerTurn:
 _APP_SERVER_CLIENTS_LOCK = threading.Lock()
 _APP_SERVER_CLIENTS: dict[tuple[str, str, str, str, str], "CodexAppServerClient"] = {}
 _APP_SERVER_LOCK_FILE = ".pullwise-app-server.lock"
+DEFAULT_APP_SERVER_MAX_AGE_SECONDS = 1800
+DEFAULT_APP_SERVER_MAX_TURNS = 8
 MAX_STORED_TURN_EVENTS = 2000
 MAX_STORED_COMMAND_OUTPUT_CHARS = 32_000
 MAX_STORED_AGENT_MESSAGE_CHARS = 64_000
@@ -798,11 +800,17 @@ def app_server_retry_delay_seconds(attempt: int) -> float:
 
 
 def app_server_max_age_seconds(env: dict[str, str] | None) -> int:
-    return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS"), 14400)
+    return parse_non_negative_int(
+        (env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS"),
+        DEFAULT_APP_SERVER_MAX_AGE_SECONDS,
+    )
 
 
 def app_server_max_turns(env: dict[str, str] | None) -> int:
-    return parse_non_negative_int((env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_TURNS"), 512)
+    return parse_non_negative_int(
+        (env or {}).get("PULLWISE_CODEX_APP_SERVER_MAX_TURNS"),
+        DEFAULT_APP_SERVER_MAX_TURNS,
+    )
 
 
 def parse_non_negative_int(value: object, default: int) -> int:
@@ -881,12 +889,16 @@ def resolve_npm_codex_vendor(directory: Path, stem: str) -> Path | None:
     return None
 
 
-def reset_app_server_clients_for_tests() -> None:
+def close_app_server_clients(reason: str = "codex app-server closed") -> None:
     with _APP_SERVER_CLIENTS_LOCK:
         clients = list(_APP_SERVER_CLIENTS.values())
         _APP_SERVER_CLIENTS.clear()
     for client in clients:
-        client.close()
+        client.close(reason)
 
 
-atexit.register(reset_app_server_clients_for_tests)
+def reset_app_server_clients_for_tests() -> None:
+    close_app_server_clients()
+
+
+atexit.register(close_app_server_clients)

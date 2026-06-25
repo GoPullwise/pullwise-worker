@@ -5292,12 +5292,43 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertNotIn("runId", payload)
         self.assertIn("outside the checkout run directory", payload["debugMarkdown"])
 
+    def test_run_graph_verified_review_payload_closes_app_server_client_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+            reports = root / ".codereview" / "runs" / "run_1" / "reports"
+            reports.mkdir(parents=True)
+            final_md = reports / "final.md"
+            final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
+            (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
+            (reports / "confirmed.json").write_text(json.dumps([{"candidate": {"candidate_id": "c1"}}]), encoding="utf-8")
+            (reports / "rejected.json").write_text("[]", encoding="utf-8")
+            (reports / "final.json").write_text(json.dumps({"confirmed": [{"candidate": {"candidate_id": "c1"}}]}), encoding="utf-8")
+            (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 0}}), encoding="utf-8")
+            codereview_main = importlib.import_module("codereview.simple_review")
+
+            with (
+                patch.object(codereview_main, "run_review", return_value=final_md),
+                patch("codereview.app_server_runner.close_app_server_clients") as close_clients,
+            ):
+                payload = worker_main.run_graph_verified_review_payload(
+                    cfg,
+                    {"agentConfig": {"graphVerified": {"mode": "fast"}}},
+                    root,
+                )
+
+        self.assertEqual(payload["confirmedCount"], 1)
+        close_clients.assert_called_once_with("GraphVerified review complete")
+
     def test_run_graph_verified_review_payload_blocks_on_review_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
             codereview_main = importlib.import_module("codereview.simple_review")
-            with patch.object(codereview_main, "run_review", side_effect=RuntimeError("failed with secret-token")):
+            with (
+                patch.object(codereview_main, "run_review", side_effect=RuntimeError("failed with secret-token")),
+                patch("codereview.app_server_runner.close_app_server_clients") as close_clients,
+            ):
                 payload = worker_main.run_graph_verified_review_payload(
                     cfg,
                     {"agentConfig": {"graphVerified": {"mode": "invalid"}}},
@@ -5314,6 +5345,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["finalJson"], {"confirmed": []})
         self.assertNotIn("secret-token", payload["debugMarkdown"])
         self.assertIn("[redacted]", payload["debugMarkdown"])
+        close_clients.assert_called_once_with("GraphVerified review complete")
 
 
 if __name__ == "__main__":
