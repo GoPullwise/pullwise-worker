@@ -357,6 +357,44 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             ],
         )
 
+    def test_report_progress_can_skip_local_summary_write_for_pre_recorded_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1024,
+                log_dir=root / "logs",
+                scan_summary_log_max_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            summary = config.log_dir / "scan-summary.log"
+            config.log_dir.mkdir(parents=True, exist_ok=True)
+            summary.write_text("already-recorded\n", encoding="utf-8")
+
+            with patch.object(worker.client, "progress", return_value=None) as progress:
+                self.assertTrue(
+                    worker.report_progress(
+                        "job_progress",
+                        "ai",
+                        63,
+                        "Discovery 1/3",
+                        "run=gv stage=finder progress=1/3",
+                        write_local=False,
+                    )
+                )
+
+            progress.assert_called_once_with(
+                "job_progress",
+                "ai",
+                63,
+                "Discovery 1/3",
+                "run=gv stage=finder progress=1/3",
+            )
+            self.assertEqual(summary.read_text(encoding="utf-8"), "already-recorded\n")
+
     def test_client_rejects_invalid_url_path_segments(self) -> None:
         config = SimpleNamespace(
             server_url="https://pullwise.example",

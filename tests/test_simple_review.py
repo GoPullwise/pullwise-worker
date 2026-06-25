@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from codereview.app_server_runner import stored_app_server_event
 from codereview.config import CodexConfig, ReviewConfig
 from codereview.simple_review import (
     CommandEvidence,
@@ -217,6 +218,34 @@ class SimpleReviewTests(unittest.TestCase):
             self.assertEqual(len(parsed), 1)
             self.assertEqual(parsed[0].exit_code, 0)
             self.assertIn("PULLWISE_REPRO", parsed[0].output)
+
+    def test_command_events_parse_normalized_shell_exec_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_event = {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "shellExec",
+                        "commandLine": ["python3", ".codereview/repro/check.py"],
+                        "cwd": tmp,
+                        "status": "completed",
+                        "exit_code": 0,
+                        "stdout": "PULLWISE_REPRO:false",
+                    },
+                },
+            }
+            stored = stored_app_server_event(raw_event)
+            self.assertIsNotNone(stored)
+            events = Path(tmp) / "events.jsonl"
+            events.write_text(json.dumps(stored) + "\n", encoding="utf-8")
+
+            parsed = parse_command_events(events)
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0].command, "python3 .codereview/repro/check.py")
+            self.assertEqual(parsed[0].exit_code, 0)
+            self.assertIn("PULLWISE_REPRO:false", parsed[0].output)
 
     def test_command_events_parse_commands_after_oversized_event_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

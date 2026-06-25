@@ -920,17 +920,24 @@ def parse_command_events(path: Path) -> list[CommandEvidence]:
                     continue
                 params = message.get("params") if isinstance(message.get("params"), dict) else {}
                 item = params.get("item") if isinstance(params.get("item"), dict) else {}
-                if item.get("type") != "commandExecution":
+                command = command_event_text(item.get("command") or item.get("commandLine") or item.get("cmd"))
+                if not command and isinstance(item.get("input"), dict):
+                    command = command_event_text(item["input"].get("command") or item["input"].get("cmd"))
+                item_type = _normalize_text(str(item.get("type") or ""))
+                if item_type not in {"commandexecution", "command_execution"} and not (
+                    command and any(token in item_type for token in ("command", "exec", "shell"))
+                ):
                     continue
-                exit_code = item.get("exitCode")
+                exit_code = command_event_exit_code(item)
                 if isinstance(exit_code, bool) or not isinstance(exit_code, int):
                     continue
+                output = command_event_output(item)
                 commands.append(
                     CommandEvidence(
-                        command=str(item.get("command") or "").strip(),
+                        command=command,
                         cwd=str(item.get("cwd") or "").strip(),
                         exit_code=exit_code,
-                        output=str(item.get("aggregatedOutput") or "")[-MAX_COMMAND_OUTPUT_CHARS:],
+                        output=output[-MAX_COMMAND_OUTPUT_CHARS:],
                         status=str(item.get("status") or "").strip(),
                     )
                 )
@@ -939,6 +946,51 @@ def parse_command_events(path: Path) -> list[CommandEvidence]:
     except OSError:
         return []
     return commands[-200:]
+
+
+def command_event_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return " ".join(shlex.quote(str(item)) for item in value).strip()
+    if isinstance(value, dict):
+        args = value.get("args") or value.get("argv")
+        if isinstance(args, list):
+            return " ".join(shlex.quote(str(item)) for item in args).strip()
+        for key in ("command", "cmd", "line", "text"):
+            text = command_event_text(value.get(key))
+            if text:
+                return text
+    return ""
+
+
+def command_event_output(item: dict) -> str:
+    for key in ("aggregatedOutput", "output", "stdout", "stderr", "text"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    chunks: list[str] = []
+    for key in ("stdout", "stderr"):
+        value = item.get(key)
+        if isinstance(value, list):
+            chunks.extend(str(part) for part in value)
+    if chunks:
+        return "\n".join(chunks)
+    result = item.get("result")
+    if isinstance(result, dict):
+        return command_event_output(result)
+    return ""
+
+
+def command_event_exit_code(item: dict) -> object:
+    for key in ("exitCode", "exit_code", "code", "statusCode"):
+        value = item.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    result = item.get("result")
+    if isinstance(result, dict):
+        return command_event_exit_code(result)
+    return None
 
 def validate_verification_result(
     candidate: dict,
@@ -1502,7 +1554,7 @@ def verification_prompt(candidate_path: str, candidate: dict, settings: SimpleSe
     candidate_id = str(candidate.get("candidate_id") or "")
     return f"""Independently verify candidate {candidate_id} from {candidate_path} in this isolated repository copy.
 
-Use Codex subagents when available: delegate one agent to trace the claimed behavior and one skeptical agent to challenge the claim and reproduction. The coordinator owns the final decision and must execute the final reproduction command itself.
+Do not use Codex subagents for verification. The coordinator must personally create any harness, execute the final reproduction command, inspect the output, and return the final JSON, because Pullwise audits only command events from this app-server turn.
 
 Hard rules:
 - Network access is unavailable. Do not install dependencies or fetch anything.

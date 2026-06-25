@@ -4,6 +4,7 @@ import atexit
 import errno
 import json
 import os
+import shlex
 import subprocess
 import stat
 import threading
@@ -369,13 +370,10 @@ def stored_app_server_event(message: dict) -> dict | None:
     if method != "item/completed":
         return None
     item = params.get("item") if isinstance(params.get("item"), dict) else {}
-    item_type = item.get("type")
-    if item_type == "commandExecution":
-        stored_item = dict(item)
-        stored_item["aggregatedOutput"] = str(stored_item.get("aggregatedOutput") or "")[-MAX_STORED_COMMAND_OUTPUT_CHARS:]
-    elif item_type == "agentMessage":
+    stored_item = normalized_command_event_item(item)
+    if stored_item is None and item.get("type") == "agentMessage":
         stored_item = {"type": "agentMessage", "text": str(item.get("text") or "")[-MAX_STORED_AGENT_MESSAGE_CHARS:]}
-    else:
+    if stored_item is None:
         return None
     stored_params = {
         "threadId": params.get("threadId"),
@@ -383,6 +381,76 @@ def stored_app_server_event(message: dict) -> dict | None:
         "item": stored_item,
     }
     return {"method": method, "params": stored_params}
+
+
+def normalized_command_event_item(item: dict) -> dict | None:
+    command = command_event_text(item.get("command") or item.get("commandLine") or item.get("cmd"))
+    if not command and isinstance(item.get("input"), dict):
+        command = command_event_text(item["input"].get("command") or item["input"].get("cmd"))
+    item_type = str(item.get("type") or "")
+    normalized_type = "".join(ch for ch in item_type.lower() if ch.isalnum() or ch == "_")
+    is_command_type = normalized_type in {"commandexecution", "command_execution"} or any(
+        token in normalized_type for token in ("command", "exec", "shell")
+    )
+    if not command or not is_command_type:
+        return None
+    exit_code = command_event_exit_code(item)
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return None
+    return {
+        "type": "commandExecution",
+        "command": command,
+        "cwd": str(item.get("cwd") or ""),
+        "status": str(item.get("status") or ""),
+        "exitCode": exit_code,
+        "aggregatedOutput": command_event_output(item)[-MAX_STORED_COMMAND_OUTPUT_CHARS:],
+    }
+
+
+def command_event_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return " ".join(shlex.quote(str(item)) for item in value).strip()
+    if isinstance(value, dict):
+        args = value.get("args") or value.get("argv")
+        if isinstance(args, list):
+            return " ".join(shlex.quote(str(item)) for item in args).strip()
+        for key in ("command", "cmd", "line", "text"):
+            text = command_event_text(value.get(key))
+            if text:
+                return text
+    return ""
+
+
+def command_event_output(item: dict) -> str:
+    for key in ("aggregatedOutput", "output", "stdout", "stderr", "text"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    chunks: list[str] = []
+    for key in ("stdout", "stderr"):
+        value = item.get(key)
+        if isinstance(value, list):
+            chunks.extend(str(part) for part in value)
+    if chunks:
+        return "\n".join(chunks)
+    result = item.get("result")
+    if isinstance(result, dict):
+        return command_event_output(result)
+    return ""
+
+
+def command_event_exit_code(item: dict) -> object:
+    for key in ("exitCode", "exit_code", "code", "statusCode"):
+        value = item.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    result = item.get("result")
+    if isinstance(result, dict):
+        return command_event_exit_code(result)
+    return None
+
 
 def final_assistant_text(turn: AppServerTurn) -> str:
     for text in reversed(turn.assistant_messages):

@@ -1294,14 +1294,16 @@ class Worker:
         logs_summary: str = "",
         *,
         config: WorkerConfig | None = None,
+        write_local: bool = True,
     ) -> bool:
         active_config = config or self.config
         if self.job_cancel_requested(job_id):
             raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates")
-        try:
-            write_scan_progress_summary(active_config, job_id, phase, progress, message, logs_summary)
-        except Exception:
-            pass
+        if write_local:
+            try:
+                write_scan_progress_summary(active_config, job_id, phase, progress, message, logs_summary)
+            except Exception:
+                pass
         try:
             self.client.progress(job_id, phase, progress, message, logs_summary)
             return True
@@ -1429,6 +1431,7 @@ class Worker:
                     message,
                     event_logs_summary,
                     config=job_config,
+                    write_local=False,
                 )
 
             graph_verified_report = run_graph_verified_review_payload(
