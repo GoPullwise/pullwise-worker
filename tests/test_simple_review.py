@@ -31,6 +31,7 @@ from codereview.simple_review import (
     validate_discovery_payload,
     validate_unit_coverage,
     validate_verification_result,
+    verification_prompt,
 )
 
 
@@ -54,6 +55,20 @@ class SimpleReviewTests(unittest.TestCase):
         self.assertEqual(settings.discovery_parallel, 4)
         self.assertEqual(settings.verification_parallel, 4)
         self.assertEqual(settings.subagents_per_turn, 4)
+
+    def test_verification_prompt_requires_verbatim_candidate_expected_behavior(self) -> None:
+        settings = load_simple_settings({"simple": {}}, ReviewConfig())
+        prompt = verification_prompt(
+            ".codereview/simple/candidate.json",
+            {"candidate_id": "cand-1", "expected_behavior": "The handler should return true."},
+            settings,
+        )
+
+        self.assertIn("expected_behavior is a contract carried forward from discovery", prompt)
+        self.assertIn("copy it exactly", prompt)
+        self.assertIn("without paraphrasing", prompt)
+        self.assertIn("\"The handler should return true.\"", prompt)
+        self.assertIn("return status=rejected", prompt)
 
     def test_auto_parallelism_uses_app_server_and_resource_budget(self) -> None:
         inventory = {

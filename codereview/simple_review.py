@@ -1641,6 +1641,7 @@ Return JSON matching the supplied schema. reviewed_unit_ids must exactly equal e
 
 def verification_prompt(candidate_path: str, candidate: dict, settings: SimpleSettings) -> str:
     candidate_id = str(candidate.get("candidate_id") or "")
+    expected_behavior = json.dumps(_clean_text(candidate.get("expected_behavior"), 2_000), ensure_ascii=False)
     return f"""Independently verify candidate {candidate_id} from {candidate_path} in this isolated repository copy.
 
 Do not use Codex subagents for verification. The coordinator must personally inspect the candidate, choose the correct proof type, perform the verification work, and return the final JSON.
@@ -1649,6 +1650,8 @@ Hard rules:
 - Network access is unavailable. Do not install dependencies or fetch anything.
 - Do not modify repository source files. Temporary harnesses may only be created below .codereview/repro/.
 - Keep user-facing text in {settings.output_language}.
+- expected_behavior is a contract carried forward from discovery. In the final JSON, copy it exactly from the candidate without paraphrasing, translating, shortening, or replacing it. For this candidate it must exactly equal: {expected_behavior}
+- If the candidate's expected_behavior is not the correct repository contract, do not repair or reinterpret it; return status=rejected and explain why in reason.
 - Reject the candidate when confirmation depends on unavailable services, credentials, hand-wavy timing guesses, or assumptions not grounded in repository files.
 - skeptic_agreed may be true only after an independent challenge finds the proof valid.
 
