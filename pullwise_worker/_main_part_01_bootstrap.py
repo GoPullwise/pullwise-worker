@@ -61,6 +61,10 @@ DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 WORKER_HTTP_TIMEOUT_SECONDS = 60
 WORKER_HTTP_RESPONSE_MAX_BYTES = 1024 * 1024
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
+NODESOURCE_GPG_KEY_URL = "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"
+NODESOURCE_GPG_KEY_FINGERPRINTS = (
+    "6F71F525282841EEDAF851B42F59B5F99B1BE0B4",
+)
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
@@ -426,6 +430,48 @@ def run_apt_command(command: list[str]) -> tuple[bool, str]:
         return False, f"{' '.join(command)} exited {completed.returncode}"
     return True, "ok"
 
+def normalized_gpg_fingerprint(value: object) -> str:
+    return re.sub(r"[^0-9A-F]", "", str(value or "").upper())
+
+def expected_nodesource_key_fingerprints() -> set[str]:
+    configured = os.environ.get("PULLWISE_NODESOURCE_KEY_FINGERPRINTS", "")
+    values = configured.split(",") if configured.strip() else list(NODESOURCE_GPG_KEY_FINGERPRINTS)
+    return {fingerprint for value in values if (fingerprint := normalized_gpg_fingerprint(value))}
+
+def nodesource_key_fingerprints(key_file: object) -> tuple[set[str] | None, str]:
+    try:
+        key_file.seek(0)
+        completed = subprocess.run(
+            ["gpg", "--show-keys", "--with-colons", "--fingerprint"],
+            stdin=key_file,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        return None, str(exc)
+    if completed.returncode != 0:
+        return None, f"gpg NodeSource key fingerprint exited {completed.returncode}"
+    fingerprints = {
+        normalized_gpg_fingerprint(parts[9])
+        for line in str(completed.stdout or "").splitlines()
+        if line.startswith("fpr:") and len(parts := line.split(":")) > 9
+    }
+    if not fingerprints:
+        return None, "NodeSource key fingerprint not found"
+    return fingerprints, "ok"
+
+def verify_nodesource_key_fingerprint(key_file: object) -> tuple[bool, str]:
+    expected = expected_nodesource_key_fingerprints()
+    if not expected:
+        return False, "NodeSource key fingerprint allowlist is empty"
+    fingerprints, detail = nodesource_key_fingerprints(key_file)
+    if fingerprints is None:
+        return False, detail
+    if fingerprints.isdisjoint(expected):
+        found = ", ".join(sorted(fingerprints))
+        return False, f"NodeSource key fingerprint mismatch: {found}"
+    return True, "ok"
 
 def install_nodesource_nodejs(*, dry_run: bool = False) -> tuple[bool, str]:
     if dry_run:
@@ -445,7 +491,7 @@ def install_nodesource_nodejs(*, dry_run: bool = False) -> tuple[bool, str]:
         )
         with tempfile.TemporaryFile("w+b") as key_file:
             curl = subprocess.run(
-                ["curl", "-fsSL", "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"],
+                ["curl", "-fsSL", NODESOURCE_GPG_KEY_URL],
                 stdout=key_file,
             )
             if curl.returncode != 0:
@@ -453,6 +499,9 @@ def install_nodesource_nodejs(*, dry_run: bool = False) -> tuple[bool, str]:
             key_file.seek(0, os.SEEK_END)
             if key_file.tell() > key_max_bytes:
                 return False, "NodeSource key response too large"
+            ok, detail = verify_nodesource_key_fingerprint(key_file)
+            if not ok:
+                return False, detail
             key_file.seek(0)
             gpg = subprocess.run(
                 ["gpg", "--dearmor", "--yes", "-o", str(keyring_path)],
@@ -1318,3 +1367,5 @@ def main() -> None:
         raise SystemExit(0)
     worker = Worker(config)
     worker.run(once=args.once)
+
+__all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]

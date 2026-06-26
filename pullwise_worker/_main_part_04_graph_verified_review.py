@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-# Loaded by main.py; definitions are executed in that module's globals.
+# Imported by main.py and re-exported from the aggregate module.
+
+from ._main_part_01_bootstrap import *  # noqa: F403
+from ._main_part_02_worker_checkout import *  # noqa: F403
+from ._main_part_03_preflight import *  # noqa: F403
 
 GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES = 200_000
 GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES = 50_000
@@ -574,3 +578,5 @@ def graph_verified_count(value: object) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+__all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]

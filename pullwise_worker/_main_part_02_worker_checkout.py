@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-# Loaded by main.py; definitions are executed in that module's globals.
+# Imported by main.py and re-exported from the aggregate module.
 
 from dataclasses import dataclass
 
 from codereview.utils.process import ProcessCancelled, clear_process_cancel_event, set_process_cancel_event
+
+from ._main_part_01_bootstrap import *  # noqa: F403
 
 AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
@@ -616,7 +618,6 @@ def effective_agent_config_payload(config: WorkerConfig, provider: object = None
         or normalized_agent_provider(getattr(config, "provider", ""))
         or "codex"
     )
-    selected_provider = "codex"
     cli = effective_agent_config_value(getattr(config, "codex_command", ""))
     model = effective_agent_config_value(getattr(config, "codex_model", ""))
     reasoning_effort = normalized_agent_reasoning_level(getattr(config, "codex_reasoning_effort", ""))
@@ -782,21 +783,6 @@ def summarize(findings: list[dict]) -> dict:
         summary[severity] += 1
     return summary
 
-
-def normalize_ai_usage(value: object) -> dict:
-    if not isinstance(value, dict):
-        return {}
-    usage = {}
-    for key, item in value.items():
-        if not isinstance(key, str) or not key:
-            continue
-        if isinstance(item, (str, int, float, bool)) or item is None:
-            usage[key] = item
-        elif isinstance(item, dict):
-            nested = normalize_ai_usage(item)
-            if nested:
-                usage[key] = nested
-    return usage
 
 
 def worker_config_for_job(base_config: WorkerConfig, job: dict) -> WorkerConfig:
@@ -1461,7 +1447,6 @@ class Worker:
             summary = summarize(projected_findings)
             logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
             effective_agent_config = configured_agent
-            ai_usage = normalize_ai_usage({})
             self.report_progress(
                 job_id,
                 "ai",
@@ -1470,7 +1455,6 @@ class Worker:
                 logs_summary,
                 config=job_config,
             )
-            summary = summarize(projected_findings)
             duration_ms = int((time.monotonic() - started) * 1000)
             completion_error = graph_verified_completion_error(graph_verified_report, projected_findings)
             completion_error_code = "GRAPH_VERIFIED_COMPLETION_FAILED"
@@ -1518,8 +1502,6 @@ class Worker:
                 payload["error"] = completion_error or "GraphVerified completion gate failed."
                 payload["error_code"] = completion_error_code
                 payload["errorCode"] = completion_error_code
-            if ai_usage:
-                payload["aiUsage"] = ai_usage
             payload["result_checksum"] = result_checksum(payload)
             self.report_progress(
                 job_id,
@@ -2107,7 +2089,7 @@ def normalize_git_branch(value: object) -> str:
 def clone_checkout_from_mirror(mirror_dir: Path, checkout_dir: Path, *, clone_url: str, mirror_ref: str) -> None:
     checkout_ref = "refs/pullwise/checkout"
     run_git_command(
-        ["git", "clone", "--shared", "--no-checkout", str(mirror_dir), str(checkout_dir)],
+        ["git", "clone", "--no-checkout", str(mirror_dir), str(checkout_dir)],
         phase="checkout-clone",
     )
     run_git_command(
@@ -2430,3 +2412,5 @@ _DOCKERFILE_SKIP_DIRS = {
     "vendor",
     "__tests__",
 }
+
+__all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]

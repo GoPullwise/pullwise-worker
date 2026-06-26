@@ -190,6 +190,7 @@ VERIFICATION_SCHEMA = {
     "required": [
         "candidate_id",
         "status",
+        "proof_type",
         "safe_to_show_user",
         "reason",
         "expected_behavior",
@@ -197,6 +198,7 @@ VERIFICATION_SCHEMA = {
         "reproduction_command",
         "output_marker",
         "exercised_files",
+        "verification_steps",
         "skeptic_agreed",
         "independent_check",
         "limitations",
@@ -204,6 +206,7 @@ VERIFICATION_SCHEMA = {
     "properties": {
         "candidate_id": {"type": "string"},
         "status": {"type": "string", "enum": ["confirmed", "rejected", "blocked"]},
+        "proof_type": {"type": "string", "enum": ["runtime-command", "static-proof"]},
         "safe_to_show_user": {"type": "boolean"},
         "reason": {"type": "string"},
         "expected_behavior": {"type": "string"},
@@ -211,6 +214,7 @@ VERIFICATION_SCHEMA = {
         "reproduction_command": {"type": "string"},
         "output_marker": {"type": "string"},
         "exercised_files": {"type": "array", "items": {"type": "string"}},
+        "verification_steps": {"type": "array", "items": {"type": "string"}},
         "skeptic_agreed": {"type": "boolean"},
         "independent_check": {"type": "string"},
         "limitations": {"type": "array", "items": {"type": "string"}},
@@ -414,7 +418,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     _emit(
         progress,
         "candidates",
-        f"Candidates: {len(raw_candidates)} raw, {len(selected_candidates)} selected for runtime verification",
+        f"Candidates: {len(raw_candidates)} raw, {len(selected_candidates)} selected for verification",
         run_id=run_id,
         extra={"candidateCount": len(selected_candidates)},
     )
@@ -423,7 +427,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     _emit(
         progress,
         "verification",
-        f"Runtime verification 0/{len(selected_candidates)}",
+        f"Verification 0/{len(selected_candidates)}",
         current=0,
         total=len(selected_candidates),
         run_id=run_id,
@@ -856,7 +860,7 @@ def limit_candidates_per_unit(candidates: list[dict], limit: int) -> tuple[list[
                 {
                     "stage": "unit-budget",
                     "candidate_id": str(candidate.get("candidate_id") or ""),
-                    "reason": f"per-unit runtime verification budget exhausted for {unit_id}",
+                    "reason": f"per-unit verification budget exhausted for {unit_id}",
                 }
             )
             continue
@@ -890,7 +894,7 @@ def select_candidates(candidates: list[dict], limit: int) -> tuple[list[dict], l
         {
             "stage": "budget",
             "candidate_id": str(candidate.get("candidate_id") or ""),
-            "reason": "runtime verification budget exhausted",
+            "reason": "verification budget exhausted",
         }
         for candidate in ordered[len(selected) :]
     ]
@@ -992,6 +996,40 @@ def command_event_exit_code(item: dict) -> object:
         return command_event_exit_code(result)
     return None
 
+def verification_payload_proof_type(payload: dict) -> str:
+    raw = _clean_text(payload.get("proof_type") or payload.get("proofType"), 80)
+    proof_type = raw.lower().replace("_", "-").strip()
+    if proof_type in {"", "runtime", "runtime-command"}:
+        return "runtime-command"
+    if proof_type in {
+        "static",
+        "static-proof",
+        "code-proof",
+        "config-proof",
+        "lifecycle-proof",
+        "security-proof",
+        "documentation-proof",
+        "workflow-proof",
+    }:
+        return "static-proof"
+    return proof_type
+
+
+def verification_step_list(value: object, *, limit: int = 8) -> list[str]:
+    raw_items = value if isinstance(value, list) else []
+    steps = []
+    for item in raw_items[:limit]:
+        step = _clean_text(item, 500)
+        if step:
+            steps.append(step)
+    return steps
+
+
+def verification_limitations(value: object, *, limit: int = 8) -> list[str]:
+    raw_items = value if isinstance(value, list) else []
+    return [_clean_text(item, 500) for item in raw_items[:limit] if _clean_text(item, 500)]
+
+
 def validate_verification_result(
     candidate: dict,
     payload: dict,
@@ -999,7 +1037,7 @@ def validate_verification_result(
     worker_repo: Path,
     *,
     source_changed: bool,
-) -> tuple[CommandEvidence, str]:
+) -> tuple[CommandEvidence | None, str]:
     candidate_id = str(candidate.get("candidate_id") or "")
     if _clean_text(payload.get("candidate_id"), 120) != candidate_id:
         raise VerificationRejected("verification candidate_id does not match")
@@ -1009,6 +1047,39 @@ def validate_verification_result(
         raise VerificationRejected("independent skeptic did not agree")
     if source_changed:
         raise VerificationRejected("verification modified repository source files")
+
+    proof_type = verification_payload_proof_type(payload)
+    if proof_type not in {"runtime-command", "static-proof"}:
+        raise VerificationRejected("verification proof_type is unsupported")
+
+    reason = _clean_text(payload.get("reason"), 2_000)
+    expected = _clean_text(payload.get("expected_behavior"), 2_000)
+    observed = _clean_text(payload.get("observed_behavior"), 2_000)
+    independent = _clean_text(payload.get("independent_check"), 2_000)
+    if not all((reason, expected, observed, independent)):
+        raise VerificationRejected("verification lacks expected, observed, reason, or independent check")
+    candidate_expected = _clean_text(candidate.get("expected_behavior"), 2_000)
+    if candidate_expected and _normalize_text(expected) != _normalize_text(candidate_expected):
+        raise VerificationRejected("verification changed the candidate's expected behavior")
+    if _normalize_text(expected) == _normalize_text(observed):
+        raise VerificationRejected("verification did not observe behavior that differs from the expectation")
+
+    exercised_files = [safe_relative_path(value) for value in payload.get("exercised_files", [])]
+    exercised_files = [value for value in exercised_files if value]
+    primary_files = [safe_relative_path(item.get("file")) for item in candidate.get("evidence", []) if isinstance(item, dict)]
+    primary_files = [value for value in primary_files if value]
+    if not exercised_files or not set(primary_files).intersection(exercised_files):
+        raise VerificationRejected("verification did not exercise the candidate's source evidence")
+    for rel in exercised_files:
+        target = worker_repo / rel
+        if not target.is_file() or target.is_symlink() or not is_within(target, worker_repo):
+            raise VerificationRejected(f"verification exercised file is invalid: {rel}")
+
+    if proof_type == "static-proof":
+        if not verification_step_list(payload.get("verification_steps")):
+            raise VerificationRejected("static proof lacks verification steps")
+        return None, ""
+
     declared_command = _clean_text(payload.get("reproduction_command"), 2_000)
     marker = _clean_text(payload.get("output_marker"), 500)
     if (
@@ -1037,34 +1108,11 @@ def validate_verification_result(
         raise VerificationRejected("final reproduction command must execute a repro harness file, not inline code")
     if not command_references_repro_harness(actual.command, worker_repo):
         raise VerificationRejected("final reproduction command must execute a harness under .codereview/repro")
-    exercised_files = [safe_relative_path(value) for value in payload.get("exercised_files", [])]
-    exercised_files = [value for value in exercised_files if value]
-    primary_files = [safe_relative_path(item.get("file")) for item in candidate.get("evidence", []) if isinstance(item, dict)]
-    primary_files = [value for value in primary_files if value]
-    if not exercised_files or not set(primary_files).intersection(exercised_files):
-        raise VerificationRejected("verification did not exercise the candidate's source evidence")
-    for rel in exercised_files:
-        target = worker_repo / rel
-        if not target.is_file() or target.is_symlink() or not is_within(target, worker_repo):
-            raise VerificationRejected(f"verification exercised file is invalid: {rel}")
     if not verification_source_is_grounded(candidate, matching, worker_repo, marker=marker):
         raise VerificationRejected(
             "reproduction command, output, and referenced harnesses do not ground execution in the cited source files"
         )
-    reason = _clean_text(payload.get("reason"), 2_000)
-    expected = _clean_text(payload.get("expected_behavior"), 2_000)
-    observed = _clean_text(payload.get("observed_behavior"), 2_000)
-    independent = _clean_text(payload.get("independent_check"), 2_000)
-    if not all((reason, expected, observed, independent)):
-        raise VerificationRejected("verification lacks expected, observed, reason, or independent check")
-    candidate_expected = _clean_text(candidate.get("expected_behavior"), 2_000)
-    if candidate_expected and _normalize_text(expected) != _normalize_text(candidate_expected):
-        raise VerificationRejected("verification changed the candidate's expected behavior")
-    if _normalize_text(expected) == _normalize_text(observed):
-        raise VerificationRejected("verification did not observe behavior that differs from the expectation")
     return actual, marker
-
-
 def command_matches(declared: str, actual: str) -> bool:
     left = _normalize_command(declared)
     right = _normalize_command(actual)
@@ -1432,18 +1480,57 @@ def _run_verifications(
         expected = _clean_text(payload.get("expected_behavior"), 2_000)
         reason = _clean_text(payload.get("reason"), 2_000)
         independent = _clean_text(payload.get("independent_check"), 2_000)
+        proof_type = verification_payload_proof_type(payload)
+        steps = verification_step_list(payload.get("verification_steps"))
+        limitations = verification_limitations(payload.get("limitations"))
+        if actual is None:
+            proof = {
+                "type": "static-proof",
+                "expected": expected,
+                "actual": observed,
+                "verification_steps": steps,
+            }
+            item = {
+                "candidate": candidate,
+                "verification": {
+                    "status": "confirmed",
+                    "verdict": "confirmed",
+                    "level": "L1",
+                    "proof_type": proof_type,
+                    "safe_to_show_user": True,
+                    "reason": reason,
+                },
+                "repro": {
+                    "status": "static_proof",
+                    "level": "L1",
+                    "summary": observed,
+                    "commands_run": [],
+                    "proof": proof,
+                    "graph_path_exercised": True,
+                    "limitations": limitations,
+                },
+                "judge": {
+                    "status": "confirmed",
+                    "level": "L1",
+                    "safe_to_show_user": True,
+                    "reason": independent,
+                    "evidence_summary": {
+                        "observable": " | ".join(steps[:3]),
+                    },
+                    "limitations": limitations,
+                },
+            }
+            write_json(worker_root / "confirmed.json", item)
+            return {"candidate_id": candidate_id, "confirmed": True, "item": item}
+
         excerpt = _output_excerpt(actual.output, marker)
-        limitations = [
-            _clean_text(value, 500)
-            for value in payload.get("limitations", [])[:8]
-            if _clean_text(value, 500)
-        ]
         item = {
             "candidate": candidate,
             "verification": {
                 "status": "confirmed",
                 "verdict": "confirmed",
                 "level": "L2",
+                "proof_type": "runtime-command",
                 "safe_to_show_user": True,
                 "reason": reason,
             },
@@ -1463,6 +1550,7 @@ def _run_verifications(
                     "expected": expected,
                     "actual": observed,
                     "log_excerpt": excerpt,
+                    "verification_steps": steps,
                 },
                 "graph_path_exercised": True,
                 "limitations": limitations,
@@ -1483,6 +1571,7 @@ def _run_verifications(
         write_json(worker_root / "confirmed.json", item)
         return {"candidate_id": candidate_id, "confirmed": True, "item": item}
 
+
     return _parallel_collect(
         candidates,
         execute,
@@ -1490,7 +1579,7 @@ def _run_verifications(
         progress=lambda completed, total: _emit(
             progress,
             "verification",
-            f"Runtime verification {completed}/{total}",
+            f"Verification {completed}/{total}",
             current=completed,
             total=total,
             run_id=run_id,
@@ -1554,26 +1643,26 @@ def verification_prompt(candidate_path: str, candidate: dict, settings: SimpleSe
     candidate_id = str(candidate.get("candidate_id") or "")
     return f"""Independently verify candidate {candidate_id} from {candidate_path} in this isolated repository copy.
 
-Do not use Codex subagents for verification. The coordinator must personally create any harness, execute the final reproduction command, inspect the output, and return the final JSON, because Pullwise audits only command events from this app-server turn.
+Do not use Codex subagents for verification. The coordinator must personally inspect the candidate, choose the correct proof type, perform the verification work, and return the final JSON.
 
 Hard rules:
 - Network access is unavailable. Do not install dependencies or fetch anything.
 - Do not modify repository source files. Temporary harnesses may only be created below .codereview/repro/.
-- A finding is confirmed only when an actually executed command exercises the cited repository code and produces deterministic observable evidence.
-- Prefer a small harness below .codereview/repro/ that imports or invokes the cited code. Do not use echo, printf, cat, or a print-only inline snippet as proof.
-- The final reproduction command must execute a normal harness file below .codereview/repro/. Do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof.
-- Execute the final reproduction command at least once. Prefer a repeat when it is cheap, but do not reject a real reproduction only because it was run once or exit codes differ.
-- Set reproduction_command to the exact command that produced the observed evidence.
-- Set output_marker to an exact non-trivial substring present in the real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
-- exercised_files must include the cited source file paths that the command actually exercised.
-- Reject the candidate when reproduction depends on unavailable services, credentials, timing guesses, or assumptions.
-- skeptic_agreed may be true only after the independent challenge finds the proof valid.
 - Keep user-facing text in {settings.output_language}.
+- Reject the candidate when confirmation depends on unavailable services, credentials, hand-wavy timing guesses, or assumptions not grounded in repository files.
+- skeptic_agreed may be true only after an independent challenge finds the proof valid.
 
-Return JSON matching the supplied schema. Do not include a finding merely because static reading makes it plausible.
+Proof types:
+- Use proof_type=runtime-command when a deterministic local harness or project command can exercise the cited code. For this proof type, create a small harness below .codereview/repro/ when useful, execute the final reproduction command, and set reproduction_command to the exact command that produced the observed evidence. The final command must execute a normal harness file below .codereview/repro/; do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof. Set output_marker to an exact non-trivial substring present in real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
+- Use proof_type=static-proof when the candidate is a real config, workflow, lifecycle, concurrency/state-machine, security, or documentation-contract defect that cannot be faithfully reproduced by one local command. For this proof type, leave reproduction_command and output_marker empty, and provide verification_steps that explain how the repository evidence confirms the issue. Static proof must cite and inspect the relevant files; do not return it merely because the issue sounds plausible.
+
+For both proof types:
+- status must be confirmed only when expected_behavior and observed_behavior differ and the cited evidence supports that difference.
+- exercised_files must include the cited source/config/doc/workflow files you actually inspected or exercised.
+- verification_steps must describe the concrete verification path or reproduction approach that should travel with the issue.
+
+Return JSON matching the supplied schema.
 """
-
-
 def _run_codex_json(
     *,
     cd: Path,
@@ -1686,7 +1775,7 @@ def _write_reports(
     summary = {
         "engine": {
             "version": ENGINE_VERSION,
-            "stages": ["snapshot", "discovery", "runtime-verification", "report"],
+            "stages": ["snapshot", "discovery", "verification", "report"],
             "sharedAppServer": True,
             "forcedTokenRefresh": False,
         },
@@ -1717,7 +1806,7 @@ def _write_reports(
         "candidates": {
             "raw": len(raw_candidates),
             "valid": len(valid_candidates),
-            "selectedForRepro": len(selected_candidates),
+            "selectedForVerification": len(selected_candidates),
         },
         "repro": {
             "tasks": len(selected_candidates),
@@ -1728,7 +1817,7 @@ def _write_reports(
             "blockedItems": [],
         },
         "judge": {
-            "implementation": "deterministic-event-gate",
+            "implementation": "typed-proof-gate",
             "confirmed": len(confirmed),
             "rejected": 0,
             "internalRejected": len(rejected),
@@ -1774,7 +1863,7 @@ def render_final_markdown(confirmed: list[dict], *, mode: str, scan_mode: str) -
         "",
     ]
     if not confirmed:
-        lines.append("No runtime-reproducible findings were confirmed.")
+        lines.append("No findings were confirmed.")
         return "\n".join(lines) + "\n"
     lines.append(f"Confirmed findings: **{len(confirmed)}**")
     lines.append("")
@@ -1789,14 +1878,24 @@ def render_final_markdown(confirmed: list[dict], *, mode: str, scan_mode: str) -
                 f"## {index}. {_clean_text(candidate.get('title'), 240)}",
                 "",
                 f"- Severity: `{_clean_text(candidate.get('severity'), 20)}`",
+                f"- Proof type: `{_clean_text(proof.get('type'), 80)}`",
                 f"- Trigger: {_clean_text(candidate.get('trigger_condition'), MAX_REPORT_TEXT_CHARS)}",
                 f"- Expected: {_clean_text(proof.get('expected'), MAX_REPORT_TEXT_CHARS)}",
                 f"- Observed: {_clean_text(proof.get('actual'), MAX_REPORT_TEXT_CHARS)}",
-                f"- Command: `{_clean_text(command.get('cmd'), 1_000)}`",
-                f"- Exit code: `{command.get('exit_code')}`",
-                "",
             ]
         )
+        if command:
+            lines.extend(
+                [
+                    f"- Command: `{_clean_text(command.get('cmd'), 1_000)}`",
+                    f"- Exit code: `{command.get('exit_code')}`",
+                ]
+            )
+        steps = verification_step_list(proof.get("verification_steps"))
+        if steps:
+            lines.append("- Verification steps:")
+            lines.extend(f"  - {step}" for step in steps)
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -1814,7 +1913,7 @@ def render_debug_markdown(summary: dict, rejected: list[dict]) -> str:
         f"- Internal verification rejections: `{(summary.get('repro') or {}).get('internalRejected', 0)}`",
         f"- Confirmed: `{(summary.get('reports') or {}).get('confirmed', 0)}`",
         "",
-        "Only runtime-confirmed findings are included. Unconfirmed hypotheses are not exposed.",
+        "Only confirmed runtime or static-proof findings are included. Unconfirmed hypotheses are not exposed.",
     ]
     if reason_counts:
         lines.extend(["", "Internal rejection reason counts:"])

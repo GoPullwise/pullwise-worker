@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-# Loaded by main.py; definitions are executed in that module's globals.
+# Imported by main.py and re-exported from the aggregate module.
+
+from ._main_part_01_bootstrap import *  # noqa: F403
+from ._main_part_02_worker_checkout import *  # noqa: F403
 
 def collect_preflight_metadata(config: WorkerConfig, job: dict, checkout_dir: Path) -> dict:
     repository = repository_preflight_metadata(checkout_dir)
@@ -605,3 +608,5 @@ def dockerfile_scan_allowed(path: Path, checkout_dir: Path) -> bool:
         return False
     parts = [part.lower() for part in relative.parts]
     return not any(part in _DOCKERFILE_SKIP_DIRS for part in parts[:-1])
+
+__all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]

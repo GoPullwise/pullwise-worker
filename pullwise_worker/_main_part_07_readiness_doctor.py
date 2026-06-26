@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-# Loaded by main.py; definitions are executed in that module's globals.
+# Imported by main.py and re-exported from the aggregate module.
+
+from ._main_part_01_bootstrap import *  # noqa: F403
+from ._main_part_02_worker_checkout import *  # noqa: F403
+from ._main_part_03_preflight import *  # noqa: F403
+from ._main_part_04_graph_verified_review import *  # noqa: F403
 
 import posixpath
 
@@ -498,3 +503,5 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
                 return False, node_detail
             return False, "Codex app-server failed to start; reinstall Codex CLI or verify Node.js 20+"
         return False, detail
+
+__all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
