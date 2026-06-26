@@ -21,6 +21,7 @@ from unittest.mock import ANY, patch
 from codereview.utils.process import ProcessCancelled, ProcessResult, clear_process_cancel_event, process_cancel_requested, run_process, set_process_cancel_event
 
 worker_main = importlib.import_module("pullwise_worker.main")
+codex_stress = importlib.import_module("scripts.codex_app_server_stress")
 
 
 def config_for(tmp: Path) -> SimpleNamespace:
@@ -3784,7 +3785,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 root,
                 {
                     "finderMaxTurnsPerScan": 5,
-                    "finderTurnParallel": 4,
+                    "finderTurnParallel": 6,
+                    "finderMaxParallel": 6,
                     "finderTimeoutSeconds": 300,
                     "codexMaxInputChars": 12345,
                     "reproMaxParallel": 3,
@@ -3800,7 +3802,6 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertEqual(payload["mode"], "deep")
         self.assertNotIn("graph", payload)
-        self.assertNotIn("finders", payload)
         self.assertNotIn("repro", payload)
         self.assertNotIn("review", payload)
         self.assertEqual(payload["codex"]["reasoning_effort"], "medium")
@@ -3808,13 +3809,36 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["codex"]["env"]["CODEX_SQLITE_HOME"], str(root / "home" / ".codex-sqlite"))
         self.assertEqual(payload["simple"]["engine"], "simple-full-repository/1")
         self.assertEqual(payload["simple"]["discovery_turns"], 5)
-        self.assertEqual(payload["simple"]["discovery_parallel"], 4)
+        self.assertEqual(payload["finders"]["turn_parallel"], 6)
+        self.assertEqual(payload["finders"]["max_workers"], 6)
+        self.assertEqual(payload["simple"]["discovery_parallel"], 6)
         self.assertEqual(payload["simple"]["verification_parallel"], 3)
+        self.assertEqual(payload["simple"]["subagents_per_turn"], 6)
         self.assertEqual(payload["simple"]["max_candidates"], 20)
         self.assertEqual(payload["simple"]["discovery_timeout_seconds"], 300)
         self.assertEqual(payload["simple"]["verification_timeout_seconds"], 600)
         self.assertEqual(payload["simple"]["scan_deadline_seconds"], 1500)
         self.assertEqual(payload["simple"]["output_language"], "Chinese")
+
+    def test_codex_stress_defaults_to_service_home_codex_and_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            service_home = root / "service-home"
+            env_path = str(root / "global-bin")
+
+            with patch.dict(os.environ, {"PATH": env_path}, clear=False):
+                env = codex_stress.provider_env(
+                    home=service_home,
+                    codex_home=service_home / ".codex",
+                    sqlite_home=service_home / ".codex-sqlite",
+                    service_home=service_home,
+                )
+
+        parts = env["PATH"].split(os.pathsep)
+        self.assertEqual(codex_stress.default_codex_command(service_home), str(service_home / ".codex" / "bin" / "codex"))
+        self.assertEqual(parts[0], str(service_home / ".local" / "bin"))
+        self.assertEqual(parts[1], str(service_home / ".codex" / "bin"))
+        self.assertIn(env_path, parts)
 
     def test_write_graph_verified_codereview_config_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4616,6 +4640,24 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertTrue(bad_marker.exists())
             self.assertFalse(checkout.exists())
             self.assertFalse(marker.exists())
+
+    def test_remote_uninstall_without_finalizer_runs_full_uninstall_cleanup(self) -> None:
+        config = SimpleNamespace(remote_uninstall_finalizer=False)
+
+        with patch.object(worker_main, "uninstall_worker", return_value=0) as uninstall:
+            code = worker_main.execute_lifecycle_command("uninstall", config)
+
+        self.assertEqual(code, 0)
+        uninstall.assert_called_once_with(
+            config,
+            remove_config=True,
+            remove_logs=True,
+            remove_service_home=True,
+            remove_wrapper=True,
+            remove_logrotate=True,
+            remove_service_user=True,
+            stop_service=False,
+        )
 
     def test_remote_uninstall_marker_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

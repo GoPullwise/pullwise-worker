@@ -2,7 +2,7 @@
 
 ## 目标
 
-新引擎只做一件事：对一个不可变的全仓快照执行 Codex 审查，并且只把具有真实运行命令证据的问题写入公开结果。
+新引擎只做一件事：对一个不可变的全仓快照执行 Codex 审查，并且只把具有可审计证据的问题写入公开结果。证据可以是 runtime-command，也可以是经过结构化静态证据门校验的 static-proof。
 
 它明确不做以下事情：
 
@@ -53,7 +53,7 @@ legacy-compatible graphVerifiedReport/1 payload
 
 - 按顶层目录、文件数和字节数形成稳定的 review units。
 - 所有 units 都会被分配，预算只改变 turn 数和每个 turn 的工作量，不会偷偷跳过文件。
-- 根据文件数和字节数自动增加顺序 discovery turns，默认每个 turn 最多约 120 个文件、1.5 MB 源码。
+- Batches grow from file and byte limits; each discovery turn defaults to about 120 files and 1.5 MB of source.
 - 如果仓库在最大 turn 预算内仍装不下，引擎直接失败，不会把超大批次硬塞进模型上下文，也不会假装完成全仓覆盖。
 - 每个 discovery turn 读取磁盘上的 assignment JSON，prompt 不内嵌源码，减少输入 token。
 - prompt 明确要求 Codex 在可用时把 agent groups 分给子代理。
@@ -70,7 +70,7 @@ legacy-compatible graphVerifiedReport/1 payload
 
 ### 4. Deterministic Evidence Gate
 
-只有同时满足以下条件才确认：
+confirmed 有两类证据路径。runtime-command 必须同时满足以下条件：
 
 - App Server 的 `item/completed` 事件中存在真实 `commandExecution`。
 - 同一条精确命令至少真实执行两次，两次退出码一致。
@@ -82,7 +82,15 @@ legacy-compatible graphVerifiedReport/1 payload
 - 验证过程没有修改仓库源码。
 - verifier 和 skeptic 都同意，且 expected/observed 行为完整。
 
-任一条件不满足，候选只进入本地 diagnostics，不进入 `finalJson.confirmed`、公开 `rejected.json` 或用户报告。
+static-proof 只适用于无法忠实用一个本地命令复现的仓库证据类缺陷，例如 config、workflow、lifecycle、concurrency/state-machine、security 或 documentation-contract。它必须满足：
+
+- `reproduction_command` 和 `output_marker` 为空，不能伪装成 runtime evidence。
+- `exercised_files`/inspected files 覆盖候选的每个 primary evidence file。
+- 每个 inspected file 必须真实存在、不是 symlink，并位于隔离仓库副本内。
+- `verification_steps` 必须说明如何从具体仓库文件验证 observed behavior。
+- verifier 和 skeptic 都同意，且 expected/observed 行为完整。
+
+任一条件不满足，候选只进入本地 diagnostics，不进入 `finalJson.confirmed`、公开 `rejected.json` 或用户报告。自然语言描述本身不是证据。
 
 ### 5. Report
 
@@ -103,7 +111,7 @@ legacy-compatible graphVerifiedReport/1 payload
 2. 新引擎每次 scan 只调用一次 `account/read`，并固定传入 `refreshToken: false`。
 3. token 的自动刷新完全交给 Codex App Server，不在 worker 里实现第二套刷新器。
 4. 不启动并发 CLI，因此不会出现多个进程同时消费同一个 refresh token。
-5. discovery 和 verification 的外层 turn 并发默认都是 1，硬上限都是 2。
+5. Discovery outer turn concurrency defaults to 1 and is capped at 6 via `graphVerified.finderTurnParallel`; verification outer turn concurrency remains auto/plan controlled and capped at 6 by the simple engine.
 6. 大部分并发通过同一 turn 内的 Codex 子代理完成，共享同一个 App Server 与认证状态。
 7. 一旦出现 401、refresh token already used、failed to refresh token、quota exhausted、usage limit 等可缓存的 readiness 错误，当前 scan 立即失败并打开 cooldown，停止继续 claim，避免登录重试或额度重试风暴。
 8. server 将这些 readiness 错误视为终止且可退款，不自动排队重试，并释放或回滚本次扫描额度。
@@ -113,11 +121,11 @@ legacy-compatible graphVerifiedReport/1 payload
 ## Token 预算
 
 - prompt 只包含规则和 assignment 文件路径，不复制整个源码或大段 manifest。
-- fast/standard/deep 的 discovery 基准 turn 数为 2/3/4；仓库较大时会按 120 文件或 1.5 MB 的批次上限自动增加顺序 turns，硬上限默认 48。
+- fast/standard/deep use baseline discovery turn counts of 2/3/4; large repositories add sequential turns by the 120-file or 1.5 MB batch limits, with a default max of 48.
 - 每个 unit 默认最多产生 2 个候选。
 - runtime verification 默认 fast/standard/deep 最多 6/10/20 个候选；server 显式下发 maxRepro 时仍按计划配置覆盖。
 - 全局 scan deadline 默认 fast/standard/deep 为 30/60/120 分钟；deadline 耗尽后剩余候选进入内部拒绝，不触发整仓重跑。
-- 外层 turn 并发硬限制为 2，避免同时压入多个大上下文。
+- Outer turn concurrency is capped at 6. `graphVerified.finderTurnParallel` controls discovery turn concurrency, and `graphVerified.finderMaxParallel` controls finder subagents batched inside one turn.
 - 超出验证预算的候选不会公开，也不会伪装成已审查问题。
 
 ## 发布顺序
@@ -126,7 +134,7 @@ legacy-compatible graphVerifiedReport/1 payload
 2. 再发布 `pullwise-worker` 补丁，并只在一个 worker identity 上运行 smoke scan。
 3. 检查 `summary.coverage.complete == true`、同一 identity 的 App Server 进程数为 1、公开结果只包含 confirmed。
 4. 再扩大 worker 数量，每个实例使用独立 HOME/CODEX_HOME。
-5. 稳定一个发布周期后，再单独删除旧 GraphVerified 模块。
+5. After one stable release cycle, remove the old GraphVerified modules separately.
 
 web 和 admin 不需要发布补丁。
 

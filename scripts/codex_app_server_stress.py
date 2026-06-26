@@ -14,6 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from codereview.app_server_runner import run_codex_app_server_turn
 from codereview.config import CodexConfig
 
+DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
+DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "LANG",
     "LC_ALL",
@@ -41,16 +45,19 @@ def main() -> int:
     parser.add_argument("--sqlite-home", default=os.environ.get("PULLWISE_CODEX_SQLITE_HOME") or "")
     parser.add_argument("--codex-home", default=os.environ.get("PULLWISE_CODEX_HOME") or "")
     parser.add_argument("--home", default=os.environ.get("PULLWISE_CODEX_STRESS_HOME") or "")
-    parser.add_argument("--codex-command", default=os.environ.get("PULLWISE_CODEX_COMMAND") or "codex")
+    parser.add_argument("--service-home", default=os.environ.get("PULLWISE_CODEX_STRESS_SERVICE_HOME") or os.environ.get("PULLWISE_SERVICE_HOME") or DEFAULT_SERVICE_HOME)
+    parser.add_argument("--codex-command", default=os.environ.get("PULLWISE_CODEX_COMMAND") or "")
     parser.add_argument("--model", default=os.environ.get("PULLWISE_CODEX_MODEL") or "")
     parser.add_argument("--reasoning-effort", default=os.environ.get("PULLWISE_CODEX_REASONING_EFFORT") or "medium")
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
     run_root = Path(tempfile.mkdtemp(prefix="pullwise-app-server-stress-"))
-    home = Path(args.home).resolve() if args.home else run_root / "home"
-    codex_home = Path(args.codex_home).resolve() if args.codex_home else run_root / "codex"
-    sqlite_home = Path(args.sqlite_home).resolve() if args.sqlite_home else run_root / "sqlite"
+    service_home = Path(args.service_home).resolve()
+    home = Path(args.home).resolve() if args.home else service_home
+    codex_home = Path(args.codex_home).resolve() if args.codex_home else service_home / ".codex"
+    sqlite_home = Path(args.sqlite_home).resolve() if args.sqlite_home else service_home / ".codex-sqlite"
+    codex_command = args.codex_command or default_codex_command(service_home)
     home.mkdir(parents=True, exist_ok=True)
     codex_home.mkdir(parents=True, exist_ok=True)
     sqlite_home.mkdir(parents=True, exist_ok=True)
@@ -66,9 +73,9 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
-    env = provider_env(home=home, codex_home=codex_home, sqlite_home=sqlite_home)
+    env = provider_env(home=home, codex_home=codex_home, sqlite_home=sqlite_home, service_home=service_home)
     config = CodexConfig(
-        command=args.codex_command,
+        command=codex_command,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         env=env,
@@ -131,7 +138,11 @@ def main() -> int:
     return 0 if payload["failed_count"] == 0 else 1
 
 
-def provider_env(*, home: Path, codex_home: Path, sqlite_home: Path) -> dict[str, str]:
+def default_codex_command(service_home: Path) -> str:
+    return str(service_home / ".codex" / "bin" / "codex")
+
+
+def provider_env(*, home: Path, codex_home: Path, sqlite_home: Path, service_home: Path) -> dict[str, str]:
     env = {
         key: os.environ[key]
         for key in PROVIDER_ENV_PASSTHROUGH_KEYS
@@ -143,7 +154,17 @@ def provider_env(*, home: Path, codex_home: Path, sqlite_home: Path) -> dict[str
             "USERPROFILE": str(home),
             "CODEX_HOME": str(codex_home),
             "CODEX_SQLITE_HOME": str(sqlite_home),
-            "PATH": os.environ.get("PATH", ""),
+            "PATH": os.pathsep.join(
+                dict.fromkeys(
+                    part
+                    for part in [
+                        str(service_home / ".local" / "bin"),
+                        str(service_home / ".codex" / "bin"),
+                        os.environ.get("PATH", "") or DEFAULT_SERVICE_PATH,
+                    ]
+                    if part
+                )
+            ),
         }
     )
     return env

@@ -111,7 +111,7 @@ _INLINE_CODE_FLAGS = {
 _INLINE_SHELLS = {"bash", "sh", "zsh"}
 _MAX_HARNESS_BYTES = 256 * 1024
 _AUTO_PARALLELISM_SENTINEL = 0
-_SIMPLE_PARALLEL_MAX = 4
+_SIMPLE_PARALLEL_MAX = 6
 
 
 DISCOVERY_SCHEMA = {
@@ -206,7 +206,7 @@ VERIFICATION_SCHEMA = {
     "properties": {
         "candidate_id": {"type": "string"},
         "status": {"type": "string", "enum": ["confirmed", "rejected", "blocked"]},
-        "proof_type": {"type": "string", "enum": ["runtime-command"]},
+        "proof_type": {"type": "string", "enum": ["runtime-command", "static-proof"]},
         "safe_to_show_user": {"type": "boolean"},
         "reason": {"type": "string"},
         "expected_behavior": {"type": "string"},
@@ -494,7 +494,7 @@ def load_simple_settings(raw_config: dict, config: ReviewConfig) -> SimpleSettin
         max_discovery_turns=_bounded_int(simple.get("max_discovery_turns"), 48, 1, 64),
         discovery_parallel=_bounded_int(simple.get("discovery_parallel"), _AUTO_PARALLELISM_SENTINEL, 0, _SIMPLE_PARALLEL_MAX),
         verification_parallel=_bounded_int(simple.get("verification_parallel"), _AUTO_PARALLELISM_SENTINEL, 0, _SIMPLE_PARALLEL_MAX),
-        subagents_per_turn=_bounded_int(simple.get("subagents_per_turn"), 3, 1, 4),
+        subagents_per_turn=_bounded_int(simple.get("subagents_per_turn"), 3, 1, 6),
         max_candidates=_bounded_int(simple.get("max_candidates"), mode_defaults["candidates"], 1, 100),
         max_candidates_per_unit=_bounded_int(simple.get("max_candidates_per_unit"), 2, 1, 4),
         max_unit_files=_bounded_int(simple.get("max_unit_files"), 40, 5, 100),
@@ -1075,13 +1075,19 @@ def validate_verification_result(
         if not target.is_file() or target.is_symlink() or not is_within(target, worker_repo):
             raise VerificationRejected(f"verification exercised file is invalid: {rel}")
 
-    if proof_type == "static-proof":
-        if not verification_step_list(payload.get("verification_steps")):
-            raise VerificationRejected("static proof lacks verification steps")
-        return None, ""
-
     declared_command = _clean_text(payload.get("reproduction_command"), 2_000)
     marker = _clean_text(payload.get("output_marker"), 500)
+    if proof_type == "static-proof":
+        steps = verification_step_list(payload.get("verification_steps"))
+        if not steps:
+            raise VerificationRejected("static proof lacks verification steps")
+        missing_static_files = sorted(set(primary_files) - set(exercised_files))
+        if missing_static_files:
+            raise VerificationRejected("static proof did not inspect every primary evidence file")
+        if declared_command or marker:
+            raise VerificationRejected("static proof must not claim runtime command evidence")
+        return None, ""
+
     if (
         not declared_command
         or not marker
@@ -1489,6 +1495,7 @@ def _run_verifications(
                 "expected": expected,
                 "actual": observed,
                 "verification_steps": steps,
+                "inspected_files": [safe_relative_path(value) for value in payload.get("exercised_files", []) if safe_relative_path(value)],
             }
             item = {
                 "candidate": candidate,
@@ -1515,6 +1522,7 @@ def _run_verifications(
                     "safe_to_show_user": True,
                     "reason": independent,
                     "evidence_summary": {
+                        "inspected_files": proof["inspected_files"],
                         "observable": " | ".join(steps[:3]),
                     },
                     "limitations": limitations,
@@ -1656,10 +1664,10 @@ Hard rules:
 - skeptic_agreed may be true only after an independent challenge finds the proof valid.
 
 Proof types:
-- Use proof_type=runtime-command when a deterministic local harness or project command can exercise the cited code. For this proof type, create a small harness below .codereview/repro/ when useful, execute the final reproduction command, and set reproduction_command to the exact command that produced the observed evidence. The final command must execute a normal harness file below .codereview/repro/; do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof. Set output_marker to an exact non-trivial substring present in real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
-- Use proof_type=static-proof when the candidate is a real config, workflow, lifecycle, concurrency/state-machine, security, or documentation-contract defect that cannot be faithfully reproduced by one local command. Workflow/config/security issues such as shell interpolation, release ordering, permissions, and environment handling should use static-proof when repository evidence is enough; do not invent a runtime-command harness for them. For this proof type, leave reproduction_command and output_marker empty, and provide verification_steps that explain how the repository evidence confirms the issue. Static proof must cite and inspect the relevant files; do not return it merely because the issue sounds plausible.
+- Use proof_type=runtime-command when a deterministic local harness or project command can exercise the cited code. Create a small harness below .codereview/repro/ when useful, execute the final reproduction command, and set reproduction_command to the exact command that produced the observed evidence. The final command must execute a normal harness file below .codereview/repro/; do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof. Set output_marker to an exact non-trivial substring present in real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
+- Use proof_type=static-proof only for repository-evidence defects that cannot be faithfully reproduced by one local command, such as config, workflow, lifecycle, concurrency/state-machine, security, or documentation-contract defects. Static proof must leave reproduction_command and output_marker empty, inspect every primary evidence file, and provide verification_steps that cite the concrete files and explain how the repository evidence proves the observed behavior. A narrative description without inspected files and verification steps is not enough.
 
-For runtime proof:
+For both proof types:
 - status must be confirmed only when expected_behavior and observed_behavior differ and the cited evidence supports that difference.
 - exercised_files must include the cited source/config/doc/workflow files you actually inspected or exercised.
 - verification_steps must describe the concrete verification path or reproduction approach that should travel with the issue.
@@ -1916,7 +1924,7 @@ def render_debug_markdown(summary: dict, rejected: list[dict]) -> str:
         f"- Internal verification rejections: `{(summary.get('repro') or {}).get('internalRejected', 0)}`",
         f"- Confirmed: `{(summary.get('reports') or {}).get('confirmed', 0)}`",
         "",
-        "Only confirmed runtime-command findings with command evidence are included. Unconfirmed hypotheses and static-only proofs are not exposed.",
+        "Only confirmed runtime-command and validated static-proof findings are included. Unconfirmed hypotheses and unsupported descriptions are not exposed.",
     ]
     if reason_counts:
         lines.extend(["", "Internal rejection reason counts:"])

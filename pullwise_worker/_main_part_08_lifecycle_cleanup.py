@@ -384,11 +384,19 @@ def execute_lifecycle_command(action: str, config: WorkerConfig | None = None) -
                     file=sys.stderr,
                 )
         try:
-            cleanup_worker_instance(config)
+            return uninstall_worker(
+                config,
+                remove_config=True,
+                remove_logs=True,
+                remove_service_home=True,
+                remove_wrapper=True,
+                remove_logrotate=True,
+                remove_service_user=True,
+                stop_service=False,
+            )
         except Exception as exc:
             print(f"remote uninstall cleanup failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
             return 1
-        return 0
     return 2
 
 

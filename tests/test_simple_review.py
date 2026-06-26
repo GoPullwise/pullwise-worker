@@ -37,7 +37,7 @@ from codereview.simple_review import (
 
 
 class SimpleReviewTests(unittest.TestCase):
-    def test_settings_allow_auto_parallelism_and_cap_explicit_values_at_four(self) -> None:
+    def test_settings_allow_auto_parallelism_and_cap_explicit_values_at_six(self) -> None:
         config = ReviewConfig()
         default_settings = load_simple_settings({"simple": {}}, config)
         self.assertEqual(default_settings.discovery_parallel, 0)
@@ -53,9 +53,9 @@ class SimpleReviewTests(unittest.TestCase):
             },
             config,
         )
-        self.assertEqual(settings.discovery_parallel, 4)
-        self.assertEqual(settings.verification_parallel, 4)
-        self.assertEqual(settings.subagents_per_turn, 4)
+        self.assertEqual(settings.discovery_parallel, 6)
+        self.assertEqual(settings.verification_parallel, 6)
+        self.assertEqual(settings.subagents_per_turn, 6)
 
     def test_verification_prompt_requires_verbatim_candidate_expected_behavior(self) -> None:
         settings = load_simple_settings({"simple": {}}, ReviewConfig())
@@ -70,8 +70,9 @@ class SimpleReviewTests(unittest.TestCase):
         self.assertIn("without paraphrasing", prompt)
         self.assertIn("\"The handler should return true.\"", prompt)
         self.assertIn("return status=rejected", prompt)
-        self.assertIn("Workflow/config/security issues", prompt)
-        self.assertIn("do not invent a runtime-command harness", prompt)
+        self.assertIn("Use proof_type=runtime-command", prompt)
+        self.assertIn("Use proof_type=static-proof", prompt)
+        self.assertIn("A narrative description without inspected files and verification steps is not enough", prompt)
 
     def test_rejected_record_keeps_raw_title_out_of_candidate_id(self) -> None:
         record = _rejected_record(
@@ -97,10 +98,10 @@ class SimpleReviewTests(unittest.TestCase):
             patch("codereview.simple_review.os.cpu_count", return_value=16),
             patch("codereview.simple_review.available_memory_gib", return_value=32.0),
         ):
-            self.assertEqual(recommended_simple_parallelism(inventory, {"shared_app_server": True}), 4)
+            self.assertEqual(recommended_simple_parallelism(inventory, {"shared_app_server": True}), 6)
             tuned = tune_simple_parallelism(settings, inventory, {"shared_app_server": True})
-        self.assertEqual(tuned.discovery_parallel, 4)
-        self.assertEqual(tuned.verification_parallel, 4)
+        self.assertEqual(tuned.discovery_parallel, 6)
+        self.assertEqual(tuned.verification_parallel, 6)
         self.assertEqual(tune_simple_parallelism(settings, inventory, {}).discovery_parallel, 1)
 
     def test_unit_and_batch_planners_cover_every_file_once(self) -> None:
@@ -540,6 +541,72 @@ class SimpleReviewTests(unittest.TestCase):
             self.assertIsNone(actual)
             self.assertEqual(marker, "")
 
+    def test_verification_gate_rejects_static_proof_without_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            candidate = {
+                "candidate_id": "cand-1",
+                "expected_behavior": "The handler should return true.",
+                "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+            }
+            payload = {
+                "candidate_id": "cand-1",
+                "status": "confirmed",
+                "proof_type": "static-proof",
+                "safe_to_show_user": True,
+                "reason": "The source returns false on the cited branch.",
+                "expected_behavior": "The handler should return true.",
+                "observed_behavior": "The handler returns false.",
+                "reproduction_command": "",
+                "output_marker": "",
+                "exercised_files": ["src/handler.py"],
+                "verification_steps": [],
+                "skeptic_agreed": True,
+                "independent_check": "The skeptic traced the same static branch.",
+                "limitations": [],
+            }
+
+            with self.assertRaisesRegex(ValueError, "static proof lacks verification steps"):
+                validate_verification_result(candidate, payload, [], repo, source_changed=False)
+
+    def test_verification_gate_rejects_static_proof_missing_primary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "src" / "handler.py"
+            other = repo / "src" / "other.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            other.write_text("EXPECTED = True\n", encoding="utf-8")
+            candidate = {
+                "candidate_id": "cand-1",
+                "expected_behavior": "The handler should return true.",
+                "evidence": [
+                    {"file": "src/handler.py", "lines": "1-2", "why_it_matters": "observed"},
+                    {"file": "src/other.py", "lines": "1", "why_it_matters": "contract"},
+                ],
+            }
+            payload = {
+                "candidate_id": "cand-1",
+                "status": "confirmed",
+                "proof_type": "static-proof",
+                "safe_to_show_user": True,
+                "reason": "The source returns false on the cited branch.",
+                "expected_behavior": "The handler should return true.",
+                "observed_behavior": "The handler returns false.",
+                "reproduction_command": "",
+                "output_marker": "",
+                "exercised_files": ["src/handler.py"],
+                "verification_steps": ["Inspect src/handler.py and src/other.py."],
+                "skeptic_agreed": True,
+                "independent_check": "The skeptic traced the same static branch.",
+                "limitations": [],
+            }
+
+            with self.assertRaisesRegex(ValueError, "static proof did not inspect every primary evidence file"):
+                validate_verification_result(candidate, payload, [], repo, source_changed=False)
     def test_verification_gate_rejects_hardcoded_harness_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

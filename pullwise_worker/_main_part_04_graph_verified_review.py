@@ -455,12 +455,41 @@ def write_graph_verified_codereview_config(
         or job_source.get("review_output_language")
         or job_source.get("reviewOutputLanguage")
     ) or "English"
+    finder_turn_parallel = graph_verified_positive_int(
+        graph_config.get("finderTurnParallel"),
+        default=1,
+        minimum=1,
+        maximum=6,
+    )
+    finder_max_parallel_source = graph_config.get("finderMaxParallel")
+    if finder_max_parallel_source is None:
+        finder_max_parallel_source = graph_config.get("subagentsPerTurn")
+    finder_max_parallel = graph_verified_positive_int(
+        finder_max_parallel_source,
+        default=3,
+        minimum=1,
+        maximum=6,
+    )
     discovery_parallel = graph_config.get("simpleDiscoveryParallel")
     if discovery_parallel is None:
-        discovery_parallel = graph_config.get("finderTurnParallel")
+        discovery_parallel = finder_turn_parallel
     verification_parallel = graph_config.get("simpleVerificationParallel")
     if verification_parallel is None:
         verification_parallel = graph_config.get("reproMaxParallel")
+    current["finders"] = {
+        "enabled": True,
+        "timeout_seconds": graph_verified_positive_int(
+            graph_config.get("finderTimeoutSeconds"), default=900, minimum=60, maximum=3600
+        ),
+        "max_workers": finder_max_parallel,
+        "turn_parallel": finder_turn_parallel,
+        "max_turns_per_scan": graph_verified_positive_int(
+            graph_config.get("finderMaxTurnsPerScan"),
+            default={"fast": 2, "standard": 3, "deep": 4}.get(graph_verified_mode(mode), 3),
+            minimum=1,
+            maximum=16,
+        ),
+    }
     current["simple"] = {
         "engine": "simple-full-repository/1",
         "discovery_turns": graph_verified_positive_int(
@@ -477,9 +506,9 @@ def write_graph_verified_codereview_config(
         ),
         "discovery_parallel": graph_verified_positive_int(
             discovery_parallel,
-            default=0,
-            minimum=0,
-            maximum=4,
+            default=1,
+            minimum=1,
+            maximum=6,
         ),
         "verification_parallel": graph_verified_positive_int(
             verification_parallel,
@@ -487,12 +516,7 @@ def write_graph_verified_codereview_config(
             minimum=0,
             maximum=4,
         ),
-        "subagents_per_turn": graph_verified_positive_int(
-            graph_config.get("subagentsPerTurn"),
-            default=3,
-            minimum=1,
-            maximum=4,
-        ),
+        "subagents_per_turn": finder_max_parallel,
         "max_candidates": repro_limit,
         "max_candidates_per_unit": graph_verified_positive_int(
             graph_config.get("maxCandidatesPerUnit"),
