@@ -15,6 +15,7 @@ from codereview.simple_review import (
     CommandEvidence,
     DiscoveryBatch,
     ReviewUnit,
+    _rejected_record,
     _run_verifications,
     _write_reports,
     codex_account_preflight,
@@ -69,6 +70,19 @@ class SimpleReviewTests(unittest.TestCase):
         self.assertIn("without paraphrasing", prompt)
         self.assertIn("\"The handler should return true.\"", prompt)
         self.assertIn("return status=rejected", prompt)
+        self.assertIn("Workflow/config/security issues", prompt)
+        self.assertIn("do not invent a runtime-command harness", prompt)
+
+    def test_rejected_record_keeps_raw_title_out_of_candidate_id(self) -> None:
+        record = _rejected_record(
+            "discovery",
+            {"title": "静态证明可无命令证据进入 confirmed", "unit_id": "unit-0001"},
+            "candidate primary evidence is outside its reviewed unit",
+        )
+
+        self.assertEqual(record["candidate_id"], "")
+        self.assertEqual(record["title"], "静态证明可无命令证据进入 confirmed")
+        self.assertEqual(record["unit_id"], "unit-0001")
 
     def test_auto_parallelism_uses_app_server_and_resource_budget(self) -> None:
         inventory = {
@@ -261,6 +275,32 @@ class SimpleReviewTests(unittest.TestCase):
             self.assertEqual(parsed[0].command, "python3 .codereview/repro/check.py")
             self.assertEqual(parsed[0].exit_code, 0)
             self.assertIn("PULLWISE_REPRO:false", parsed[0].output)
+
+    def test_command_events_default_completed_status_for_completed_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_event = {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "type": "shellExec",
+                        "commandLine": ["python3", ".codereview/repro/check.py"],
+                        "cwd": tmp,
+                        "exit_code": 0,
+                        "stdout": "PULLWISE_REPRO:false",
+                    },
+                },
+            }
+            stored = stored_app_server_event(raw_event)
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored["params"]["item"]["status"], "completed")
+            events = Path(tmp) / "events.jsonl"
+            events.write_text(json.dumps(stored) + "\n", encoding="utf-8")
+
+            parsed = parse_command_events(events)
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0].status, "completed")
 
     def test_command_events_parse_commands_after_oversized_event_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

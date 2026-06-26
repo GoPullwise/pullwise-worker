@@ -14,6 +14,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from codereview.app_server_runner import run_codex_app_server_turn
 from codereview.config import CodexConfig
 
+PROVIDER_ENV_PASSTHROUGH_KEYS = (
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stress one persistent Codex app-server with concurrent turns.")
@@ -24,6 +39,8 @@ def main() -> int:
     parser.add_argument("--round-interval-seconds", type=int, default=0, help="Minimum seconds between round starts.")
     parser.add_argument("--stop-on-failure", action="store_true", help="Stop the sustained run after the first failed round.")
     parser.add_argument("--sqlite-home", default=os.environ.get("PULLWISE_CODEX_SQLITE_HOME") or "")
+    parser.add_argument("--codex-home", default=os.environ.get("PULLWISE_CODEX_HOME") or "")
+    parser.add_argument("--home", default=os.environ.get("PULLWISE_CODEX_STRESS_HOME") or "")
     parser.add_argument("--codex-command", default=os.environ.get("PULLWISE_CODEX_COMMAND") or "codex")
     parser.add_argument("--model", default=os.environ.get("PULLWISE_CODEX_MODEL") or "")
     parser.add_argument("--reasoning-effort", default=os.environ.get("PULLWISE_CODEX_REASONING_EFFORT") or "medium")
@@ -31,7 +48,11 @@ def main() -> int:
 
     repo = Path(args.repo).resolve()
     run_root = Path(tempfile.mkdtemp(prefix="pullwise-app-server-stress-"))
+    home = Path(args.home).resolve() if args.home else run_root / "home"
+    codex_home = Path(args.codex_home).resolve() if args.codex_home else run_root / "codex"
     sqlite_home = Path(args.sqlite_home).resolve() if args.sqlite_home else run_root / "sqlite"
+    home.mkdir(parents=True, exist_ok=True)
+    codex_home.mkdir(parents=True, exist_ok=True)
     sqlite_home.mkdir(parents=True, exist_ok=True)
     schema = run_root / "schema.json"
     schema.write_text(
@@ -45,8 +66,7 @@ def main() -> int:
         ),
         encoding="utf-8",
     )
-    env = os.environ.copy()
-    env["CODEX_SQLITE_HOME"] = str(sqlite_home)
+    env = provider_env(home=home, codex_home=codex_home, sqlite_home=sqlite_home)
     config = CodexConfig(
         command=args.codex_command,
         model=args.model,
@@ -109,6 +129,24 @@ def main() -> int:
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if payload["failed_count"] == 0 else 1
+
+
+def provider_env(*, home: Path, codex_home: Path, sqlite_home: Path) -> dict[str, str]:
+    env = {
+        key: os.environ[key]
+        for key in PROVIDER_ENV_PASSTHROUGH_KEYS
+        if os.environ.get(key)
+    }
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "CODEX_HOME": str(codex_home),
+            "CODEX_SQLITE_HOME": str(sqlite_home),
+            "PATH": os.environ.get("PATH", ""),
+        }
+    )
+    return env
 
 
 def run_round(

@@ -401,7 +401,7 @@ def normalized_command_event_item(item: dict) -> dict | None:
         "type": "commandExecution",
         "command": command,
         "cwd": str(item.get("cwd") or ""),
-        "status": str(item.get("status") or ""),
+        "status": str(item.get("status") or "completed"),
         "exitCode": exit_code,
         "aggregatedOutput": command_event_output(item)[-MAX_STORED_COMMAND_OUTPUT_CHARS:],
     }

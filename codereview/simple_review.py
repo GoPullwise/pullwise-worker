@@ -942,7 +942,7 @@ def parse_command_events(path: Path) -> list[CommandEvidence]:
                         cwd=str(item.get("cwd") or "").strip(),
                         exit_code=exit_code,
                         output=output[-MAX_COMMAND_OUTPUT_CHARS:],
-                        status=str(item.get("status") or "").strip(),
+                        status=str(item.get("status") or "completed").strip(),
                     )
                 )
                 if len(commands) > 400:
@@ -1657,7 +1657,7 @@ Hard rules:
 
 Proof types:
 - Use proof_type=runtime-command when a deterministic local harness or project command can exercise the cited code. For this proof type, create a small harness below .codereview/repro/ when useful, execute the final reproduction command, and set reproduction_command to the exact command that produced the observed evidence. The final command must execute a normal harness file below .codereview/repro/; do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof. Set output_marker to an exact non-trivial substring present in real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
-- Use proof_type=static-proof when the candidate is a real config, workflow, lifecycle, concurrency/state-machine, security, or documentation-contract defect that cannot be faithfully reproduced by one local command. For this proof type, leave reproduction_command and output_marker empty, and provide verification_steps that explain how the repository evidence confirms the issue. Static proof must cite and inspect the relevant files; do not return it merely because the issue sounds plausible.
+- Use proof_type=static-proof when the candidate is a real config, workflow, lifecycle, concurrency/state-machine, security, or documentation-contract defect that cannot be faithfully reproduced by one local command. Workflow/config/security issues such as shell interpolation, release ordering, permissions, and environment handling should use static-proof when repository evidence is enough; do not invent a runtime-command harness for them. For this proof type, leave reproduction_command and output_marker empty, and provide verification_steps that explain how the repository evidence confirms the issue. Static proof must cite and inspect the relevant files; do not return it merely because the issue sounds plausible.
 
 For both proof types:
 - status must be confirmed only when expected_behavior and observed_behavior differ and the cited evidence supports that difference.
@@ -1960,11 +1960,18 @@ def internal_rejection_reason_counts(rejected: list[dict]) -> list[dict]:
 
 def internal_rejection_payload(item: dict) -> dict:
     source = item if isinstance(item, dict) else {}
-    return {
+    payload = {
         "stage": _clean_text(source.get("stage"), 80),
         "candidate_id": _clean_text(source.get("candidate_id"), 160),
         "reason": _clean_text(source.get("reason"), MAX_DEBUG_REASON_CHARS),
     }
+    title = _clean_text(source.get("title"), 240)
+    unit_id = _clean_text(source.get("unit_id"), 160)
+    if title:
+        payload["title"] = title
+    if unit_id:
+        payload["unit_id"] = unit_id
+    return payload
 
 
 def internal_candidate_summary(candidate: dict) -> dict:
@@ -2071,7 +2078,9 @@ def _candidate_sort_key(candidate: dict) -> tuple:
 def _rejected_record(stage: str, candidate: dict, reason: str) -> dict:
     return {
         "stage": stage,
-        "candidate_id": _clean_text(candidate.get("candidate_id") or candidate.get("title"), 160),
+        "candidate_id": _clean_text(candidate.get("candidate_id") or candidate.get("issue_id") or candidate.get("id"), 160),
+        "title": _clean_text(candidate.get("title"), 240),
+        "unit_id": _clean_text(candidate.get("unit_id"), 160),
         "reason": _clean_text(reason, MAX_DEBUG_REASON_CHARS),
     }
 
