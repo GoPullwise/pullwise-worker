@@ -374,28 +374,11 @@ def execute_lifecycle_command(action: str, config: WorkerConfig | None = None) -
         if config is None:
             print("Remote uninstall requires a worker configuration.", file=sys.stderr)
             return 2
-        if getattr(config, "remote_uninstall_finalizer", False):
-            try:
-                write_remote_uninstall_marker(config)
-                return 0
-            except Exception as exc:
-                print(
-                    f"remote uninstall finalizer marker failed; falling back to instance cleanup: {redact_secrets(str(exc), config)}",
-                    file=sys.stderr,
-                )
         try:
-            return uninstall_worker(
-                config,
-                remove_config=True,
-                remove_logs=True,
-                remove_service_home=True,
-                remove_wrapper=True,
-                remove_logrotate=True,
-                remove_service_user=True,
-                stop_service=False,
-            )
+            write_remote_uninstall_marker(config)
+            return 0
         except Exception as exc:
-            print(f"remote uninstall cleanup failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
+            print(f"remote uninstall finalizer marker failed: {redact_secrets(str(exc), config)}", file=sys.stderr)
             return 1
     return 2
 

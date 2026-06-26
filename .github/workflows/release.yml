@@ -71,16 +71,100 @@ jobs:
               path.write_text(updated, encoding="utf-8", newline="\n")
           PY
 
-      - name: Validate tag matches package version
+      - name: Validate release version sources
         run: |
-          actual="$(python -c "import re; text=open('pyproject.toml', encoding='utf-8').read(); print(re.search(r'^version = \"([^\"]+)\"', text, re.M).group(1))")"
-          test "$actual" = "$RELEASE_VERSION" || { echo "requested version $RELEASE_VERSION does not match pyproject version $actual"; exit 1; }
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          expected_url = (
+              "https://github.com/GoPullwise/pullwise-worker/releases/download/"
+              f"v{version}/pullwise_worker-{version}-py3-none-any.whl"
+          )
+          checks = {
+              "pyproject.toml": re.search(
+                  r'^version = "([^"]+)"',
+                  Path("pyproject.toml").read_text(encoding="utf-8"),
+                  re.M,
+              ),
+              "pullwise_worker/__init__.py": re.search(
+                  r'^__version__ = "([^"]+)"',
+                  Path("pullwise_worker/__init__.py").read_text(encoding="utf-8"),
+                  re.M,
+              ),
+              "deploy/worker.env.template": re.search(
+                  r'^PULLWISE_WORKER_PACKAGE=(.+)$',
+                  Path("deploy/worker.env.template").read_text(encoding="utf-8"),
+                  re.M,
+              ),
+          }
+          actual = {}
+          for source_path, match in checks.items():
+              if not match:
+                  raise SystemExit(f"unable to read release version source: {source_path}")
+              actual[source_path] = match.group(1)
+          expected = {
+              "pyproject.toml": version,
+              "pullwise_worker/__init__.py": version,
+              "deploy/worker.env.template": expected_url,
+          }
+          mismatches = [
+              f"{source_path}: expected {expected[source_path]!r}, found {value!r}"
+              for source_path, value in actual.items()
+              if value != expected[source_path]
+          ]
+          if mismatches:
+              raise SystemExit("release version source mismatch:\n" + "\n".join(mismatches))
+          PY
 
       - name: Build distributions
         run: |
+          rm -rf build dist
           python -m pip install --upgrade pip build
           python -m build
           python -m pip install --dry-run --no-deps dist/*.whl
+
+      - name: Validate built distribution version
+        run: |
+          python - <<'PY'
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          expected_wheel = f"pullwise_worker-{version}-py3-none-any.whl"
+          dist_files = sorted(path.name for path in Path("dist").iterdir())
+          if expected_wheel not in dist_files:
+              raise SystemExit(f"missing expected wheel {expected_wheel}; found {dist_files}")
+
+          with zipfile.ZipFile(Path("dist") / expected_wheel) as wheel:
+              metadata_names = [name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(metadata_names) != 1:
+                  raise SystemExit(f"expected one wheel METADATA file, found {metadata_names}")
+              metadata = wheel.read(metadata_names[0]).decode("utf-8")
+          wheel_version = next((line.partition(":")[2].strip() for line in metadata.splitlines() if line.startswith("Version:")), "")
+          if wheel_version != version:
+              raise SystemExit(f"wheel metadata version {wheel_version!r} does not match {version}")
+
+          expected_sdist = f"pullwise_worker-{version}.tar.gz"
+          sdist_path = Path("dist") / expected_sdist
+          if not sdist_path.exists():
+              raise SystemExit(f"missing expected source archive {expected_sdist}; found {dist_files}")
+          with tarfile.open(sdist_path) as sdist:
+              pkg_info_names = [name for name in sdist.getnames() if name.endswith("/PKG-INFO")]
+              if not pkg_info_names:
+                  raise SystemExit("source archive is missing PKG-INFO")
+              pkg_info_file = sdist.extractfile(pkg_info_names[0])
+              if pkg_info_file is None:
+                  raise SystemExit("unable to read source archive PKG-INFO")
+              pkg_info = pkg_info_file.read().decode("utf-8")
+          sdist_version = next((line.partition(":")[2].strip() for line in pkg_info.splitlines() if line.startswith("Version:")), "")
+          if sdist_version != version:
+              raise SystemExit(f"source archive metadata version {sdist_version!r} does not match {version}")
+          PY
 
       - name: Commit package version
         if: github.ref_type != 'tag'

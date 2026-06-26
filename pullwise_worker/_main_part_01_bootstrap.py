@@ -934,7 +934,7 @@ class WorkerConfig:
             os.environ.get("PULLWISE_WATCHER_SERVICE_FILE", f"/etc/systemd/system/{self.watcher_service_name}.service").strip()
             or f"/etc/systemd/system/{self.watcher_service_name}.service"
         )
-        self.remote_uninstall_finalizer = env_bool("PULLWISE_REMOTE_UNINSTALL_FINALIZER", False)
+        self.remote_uninstall_finalizer = env_bool("PULLWISE_REMOTE_UNINSTALL_FINALIZER", True)
         self.uninstall_marker_file = (
             os.environ.get("PULLWISE_UNINSTALL_MARKER_FILE", f"/run/{self.service_name}/uninstall-requested").strip()
             or f"/run/{self.service_name}/uninstall-requested"

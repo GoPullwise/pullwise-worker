@@ -87,7 +87,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(config.poll_seconds, 5)
         self.assertEqual(config.poll_jitter_seconds, 2)
         self.assertEqual(config.max_backoff_seconds, 60)
+        self.assertFalse(config.lifecycle_watcher_enabled)
         self.assertEqual(config.watcher_poll_seconds, 5)
+        self.assertTrue(config.remote_uninstall_finalizer)
         self.assertEqual(config.codex_timeout_seconds, 1800)
         self.assertEqual(config.codex_doctor_timeout_seconds, 60)
         self.assertEqual(config.result_upload_attempts, 5)
@@ -4641,23 +4643,33 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertFalse(checkout.exists())
             self.assertFalse(marker.exists())
 
-    def test_remote_uninstall_without_finalizer_runs_full_uninstall_cleanup(self) -> None:
-        config = SimpleNamespace(remote_uninstall_finalizer=False)
+    def test_remote_uninstall_writes_marker_instead_of_self_cleanup(self) -> None:
+        config = SimpleNamespace(remote_uninstall_finalizer=False, worker_token="")
 
-        with patch.object(worker_main, "uninstall_worker", return_value=0) as uninstall:
+        with patch.object(
+            worker_main,
+            "write_remote_uninstall_marker",
+            return_value=Path("/run/pullwise/uninstall-requested"),
+        ) as marker, patch.object(worker_main, "uninstall_worker", return_value=0) as uninstall:
             code = worker_main.execute_lifecycle_command("uninstall", config)
 
         self.assertEqual(code, 0)
-        uninstall.assert_called_once_with(
-            config,
-            remove_config=True,
-            remove_logs=True,
-            remove_service_home=True,
-            remove_wrapper=True,
-            remove_logrotate=True,
-            remove_service_user=True,
-            stop_service=False,
-        )
+        marker.assert_called_once_with(config)
+        uninstall.assert_not_called()
+
+    def test_remote_uninstall_marker_failure_does_not_self_cleanup(self) -> None:
+        config = SimpleNamespace(remote_uninstall_finalizer=False, worker_token="")
+
+        with patch.object(
+            worker_main,
+            "write_remote_uninstall_marker",
+            side_effect=OSError("blocked"),
+        ) as marker, patch.object(worker_main, "uninstall_worker", return_value=0) as uninstall:
+            code = worker_main.execute_lifecycle_command("uninstall", config)
+
+        self.assertEqual(code, 1)
+        marker.assert_called_once_with(config)
+        uninstall.assert_not_called()
 
     def test_remote_uninstall_marker_write_does_not_follow_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
