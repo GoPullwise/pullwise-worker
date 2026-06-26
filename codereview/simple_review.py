@@ -206,7 +206,7 @@ VERIFICATION_SCHEMA = {
     "properties": {
         "candidate_id": {"type": "string"},
         "status": {"type": "string", "enum": ["confirmed", "rejected", "blocked"]},
-        "proof_type": {"type": "string", "enum": ["runtime-command", "static-proof"]},
+        "proof_type": {"type": "string", "enum": ["runtime-command"]},
         "safe_to_show_user": {"type": "boolean"},
         "reason": {"type": "string"},
         "expected_behavior": {"type": "string"},
@@ -1659,7 +1659,7 @@ Proof types:
 - Use proof_type=runtime-command when a deterministic local harness or project command can exercise the cited code. For this proof type, create a small harness below .codereview/repro/ when useful, execute the final reproduction command, and set reproduction_command to the exact command that produced the observed evidence. The final command must execute a normal harness file below .codereview/repro/; do not use python -c, node -e, ruby -e, php -r, sh -c, bash -c, or other inline-code execution as final proof. Set output_marker to an exact non-trivial substring present in real stdout/stderr. It must come from the observed result or assertion, not unconditional hard-coded output.
 - Use proof_type=static-proof when the candidate is a real config, workflow, lifecycle, concurrency/state-machine, security, or documentation-contract defect that cannot be faithfully reproduced by one local command. Workflow/config/security issues such as shell interpolation, release ordering, permissions, and environment handling should use static-proof when repository evidence is enough; do not invent a runtime-command harness for them. For this proof type, leave reproduction_command and output_marker empty, and provide verification_steps that explain how the repository evidence confirms the issue. Static proof must cite and inspect the relevant files; do not return it merely because the issue sounds plausible.
 
-For both proof types:
+For runtime proof:
 - status must be confirmed only when expected_behavior and observed_behavior differ and the cited evidence supports that difference.
 - exercised_files must include the cited source/config/doc/workflow files you actually inspected or exercised.
 - verification_steps must describe the concrete verification path or reproduction approach that should travel with the issue.
@@ -1916,7 +1916,7 @@ def render_debug_markdown(summary: dict, rejected: list[dict]) -> str:
         f"- Internal verification rejections: `{(summary.get('repro') or {}).get('internalRejected', 0)}`",
         f"- Confirmed: `{(summary.get('reports') or {}).get('confirmed', 0)}`",
         "",
-        "Only confirmed runtime or static-proof findings are included. Unconfirmed hypotheses are not exposed.",
+        "Only confirmed runtime-command findings with command evidence are included. Unconfirmed hypotheses and static-only proofs are not exposed.",
     ]
     if reason_counts:
         lines.extend(["", "Internal rejection reason counts:"])
