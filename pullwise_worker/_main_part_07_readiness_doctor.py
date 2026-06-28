@@ -10,7 +10,7 @@ from ._main_part_04_graph_verified_review import *  # noqa: F403
 import posixpath
 
 from codereview.app_server_runner import run_codex_app_server_turn
-from codereview.config import CodexConfig
+from codereview.config import AUXILIARY_CODEX_REASONING_EFFORT, CodexConfig
 
 def result_checksum(payload: dict) -> str:
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -461,7 +461,7 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
                 config=CodexConfig(
                     command=config.codex_command,
                     model=config.codex_model,
-                    reasoning_effort=config.codex_reasoning_effort,
+                    reasoning_effort=AUXILIARY_CODEX_REASONING_EFFORT,
                     env=provider_env,
                 ),
                 env=provider_env,

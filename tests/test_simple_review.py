@@ -15,6 +15,7 @@ from codereview.simple_review import (
     CommandEvidence,
     DiscoveryBatch,
     ReviewUnit,
+    TurnMetrics,
     _rejected_record,
     _run_verifications,
     _write_reports,
@@ -40,8 +41,14 @@ class SimpleReviewTests(unittest.TestCase):
     def test_settings_allow_auto_parallelism_and_cap_explicit_values_at_six(self) -> None:
         config = ReviewConfig()
         default_settings = load_simple_settings({"simple": {}}, config)
+        self.assertEqual(default_settings.discovery_turns, 2)
+        self.assertEqual(default_settings.max_discovery_turns, 20)
         self.assertEqual(default_settings.discovery_parallel, 0)
         self.assertEqual(default_settings.verification_parallel, 0)
+        self.assertEqual(default_settings.max_candidates, 8)
+        self.assertEqual(default_settings.max_candidates_per_unit, 1)
+        self.assertEqual(default_settings.max_batch_files, 80)
+        self.assertEqual(default_settings.max_batch_bytes, 1_000_000)
 
         settings = load_simple_settings(
             {
@@ -1232,6 +1239,13 @@ class SimpleReviewTests(unittest.TestCase):
                 rejected=[{"stage": "budget", "candidate_id": "cand-2", "reason": "runtime verification budget exhausted"}],
                 account={},
                 progress=None,
+                turn_metrics=TurnMetrics(
+                    discovery_turns=2,
+                    discovery_prompt_chars=1200,
+                    verification_turns=1,
+                    verification_prompt_chars=700,
+                    input_limit_chars=5000,
+                ),
             )
             diagnostics = json.loads(final.with_name("diagnostics.json").read_text(encoding="utf-8"))
             self.assertEqual(diagnostics["selectedCandidateCount"], 1)
@@ -1243,6 +1257,12 @@ class SimpleReviewTests(unittest.TestCase):
             self.assertFalse(summary["coverage"]["complete"])
             self.assertEqual(summary["coverage"]["verificationBudgetDropped"], 1)
             self.assertEqual(summary["reports"]["blocked"], 1)
+            self.assertEqual(summary["codexTurns"]["turns"], {"discovery": 2, "verification": 1, "total": 3})
+            self.assertEqual(
+                summary["codexTurns"]["promptChars"],
+                {"discovery": 1200, "verification": 700, "total": 1900},
+            )
+            self.assertEqual(summary["codexTurns"]["inputLimitChars"], 5000)
 
 if __name__ == "__main__":
     unittest.main()

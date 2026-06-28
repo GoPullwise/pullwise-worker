@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -274,6 +274,16 @@ class SimpleSettings:
     output_language: str
 
 
+@dataclass
+class TurnMetrics:
+    discovery_turns: int = 0
+    discovery_prompt_chars: int = 0
+    verification_turns: int = 0
+    verification_prompt_chars: int = 0
+    input_limit_chars: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+
 @dataclass(frozen=True)
 class CommandEvidence:
     command: str
@@ -297,6 +307,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
     raw_config = read_json(checkout / ".codereview" / "config.json", default={})
     raw_config = raw_config if isinstance(raw_config, dict) else {}
     settings = load_simple_settings(raw_config, config)
+    turn_metrics = TurnMetrics(input_limit_chars=max(0, int(config.codex.max_input_chars or 0)))
     deadline_at = time.monotonic() + settings.scan_deadline_seconds if settings.scan_deadline_seconds > 0 else 0.0
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     run = checkout / ".codereview" / "runs" / run_id
@@ -331,6 +342,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
             rejected=[],
             account={},
             progress=progress,
+            turn_metrics=turn_metrics,
         )
     source_state_before = source_state_from_inventory(inventory)
     write_json(run / "inventory.json", inventory)
@@ -387,6 +399,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         settings,
         progress,
         run_id,
+        turn_metrics,
     )
     raw_candidates = [
         item
@@ -442,6 +455,7 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         progress,
         run_id,
         deadline_at,
+        turn_metrics,
     )
     confirmed: list[dict] = []
     for result in verification_results:
@@ -479,28 +493,59 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         rejected=rejected,
         account=account,
         progress=progress,
+        turn_metrics=turn_metrics,
     )
 
 
 def load_simple_settings(raw_config: dict, config: ReviewConfig) -> SimpleSettings:
     simple = raw_config.get("simple") if isinstance(raw_config.get("simple"), dict) else {}
     mode_defaults = {
-        "fast": {"turns": 2, "candidates": 8},
-        "standard": {"turns": 3, "candidates": 10},
-        "deep": {"turns": 4, "candidates": 20},
-    }.get(config.mode, {"turns": 3, "candidates": 10})
+        "fast": {
+            "turns": 1,
+            "max_turns": 10,
+            "candidates": 4,
+            "candidates_per_unit": 1,
+            "batch_files": 40,
+            "batch_bytes": 500_000,
+        },
+        "standard": {
+            "turns": 2,
+            "max_turns": 20,
+            "candidates": 8,
+            "candidates_per_unit": 1,
+            "batch_files": 80,
+            "batch_bytes": 1_000_000,
+        },
+        "deep": {
+            "turns": 3,
+            "max_turns": 32,
+            "candidates": 12,
+            "candidates_per_unit": 2,
+            "batch_files": 100,
+            "batch_bytes": 1_250_000,
+        },
+    }.get(config.mode, {})
+    if not mode_defaults:
+        mode_defaults = {
+            "turns": 2,
+            "max_turns": 20,
+            "candidates": 8,
+            "candidates_per_unit": 1,
+            "batch_files": 80,
+            "batch_bytes": 1_000_000,
+        }
     return SimpleSettings(
         discovery_turns=_bounded_int(simple.get("discovery_turns"), mode_defaults["turns"], 1, 16),
-        max_discovery_turns=_bounded_int(simple.get("max_discovery_turns"), 48, 1, 64),
+        max_discovery_turns=_bounded_int(simple.get("max_discovery_turns"), mode_defaults["max_turns"], 1, 64),
         discovery_parallel=_bounded_int(simple.get("discovery_parallel"), _AUTO_PARALLELISM_SENTINEL, 0, _SIMPLE_PARALLEL_MAX),
         verification_parallel=_bounded_int(simple.get("verification_parallel"), _AUTO_PARALLELISM_SENTINEL, 0, _SIMPLE_PARALLEL_MAX),
         subagents_per_turn=_bounded_int(simple.get("subagents_per_turn"), 3, 1, 6),
         max_candidates=_bounded_int(simple.get("max_candidates"), mode_defaults["candidates"], 1, 100),
-        max_candidates_per_unit=_bounded_int(simple.get("max_candidates_per_unit"), 2, 1, 4),
+        max_candidates_per_unit=_bounded_int(simple.get("max_candidates_per_unit"), mode_defaults["candidates_per_unit"], 1, 4),
         max_unit_files=_bounded_int(simple.get("max_unit_files"), 40, 5, 100),
         max_unit_bytes=_bounded_int(simple.get("max_unit_bytes"), 500_000, 50_000, 2_000_000),
-        max_batch_files=_bounded_int(simple.get("max_batch_files"), 120, 10, 400),
-        max_batch_bytes=_bounded_int(simple.get("max_batch_bytes"), 1_500_000, 100_000, 5_000_000),
+        max_batch_files=_bounded_int(simple.get("max_batch_files"), mode_defaults["batch_files"], 10, 400),
+        max_batch_bytes=_bounded_int(simple.get("max_batch_bytes"), mode_defaults["batch_bytes"], 100_000, 5_000_000),
         discovery_timeout_seconds=_bounded_int(simple.get("discovery_timeout_seconds"), 900, 60, 3600),
         verification_timeout_seconds=_bounded_int(simple.get("verification_timeout_seconds"), 1200, 60, 7200),
         scan_deadline_seconds=_bounded_int(simple.get("scan_deadline_seconds"), {"fast": 1800, "standard": 3600, "deep": 7200}.get(config.mode, 3600), 0, 21600),
@@ -1325,6 +1370,51 @@ def validate_discovery_payload(batch: DiscoveryBatch, result: dict) -> tuple[lis
     return sorted(reviewed), candidates
 
 
+def record_turn_metrics(metrics: TurnMetrics, stage: str, prompt: str, codex: CodexConfig) -> dict[str, object]:
+    prompt_chars = len(prompt)
+    input_limit_chars = max(0, int(codex.max_input_chars or 0))
+    with metrics.lock:
+        metrics.input_limit_chars = max(metrics.input_limit_chars, input_limit_chars)
+        if stage == "discovery":
+            metrics.discovery_turns += 1
+            metrics.discovery_prompt_chars += prompt_chars
+        elif stage == "verification":
+            metrics.verification_turns += 1
+            metrics.verification_prompt_chars += prompt_chars
+    return {
+        "promptChars": prompt_chars,
+        "inputLimitChars": input_limit_chars,
+        "inputLimitSource": "codex.max_input_chars" if input_limit_chars else "unbounded",
+    }
+
+
+def turn_metrics_summary(metrics: TurnMetrics | None) -> dict:
+    if metrics is None:
+        metrics = TurnMetrics()
+    with metrics.lock:
+        discovery_turns = metrics.discovery_turns
+        verification_turns = metrics.verification_turns
+        discovery_prompt_chars = metrics.discovery_prompt_chars
+        verification_prompt_chars = metrics.verification_prompt_chars
+        input_limit_chars = metrics.input_limit_chars
+    total_turns = discovery_turns + verification_turns
+    total_prompt_chars = discovery_prompt_chars + verification_prompt_chars
+    return {
+        "turns": {
+            "discovery": discovery_turns,
+            "verification": verification_turns,
+            "total": total_turns,
+        },
+        "promptChars": {
+            "discovery": discovery_prompt_chars,
+            "verification": verification_prompt_chars,
+            "total": total_prompt_chars,
+        },
+        "inputLimitChars": input_limit_chars,
+        "inputLimitSource": "codex.max_input_chars" if input_limit_chars else "unbounded",
+    }
+
+
 def _run_discovery(
     snapshot_repo: Path,
     run: Path,
@@ -1335,6 +1425,7 @@ def _run_discovery(
     settings: SimpleSettings,
     progress: ProgressCallback | None,
     run_id: str,
+    turn_metrics: TurnMetrics,
 ) -> list[dict]:
     schema_path = run / "schemas" / "discovery.schema.json"
     write_json(schema_path, DISCOVERY_SCHEMA)
@@ -1361,6 +1452,14 @@ def _run_discovery(
             assignment_path.relative_to(snapshot_repo).as_posix(),
             batch,
             settings,
+        )
+        metric_payload = record_turn_metrics(turn_metrics, "discovery", prompt, codex)
+        _emit(
+            progress,
+            "finder",
+            f"Discovery turn {batch.batch_id}",
+            run_id=run_id,
+            extra={**metric_payload, "batchTaskCount": len(batch.units)},
         )
         result = _run_codex_json(
             cd=snapshot_repo,
@@ -1401,6 +1500,7 @@ def _run_verifications(
     progress: ProgressCallback | None,
     run_id: str,
     deadline_at: float = 0.0,
+    turn_metrics: TurnMetrics | None = None,
 ) -> list[dict]:
     schema_path = run / "schemas" / "verification.schema.json"
     write_json(schema_path, VERIFICATION_SCHEMA)
@@ -1444,10 +1544,20 @@ def _run_verifications(
         write_json(candidate_path, candidate)
         output = worker_root / "output.json"
         events = worker_root / "events.jsonl"
+        prompt = verification_prompt(candidate_path.relative_to(worker_repo).as_posix(), candidate, settings)
+        if turn_metrics is not None:
+            metric_payload = record_turn_metrics(turn_metrics, "verification", prompt, codex)
+            _emit(
+                progress,
+                "verification",
+                f"Verification {candidate_id}",
+                run_id=run_id,
+                extra={**metric_payload, "taskId": candidate_id},
+            )
         try:
             payload = _run_codex_json(
                 cd=worker_repo,
-                prompt=verification_prompt(candidate_path.relative_to(worker_repo).as_posix(), candidate, settings),
+                prompt=prompt,
                 schema_path=schema_path,
                 output_file=output,
                 events_file=events,
@@ -1769,6 +1879,7 @@ def _write_reports(
     rejected: list[dict],
     account: dict,
     progress: ProgressCallback | None,
+    turn_metrics: TurnMetrics | None = None,
 ) -> Path:
     reviewed_unit_ids = {
         str(unit_id)
@@ -1841,6 +1952,7 @@ def _write_reports(
             "blocked": 0 if coverage_complete and verification_complete else 1,
         },
         "codexAccount": account,
+        "codexTurns": turn_metrics_summary(turn_metrics),
     }
     reports = run / "reports"
     ensure_dir(reports)

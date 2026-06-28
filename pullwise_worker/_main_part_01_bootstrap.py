@@ -68,6 +68,7 @@ NODESOURCE_GPG_KEY_FINGERPRINTS = (
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
+DEFAULT_READINESS_CHECK_SECONDS = 300
 DEFAULT_SERVICE_NAME = "pullwise-worker"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
@@ -949,7 +950,11 @@ class WorkerConfig:
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or env_int("PULLWISE_CODEX_TIMEOUT_SECONDS", 1800)))
         self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
         self.codex_auth_failure_cooldown_seconds = env_int("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS", 3600, minimum=0)
-        self.readiness_check_seconds = env_int("PULLWISE_READINESS_CHECK_SECONDS", 60, minimum=10)
+        self.readiness_check_seconds = env_int(
+            "PULLWISE_READINESS_CHECK_SECONDS",
+            DEFAULT_READINESS_CHECK_SECONDS,
+            minimum=10,
+        )
         self.machine_metrics_interval_seconds = env_int(
             "PULLWISE_WORKER_MACHINE_METRICS_SECONDS",
             DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS,

@@ -27,6 +27,32 @@ GRAPH_VERIFIED_PROGRESS_RANGES = {
     "judge": (92, 94),
     "report": (94, GRAPH_VERIFIED_PROGRESS_COMPLETE),
 }
+GRAPH_VERIFIED_MODE_SIMPLE_DEFAULTS = {
+    "fast": {
+        "discovery_turns": 1,
+        "max_discovery_turns": 10,
+        "max_candidates": 4,
+        "max_candidates_per_unit": 1,
+        "max_batch_files": 40,
+        "max_batch_bytes": 500_000,
+    },
+    "standard": {
+        "discovery_turns": 2,
+        "max_discovery_turns": 20,
+        "max_candidates": 8,
+        "max_candidates_per_unit": 1,
+        "max_batch_files": 80,
+        "max_batch_bytes": 1_000_000,
+    },
+    "deep": {
+        "discovery_turns": 3,
+        "max_discovery_turns": 32,
+        "max_candidates": 12,
+        "max_candidates_per_unit": 2,
+        "max_batch_files": 100,
+        "max_batch_bytes": 1_250_000,
+    },
+}
 
 
 def graph_verified_codex_env(config: WorkerConfig) -> dict[str, str]:
@@ -455,6 +481,7 @@ def write_graph_verified_codereview_config(
         or job_source.get("review_output_language")
         or job_source.get("reviewOutputLanguage")
     ) or "English"
+    mode_defaults = GRAPH_VERIFIED_MODE_SIMPLE_DEFAULTS[graph_verified_mode(mode)]
     finder_turn_parallel = graph_verified_positive_int(
         graph_config.get("finderTurnParallel"),
         default=1,
@@ -485,7 +512,7 @@ def write_graph_verified_codereview_config(
         "turn_parallel": finder_turn_parallel,
         "max_turns_per_scan": graph_verified_positive_int(
             graph_config.get("finderMaxTurnsPerScan"),
-            default={"fast": 2, "standard": 3, "deep": 4}.get(graph_verified_mode(mode), 3),
+            default=mode_defaults["discovery_turns"],
             minimum=1,
             maximum=16,
         ),
@@ -494,13 +521,13 @@ def write_graph_verified_codereview_config(
         "engine": "simple-full-repository/1",
         "discovery_turns": graph_verified_positive_int(
             graph_config.get("finderMaxTurnsPerScan"),
-            default={"fast": 2, "standard": 3, "deep": 4}.get(graph_verified_mode(mode), 3),
+            default=mode_defaults["discovery_turns"],
             minimum=1,
             maximum=16,
         ),
         "max_discovery_turns": graph_verified_positive_int(
             graph_config.get("simpleMaxDiscoveryTurns"),
-            default=48,
+            default=mode_defaults["max_discovery_turns"],
             minimum=1,
             maximum=64,
         ),
@@ -520,7 +547,7 @@ def write_graph_verified_codereview_config(
         "max_candidates": repro_limit,
         "max_candidates_per_unit": graph_verified_positive_int(
             graph_config.get("maxCandidatesPerUnit"),
-            default=2,
+            default=mode_defaults["max_candidates_per_unit"],
             minimum=1,
             maximum=4,
         ),
@@ -528,13 +555,13 @@ def write_graph_verified_codereview_config(
         "max_unit_bytes": 500000,
         "max_batch_files": graph_verified_positive_int(
             graph_config.get("simpleMaxBatchFiles"),
-            default=120,
+            default=mode_defaults["max_batch_files"],
             minimum=10,
             maximum=400,
         ),
         "max_batch_bytes": graph_verified_positive_int(
             graph_config.get("simpleMaxBatchBytes"),
-            default=1500000,
+            default=mode_defaults["max_batch_bytes"],
             minimum=100000,
             maximum=5000000,
         ),
@@ -572,7 +599,7 @@ def graph_verified_repro_limit(value: object, mode: object) -> int:
         number = 0
     if number > 0:
         return min(100, number)
-    return {"fast": 6, "standard": 10, "deep": 20}.get(graph_verified_mode(mode), 10)
+    return GRAPH_VERIFIED_MODE_SIMPLE_DEFAULTS[graph_verified_mode(mode)]["max_candidates"]
 
 
 def graph_verified_text(value: object) -> str:

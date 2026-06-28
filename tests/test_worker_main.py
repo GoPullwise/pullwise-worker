@@ -49,6 +49,26 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("Run the Pullwise pull worker.", completed.stdout)
 
+    def test_worker_config_defaults_readiness_probe_interval_to_five_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
+            root = Path(tmp_dir)
+            args = SimpleNamespace(
+                server_url="http://localhost:8080",
+                worker_id="wk_default_ready",
+                poll_seconds=None,
+                work_dir=str(root / "work"),
+                checkout_root=None,
+                log_dir=str(root / "logs"),
+                provider=None,
+                codex_command=None,
+                codex_timeout_seconds=None,
+            )
+
+            cfg = worker_main.WorkerConfig(args, require_worker_token=False, validate_server_url=False)
+
+        self.assertEqual(cfg.readiness_check_seconds, worker_main.DEFAULT_READINESS_CHECK_SECONDS)
+        self.assertEqual(cfg.readiness_check_seconds, 300)
+
     def test_result_readable_payload_indexes_graph_verified_findings(self) -> None:
         report = {
             "version": "graph-verified-code-review/1",
@@ -3850,6 +3870,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                     "reproTimeoutSeconds": 600,
                     "scanDeadlineSeconds": 1500,
                     "maxRepro": 20,
+                    "maxCandidatesPerUnit": 3,
+                    "simpleMaxDiscoveryTurns": 30,
+                    "simpleMaxBatchFiles": 70,
+                    "simpleMaxBatchBytes": 900000,
                 },
                 "deep",
                 job={"review_output_language_label": "Chinese"},
@@ -3872,6 +3896,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["simple"]["verification_parallel"], 3)
         self.assertEqual(payload["simple"]["subagents_per_turn"], 6)
         self.assertEqual(payload["simple"]["max_candidates"], 20)
+        self.assertEqual(payload["simple"]["max_candidates_per_unit"], 3)
+        self.assertEqual(payload["simple"]["max_discovery_turns"], 30)
+        self.assertEqual(payload["simple"]["max_batch_files"], 70)
+        self.assertEqual(payload["simple"]["max_batch_bytes"], 900000)
         self.assertEqual(payload["simple"]["discovery_timeout_seconds"], 300)
         self.assertEqual(payload["simple"]["verification_timeout_seconds"], 600)
         self.assertEqual(payload["simple"]["scan_deadline_seconds"], 1500)
@@ -5144,6 +5172,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             def fake_app_server_turn(**kwargs):
                 self.assertEqual(kwargs["prompt"], 'Return only JSON: {"ok": true}')
+                self.assertEqual(kwargs["config"].reasoning_effort, "medium")
                 kwargs["output_file"].write_text('{"ok": true}', encoding="utf-8")
                 return ProcessResult(["codex", "app-server", "turn/start"], str(kwargs["cd"]), 0, '{"ok": true}\n', "", 1)
 
