@@ -49,6 +49,56 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("Run the Pullwise pull worker.", completed.stdout)
 
+    def test_result_readable_payload_indexes_graph_verified_findings(self) -> None:
+        report = {
+            "version": "graph-verified-code-review/1",
+            "runId": "gv_run",
+            "confirmedCount": 1,
+            "rejectedCount": 0,
+            "blockedCount": 0,
+            "finalJson": {
+                "confirmed": [
+                    {
+                        "candidate": {
+                            "issue_id": "issue-auth-cache",
+                            "severity": "high",
+                            "category": "Security",
+                            "claim": "Auth cache can return stale permissions.",
+                            "graph_evidence": {
+                                "slice_id": "slice-auth",
+                                "codegraph_files": ["src/auth/cache.ts"],
+                            },
+                            "evidence": [
+                                {
+                                    "file": "src/auth/cache.ts",
+                                    "line": 84,
+                                    "why_it_matters": "The permission path reuses stale state.",
+                                }
+                            ],
+                        },
+                        "judge": {"status": "confirmed", "safe_to_show_user": True},
+                        "repro": {"status": "static_proof", "graph_path_exercised": True},
+                        "verification": {"verdict": "confirmed", "safe_to_show_user": True},
+                    }
+                ]
+            },
+        }
+
+        payload = worker_main.result_readable_payload(
+            "done",
+            {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+            report,
+        )
+
+        issue = payload["agentReport"]["issueIndex"][0]
+        self.assertEqual(issue["id"], "issue-auth-cache")
+        self.assertEqual(issue["primaryFile"], "src/auth/cache.ts")
+        self.assertEqual(issue["primaryLine"], 84)
+        self.assertEqual(issue["readNext"][0], "graphVerifiedReport.finalJson.confirmed[0]")
+        self.assertEqual(payload["agentReport"]["nextActions"][0]["type"], "inspect_file")
+        self.assertIn("Auth cache can return stale permissions", payload["humanReport"]["summaryMarkdown"])
+        self.assertEqual(payload["readingGuide"]["forAgentDeep"], "graphVerifiedReport.finalJson.confirmed")
+
     def test_worker_config_tolerates_bad_numeric_environment_values(self) -> None:
         env = {
             "PULLWISE_WORKER_POLL_SECONDS": "bad",
@@ -1868,6 +1918,11 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 worker.run_job(job)
 
             upload.assert_called_once()
+            payload = upload.call_args.args[1]
+            self.assertEqual(payload["humanReport"]["title"], "GraphVerified review complete: no confirmed findings")
+            self.assertEqual(payload["agentReport"]["schemaVersion"], "pullwise-agent-result/1")
+            self.assertEqual(payload["agentReport"]["issueIndex"], [])
+            self.assertEqual(payload["readingGuide"]["forAgentQuick"], "agentReport.issueIndex")
             summary_log = config.log_dir / "scan-summary.log"
             self.assertTrue(summary_log.is_file())
             summary_text = summary_log.read_text(encoding="utf-8")

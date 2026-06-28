@@ -641,10 +641,10 @@ def effective_agent_config_payload(config: WorkerConfig, provider: object = None
     }
 
 
-def graph_verified_summary_findings(report: dict) -> list[dict]:
+def graph_verified_reportable_items(report: dict) -> list[tuple[int, dict, dict, dict, dict]]:
     final_json = report.get("finalJson") if isinstance(report.get("finalJson"), dict) else {}
     confirmed = final_json.get("confirmed") if isinstance(final_json.get("confirmed"), list) else []
-    findings = []
+    items = []
     for index, item in enumerate(confirmed):
         if not isinstance(item, dict):
             continue
@@ -659,6 +659,13 @@ def graph_verified_summary_findings(report: dict) -> list[dict]:
         graph_evidence = candidate.get("graph_evidence") if isinstance(candidate.get("graph_evidence"), dict) else {}
         if not graph_evidence:
             continue
+        items.append((index, item, candidate, judge, verification))
+    return items
+
+
+def graph_verified_summary_findings(report: dict) -> list[dict]:
+    findings = []
+    for index, _item, candidate, _judge, _verification in graph_verified_reportable_items(report):
         findings.append(
             {
                 "id": clean_protocol_text(candidate.get("candidate_id") or candidate.get("issue_id")) or f"gv-{index + 1}",
@@ -670,6 +677,229 @@ def graph_verified_summary_findings(report: dict) -> list[dict]:
 
 
 
+
+
+def result_summary_count(summary: object, severity: str) -> int:
+    source = summary if isinstance(summary, dict) else {}
+    if isinstance(source.get(severity), bool):
+        return 0
+    try:
+        return max(0, int(source.get(severity) or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def result_summary_total(summary: object) -> int:
+    return sum(result_summary_count(summary, severity) for severity in ("critical", "high", "medium", "low", "info"))
+
+
+def result_summary_parts(summary: object) -> list[str]:
+    parts = []
+    for severity in ("critical", "high", "medium", "low", "info"):
+        count = result_summary_count(summary, severity)
+        if count:
+            parts.append(f"{count} {severity}")
+    return parts
+
+
+def graph_verified_candidate_title(candidate: dict, index: int) -> str:
+    title = clean_protocol_text(candidate.get("title"), 240)
+    if title:
+        return title
+    claim = clean_protocol_text(candidate.get("claim"), 240)
+    if claim:
+        return claim.split(". ", 1)[0].strip(".")[:240]
+    return f"GraphVerified finding {index + 1}"
+
+
+def graph_verified_issue_line(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    text = clean_protocol_text(value, 40)
+    for separator in ("-", ":", ",", " "):
+        text = text.split(separator, 1)[0]
+    try:
+        return max(0, int(text))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def graph_verified_primary_location(candidate: dict) -> dict:
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        file_path = clean_protocol_text(item.get("file") or item.get("path"), 500)
+        line = graph_verified_issue_line(item.get("line") or item.get("startLine") or item.get("lines"))
+        if file_path or line:
+            location = {}
+            if file_path:
+                location["file"] = file_path
+            if line:
+                location["line"] = line
+            return location
+    graph_evidence = candidate.get("graph_evidence") if isinstance(candidate.get("graph_evidence"), dict) else {}
+    files = graph_evidence.get("codegraph_files") if isinstance(graph_evidence.get("codegraph_files"), list) else []
+    for file_path in files:
+        cleaned = clean_protocol_text(file_path, 500)
+        if cleaned:
+            return {"file": cleaned}
+    return {}
+
+
+def graph_verified_issue_tags(candidate: dict, severity: str) -> list[str]:
+    raw_tags = ["graph-verified", severity, candidate.get("category")]
+    tags = []
+    for value in raw_tags:
+        tag = clean_protocol_text(value, 80).lower().replace(" ", "-")
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags[:8]
+
+
+def graph_verified_agent_issue_index(report: dict) -> list[dict]:
+    issues = []
+    for raw_index, _item, candidate, judge, verification in graph_verified_reportable_items(report):
+        agent_index = len(issues)
+        issue_id = clean_protocol_text(candidate.get("issue_id") or candidate.get("candidate_id"), 160) or f"gv-{raw_index + 1}"
+        source_path = f"graphVerifiedReport.finalJson.confirmed[{raw_index}]"
+        severity = graph_verified_severity(candidate.get("severity"))
+        location = graph_verified_primary_location(candidate)
+        issue = {
+            "id": issue_id,
+            "severity": severity,
+            "title": graph_verified_candidate_title(candidate, raw_index),
+            "confidence": clean_protocol_text(
+                candidate.get("confidence")
+                or verification.get("verdict")
+                or verification.get("status")
+                or judge.get("status")
+                or "confirmed",
+                80,
+            ) or "confirmed",
+            "tags": graph_verified_issue_tags(candidate, severity),
+            "readNext": [source_path, f"agentReport.issueIndex[{agent_index}]"],
+            "evidencePath": f"{source_path}.candidate.evidence",
+            "reproPath": f"{source_path}.repro",
+            "sourcePath": source_path,
+        }
+        if location.get("file"):
+            issue["primaryFile"] = location["file"]
+        if location.get("line"):
+            issue["primaryLine"] = location["line"]
+        issues.append(issue)
+        if len(issues) >= 50:
+            break
+    return issues
+
+
+def result_one_line(status: str, summary: dict, error: str = "") -> str:
+    if status == "failed":
+        detail = clean_protocol_text(error, 240)
+        return f"GraphVerified review failed: {detail}" if detail else "GraphVerified review failed."
+    total = result_summary_total(summary)
+    if total == 0:
+        return "GraphVerified review completed with no confirmed findings."
+    parts = ", ".join(result_summary_parts(summary))
+    return f"GraphVerified review completed with {total} confirmed findings ({parts})."
+
+
+def result_human_report(status: str, summary: dict, issue_index: list[dict], error: str = "") -> dict:
+    one_line = result_one_line(status, summary, error)
+    if status == "failed":
+        title = "GraphVerified review failed"
+    elif issue_index:
+        title = f"GraphVerified review complete: {len(issue_index)} confirmed findings"
+    else:
+        title = "GraphVerified review complete: no confirmed findings"
+    summary_lines = [one_line]
+    for issue in issue_index[:5]:
+        location = issue.get("primaryFile") or ""
+        if issue.get("primaryLine"):
+            location = f"{location}:{issue['primaryLine']}" if location else str(issue["primaryLine"])
+        location_text = f" ({location})" if location else ""
+        summary_lines.append(f"- {issue['severity']}: {issue['title']}{location_text}")
+    sections = []
+    for severity in ("critical", "high", "medium", "low", "info"):
+        severity_issues = [issue for issue in issue_index if issue.get("severity") == severity]
+        if not severity_issues:
+            continue
+        lines = []
+        for issue in severity_issues[:20]:
+            location = issue.get("primaryFile") or ""
+            if issue.get("primaryLine"):
+                location = f"{location}:{issue['primaryLine']}" if location else str(issue["primaryLine"])
+            location_text = f" `{location}`" if location else ""
+            lines.append(f"- {issue['title']}{location_text}")
+        sections.append({"heading": f"{severity.title()} findings", "markdown": "\n".join(lines)})
+    return {
+        "title": title,
+        "summaryMarkdown": "\n".join(summary_lines),
+        "sections": sections,
+    }
+
+
+def result_agent_next_actions(issue_index: list[dict]) -> list[dict]:
+    actions = []
+    for issue in issue_index[:10]:
+        issue_id = clean_protocol_text(issue.get("id"), 160)
+        primary_file = clean_protocol_text(issue.get("primaryFile"), 500)
+        if primary_file:
+            actions.append(
+                {
+                    "type": "inspect_file",
+                    "path": primary_file,
+                    "targetIssueId": issue_id,
+                    "reason": "Primary evidence for confirmed finding",
+                }
+            )
+        if issue_id:
+            actions.append(
+                {
+                    "type": "write_fix",
+                    "targetIssueId": issue_id,
+                    "reason": "Address confirmed finding",
+                }
+            )
+        if len(actions) >= 12:
+            break
+    return actions
+
+
+def result_agent_report(status: str, summary: dict, graph_verified_report: dict, error: str = "") -> dict:
+    issue_index = graph_verified_agent_issue_index(graph_verified_report)
+    return {
+        "schemaVersion": "pullwise-agent-result/1",
+        "oneLine": result_one_line(status, summary, error),
+        "status": status,
+        "issueIndex": issue_index,
+        "nextActions": result_agent_next_actions(issue_index),
+        "tokensHint": {
+            "recommendedEntry": "agentReport.issueIndex",
+            "detailsPath": "graphVerifiedReport.finalJson.confirmed",
+            "debugPath": "graphVerifiedReport.debugMarkdown",
+        },
+    }
+
+
+def result_reading_guide() -> dict:
+    return {
+        "forUser": "humanReport.summaryMarkdown",
+        "forAgentQuick": "agentReport.issueIndex",
+        "forAgentDeep": "graphVerifiedReport.finalJson.confirmed",
+        "forDebug": "graphVerifiedReport.debugMarkdown",
+    }
+
+
+def result_readable_payload(status: str, summary: dict, graph_verified_report: dict, error: str = "") -> dict:
+    agent_report = result_agent_report(status, summary, graph_verified_report, error)
+    return {
+        "humanReport": result_human_report(status, summary, agent_report["issueIndex"], error),
+        "agentReport": agent_report,
+        "readingGuide": result_reading_guide(),
+    }
 
 
 def graph_verified_severity(value: object) -> str:
@@ -1502,6 +1732,7 @@ class Worker:
                 payload["error"] = completion_error or "GraphVerified completion gate failed."
                 payload["error_code"] = completion_error_code
                 payload["errorCode"] = completion_error_code
+            payload.update(result_readable_payload(result_status, result_summary, graph_verified_report, completion_error))
             payload["result_checksum"] = result_checksum(payload)
             self.report_progress(
                 job_id,
@@ -1631,6 +1862,7 @@ class Worker:
             if resolved_commit:
                 error_payload["commit"] = resolved_commit
                 error_payload["resolved_commit"] = resolved_commit
+            error_payload.update(result_readable_payload("failed", error_payload["summary"], graph_verified_report, error))
             error_payload["result_checksum"] = result_checksum(error_payload)
             log_graph_verified_completion(job_id, attempt_id, "failed", graph_verified_report, error)
             try:
