@@ -100,8 +100,6 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         raise WorkerJobCancelled(str(exc)) from exc
     except Exception as exc:
         detail = redact_secrets(str(exc), config)
-        if codex_readiness_failure_cacheable(detail):
-            mark_codex_auth_failure(config, detail)
         return graph_verified_failed_report(mode, scan_mode, detail)
     finally:
         close_app_server_clients("GraphVerified review complete")

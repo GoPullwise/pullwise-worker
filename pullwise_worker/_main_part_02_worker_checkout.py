@@ -1382,10 +1382,27 @@ class Worker:
         jitter = random.uniform(0, self.config.poll_jitter_seconds) if self.config.poll_jitter_seconds else 0
         return min(self.config.max_backoff_seconds, base) + jitter
 
+    def readiness_check_interval_seconds(self, snapshot=None):
+        snapshot = snapshot or self._readiness_snapshot
+        if snapshot.ready_for_claim:
+            default = getattr(self.config, 'readiness_check_seconds', DEFAULT_ACTIVE_READINESS_CHECK_SECONDS)
+            value = getattr(self.config, 'active_readiness_check_seconds', default)
+        else:
+            default = getattr(self.config, 'readiness_check_seconds', DEFAULT_DEGRADED_READINESS_CHECK_SECONDS)
+            value = getattr(self.config, 'degraded_readiness_check_seconds', default)
+        try:
+            return max(10, int(value))
+        except (TypeError, ValueError, OverflowError):
+            try:
+                fallback = int(default)
+            except (TypeError, ValueError, OverflowError):
+                fallback = DEFAULT_ACTIVE_READINESS_CHECK_SECONDS if snapshot.ready_for_claim else DEFAULT_DEGRADED_READINESS_CHECK_SECONDS
+            return max(10, fallback)
+
     def refresh_readiness_if_due(self) -> bool:
         current = time.time()
         snapshot = self._readiness_snapshot
-        if current - snapshot.checked_at < self.config.readiness_check_seconds:
+        if current - snapshot.checked_at < self.readiness_check_interval_seconds(snapshot):
             return snapshot.ready_for_claim
         try:
             checks, _provider_ready, ready_providers = worker_readiness_state(self.config)
@@ -1698,7 +1715,6 @@ class Worker:
                     "codex_quota_exhausted": "CODEX_QUOTA_EXHAUSTED",
                     "codex_version_unsupported": "CODEX_VERSION_UNSUPPORTED",
                 }.get(readiness_kind, completion_error_code)
-                mark_codex_auth_failure(job_config, completion_error)
                 auth_detail = codex_readiness_issue_detail(completion_error, job_config) or completion_error
                 self._set_readiness_snapshot(
                     WorkerReadinessSnapshot(

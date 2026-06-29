@@ -68,7 +68,9 @@ NODESOURCE_GPG_KEY_FINGERPRINTS = (
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
-DEFAULT_READINESS_CHECK_SECONDS = 300
+DEFAULT_ACTIVE_READINESS_CHECK_SECONDS = 60
+DEFAULT_DEGRADED_READINESS_CHECK_SECONDS = 600
+DEFAULT_READINESS_CHECK_SECONDS = DEFAULT_ACTIVE_READINESS_CHECK_SECONDS
 DEFAULT_SERVICE_NAME = "pullwise-worker"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
@@ -185,9 +187,6 @@ _CODEX_READINESS_ISSUE_MESSAGES = {
     "codex_version_unsupported": "codex_version_unsupported: installed Codex CLI does not support the required app-server interface",
 }
 _CODEX_READINESS_FAILURE_CACHEABLE_ISSUES = set(_CODEX_READINESS_ISSUE_MESSAGES)
-_CODEX_AUTH_FAILURE_LOCK = Lock()
-_codex_auth_failure_until = 0.0
-_codex_auth_failure_detail = ""
 _UBUNTU_2204_DEPENDENCY_PACKAGES = {
     "git": ("git",),
     "python3": ("python3.10", "python3.10-venv"),
@@ -261,31 +260,15 @@ def looks_like_codex_auth_failure(output: object) -> bool:
 
 
 def mark_codex_auth_failure(config: object, detail: object) -> None:
-    global _codex_auth_failure_until, _codex_auth_failure_detail
-    cooldown = max(0, int(getattr(config, "codex_auth_failure_cooldown_seconds", 0) or 0))
-    diagnostic = codex_readiness_issue_detail(detail, config) or clean_protocol_text(redact_secrets(str(detail or ""), config), 500)
-    with _CODEX_AUTH_FAILURE_LOCK:
-        _codex_auth_failure_until = time.time() + cooldown if cooldown else 0.0
-        _codex_auth_failure_detail = diagnostic[:500]
+    return None
 
 
 def cached_codex_readiness_failure_detail() -> str:
-    global _codex_auth_failure_until, _codex_auth_failure_detail
-    with _CODEX_AUTH_FAILURE_LOCK:
-        if not _codex_auth_failure_detail or not _codex_auth_failure_until:
-            return ""
-        if time.time() >= _codex_auth_failure_until:
-            _codex_auth_failure_until = 0.0
-            _codex_auth_failure_detail = ""
-            return ""
-        return _codex_auth_failure_detail
+    return ""
 
 
 def clear_codex_auth_failure() -> None:
-    global _codex_auth_failure_until, _codex_auth_failure_detail
-    with _CODEX_AUTH_FAILURE_LOCK:
-        _codex_auth_failure_until = 0.0
-        _codex_auth_failure_detail = ""
+    return None
 
 
 def auto_install_dependencies_enabled() -> bool:
@@ -949,12 +932,22 @@ class WorkerConfig:
         )
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or env_int("PULLWISE_CODEX_TIMEOUT_SECONDS", 1800)))
         self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
-        self.codex_auth_failure_cooldown_seconds = env_int("PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS", 3600, minimum=0)
-        self.readiness_check_seconds = env_int(
+        legacy_readiness_check_seconds = env_int(
             "PULLWISE_READINESS_CHECK_SECONDS",
-            DEFAULT_READINESS_CHECK_SECONDS,
+            DEFAULT_ACTIVE_READINESS_CHECK_SECONDS,
             minimum=10,
         )
+        self.active_readiness_check_seconds = env_int(
+            "PULLWISE_ACTIVE_READINESS_CHECK_SECONDS",
+            legacy_readiness_check_seconds,
+            minimum=10,
+        )
+        self.degraded_readiness_check_seconds = env_int(
+            "PULLWISE_DEGRADED_READINESS_CHECK_SECONDS",
+            DEFAULT_DEGRADED_READINESS_CHECK_SECONDS,
+            minimum=10,
+        )
+        self.readiness_check_seconds = self.active_readiness_check_seconds
         self.machine_metrics_interval_seconds = env_int(
             "PULLWISE_WORKER_MACHINE_METRICS_SECONDS",
             DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS,

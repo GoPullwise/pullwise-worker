@@ -49,7 +49,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("Run the Pullwise pull worker.", completed.stdout)
 
-    def test_worker_config_defaults_readiness_probe_interval_to_five_minutes(self) -> None:
+    def test_worker_config_defaults_readiness_probe_intervals_to_minutes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(os.environ, {}, clear=True):
             root = Path(tmp_dir)
             args = SimpleNamespace(
@@ -66,8 +66,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             cfg = worker_main.WorkerConfig(args, require_worker_token=False, validate_server_url=False)
 
-        self.assertEqual(cfg.readiness_check_seconds, worker_main.DEFAULT_READINESS_CHECK_SECONDS)
-        self.assertEqual(cfg.readiness_check_seconds, 300)
+        self.assertEqual(cfg.active_readiness_check_seconds, worker_main.DEFAULT_ACTIVE_READINESS_CHECK_SECONDS)
+        self.assertEqual(cfg.degraded_readiness_check_seconds, worker_main.DEFAULT_DEGRADED_READINESS_CHECK_SECONDS)
+        self.assertEqual(cfg.readiness_check_seconds, 60)
+        self.assertEqual(cfg.degraded_readiness_check_seconds, 600)
 
     def test_result_readable_payload_indexes_graph_verified_findings(self) -> None:
         report = {
@@ -127,7 +129,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             "PULLWISE_WATCHER_POLL_SECONDS": "bad",
             "PULLWISE_CODEX_TIMEOUT_SECONDS": "bad",
             "PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS": "bad",
-            "PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS": "bad",
+            "PULLWISE_ACTIVE_READINESS_CHECK_SECONDS": "bad",
+            "PULLWISE_DEGRADED_READINESS_CHECK_SECONDS": "bad",
             "PULLWISE_READINESS_CHECK_SECONDS": "bad",
             "PULLWISE_RESULT_UPLOAD_ATTEMPTS": "bad",
             "PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES": "bad",
@@ -162,6 +165,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertTrue(config.remote_uninstall_finalizer)
         self.assertEqual(config.codex_timeout_seconds, 1800)
         self.assertEqual(config.codex_doctor_timeout_seconds, 60)
+        self.assertEqual(config.active_readiness_check_seconds, 60)
+        self.assertEqual(config.degraded_readiness_check_seconds, 600)
+        self.assertEqual(config.readiness_check_seconds, 60)
         self.assertEqual(config.result_upload_attempts, 5)
         self.assertEqual(config.failed_checkout_retention_seconds, 0)
         self.assertEqual(config.scan_summary_log_max_bytes, 10 * 1024 * 1024)
@@ -5096,26 +5102,26 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("[redacted]", detail)
         self.assertNotIn("secret-token", detail)
 
-    def test_codex_ready_check_uses_cached_classified_failure_without_probe(self) -> None:
+    def test_codex_ready_check_ignores_legacy_cached_failure_and_probes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg = config_for(Path(tmp_dir))
-            cfg.codex_auth_failure_cooldown_seconds = 3600
-            worker_main.clear_codex_auth_failure()
             worker_main.mark_codex_auth_failure(cfg, "insufficient_quota: no credits remaining")
             with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
                 worker_main,
                 "provider_process_env",
+                return_value={},
             ) as provider_env, patch.object(
                 worker_main,
                 "run_codex_app_server_turn",
+                return_value=ProcessResult(["codex", "app-server"], str(Path(tmp_dir)), 0, '{"ok": true}\n', "", 1),
             ) as app_server_turn:
                 ok, detail = worker_main.codex_ready_check(cfg)
 
-        self.assertFalse(ok)
-        self.assertIn("codex_quota_exhausted", detail)
-        provider_env.assert_not_called()
-        app_server_turn.assert_not_called()
-        worker_main.clear_codex_auth_failure()
+        self.assertTrue(ok)
+        self.assertEqual(detail, "ready")
+        provider_env.assert_called_once()
+        app_server_turn.assert_called_once()
+
     def test_codex_ready_check_reports_quota_and_version_failures(self) -> None:
         worker_main.clear_codex_auth_failure()
         failures = {
@@ -5142,11 +5148,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         finally:
             worker_main.clear_codex_auth_failure()
 
-    def test_codex_ready_check_marks_expired_auth_failure(self) -> None:
+    def test_codex_ready_check_reports_expired_auth_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cfg = config_for(Path(tmp_dir))
-            cfg.codex_auth_failure_cooldown_seconds = 3600
-            worker_main.clear_codex_auth_failure()
             with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
                 worker_main,
                 "provider_process_env",
@@ -5160,33 +5164,24 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("codex_auth_expired", detail)
-        self.assertGreater(worker_main._codex_auth_failure_until, 0)
-        worker_main.clear_codex_auth_failure()
-    def test_codex_ready_check_clears_auth_failure_state_on_success(self) -> None:
+
+    def test_codex_ready_check_reports_success_after_prior_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            cfg = config_for(root)
-            cfg.codex_auth_failure_cooldown_seconds = 0
+            cfg = config_for(Path(tmp_dir))
             worker_main.mark_codex_auth_failure(cfg, "401 Unauthorized")
-            self.assertIn("codex_auth_required", worker_main._codex_auth_failure_detail)
-
-            def fake_app_server_turn(**kwargs):
-                self.assertEqual(kwargs["prompt"], 'Return only JSON: {"ok": true}')
-                self.assertEqual(kwargs["config"].reasoning_effort, "medium")
-                kwargs["output_file"].write_text('{"ok": true}', encoding="utf-8")
-                return ProcessResult(["codex", "app-server", "turn/start"], str(kwargs["cd"]), 0, '{"ok": true}\n', "", 1)
-
             with patch.object(worker_main, "provider_command_scope_check", return_value=(True, "ok")), patch.object(
                 worker_main,
                 "provider_process_env",
                 return_value={},
-            ), patch.object(worker_main, "run_codex_app_server_turn", side_effect=fake_app_server_turn):
+            ), patch.object(
+                worker_main,
+                "run_codex_app_server_turn",
+                return_value=ProcessResult(["codex", "app-server", "turn/start"], str(Path(tmp_dir)), 0, '{"ok": true}\n', "", 1),
+            ):
                 ok, detail = worker_main.codex_ready_check(cfg)
 
         self.assertTrue(ok)
         self.assertEqual(detail, "ready")
-        self.assertEqual(worker_main._codex_auth_failure_until, 0.0)
-        self.assertEqual(worker_main._codex_auth_failure_detail, "")
 
     def test_codex_ready_check_reports_app_server_failure(self) -> None:
         worker_main.clear_codex_auth_failure()
@@ -5205,6 +5200,69 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("boom", detail)
+
+    def test_refresh_readiness_uses_active_and_degraded_intervals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = config_for(Path(tmp_dir))
+            cfg.readiness_check_seconds = 60
+            cfg.active_readiness_check_seconds = 60
+            cfg.degraded_readiness_check_seconds = 600
+            worker = worker_main.Worker(cfg)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+
+            worker._set_readiness_snapshot(
+                worker_main.WorkerReadinessSnapshot(
+                    checked_at=100,
+                    doctor_status="degraded",
+                    ready_for_claim=False,
+                )
+            )
+            with patch.object(worker_main.time, "time", return_value=699), patch.object(
+                worker_main,
+                "worker_readiness_state",
+                side_effect=AssertionError("degraded check should wait"),
+            ):
+                self.assertFalse(worker.refresh_readiness_if_due())
+
+            ready_checks = [
+                ("server_url", True, "ok"),
+                ("worker_token", True, "configured"),
+                ("codex_ready", True, "ready"),
+                ("provider_ready", True, "codex"),
+            ]
+            with patch.object(worker_main.time, "time", return_value=700), patch.object(
+                worker_main,
+                "worker_readiness_state",
+                return_value=(ready_checks, True, ["codex"]),
+            ) as readiness_state:
+                self.assertTrue(worker.refresh_readiness_if_due())
+            readiness_state.assert_called_once()
+            self.assertTrue(worker._readiness_snapshot.ready_for_claim)
+
+            worker._set_readiness_snapshot(
+                worker_main.WorkerReadinessSnapshot(
+                    checked_at=100,
+                    doctor_status="ok",
+                    codex_ready=True,
+                    ready_providers=("codex",),
+                    ready_for_claim=True,
+                )
+            )
+            with patch.object(worker_main.time, "time", return_value=159), patch.object(
+                worker_main,
+                "worker_readiness_state",
+                side_effect=AssertionError("active check should wait"),
+            ):
+                self.assertTrue(worker.refresh_readiness_if_due())
+            with patch.object(worker_main.time, "time", return_value=160), patch.object(
+                worker_main,
+                "worker_readiness_state",
+                return_value=(ready_checks, True, ["codex"]),
+            ) as active_readiness_state:
+                self.assertTrue(worker.refresh_readiness_if_due())
+            active_readiness_state.assert_called_once()
+
 
     def test_refresh_readiness_reports_degraded_instead_of_crashing_on_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -39,7 +39,8 @@ Required environment:
 - `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_APP_SERVER_MAX_TURNS` optional, defaults to `8`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
-- `PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS` optional, defaults to `3600`; set to `0` to disable
+- `PULLWISE_ACTIVE_READINESS_CHECK_SECONDS` optional, defaults to `60`; used while the worker can claim jobs
+- `PULLWISE_DEGRADED_READINESS_CHECK_SECONDS` optional, defaults to `600`; used while readiness is degraded and the worker is waiting for auth/quota/operator recovery
 - `PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS` optional, defaults to `3600`
 - `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
@@ -60,7 +61,7 @@ Each worker processes exactly one job at a time. Queuing is maintained on the se
 
 Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. Review provider/model policy comes from the server-side subscription plan `agentConfig`; executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
 
-GraphVerified Codex work runs through one instance-scoped `codex app-server` per job, with a bounded shared client inside that job. A single worker still processes exactly one job at a time, but app-server turns inside that job can run concurrently when the server plan enables bounded settings such as `graphVerified.finderTurnParallel`. Do not add parallel `codex exec` CLI launches for one worker identity. If Codex reports an authentication or refresh-token failure, the worker degrades readiness and cools down further Codex work for `PULLWISE_CODEX_AUTH_FAILURE_COOLDOWN_SECONDS`; lower app-server turn parallelism if token refresh failures appear under load.
+GraphVerified Codex work runs through one instance-scoped `codex app-server` per job, with a bounded shared client inside that job. A single worker still processes exactly one job at a time, but app-server turns inside that job can run concurrently when the server plan enables bounded settings such as `graphVerified.finderTurnParallel`. Do not add parallel `codex exec` CLI launches for one worker identity. If Codex reports an authentication, quota, or refresh-token failure, the worker degrades readiness and stops claiming jobs; it keeps rechecking on the degraded readiness interval and becomes active again when a later health check succeeds.
 
 Production local capability example:
 
