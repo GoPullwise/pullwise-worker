@@ -2,9 +2,10 @@ from __future__ import annotations
 
 # Imported by main.py and re-exported from the aggregate module.
 
+import signal
 from dataclasses import dataclass
 
-from codereview.utils.process import ProcessCancelled, clear_process_cancel_event, set_process_cancel_event
+from codereview.utils.process import ProcessCancelled, clear_process_cancel_event, process_cancel_requested, set_process_cancel_event
 
 from ._main_part_01_bootstrap import *  # noqa: F403
 
@@ -13,6 +14,7 @@ AGENT_CONFIG_TEXT_MAX_LENGTH = 128
 PROTOCOL_TEXT_MAX_LENGTH = 4000
 PROTOCOL_SINGLE_LINE_TEXT_MAX_LENGTH = 500
 GRAPH_VERIFIED_PROGRESS_UPLOAD_MIN_SECONDS = 2.0
+FAILED_SCAN_PROGRESS_MAX = max(0, PHASE_PROGRESS["report"] - 1)
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,7 @@ class ResultUploadManager:
             thread_name_prefix="pullwise-result-upload",
         )
         self.pending_uploads: dict[str, tuple[concurrent.futures.Future[None], Path]] = {}
+        self.delayed_uploads: dict[str, tuple[int, Path]] = {}
         self.lock = Lock()
 
     @property
@@ -263,11 +266,15 @@ class ResultUploadManager:
                 self.dead_letter(path, job_id, record, reason)
                 self.worker.last_error = f"result upload dead-lettered for {job_id}: {reason}"[:500]
                 continue
+            next_attempt_at = self.pending_next_attempt_at(record)
+            if next_attempt_at > now:
+                self.delay(job_id, path, next_attempt_at)
+                continue
             self.worker.schedule_pending_result_upload(job_id, path)
 
     def pending_job_ids(self) -> list[str]:
         with self.lock:
-            return list(self.pending_uploads.keys())
+            return list(dict.fromkeys([*self.pending_uploads.keys(), *self.delayed_uploads.keys()]))
 
     def has_pending(self, job_id: str) -> bool:
         try:
@@ -275,7 +282,7 @@ class ResultUploadManager:
         except ValueError:
             return False
         with self.lock:
-            return job_id in self.pending_uploads
+            return job_id in self.pending_uploads or job_id in self.delayed_uploads
 
     def collect(self) -> None:
         done_uploads: list[tuple[str, concurrent.futures.Future[None], Path]] = []
@@ -323,6 +330,7 @@ class ResultUploadManager:
                 self.defer_failed_upload(job_id, path, exc)
             except Exception as exc:
                 self.defer_failed_upload(job_id, path, exc)
+        self.schedule_due_delayed()
 
     def clear_error(self, job_id: str) -> None:
         if not self.worker.last_error:
@@ -337,9 +345,40 @@ class ResultUploadManager:
         if any(self.worker.last_error.startswith(prefix) for prefix in prefixes):
             self.worker.last_error = None
 
-    def schedule(self, job_id: str, path: Path) -> None:
+    def delay(self, job_id: str, path: Path, due_at: int) -> None:
         job_id = safe_job_id(job_id)
         with self.lock:
+            current = self.pending_uploads.get(job_id)
+            if current and not current[0].done():
+                return
+            self.delayed_uploads[job_id] = (max(0, int(due_at or 0)), path)
+
+    def schedule_due_delayed(self) -> None:
+        now = int(time.time())
+        due_uploads: list[tuple[str, Path]] = []
+        with self.lock:
+            for job_id, (due_at, path) in list(self.delayed_uploads.items()):
+                if due_at > now:
+                    continue
+                self.delayed_uploads.pop(job_id, None)
+                due_uploads.append((job_id, path))
+        for job_id, path in due_uploads:
+            self.schedule(job_id, path)
+
+    def schedule(self, job_id: str, path: Path) -> None:
+        job_id = safe_job_id(job_id)
+        try:
+            record = self.read_record_data(path)
+            record_job_id = safe_job_id(record.get("job_id"))
+            if record_job_id == job_id:
+                next_attempt_at = self.pending_next_attempt_at(record)
+                if next_attempt_at > int(time.time()):
+                    self.delay(job_id, path, next_attempt_at)
+                    return
+        except PendingResultUploadRecordError:
+            pass
+        with self.lock:
+            self.delayed_uploads.pop(job_id, None)
             current = self.pending_uploads.get(job_id)
             if current and not current[0].done():
                 return
@@ -351,7 +390,8 @@ class ResultUploadManager:
         job_id = safe_job_id(record.get("job_id"))
         delay_seconds = self.pending_retry_delay_seconds(record)
         if delay_seconds > 0:
-            self.wait_before_retry(job_id, min(delay_seconds, self.pending_backoff_max_seconds()))
+            self.delay(job_id, path, self.pending_next_attempt_at(record))
+            return
         payload = record.get("payload")
         if not isinstance(payload, dict):
             raise PendingResultUploadRecordError("pending result upload payload must be an object")
@@ -446,11 +486,14 @@ class ResultUploadManager:
         except OSError:
             return now
 
-    def pending_retry_delay_seconds(self, record: dict) -> int:
-        next_attempt_at = self.pending_record_int(record, "next_attempt_at", 0)
+    def pending_next_attempt_at(self, record: dict) -> int:
+        return max(0, self.pending_record_int(record, "next_attempt_at", 0))
+
+    def pending_retry_delay_seconds(self, record: dict, *, now: int | None = None) -> int:
+        next_attempt_at = self.pending_next_attempt_at(record)
         if next_attempt_at <= 0:
             return 0
-        return max(0, next_attempt_at - int(time.time()))
+        return max(0, next_attempt_at - (int(time.time()) if now is None else int(now)))
 
     def pending_backoff_seconds(self, attempts: int) -> int:
         exponent = min(max(0, attempts - 1), 10)
@@ -1694,16 +1737,19 @@ class Worker:
             summary = summarize(projected_findings)
             logs_summary = protocol_multiline_text(graph_verified_report.get("debugMarkdown"))[-1000:]
             effective_agent_config = configured_agent
+            completion_error = graph_verified_completion_error(graph_verified_report, projected_findings)
+            completion_logs_summary = completion_error[-1000:] if completion_error else logs_summary
             self.report_progress(
                 job_id,
                 "ai",
-                graph_verified_progress_percent({"stage": "report", "current": 1, "total": 1}),
-                "GraphVerified review complete",
-                logs_summary,
+                FAILED_SCAN_PROGRESS_MAX
+                if completion_error
+                else graph_verified_progress_percent({"stage": "report", "current": 1, "total": 1}),
+                "GraphVerified review failed" if completion_error else "GraphVerified review complete",
+                completion_logs_summary,
                 config=job_config,
             )
             duration_ms = int((time.monotonic() - started) * 1000)
-            completion_error = graph_verified_completion_error(graph_verified_report, projected_findings)
             completion_error_code = "GRAPH_VERIFIED_COMPLETION_FAILED"
             if completion_error and codex_readiness_failure_cacheable(completion_error):
                 readiness_kind = codex_readiness_issue_kind(completion_error)
@@ -1728,7 +1774,7 @@ class Worker:
                 )
             result_status = "failed" if completion_error else "done"
             if completion_error:
-                logs_summary = completion_error[-1000:]
+                logs_summary = completion_logs_summary
             log_graph_verified_completion(job_id, attempt_id, result_status, graph_verified_report, completion_error)
             result_summary = summary
             if result_status == "failed":
@@ -1753,7 +1799,7 @@ class Worker:
             self.report_progress(
                 job_id,
                 "report",
-                100,
+                FAILED_SCAN_PROGRESS_MAX if result_status == "failed" else 100,
                 "Uploading failed result" if result_status == "failed" else "Uploading result",
                 logs_summary,
                 config=job_config,
@@ -1885,7 +1931,7 @@ class Worker:
                 self.report_progress(
                     job_id,
                     "report",
-                    PHASE_PROGRESS["report"],
+                    FAILED_SCAN_PROGRESS_MAX,
                     "Uploading failed result",
                     error,
                     config=job_config,
@@ -2403,6 +2449,31 @@ def run_git_command(command: list[str], *, phase: str, env: dict[str, str] | Non
     run_git_capture(command, phase=phase, env=env)
 
 
+def kill_git_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+    except OSError:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.wait()
+
+
 def run_git_capture(command: list[str], *, phase: str, env: dict[str, str] | None = None) -> str:
     timeout_seconds = env_int("PULLWISE_GIT_TIMEOUT_SECONDS", 600)
     output_limit = env_int(
@@ -2412,36 +2483,57 @@ def run_git_capture(command: list[str], *, phase: str, env: dict[str, str] | Non
         maximum=2 * 1024 * 1024,
     )
     log_worker_git_event(phase, "start", command=command, detail=f"timeout={timeout_seconds}s")
-    try:
-        with tempfile.TemporaryDirectory(prefix="pullwise-git-") as tmp_dir:
-            stdout_path = Path(tmp_dir) / "git.stdout"
-            stderr_path = Path(tmp_dir) / "git.stderr"
-            with open_git_output_file(stdout_path) as stdout_file, open_git_output_file(
-                stderr_path
-            ) as stderr_file:
-                completed = subprocess.run(
-                    command,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    timeout=timeout_seconds,
-                    env=env,
-                )
-            stdout_text = git_output_text(stdout_path, max_bytes=output_limit)
-            stderr_text = git_output_text(stderr_path, max_bytes=output_limit)
-            if completed.returncode != 0:
-                message = git_error_summary(
-                    phase,
-                    completed.returncode,
-                    stdout_text=stdout_text,
-                    stderr_text=stderr_text,
-                )
-                log_worker_git_event(phase, "failed", command=command, detail=message)
-                raise RuntimeError(message)
-        log_worker_git_event(phase, "done", command=command)
-        return stdout_text
-    except subprocess.TimeoutExpired as exc:
-        log_worker_git_event(phase, "timeout", command=command, detail=f"timeout={timeout_seconds}s")
-        raise RuntimeError(f"git {phase} timed out after {timeout_seconds}s") from exc
+    with tempfile.TemporaryDirectory(prefix="pullwise-git-") as tmp_dir:
+        stdout_path = Path(tmp_dir) / "git.stdout"
+        stderr_path = Path(tmp_dir) / "git.stderr"
+        timed_out = False
+        cancelled = False
+        returncode = 0
+        with open_git_output_file(stdout_path) as stdout_file, open_git_output_file(stderr_path) as stderr_file:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=env,
+                start_new_session=(os.name == "posix"),
+            )
+            started = time.monotonic()
+            while True:
+                polled = process.poll()
+                if polled is not None:
+                    returncode = polled
+                    break
+                if process_cancel_requested():
+                    cancelled = True
+                    kill_git_process(process)
+                    returncode = process.returncode if process.returncode is not None else -9
+                    break
+                if time.monotonic() - started >= timeout_seconds:
+                    timed_out = True
+                    kill_git_process(process)
+                    returncode = process.returncode if process.returncode is not None else 124
+                    break
+                time.sleep(0.1)
+        stdout_text = git_output_text(stdout_path, max_bytes=output_limit)
+        stderr_text = git_output_text(stderr_path, max_bytes=output_limit)
+        if cancelled:
+            log_worker_git_event(phase, "cancelled", command=command)
+            raise ProcessCancelled(f"git {phase} cancelled")
+        if timed_out:
+            log_worker_git_event(phase, "timeout", command=command, detail=f"timeout={timeout_seconds}s")
+            raise RuntimeError(f"git {phase} timed out after {timeout_seconds}s")
+        if returncode != 0:
+            message = git_error_summary(
+                phase,
+                returncode,
+                stdout_text=stdout_text,
+                stderr_text=stderr_text,
+            )
+            log_worker_git_event(phase, "failed", command=command, detail=message)
+            raise RuntimeError(message)
+    log_worker_git_event(phase, "done", command=command)
+    return stdout_text
 
 
 def open_git_output_file(path: Path):

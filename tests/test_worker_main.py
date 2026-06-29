@@ -574,6 +574,96 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             schedule_upload.assert_called_once_with("job_retry", pending_path)
             self.assertIn("retry deferred", worker.last_error or "")
 
+    def test_future_pending_result_upload_is_not_scheduled_until_due(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                result_upload_pending_max_age_seconds=3600,
+                result_upload_pending_max_attempts=5,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_future")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps(
+                    {
+                        "job_id": "job_future",
+                        "created_at": 1000,
+                        "attempts": 1,
+                        "next_attempt_at": 1100,
+                        "payload": {"status": "done"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(worker._result_upload_executor, "submit") as submit, patch.object(
+                worker_main.time,
+                "time",
+                return_value=1000,
+            ):
+                worker.load_pending_result_uploads()
+
+            submit.assert_not_called()
+            self.assertEqual(worker.pending_result_job_ids(), ["job_future"])
+
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            with patch.object(worker._result_upload_executor, "submit", return_value=future) as submit, patch.object(
+                worker_main.time,
+                "time",
+                return_value=1100,
+            ):
+                worker.collect_result_uploads()
+
+            submit.assert_called_once_with(worker.upload_pending_result_file, pending_path)
+            self.assertEqual(worker.pending_result_job_ids(), ["job_future"])
+
+    def test_pending_result_upload_file_defers_until_next_attempt_without_sleeping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_future")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps(
+                    {
+                        "job_id": "job_future",
+                        "created_at": 1000,
+                        "attempts": 1,
+                        "next_attempt_at": 1100,
+                        "payload": {"status": "done"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(worker.client, "result") as result, patch.object(
+                worker.result_uploads,
+                "wait_before_retry",
+            ) as wait, patch.object(worker_main.time, "time", return_value=1000):
+                worker.upload_pending_result_file(pending_path)
+
+            result.assert_not_called()
+            wait.assert_not_called()
+            self.assertTrue(pending_path.exists())
+            self.assertEqual(worker.pending_result_job_ids(), ["job_future"])
+
     def test_retryable_pending_result_upload_dead_letters_after_retention(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
@@ -2161,6 +2251,97 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 summary_text,
             )
 
+    def test_run_job_caps_failed_graph_verified_progress_below_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                worker_id="wk_failed_progress",
+                work_dir=root / "work",
+                log_dir=root / "logs",
+                service_home=str(root / "home"),
+                provider="codex",
+                provider_chain=["codex"],
+                codex_command="codex",
+                codex_model="gpt-5",
+                codex_reasoning_effort="high",
+                failed_checkout_retention_seconds=0,
+                scan_summary_log_max_bytes=1024 * 1024,
+                result_upload_compress_min_bytes=1024 * 1024,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            job = {
+                "job_id": "job_failed_progress",
+                "attempt": 1,
+                "agentConfig": {
+                    "provider": "codex",
+                    "codex": {"model": "gpt-5", "reasoningEffort": "high"},
+                    "graphVerified": {},
+                },
+                "repositoryLimits": {"maxFiles": 1000, "maxBytes": 1024 * 1024},
+            }
+            progress_updates: list[dict] = []
+
+            def fake_progress(
+                _job_id: str,
+                phase: str,
+                progress: int,
+                message: str = "",
+                logs_summary: str = "",
+                *,
+                log_time: int | None = None,
+            ) -> None:
+                del _job_id, logs_summary, log_time
+                progress_updates.append({"phase": phase, "progress": progress, "message": message})
+
+            def fake_graph_verified(_config: object, _job: dict, _checkout_dir: Path, progress_callback=None) -> dict:
+                del _config, _job, _checkout_dir, progress_callback
+                return {
+                    "version": "graph-verified-code-review/1",
+                    "confirmedCount": 0,
+                    "rejectedCount": 0,
+                    "blockedCount": 1,
+                    "debugMarkdown": "GraphVerified review blocked before producing reportable candidates.",
+                    "finalJson": {"confirmed": []},
+                }
+
+            with patch.object(worker.client, "progress", side_effect=fake_progress), patch.object(
+                worker_main,
+                "clone_repository",
+                return_value="abc123",
+            ), patch.object(worker_main, "enforce_repository_limits"), patch.object(
+                worker_main,
+                "collect_preflight_metadata",
+                return_value={"summary": "preflight ok"},
+            ), patch.object(
+                worker_main,
+                "run_graph_verified_review_payload",
+                side_effect=fake_graph_verified,
+            ), patch.object(worker_main, "graph_verified_summary_findings", return_value=[]), patch.object(
+                worker,
+                "upload_result_once_or_defer",
+                return_value=True,
+            ) as upload:
+                worker.run_job(job)
+
+            failed_updates = [
+                update
+                for update in progress_updates
+                if update["message"] in {"GraphVerified review failed", "Uploading failed result"}
+            ]
+            self.assertEqual(
+                [worker_main.FAILED_SCAN_PROGRESS_MAX, worker_main.FAILED_SCAN_PROGRESS_MAX],
+                [update["progress"] for update in failed_updates],
+            )
+            self.assertFalse(
+                any(update["progress"] >= worker_main.PHASE_PROGRESS["report"] for update in failed_updates)
+            )
+            upload_payload = upload.call_args.args[1]
+            self.assertEqual(upload_payload["status"], "failed")
+
     def test_graph_verified_progress_logs_summary_includes_finder_diagnostics(self) -> None:
         summary = worker_main.graph_verified_progress_logs_summary(
             {
@@ -3369,14 +3550,24 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
     def test_run_git_capture_bounds_stdout_without_pipe(self) -> None:
         git_stdout = "ABCDEFabcdef1234567890abcdefABCDEF123456\n"
 
-        def fake_run(_command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+        class FakeGitProcess:
+            pid = 12345
+            returncode = 0
+
+            def poll(self) -> int:
+                return self.returncode
+
+            def wait(self, timeout=None) -> int:
+                return self.returncode
+
+        def fake_popen(_command: list[str], **kwargs: object) -> FakeGitProcess:
             stdout_file = kwargs["stdout"]
             stdout_file.write(git_stdout.encode("utf-8"))
             stdout_file.write(b"x" * (2 * 1024 * 1024))
             stdout_file.flush()
-            return worker_main.subprocess.CompletedProcess(["git"], 0)
+            return FakeGitProcess()
 
-        with patch.object(worker_main.subprocess, "run", side_effect=fake_run) as run, patch.dict(
+        with patch.object(worker_main.subprocess, "Popen", side_effect=fake_popen) as popen, patch.dict(
             worker_main.os.environ,
             {"PULLWISE_GIT_OUTPUT_MAX_BYTES": "1024"},
             clear=False,
@@ -3385,21 +3576,31 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         self.assertTrue(output.startswith(git_stdout))
         self.assertEqual(len(output.encode("utf-8")), 1024)
-        self.assertIn("stdout", run.call_args.kwargs)
-        self.assertIn("stderr", run.call_args.kwargs)
-        self.assertIsNot(run.call_args.kwargs["stdout"], worker_main.subprocess.PIPE)
-        self.assertIsNot(run.call_args.kwargs["stderr"], worker_main.subprocess.PIPE)
-        self.assertNotIn("text", run.call_args.kwargs)
+        self.assertIn("stdout", popen.call_args.kwargs)
+        self.assertIn("stderr", popen.call_args.kwargs)
+        self.assertIsNot(popen.call_args.kwargs["stdout"], worker_main.subprocess.PIPE)
+        self.assertIsNot(popen.call_args.kwargs["stderr"], worker_main.subprocess.PIPE)
+        self.assertNotIn("text", popen.call_args.kwargs)
 
     def test_run_git_capture_bounds_failure_output(self) -> None:
-        def fake_run(_command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
+        class FakeGitProcess:
+            pid = 12345
+            returncode = 128
+
+            def poll(self) -> int:
+                return self.returncode
+
+            def wait(self, timeout=None) -> int:
+                return self.returncode
+
+        def fake_popen(_command: list[str], **kwargs: object) -> FakeGitProcess:
             stderr_file = kwargs["stderr"]
             stderr_file.write(b"fatal: first line\n")
             stderr_file.write(b"x" * (2 * 1024 * 1024))
             stderr_file.flush()
-            return worker_main.subprocess.CompletedProcess(["git"], 128)
+            return FakeGitProcess()
 
-        with patch.object(worker_main.subprocess, "run", side_effect=fake_run), patch.dict(
+        with patch.object(worker_main.subprocess, "Popen", side_effect=fake_popen), patch.dict(
             worker_main.os.environ,
             {"PULLWISE_GIT_OUTPUT_MAX_BYTES": "1024"},
             clear=False,
@@ -3408,6 +3609,19 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 worker_main.run_git_capture(["git", "fetch"], phase="fetch")
 
         self.assertLessEqual(len(str(raised.exception)), 420)
+
+    def test_run_git_capture_stops_when_cancel_event_is_set(self) -> None:
+        cancel_event = threading.Event()
+        cancel_event.set()
+        set_process_cancel_event(cancel_event)
+        try:
+            with self.assertRaises(ProcessCancelled):
+                worker_main.run_git_capture(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    phase="fetch",
+                )
+        finally:
+            clear_process_cancel_event()
 
     def test_worker_logs_dry_run_prints_journal_and_scan_summary_commands(self) -> None:
         config = SimpleNamespace(
