@@ -403,9 +403,30 @@ def command_worker_has_active_jobs(worker_state: dict | None) -> bool:
     if not isinstance(worker_state, dict):
         return False
     try:
-        return int(worker_state.get("running_jobs") or worker_state.get("runningJobs") or 0) > 0
+        if int(worker_state.get("running_jobs") or worker_state.get("runningJobs") or 0) > 0:
+            return True
     except (TypeError, ValueError):
+        pass
+    active_ids = worker_state.get("active_job_ids") if "active_job_ids" in worker_state else worker_state.get("activeJobIds")
+    return bool(client_active_job_ids(active_ids))
+
+
+def pending_result_uploads_exist(config: WorkerConfig) -> bool:
+    try:
+        pending_dir = result_upload_dir(Path(config.work_dir))
+    except Exception:
+        return True
+    if pending_dir.is_symlink():
+        return True
+    if not pending_dir.is_dir():
         return False
+    try:
+        for path in pending_dir.glob("*.json"):
+            if path.is_symlink() or path.is_file():
+                return True
+    except OSError:
+        return True
+    return False
 
 
 class WorkerLifecycleWatcher:
@@ -439,7 +460,9 @@ class WorkerLifecycleWatcher:
         if parsed is None:
             return False
         command_id, action = parsed
-        if action == "uninstall" and command_worker_has_active_jobs(worker_state):
+        if action == "uninstall" and (
+            command_worker_has_active_jobs(worker_state) or pending_result_uploads_exist(self.config)
+        ):
             return False
         try:
             self.client.command_status(command_id, "running")

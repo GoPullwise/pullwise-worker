@@ -5,9 +5,16 @@ import unittest
 from pathlib import Path
 
 from codereview.repro.event_parser import MAX_EVENT_STREAM_BYTES, event_stream_text
+from codereview.repro.runner import validate_repro_result
 
 
 class ReproEventParserTest(unittest.TestCase):
+    def test_repro_runner_imports_without_legacy_judge_modules(self) -> None:
+        self.assertEqual(
+            validate_repro_result({"candidate_id": "cand", "status": "blocked"}, expected_candidate_id="cand"),
+            [],
+        )
+
     def test_event_stream_text_does_not_follow_symlinked_event_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

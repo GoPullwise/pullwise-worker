@@ -171,6 +171,19 @@ class WorkerJobSlot:
         return active_job_ids
 
 
+RETRYABLE_RESULT_UPLOAD_STATUS_CODES = {408, 429}
+
+
+def result_upload_http_error_retryable(status_code: object) -> bool:
+    if isinstance(status_code, bool):
+        return False
+    try:
+        code = int(status_code)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return code >= 500 or code in RETRYABLE_RESULT_UPLOAD_STATUS_CODES
+
+
 class ResultUploadManager:
     def __init__(self, worker: object) -> None:
         self.worker = worker
@@ -220,7 +233,7 @@ class ResultUploadManager:
             except PullwiseHTTPError as exc:
                 if exc.status_code == 409:
                     raise WorkerJobCancelled(f"job {job_id} is no longer accepting worker updates") from exc
-                if exc.status_code < 500 or attempt >= self.config.result_upload_attempts:
+                if not result_upload_http_error_retryable(exc.status_code) or attempt >= self.config.result_upload_attempts:
                     raise
                 last_error = exc
             except PullwiseRequestError as exc:
@@ -314,7 +327,7 @@ class ResultUploadManager:
                 self.worker.clear_job_cancel_event_by_id(job_id)
                 self.worker.last_error = redact_secrets(str(exc), self.config)[:500]
             except PullwiseHTTPError as exc:
-                if exc.status_code < 500:
+                if not result_upload_http_error_retryable(exc.status_code):
                     try:
                         path.unlink(missing_ok=True)
                     except OSError:
@@ -459,7 +472,7 @@ class ResultUploadManager:
             self.client.result(job_id, payload)
             return True
         except PullwiseHTTPError as exc:
-            if exc.status_code < 500:
+            if not result_upload_http_error_retryable(exc.status_code):
                 raise
             error = exc
         except PullwiseRequestError as exc:
@@ -1074,6 +1087,35 @@ def result_agent_report(status: str, summary: dict, graph_verified_report: dict,
     }
 
 
+def result_agent_fix_prompt(agent_report: dict) -> str:
+    issue_index = agent_report.get("issueIndex") if isinstance(agent_report.get("issueIndex"), list) else []
+    if not issue_index:
+        return "No confirmed GraphVerified findings require a code fix."
+    lines = [
+        "Use agentReport.issueIndex as the fix checklist.",
+        "For each issue, inspect primaryFile and then read sourcePath for full evidence before editing.",
+        "Only fix confirmed findings; do not act on debug diagnostics as user-visible issues.",
+        "",
+        "Confirmed issues:",
+    ]
+    for issue in issue_index[:10]:
+        if not isinstance(issue, dict):
+            continue
+        issue_id = clean_protocol_text(issue.get("id"), 160)
+        title = clean_protocol_text(issue.get("title"), 240)
+        severity = clean_protocol_text(issue.get("severity"), 20)
+        source_path = clean_protocol_text(issue.get("sourcePath"), 300)
+        primary_file = clean_protocol_text(issue.get("primaryFile"), 300)
+        location = primary_file
+        if issue.get("primaryLine"):
+            location = f"{primary_file}:{issue['primaryLine']}" if primary_file else str(issue["primaryLine"])
+        parts = [part for part in (severity, issue_id, title) if part]
+        summary = " | ".join(parts) or "confirmed finding"
+        suffix = f" ({location})" if location else ""
+        lines.append(f"- {summary}{suffix}; evidence: {source_path}")
+    return "\n".join(lines)
+
+
 def result_reading_guide() -> dict:
     return {
         "forUser": "humanReport.summaryMarkdown",
@@ -1089,6 +1131,7 @@ def result_readable_payload(status: str, summary: dict, graph_verified_report: d
     return {
         "humanReport": result_human_report(status, summary, agent_report["issueIndex"], error),
         "agentReport": agent_report,
+        "agentFixPrompt": result_agent_fix_prompt(agent_report),
         "readingGuide": result_reading_guide(),
     }
 
@@ -1533,6 +1576,8 @@ class Worker:
             return False
         command_id, action = parsed
         if getattr(self.config, "lifecycle_watcher_enabled", False):
+            return False
+        if action == "uninstall" and self.pending_result_job_ids():
             return False
         try:
             self.client.command_status(command_id, "running")

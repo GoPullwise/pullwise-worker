@@ -24,6 +24,7 @@ from codereview.simple_review import (
     command_is_reproduction,
     limit_candidates_per_unit,
     load_simple_settings,
+    init_project,
     recommended_simple_parallelism,
     normalize_candidate,
     parse_command_events,
@@ -64,6 +65,22 @@ class SimpleReviewTests(unittest.TestCase):
         self.assertEqual(settings.discovery_parallel, 6)
         self.assertEqual(settings.verification_parallel, 6)
         self.assertEqual(settings.subagents_per_turn, 6)
+
+    def test_init_project_writes_standard_defaults_that_match_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            init_project(root)
+            payload = json.loads((root / ".codereview" / "config.json").read_text(encoding="utf-8"))
+
+        settings = load_simple_settings(payload, ReviewConfig())
+        self.assertEqual(payload["mode"], "standard")
+        self.assertEqual(payload["simple"]["discovery_turns"], settings.discovery_turns)
+        self.assertEqual(payload["simple"]["max_discovery_turns"], settings.max_discovery_turns)
+        self.assertEqual(payload["simple"]["max_candidates"], settings.max_candidates)
+        self.assertEqual(payload["simple"]["max_candidates_per_unit"], settings.max_candidates_per_unit)
+        self.assertEqual(payload["simple"]["max_batch_files"], settings.max_batch_files)
+        self.assertEqual(payload["simple"]["max_batch_bytes"], settings.max_batch_bytes)
+        self.assertEqual(payload["simple"]["scan_deadline_seconds"], settings.scan_deadline_seconds)
 
     def test_verification_prompt_requires_verbatim_candidate_expected_behavior(self) -> None:
         settings = load_simple_settings({"simple": {}}, ReviewConfig())

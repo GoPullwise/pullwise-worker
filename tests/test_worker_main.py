@@ -154,6 +154,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertIn("Auth cache can return stale permissions", payload["humanReport"]["summaryMarkdown"])
         self.assertEqual(payload["readingGuide"]["forAgentDeep"], "graphVerifiedReport.finalJson.confirmed")
         self.assertEqual(payload["readingGuide"]["forAgentFix"], "agentFixPrompt")
+        self.assertIn("agentFixPrompt", payload)
+        self.assertIn("issue-auth-cache", payload["agentFixPrompt"])
 
     def test_worker_config_tolerates_bad_numeric_environment_values(self) -> None:
         env = {
@@ -560,6 +562,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(record["payload"], payload)
             schedule_upload.assert_called_once_with("job_deferred", pending_path)
 
+    def test_result_upload_defers_http_429_without_dropping_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            payload = {"status": "done"}
+
+            with patch.object(
+                worker.client,
+                "result",
+                side_effect=worker_main.PullwiseHTTPError("HTTP 429: rate limited", 429),
+            ), patch.object(worker, "schedule_pending_result_upload") as schedule_upload:
+                uploaded = worker.upload_result_once_or_defer("job_rate_limited", payload)
+
+            self.assertFalse(uploaded)
+            pending_path = worker_main.result_upload_file(work_dir, "job_rate_limited")
+            self.assertTrue(pending_path.exists())
+            schedule_upload.assert_called_once_with("job_rate_limited", pending_path)
+            self.assertIn("deferred", worker.last_error or "")
+
     def test_retryable_pending_result_upload_persists_backoff_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)
@@ -607,6 +637,46 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(record["last_error"], "offline")
             schedule_upload.assert_called_once_with("job_retry", pending_path)
             self.assertIn("retry deferred", worker.last_error or "")
+
+    def test_retryable_pending_result_upload_http_408_is_rescheduled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                result_upload_compress_min_bytes=1,
+                result_upload_attempts=1,
+                result_upload_pending_backoff_base_seconds=7,
+                result_upload_pending_backoff_max_seconds=60,
+                result_upload_pending_max_age_seconds=3600,
+                result_upload_pending_max_attempts=5,
+                work_dir=work_dir,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            pending_path = worker_main.result_upload_file(work_dir, "job_timeout")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(
+                json.dumps({"job_id": "job_timeout", "created_at": 1000, "attempts": 0, "payload": {"status": "done"}}),
+                encoding="utf-8",
+            )
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            future.set_exception(worker_main.PullwiseHTTPError("HTTP 408: timeout", 408))
+            worker._pending_result_uploads["job_timeout"] = (future, pending_path)
+
+            with patch.object(worker_main.time, "time", return_value=2000), patch.object(
+                worker,
+                "schedule_pending_result_upload",
+            ) as schedule_upload:
+                worker.collect_result_uploads()
+
+            self.assertTrue(pending_path.exists())
+            record = json.loads(pending_path.read_text(encoding="utf-8"))
+            self.assertEqual(record["attempts"], 1)
+            self.assertEqual(record["next_attempt_at"], 2007)
+            schedule_upload.assert_called_once_with("job_timeout", pending_path)
+            self.assertNotIn("permanently failed", worker.last_error or "")
 
     def test_future_pending_result_upload_is_not_scheduled_until_due(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2074,6 +2144,8 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(payload["agentReport"]["issueIndex"], [])
             self.assertEqual(payload["readingGuide"]["forAgentQuick"], "agentReport.issueIndex")
             self.assertEqual(payload["readingGuide"]["forAgentFix"], "agentFixPrompt")
+            self.assertIn("agentFixPrompt", payload)
+            self.assertIn("No confirmed GraphVerified findings", payload["agentFixPrompt"])
             summary_log = config.log_dir / "scan-summary.log"
             self.assertTrue(summary_log.is_file())
             summary_text = summary_log.read_text(encoding="utf-8")
@@ -2998,6 +3070,54 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         command_status.assert_not_called()
         run_job.assert_called_once_with({"job_id": "job_inline"})
+
+
+    def test_worker_lifecycle_uninstall_waits_for_pending_result_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(
+                server_url="https://pullwise.example",
+                worker_token="secret-token",
+                work_dir=work_dir,
+                lifecycle_watcher_enabled=False,
+            )
+            worker = worker_main.Worker(config)
+            self.addCleanup(worker._result_upload_executor.shutdown, wait=False, cancel_futures=True)
+            self.addCleanup(worker._cleanup_executor.shutdown, wait=False, cancel_futures=True)
+            future: concurrent.futures.Future[None] = concurrent.futures.Future()
+            worker._pending_result_uploads["job_pending_upload"] = (
+                future,
+                worker_main.result_upload_file(work_dir, "job_pending_upload"),
+            )
+
+            with patch.object(worker.client, "command_status") as command_status:
+                handled = worker.handle_lifecycle_command({"id": "cmd_uninstall", "command": "uninstall"})
+
+            self.assertFalse(handled)
+            command_status.assert_not_called()
+
+    def test_lifecycle_watcher_uninstall_waits_for_active_or_pending_upload_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            config = SimpleNamespace(server_url="https://pullwise.example", worker_token="secret-token", work_dir=work_dir)
+            pending_path = worker_main.result_upload_file(work_dir, "job_pending_upload")
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path.write_text(json.dumps({"job_id": "job_pending_upload", "payload": {"status": "done"}}), encoding="utf-8")
+            watcher = worker_main.WorkerLifecycleWatcher(config)
+
+            self.assertTrue(worker_main.command_worker_has_active_jobs({"activeJobIds": ["job_pending_upload"]}))
+            with patch.object(watcher.client, "command_status") as command_status, patch.object(
+                worker_main,
+                "execute_watcher_lifecycle_command",
+            ) as execute:
+                handled = watcher.handle_lifecycle_command(
+                    {"id": "cmd_uninstall", "command": "uninstall"},
+                    worker_state={"running_jobs": 0},
+                )
+
+            self.assertFalse(handled)
+            command_status.assert_not_called()
+            execute.assert_not_called()
 
     def test_lifecycle_command_parts_rejects_unsafe_command_ids(self) -> None:
         self.assertIsNone(worker_main.lifecycle_command_parts({"id": "cmd_bad\nnext", "command": "stop"}))
@@ -5551,10 +5671,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             reports.mkdir(parents=True)
             final_md = reports / "final.md"
             final_md.write_text("# Full-Repository Graph-Verified Code Review\n", encoding="utf-8")
-            (reports / "debug.md").write_text("# Debug Report\n", encoding="utf-8")
-            (reports / "confirmed.json").write_text(json.dumps([{"candidate": {"candidate_id": "c1"}}]), encoding="utf-8")
-            (reports / "rejected.json").write_text(json.dumps([{"candidate_id": "r1"}]), encoding="utf-8")
-            (reports / "final.json").write_text(json.dumps({"confirmed": [{"candidate": {"candidate_id": "c1"}}]}), encoding="utf-8")
+            (reports / "debug.md").write_text("# Debug Report secret-token\n", encoding="utf-8")
+            (reports / "confirmed.json").write_text(json.dumps([{"candidate": {"candidate_id": "c1"}, "worker_token": "secret-token"}]), encoding="utf-8")
+            (reports / "rejected.json").write_text(json.dumps([{"candidate_id": "r1", "reason": "secret-token"}]), encoding="utf-8")
+            (reports / "final.json").write_text(json.dumps({"confirmed": [{"candidate": {"candidate_id": "c1"}, "note": "https://x-access-token:ghs_secret@example.com/owner/repo.git"}]}), encoding="utf-8")
             (reports / "summary.json").write_text(json.dumps({"reports": {"blocked": 2}}), encoding="utf-8")
             (reports / "diagnostics.json").write_text(
                 json.dumps(
@@ -5598,6 +5718,10 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["rejectedCount"], 1)
         self.assertEqual(payload["blockedCount"], 2)
         self.assertEqual(payload["finalJson"]["confirmed"][0]["candidate"]["candidate_id"], "c1")
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("secret-token", serialized_payload)
+        self.assertNotIn("ghs_secret", serialized_payload)
+        self.assertIn("[redacted]", serialized_payload)
         self.assertEqual(payload["internalDiagnostics"]["reasonCounts"][0]["reason"], "not reproducible")
         self.assertEqual(payload["internalDiagnostics"]["internalRejections"][0]["candidateId"], "cand-x")
         self.assertEqual(payload["internalDiagnostics"]["selectedCandidates"][0]["candidateId"], "cand-x")
@@ -5879,7 +6003,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertNotIn("runId", payload)
         self.assertIn("outside the checkout run directory", payload["debugMarkdown"])
 
-    def test_run_graph_verified_review_payload_closes_app_server_client_after_success(self) -> None:
+    def test_run_graph_verified_review_payload_keeps_app_server_client_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             cfg = config_for(root)
@@ -5905,7 +6029,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 )
 
         self.assertEqual(payload["confirmedCount"], 1)
-        close_clients.assert_called_once_with("GraphVerified review complete")
+        close_clients.assert_not_called()
 
     def test_run_graph_verified_review_payload_blocks_on_review_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5932,7 +6056,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["finalJson"], {"confirmed": []})
         self.assertNotIn("secret-token", payload["debugMarkdown"])
         self.assertIn("[redacted]", payload["debugMarkdown"])
-        close_clients.assert_called_once_with("GraphVerified review complete")
+        close_clients.assert_not_called()
 
 
 if __name__ == "__main__":

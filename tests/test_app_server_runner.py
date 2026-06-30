@@ -16,8 +16,8 @@ from codereview.config import CodexConfig
 
 class AppServerRunnerTests(unittest.TestCase):
     def test_app_server_recycles_by_conservative_default_limits(self) -> None:
-        self.assertEqual(app_server_max_age_seconds({}), 1800)
-        self.assertEqual(app_server_max_turns({}), 8)
+        self.assertEqual(app_server_max_age_seconds({}), 2400)
+        self.assertEqual(app_server_max_turns({}), 48)
         self.assertEqual(
             app_server_max_age_seconds({"PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS": "45"}),
             45,

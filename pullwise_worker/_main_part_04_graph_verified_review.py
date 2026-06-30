@@ -83,7 +83,6 @@ def graph_verified_toml_string(value: object) -> str:
 
 
 def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_dir: Path, progress_callback=None) -> dict:
-    from codereview.app_server_runner import close_app_server_clients
     from codereview.simple_review import run_review
 
     agent_config = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
@@ -101,19 +100,22 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
     except Exception as exc:
         detail = redact_secrets(str(exc), config)
         return graph_verified_failed_report(mode, scan_mode, detail)
-    finally:
-        close_app_server_clients("GraphVerified review complete")
     reports = final_path.parent
     report_error = graph_verified_report_artifact_error(final_path, checkout_dir)
     if report_error:
         return graph_verified_failed_report(mode, scan_mode, report_error)
-    confirmed = graph_verified_read_json_artifact(reports / "confirmed.json", [])
-    rejected = graph_verified_read_json_artifact(reports / "rejected.json", [])
-    final_json = graph_verified_read_json_artifact(reports / "final.json", {"confirmed": []})
-    pipeline_summary = graph_verified_read_json_artifact(reports / "summary.json", {})
-    internal_diagnostics = graph_verified_internal_diagnostics(
-        graph_verified_read_json_artifact(reports / "diagnostics.json", {})
+    confirmed = graph_verified_redact_artifact(graph_verified_read_json_artifact(reports / "confirmed.json", []), config)
+    rejected = graph_verified_redact_artifact(graph_verified_read_json_artifact(reports / "rejected.json", []), config)
+    final_json = graph_verified_redact_artifact(
+        graph_verified_read_json_artifact(reports / "final.json", {"confirmed": []}),
+        config,
     )
+    pipeline_summary = graph_verified_redact_artifact(graph_verified_read_json_artifact(reports / "summary.json", {}), config)
+    diagnostics_json = graph_verified_redact_artifact(
+        graph_verified_read_json_artifact(reports / "diagnostics.json", {}),
+        config,
+    )
+    internal_diagnostics = graph_verified_internal_diagnostics(diagnostics_json)
     report_counts = (
         pipeline_summary.get("reports")
         if isinstance(pipeline_summary, dict) and isinstance(pipeline_summary.get("reports"), dict)
@@ -129,8 +131,8 @@ def run_graph_verified_review_payload(config: WorkerConfig, job: dict, checkout_
         "confirmedCount": len(confirmed) if isinstance(confirmed, list) else 0,
         "rejectedCount": len(rejected) if isinstance(rejected, list) else 0,
         "blockedCount": graph_verified_count(report_counts.get("blocked")),
-        "finalMarkdown": graph_verified_read_text_artifact(final_path, GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES),
-        "debugMarkdown": graph_verified_read_text_artifact(reports / "debug.md", GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES),
+        "finalMarkdown": redact_secrets(graph_verified_read_text_artifact(final_path, GRAPH_VERIFIED_FINAL_MARKDOWN_MAX_BYTES), config),
+        "debugMarkdown": redact_secrets(graph_verified_read_text_artifact(reports / "debug.md", GRAPH_VERIFIED_DEBUG_MARKDOWN_MAX_BYTES), config),
         "finalJson": final_json if isinstance(final_json, dict) else {"confirmed": []},
         "summary": pipeline_summary if isinstance(pipeline_summary, dict) else {},
     }
@@ -342,6 +344,29 @@ def graph_verified_read_json_artifact(path: Path, default: object) -> object:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return default
 
+
+def graph_verified_redact_artifact(value: object, config: WorkerConfig) -> object:
+    if isinstance(value, str):
+        return redact_secrets(value, config)
+    if isinstance(value, list):
+        return [graph_verified_redact_artifact(item, config) for item in value]
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            text_key = str(key)
+            if graph_verified_sensitive_key(text_key):
+                redacted[text_key] = "[redacted]"
+            else:
+                redacted[text_key] = graph_verified_redact_artifact(item, config)
+        return redacted
+    return value
+
+
+def graph_verified_sensitive_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key or "").strip().lower()).strip("_")
+    if normalized in {"token", "access_token", "refresh_token", "worker_token", "authorization", "api_key", "apikey", "secret", "password", "clone_token"}:
+        return True
+    return normalized.endswith("_token") or normalized.endswith("_secret") or normalized.endswith("_password")
 
 def graph_verified_progress_message(value: object) -> str:
     source = value if isinstance(value, dict) else {}

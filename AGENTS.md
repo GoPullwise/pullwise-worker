@@ -123,7 +123,7 @@ has finished. The only job slot must not be occupied by avoidable retry sleep or
 cleanup IO.
 
 - Final result upload should attempt the immediate request once. Retryable
-  network/5xx failures should be written to the pending result upload spool and
+  network, HTTP 408/429, and 5xx failures should be written to the pending result upload spool and
   retried by the background upload worker.
 - Pending result uploads must remain in heartbeat `active_job_ids` so the server
   renews the claimed job lease while the final payload is being retried. They do
