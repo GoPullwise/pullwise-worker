@@ -1168,7 +1168,7 @@ def validate_verification_result(
         raise VerificationRejected("final reproduction command must execute a harness under .codereview/repro")
     if not verification_source_is_grounded(candidate, exercised_files, matching, worker_repo, marker=marker):
         raise VerificationRejected(
-            "reproduction command, output, and referenced harnesses do not ground execution in the cited source files"
+            "reproduction command and referenced harnesses do not ground execution in the cited source files"
         )
     return actual, marker
 def command_matches(declared: str, actual: str) -> bool:
