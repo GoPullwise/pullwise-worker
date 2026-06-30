@@ -17,6 +17,7 @@ from codereview.simple_review import (
     ReviewUnit,
     TurnMetrics,
     _rejected_record,
+    _run_discovery,
     _run_verifications,
     _write_reports,
     codex_account_preflight,
@@ -1263,6 +1264,133 @@ class SimpleReviewTests(unittest.TestCase):
                 {"discovery": 1200, "verification": 700, "total": 1900},
             )
             self.assertEqual(summary["codexTurns"]["inputLimitChars"], 5000)
+
+    def test_discovery_turn_progress_events_include_batch_position(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            run = root / "run"
+            snapshot.mkdir()
+            run.mkdir()
+            units = [
+                ReviewUnit(
+                    unit_id="unit-1",
+                    area="src",
+                    files=("src/a.py",),
+                    size_bytes=10,
+                    line_count=1,
+                ),
+                ReviewUnit(
+                    unit_id="unit-2",
+                    area="src",
+                    files=("src/b.py",),
+                    size_bytes=10,
+                    line_count=1,
+                ),
+            ]
+            inventory_by_path = {
+                "src/a.py": {"size_bytes": 10, "line_count": 1, "content_hash": "sha256:a"},
+                "src/b.py": {"size_bytes": 10, "line_count": 1, "content_hash": "sha256:b"},
+            }
+            batches = [
+                DiscoveryBatch("discovery-001", (units[0],), (("unit-1",),)),
+                DiscoveryBatch("discovery-002", (units[1],), (("unit-2",),)),
+            ]
+            batch_units = {
+                "discovery-001": ["unit-1"],
+                "discovery-002": ["unit-2"],
+            }
+            events: list[dict] = []
+            settings = load_simple_settings({"simple": {"discovery_parallel": 1}}, ReviewConfig())
+
+            def fake_codex_json(**kwargs):
+                batch_id = Path(kwargs["output_file"]).parent.name
+                return {"reviewed_unit_ids": batch_units[batch_id], "candidates": []}
+
+            with patch("codereview.simple_review._run_codex_json", side_effect=fake_codex_json):
+                _run_discovery(
+                    snapshot,
+                    run,
+                    batches,
+                    units,
+                    inventory_by_path,
+                    CodexConfig(),
+                    settings,
+                    events.append,
+                    "run-id",
+                    TurnMetrics(),
+                )
+
+        turn_events = [
+            event for event in events if str(event.get("message", "")).startswith("Discovery turn")
+        ]
+        self.assertEqual(
+            [(event["message"], event["current"], event["total"]) for event in turn_events],
+            [("Discovery turn discovery-001", 0, 2), ("Discovery turn discovery-002", 1, 2)],
+        )
+
+    def test_verification_turn_progress_events_include_candidate_position(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            run = root / "run"
+            snapshot.mkdir()
+            run.mkdir()
+            candidates = [
+                {
+                    "candidate_id": "cand-1",
+                    "title": "First candidate",
+                    "expected_behavior": "The handler should return true.",
+                    "evidence": [
+                        {"file": "src/handler.py", "lines": "1", "why_it_matters": "branch"}
+                    ],
+                },
+                {
+                    "candidate_id": "cand-2",
+                    "title": "Second candidate",
+                    "expected_behavior": "The handler should return false.",
+                    "evidence": [
+                        {"file": "src/handler.py", "lines": "1", "why_it_matters": "branch"}
+                    ],
+                },
+            ]
+            events: list[dict] = []
+            settings = load_simple_settings({"simple": {"verification_parallel": 1}}, ReviewConfig())
+
+            def fake_create_worker(_snapshot_repo, worker_root, _candidate):
+                repo = Path(worker_root) / "repo"
+                (repo / "src").mkdir(parents=True, exist_ok=True)
+                (repo / "src" / "handler.py").write_text(
+                    "def handle():\n    return False\n", encoding="utf-8"
+                )
+
+            def fake_codex_json(**_kwargs):
+                raise RuntimeError("stop after progress")
+
+            with (
+                patch("codereview.simple_review.create_worker_dir", side_effect=fake_create_worker),
+                patch("codereview.simple_review.capture_source_state", return_value={}),
+                patch("codereview.simple_review._run_codex_json", side_effect=fake_codex_json),
+            ):
+                _run_verifications(
+                    snapshot,
+                    run,
+                    candidates,
+                    CodexConfig(),
+                    settings,
+                    threading.Event(),
+                    events.append,
+                    "run-id",
+                    turn_metrics=TurnMetrics(),
+                )
+
+        turn_events = [
+            event for event in events if str(event.get("message", "")).startswith("Verification cand-")
+        ]
+        self.assertEqual(
+            [(event["message"], event["current"], event["total"]) for event in turn_events],
+            [("Verification cand-1", 0, 2), ("Verification cand-2", 1, 2)],
+        )
 
 if __name__ == "__main__":
     unittest.main()

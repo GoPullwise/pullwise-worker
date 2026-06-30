@@ -1429,6 +1429,8 @@ def _run_discovery(
 ) -> list[dict]:
     schema_path = run / "schemas" / "discovery.schema.json"
     write_json(schema_path, DISCOVERY_SCHEMA)
+    total_batches = len(batches)
+    batch_progress_index = {batch.batch_id: index for index, batch in enumerate(batches)}
 
     def execute(batch: DiscoveryBatch) -> dict:
         if process_cancel_requested():
@@ -1458,6 +1460,8 @@ def _run_discovery(
             progress,
             "finder",
             f"Discovery turn {batch.batch_id}",
+            current=batch_progress_index.get(batch.batch_id, 0),
+            total=total_batches,
             run_id=run_id,
             extra={**metric_payload, "batchTaskCount": len(batch.units)},
         )
@@ -1504,6 +1508,10 @@ def _run_verifications(
 ) -> list[dict]:
     schema_path = run / "schemas" / "verification.schema.json"
     write_json(schema_path, VERIFICATION_SCHEMA)
+    total_candidates = len(candidates)
+    candidate_progress_index = {
+        id(candidate): index for index, candidate in enumerate(candidates)
+    }
     reuse_lane = settings.verification_parallel <= 1
     lane_root = run / "workers" / "verification-lanes" / "lane-0"
     lane_repo = lane_root / "repo"
@@ -1551,6 +1559,8 @@ def _run_verifications(
                 progress,
                 "verification",
                 f"Verification {candidate_id}",
+                current=candidate_progress_index.get(id(candidate), 0),
+                total=total_candidates,
                 run_id=run_id,
                 extra={**metric_payload, "taskId": candidate_id},
             )
