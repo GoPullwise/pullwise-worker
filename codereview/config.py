@@ -23,7 +23,7 @@ class ContextConfig:
 @dataclass
 class CodexConfig:
     command: str = "codex"
-    timeout_seconds: int = 600
+    timeout_seconds: int = 3600
     model: str = ""
     reasoning_effort: str = "high"
     env: dict[str, str] = field(default_factory=dict)
@@ -33,7 +33,7 @@ class CodexConfig:
 @dataclass
 class FinderConfig:
     enabled: bool = True
-    timeout_seconds: int = 600
+    timeout_seconds: int = 3600
     max_workers: int = 6
     turn_parallel: int = 1
     max_turns_per_scan: int = 3
@@ -43,7 +43,7 @@ class FinderConfig:
 @dataclass
 class ReproConfig:
     enabled: bool = True
-    timeout_seconds: int = 900
+    timeout_seconds: int = 3600
     max_workers: int = 2
     max_repro: int = 0
     require_red_green: bool = False
@@ -258,7 +258,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
         ),
         codex=CodexConfig(
             command=resolve_command(str(codex.get("command") or "codex")),
-            timeout_seconds=int(codex.get("timeout_seconds") or 600),
+            timeout_seconds=int(codex.get("timeout_seconds") or 3600),
             model=str(codex.get("model") or ""),
             reasoning_effort=str(codex.get("reasoning_effort") or "high"),
             env=codex_env,
@@ -266,7 +266,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
         ),
         finders=FinderConfig(
             enabled=bool(finders.get("enabled", True)),
-            timeout_seconds=int(finders.get("timeout_seconds") or agents.get("finder_timeout_seconds") or 600),
+            timeout_seconds=int(finders.get("timeout_seconds") or agents.get("finder_timeout_seconds") or 3600),
             max_workers=max(1, int(finders.get("max_workers") or agents.get("finder_parallel") or 6)),
             turn_parallel=max(1, min(6, int(finders.get("turn_parallel") or agents.get("finder_turn_parallel") or 1))),
             max_turns_per_scan=max(1, int(finders.get("max_turns_per_scan") or agents.get("finder_max_turns_per_scan") or 3)),
@@ -274,7 +274,7 @@ def load_config(checkout: Path, mode: str = "", scan_mode: str = "") -> ReviewCo
         ),
         repro=ReproConfig(
             enabled=bool(repro.get("enabled", True)),
-            timeout_seconds=int(repro.get("timeout_seconds") or agents.get("repro_timeout_seconds") or 900),
+            timeout_seconds=int(repro.get("timeout_seconds") or agents.get("repro_timeout_seconds") or 3600),
             max_workers=max(1, int(repro.get("max_workers") or agents.get("repro_parallel") or 2)),
             max_repro=max(0, int(repro.get("max_repro") or candidates.get("max_total_for_reproduction") or 0)),
             require_red_green=bool(repro.get("require_red_green")),

@@ -480,6 +480,12 @@ def write_graph_verified_codereview_config(
         or job_source.get("reviewOutputLanguage")
     ) or "English"
     mode_defaults = GRAPH_VERIFIED_MODE_SIMPLE_DEFAULTS[graph_verified_mode(mode)]
+    default_turn_timeout_seconds = graph_verified_positive_int(
+        getattr(config, "codex_timeout_seconds", 3600),
+        default=3600,
+        minimum=60,
+        maximum=3600,
+    )
     finder_turn_parallel = graph_verified_positive_int(
         graph_config.get("finderTurnParallel"),
         default=1,
@@ -504,7 +510,7 @@ def write_graph_verified_codereview_config(
     current["finders"] = {
         "enabled": True,
         "timeout_seconds": graph_verified_positive_int(
-            graph_config.get("finderTimeoutSeconds"), default=900, minimum=60, maximum=3600
+            graph_config.get("finderTimeoutSeconds"), default=default_turn_timeout_seconds, minimum=60, maximum=3600
         ),
         "max_workers": finder_max_parallel,
         "turn_parallel": finder_turn_parallel,
@@ -564,14 +570,14 @@ def write_graph_verified_codereview_config(
             maximum=5000000,
         ),
         "discovery_timeout_seconds": graph_verified_positive_int(
-            graph_config.get("finderTimeoutSeconds"), default=900, minimum=60, maximum=3600
+            graph_config.get("finderTimeoutSeconds"), default=default_turn_timeout_seconds, minimum=60, maximum=3600
         ),
         "verification_timeout_seconds": graph_verified_positive_int(
-            graph_config.get("reproTimeoutSeconds"), default=1200, minimum=60, maximum=7200
+            graph_config.get("reproTimeoutSeconds"), default=default_turn_timeout_seconds, minimum=60, maximum=3600
         ),
         "scan_deadline_seconds": graph_verified_positive_int(
             graph_config.get("simpleScanDeadlineSeconds") or graph_config.get("scanDeadlineSeconds"),
-            default={"fast": 1800, "standard": 3600, "deep": 7200}.get(graph_verified_mode(mode), 3600),
+            default=14400,
             minimum=0,
             maximum=21600,
         ),

@@ -546,9 +546,9 @@ def load_simple_settings(raw_config: dict, config: ReviewConfig) -> SimpleSettin
         max_unit_bytes=_bounded_int(simple.get("max_unit_bytes"), 500_000, 50_000, 2_000_000),
         max_batch_files=_bounded_int(simple.get("max_batch_files"), mode_defaults["batch_files"], 10, 400),
         max_batch_bytes=_bounded_int(simple.get("max_batch_bytes"), mode_defaults["batch_bytes"], 100_000, 5_000_000),
-        discovery_timeout_seconds=_bounded_int(simple.get("discovery_timeout_seconds"), 900, 60, 3600),
-        verification_timeout_seconds=_bounded_int(simple.get("verification_timeout_seconds"), 1200, 60, 7200),
-        scan_deadline_seconds=_bounded_int(simple.get("scan_deadline_seconds"), {"fast": 1800, "standard": 3600, "deep": 7200}.get(config.mode, 3600), 0, 21600),
+        discovery_timeout_seconds=_bounded_int(simple.get("discovery_timeout_seconds"), 3600, 60, 3600),
+        verification_timeout_seconds=_bounded_int(simple.get("verification_timeout_seconds"), 3600, 60, 3600),
+        scan_deadline_seconds=_bounded_int(simple.get("scan_deadline_seconds"), 14400, 0, 21600),
         output_language=_clean_text(simple.get("output_language"), 80) or "English",
     )
 
@@ -2132,7 +2132,7 @@ def init_project(checkout: Path) -> Path:
                     "verification_parallel": 0,
                     "subagents_per_turn": 3,
                     "max_candidates": 10,
-                    "scan_deadline_seconds": 3600,
+                    "scan_deadline_seconds": 14400,
                     "max_batch_files": 120,
                     "max_batch_bytes": 1500000,
                 },

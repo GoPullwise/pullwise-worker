@@ -31,6 +31,7 @@ def config_for(tmp: Path) -> SimpleNamespace:
         codex_command="codex",
         codex_model="gpt-5",
         codex_reasoning_effort="high",
+        codex_timeout_seconds=3600,
         codex_doctor_timeout_seconds=60,
     )
 
@@ -4124,6 +4125,20 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["simple"]["verification_timeout_seconds"], 600)
         self.assertEqual(payload["simple"]["scan_deadline_seconds"], 1500)
         self.assertEqual(payload["simple"]["output_language"], "Chinese")
+
+    def test_write_graph_verified_codereview_config_defaults_timeouts_to_requested_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+
+            worker_main.write_graph_verified_codereview_config(cfg, root, {}, "standard", job={})
+
+            payload = json.loads((root / ".codereview" / "config.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["finders"]["timeout_seconds"], 3600)
+        self.assertEqual(payload["simple"]["discovery_timeout_seconds"], 3600)
+        self.assertEqual(payload["simple"]["verification_timeout_seconds"], 3600)
+        self.assertEqual(payload["simple"]["scan_deadline_seconds"], 14400)
 
     def test_codex_stress_defaults_to_service_home_codex_and_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
