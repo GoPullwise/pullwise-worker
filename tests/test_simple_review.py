@@ -1265,6 +1265,45 @@ class SimpleReviewTests(unittest.TestCase):
             )
             self.assertEqual(summary["codexTurns"]["inputLimitChars"], 5000)
 
+    def test_report_summary_marks_verification_blocked_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / "run"
+            run.mkdir()
+            unit = ReviewUnit(unit_id="unit-1", area="src", files=("src/a.py",), size_bytes=10, line_count=1)
+            final = _write_reports(
+                run,
+                mode="standard",
+                scan_mode="full-cached",
+                inventory={"summary": {"files": 1, "analyzable_files": 1}},
+                units=[unit],
+                discovery_results=[{"reviewed_unit_ids": ["unit-1"], "candidates": []}],
+                raw_candidates=[{"candidate_id": "cand-1"}],
+                valid_candidates=[{"candidate_id": "cand-1"}],
+                selected_candidates=[{"candidate_id": "cand-1"}],
+                confirmed=[],
+                rejected=[
+                    {
+                        "stage": "verification",
+                        "candidate_id": "cand-1",
+                        "reason": "global scan deadline exhausted before verification",
+                        "blocked": True,
+                    }
+                ],
+                account={},
+                progress=None,
+            )
+            summary = json.loads(final.with_name("summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary["coverage"]["discoveryComplete"])
+            self.assertFalse(summary["coverage"]["verificationComplete"])
+            self.assertFalse(summary["coverage"]["complete"])
+            self.assertEqual(summary["coverage"]["verificationBlocked"], 1)
+            self.assertEqual(summary["repro"]["blocked"], 1)
+            self.assertEqual(summary["repro"]["blockedItems"][0]["candidate_id"], "cand-1")
+            self.assertEqual(summary["reports"]["blocked"], 1)
+            debug_markdown = final.with_name("debug.md").read_text(encoding="utf-8")
+            self.assertIn("Verification blocked: `1`", debug_markdown)
+            self.assertIn("not deterministic proof of model line-by-line inspection", debug_markdown)
+
     def test_discovery_turn_progress_events_include_batch_position(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

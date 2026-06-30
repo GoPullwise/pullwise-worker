@@ -684,31 +684,168 @@ def effective_agent_config_payload(config: WorkerConfig, provider: object = None
     }
 
 
-def graph_verified_reportable_items(report: dict) -> list[tuple[int, dict, dict, dict, dict]]:
+def graph_verified_item_level(judge: dict, repro: dict, verification: dict) -> str:
+    return clean_protocol_text(judge.get("level") or verification.get("level") or repro.get("level"), 20).upper()
+
+
+def graph_verified_repro_status(repro: dict) -> str:
+    return clean_protocol_text(repro.get("status"), 80).lower().replace("-", "_")
+
+
+def graph_verified_item_proof_type(repro: dict, verification: dict) -> str:
+    proof = repro.get("proof") if isinstance(repro.get("proof"), dict) else {}
+    raw = clean_protocol_text(proof.get("type") or repro.get("proof_type") or verification.get("proof_type"), 80)
+    value = raw.lower().replace("_", "-").strip()
+    if value in {"static", "static-proof", "code-proof", "config-proof", "lifecycle-proof", "security-proof", "documentation-proof", "workflow-proof"}:
+        return "static-proof"
+    if value in {"runtime", "runtime-command", "failing-test", "failing_test"}:
+        return "runtime-command"
+    return value
+
+
+def graph_verified_command_has_exit_code(command: dict) -> bool:
+    if "exit_code" in command:
+        value = command.get("exit_code")
+    elif "exitCode" in command:
+        value = command.get("exitCode")
+    else:
+        return False
+    if isinstance(value, bool):
+        return False
+    try:
+        int(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return True
+
+
+def graph_verified_item_has_repro_log_and_exit_code(judge: dict, repro: dict) -> bool:
+    evidence_summary = judge.get("evidence_summary") if isinstance(judge.get("evidence_summary"), dict) else {}
+    summary_log_path = clean_protocol_text(evidence_summary.get("log_path"), 500)
+    commands = repro.get("commands_run") if isinstance(repro.get("commands_run"), list) else []
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        command_text = clean_protocol_text(command.get("cmd") or command.get("command"), 4000)
+        log_path = clean_protocol_text(command.get("log_path") or command.get("logPath"), 500)
+        if command_text and (log_path or summary_log_path) and graph_verified_command_has_exit_code(command):
+            return True
+    return False
+
+
+def graph_verified_static_steps(judge: dict, repro: dict) -> list[str]:
+    proof = repro.get("proof") if isinstance(repro.get("proof"), dict) else {}
+    steps = proof.get("verification_steps") or proof.get("verificationSteps") or repro.get("verification_steps")
+    raw_steps = steps if isinstance(steps, list) else []
+    cleaned = [clean_protocol_text(step, 1000) for step in raw_steps[:20]]
+    if cleaned:
+        return [step for step in cleaned if step]
+    evidence_summary = judge.get("evidence_summary") if isinstance(judge.get("evidence_summary"), dict) else {}
+    observable = clean_protocol_text(evidence_summary.get("observable"), 1000)
+    return [observable] if observable else []
+
+
+def graph_verified_candidate_has_code_evidence(candidate: dict) -> bool:
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        if clean_protocol_text(item.get("file") or item.get("path"), 500):
+            return True
+    return False
+
+
+def graph_verified_item_has_graph_evidence(candidate: dict) -> bool:
+    graph_evidence = candidate.get("graph_evidence") if isinstance(candidate.get("graph_evidence"), dict) else {}
+    if not graph_evidence:
+        return False
+    if clean_protocol_text(graph_evidence.get("slice_id"), 240):
+        return True
+    for key in ("codegraph_files", "path_summary"):
+        values = graph_evidence.get(key) if isinstance(graph_evidence.get(key), list) else []
+        if any(clean_protocol_text(value, 1000) for value in values[:20]):
+            return True
+    return False
+
+
+def graph_verified_item_has_runtime_proof(judge: dict, repro: dict, verification: dict) -> bool:
+    if graph_verified_item_level(judge, repro, verification) not in {"L2", "L3"}:
+        return False
+    if graph_verified_repro_status(repro) != "reproduced":
+        return False
+    if repro.get("graph_path_exercised") is not True:
+        return False
+    return graph_verified_item_has_repro_log_and_exit_code(judge, repro)
+
+
+def graph_verified_model_self_certified(repro: dict, verification: dict) -> bool:
+    proof = repro.get("proof") if isinstance(repro.get("proof"), dict) else {}
+    values = (
+        verification.get("assurance"),
+        verification.get("proof_origin"),
+        verification.get("proof_label"),
+        repro.get("assurance"),
+        repro.get("proof_label"),
+        proof.get("assurance"),
+        proof.get("label"),
+    )
+    normalized = {clean_protocol_text(value, 120).lower().replace(" ", "-") for value in values}
+    return bool(normalized.intersection({"model-self-certified", "model-static-proof", "model-certified-static-proof"}))
+
+
+def graph_verified_item_has_static_proof(judge: dict, repro: dict, verification: dict) -> bool:
+    if graph_verified_item_level(judge, repro, verification) not in {"L1", "L2", "L3"}:
+        return False
+    if repro.get("graph_path_exercised") is not True:
+        return False
+    if graph_verified_repro_status(repro) != "static_proof" and graph_verified_item_proof_type(repro, verification) != "static-proof":
+        return False
+    if not graph_verified_model_self_certified(repro, verification):
+        return False
+    proof = repro.get("proof") if isinstance(repro.get("proof"), dict) else {}
+    expected = clean_protocol_text(proof.get("expected"), 4000)
+    actual = clean_protocol_text(proof.get("actual") or repro.get("summary"), 4000)
+    if not expected or not actual or expected.strip().lower() == actual.strip().lower():
+        return False
+    return bool(graph_verified_static_steps(judge, repro))
+
+
+def graph_verified_report_item_is_reportable(item: dict) -> bool:
+    candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+    judge = item.get("judge") if isinstance(item.get("judge"), dict) else {}
+    repro = item.get("repro") if isinstance(item.get("repro"), dict) else {}
+    verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
+    if clean_protocol_text(judge.get("status"), 80).lower() != "confirmed":
+        return False
+    verification_status = clean_protocol_text(verification.get("status") or verification.get("verdict"), 80).lower()
+    if verification_status and verification_status != "confirmed":
+        return False
+    if judge.get("safe_to_show_user") is not True or verification.get("safe_to_show_user") is not True:
+        return False
+    if not graph_verified_candidate_has_code_evidence(candidate):
+        return False
+    if not graph_verified_item_has_graph_evidence(candidate):
+        return False
+    return graph_verified_item_has_runtime_proof(judge, repro, verification) or graph_verified_item_has_static_proof(judge, repro, verification)
+
+
+def graph_verified_reportable_items(report: dict) -> list[tuple[int, dict, dict, dict, dict, dict]]:
     final_json = report.get("finalJson") if isinstance(report.get("finalJson"), dict) else {}
     confirmed = final_json.get("confirmed") if isinstance(final_json.get("confirmed"), list) else []
     items = []
     for index, item in enumerate(confirmed):
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not graph_verified_report_item_is_reportable(item):
             continue
         candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
         judge = item.get("judge") if isinstance(item.get("judge"), dict) else {}
+        repro = item.get("repro") if isinstance(item.get("repro"), dict) else {}
         verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
-        status = str(judge.get("status") or verification.get("status") or verification.get("verdict") or "").strip().lower()
-        if status and status != "confirmed":
-            continue
-        if judge.get("safe_to_show_user") is False or verification.get("safe_to_show_user") is False:
-            continue
-        graph_evidence = candidate.get("graph_evidence") if isinstance(candidate.get("graph_evidence"), dict) else {}
-        if not graph_evidence:
-            continue
-        items.append((index, item, candidate, judge, verification))
+        items.append((index, item, candidate, judge, repro, verification))
     return items
-
 
 def graph_verified_summary_findings(report: dict) -> list[dict]:
     findings = []
-    for index, _item, candidate, _judge, _verification in graph_verified_reportable_items(report):
+    for index, _item, candidate, _judge, _repro, _verification in graph_verified_reportable_items(report):
         findings.append(
             {
                 "id": clean_protocol_text(candidate.get("candidate_id") or candidate.get("issue_id")) or f"gv-{index + 1}",
@@ -792,8 +929,12 @@ def graph_verified_primary_location(candidate: dict) -> dict:
     return {}
 
 
-def graph_verified_issue_tags(candidate: dict, severity: str) -> list[str]:
+def graph_verified_issue_tags(candidate: dict, severity: str, proof_type: str) -> list[str]:
     raw_tags = ["graph-verified", severity, candidate.get("category")]
+    if proof_type == "static-proof":
+        raw_tags.extend(["static-proof", "model-self-certified"])
+    elif proof_type == "runtime-command":
+        raw_tags.append("runtime-reproduced")
     tags = []
     for value in raw_tags:
         tag = clean_protocol_text(value, 80).lower().replace(" ", "-")
@@ -804,11 +945,12 @@ def graph_verified_issue_tags(candidate: dict, severity: str) -> list[str]:
 
 def graph_verified_agent_issue_index(report: dict) -> list[dict]:
     issues = []
-    for raw_index, _item, candidate, judge, verification in graph_verified_reportable_items(report):
+    for raw_index, _item, candidate, judge, repro, verification in graph_verified_reportable_items(report):
         agent_index = len(issues)
         issue_id = clean_protocol_text(candidate.get("issue_id") or candidate.get("candidate_id"), 160) or f"gv-{raw_index + 1}"
         source_path = f"graphVerifiedReport.finalJson.confirmed[{raw_index}]"
         severity = graph_verified_severity(candidate.get("severity"))
+        proof_type = graph_verified_item_proof_type(repro, verification)
         location = graph_verified_primary_location(candidate)
         issue = {
             "id": issue_id,
@@ -822,12 +964,15 @@ def graph_verified_agent_issue_index(report: dict) -> list[dict]:
                 or "confirmed",
                 80,
             ) or "confirmed",
-            "tags": graph_verified_issue_tags(candidate, severity),
+            "tags": graph_verified_issue_tags(candidate, severity, proof_type),
+            "proofType": proof_type,
             "readNext": [source_path, f"agentReport.issueIndex[{agent_index}]"],
             "evidencePath": f"{source_path}.candidate.evidence",
             "reproPath": f"{source_path}.repro",
             "sourcePath": source_path,
         }
+        if proof_type == "static-proof":
+            issue["proofLabel"] = "Model-certified static proof"
         if location.get("file"):
             issue["primaryFile"] = location["file"]
         if location.get("line"):
@@ -863,7 +1008,8 @@ def result_human_report(status: str, summary: dict, issue_index: list[dict], err
         if issue.get("primaryLine"):
             location = f"{location}:{issue['primaryLine']}" if location else str(issue["primaryLine"])
         location_text = f" ({location})" if location else ""
-        summary_lines.append(f"- {issue['severity']}: {issue['title']}{location_text}")
+        proof_label = f" [{issue['proofLabel']}]" if issue.get("proofLabel") else ""
+        summary_lines.append(f"- {issue['severity']}: {issue['title']}{proof_label}{location_text}")
     sections = []
     for severity in ("critical", "high", "medium", "low", "info"):
         severity_issues = [issue for issue in issue_index if issue.get("severity") == severity]
@@ -875,7 +1021,8 @@ def result_human_report(status: str, summary: dict, issue_index: list[dict], err
             if issue.get("primaryLine"):
                 location = f"{location}:{issue['primaryLine']}" if location else str(issue["primaryLine"])
             location_text = f" `{location}`" if location else ""
-            lines.append(f"- {issue['title']}{location_text}")
+            proof_label = f" [{issue['proofLabel']}]" if issue.get("proofLabel") else ""
+            lines.append(f"- {issue['title']}{proof_label}{location_text}")
         sections.append({"heading": f"{severity.title()} findings", "markdown": "\n".join(lines)})
     return {
         "title": title,

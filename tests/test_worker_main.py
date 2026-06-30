@@ -99,9 +99,38 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                                 }
                             ],
                         },
-                        "judge": {"status": "confirmed", "safe_to_show_user": True},
-                        "repro": {"status": "static_proof", "graph_path_exercised": True},
-                        "verification": {"verdict": "confirmed", "safe_to_show_user": True},
+                        "judge": {
+                            "status": "confirmed",
+                            "level": "L1",
+                            "safe_to_show_user": True,
+                            "evidence_summary": {"observable": "Inspect src/auth/cache.ts."},
+                        },
+                        "repro": {
+                            "status": "static_proof",
+                            "level": "L1",
+                            "summary": "The permission path reuses stale state.",
+                            "commands_run": [],
+                            "proof": {
+                                "type": "static-proof",
+                                "expected": "Permissions should be recalculated from current state.",
+                                "actual": "Permissions are reused from stale cache state.",
+                                "verification_steps": ["Inspect src/auth/cache.ts."],
+                                "assurance": "model-self-certified",
+                                "label": "Model-certified static proof",
+                            },
+                            "graph_path_exercised": True,
+                            "assurance": "model-self-certified",
+                            "proof_label": "Model-certified static proof",
+                        },
+                        "verification": {
+                            "verdict": "confirmed",
+                            "level": "L1",
+                            "proof_type": "static-proof",
+                            "safe_to_show_user": True,
+                            "assurance": "model-self-certified",
+                            "proof_origin": "model-static-proof",
+                            "proof_label": "Model-certified static proof",
+                        },
                     }
                 ]
             },
@@ -118,6 +147,9 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(issue["primaryFile"], "src/auth/cache.ts")
         self.assertEqual(issue["primaryLine"], 84)
         self.assertEqual(issue["readNext"][0], "graphVerifiedReport.finalJson.confirmed[0]")
+        self.assertEqual(issue["proofType"], "static-proof")
+        self.assertIn("model-self-certified", issue["tags"])
+        self.assertIn("Model-certified static proof", payload["humanReport"]["summaryMarkdown"])
         self.assertEqual(payload["agentReport"]["nextActions"][0]["type"], "inspect_file")
         self.assertIn("Auth cache can return stale permissions", payload["humanReport"]["summaryMarkdown"])
         self.assertEqual(payload["readingGuide"]["forAgentDeep"], "graphVerifiedReport.finalJson.confirmed")

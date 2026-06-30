@@ -462,13 +462,14 @@ def run_review(checkout: Path, mode: str = "", scan_mode: str = "", progress: Pr
         if result.get("confirmed") and isinstance(result.get("item"), dict):
             confirmed.append(result["item"])
         else:
-            rejected.append(
-                {
-                    "stage": "verification",
-                    "candidate_id": str(result.get("candidate_id") or ""),
-                    "reason": _clean_text(result.get("reason"), MAX_DEBUG_REASON_CHARS),
-                }
-            )
+            rejected_record = {
+                "stage": "verification",
+                "candidate_id": str(result.get("candidate_id") or ""),
+                "reason": _clean_text(result.get("reason"), MAX_DEBUG_REASON_CHARS),
+            }
+            if result.get("blocked") is True:
+                rejected_record["blocked"] = True
+            rejected.append(rejected_record)
 
     snapshot_state_after = capture_source_state(snapshot_repo, include_untracked=True, max_text_file_bytes=config.scope.max_text_file_bytes)
     write_json(run / "snapshot-source-state-after.json", snapshot_state_after)
@@ -1541,7 +1542,12 @@ def _run_verifications(
             raise ProcessCancelled("verification cancelled")
         remaining_seconds = _deadline_remaining_seconds(deadline_at)
         if deadline_at and remaining_seconds < 60:
-            return {"candidate_id": candidate_id, "confirmed": False, "reason": "global scan deadline exhausted before verification"}
+            return {
+                "candidate_id": candidate_id,
+                "confirmed": False,
+                "reason": "global scan deadline exhausted before verification",
+                "blocked": True,
+            }
         verification_timeout = settings.verification_timeout_seconds
         if deadline_at:
             verification_timeout = min(verification_timeout, max(60, remaining_seconds))
@@ -1583,7 +1589,12 @@ def _run_verifications(
             if _looks_like_readiness_error(str(exc)):
                 stop_event.set()
                 raise
-            return {"candidate_id": candidate_id, "confirmed": False, "reason": f"verification turn failed: {_clean_text(str(exc), MAX_DEBUG_REASON_CHARS)}"}
+            return {
+                "candidate_id": candidate_id,
+                "confirmed": False,
+                "reason": f"verification turn failed: {_clean_text(str(exc), MAX_DEBUG_REASON_CHARS)}",
+                "blocked": True,
+            }
         source_after = capture_source_state(worker_repo, include_untracked=True)
         changed = source_state_changed(source_before, source_after)
         if using_lane and changed:
@@ -1616,6 +1627,8 @@ def _run_verifications(
                 "actual": observed,
                 "verification_steps": steps,
                 "inspected_files": [safe_relative_path(value) for value in payload.get("exercised_files", []) if safe_relative_path(value)],
+                "assurance": "model-self-certified",
+                "label": "Model-certified static proof",
             }
             item = {
                 "candidate": candidate,
@@ -1626,6 +1639,9 @@ def _run_verifications(
                     "proof_type": proof_type,
                     "safe_to_show_user": True,
                     "reason": reason,
+                    "assurance": "model-self-certified",
+                    "proof_origin": "model-static-proof",
+                    "proof_label": "Model-certified static proof",
                 },
                 "repro": {
                     "status": "static_proof",
@@ -1634,6 +1650,8 @@ def _run_verifications(
                     "commands_run": [],
                     "proof": proof,
                     "graph_path_exercised": True,
+                    "assurance": "model-self-certified",
+                    "proof_label": "Model-certified static proof",
                     "limitations": limitations,
                 },
                 "judge": {
@@ -1644,6 +1662,7 @@ def _run_verifications(
                     "evidence_summary": {
                         "inspected_files": proof["inspected_files"],
                         "observable": " | ".join(steps[:3]),
+                        "assurance": "model-self-certified",
                     },
                     "limitations": limitations,
                 },
@@ -1902,7 +1921,10 @@ def _write_reports(
     verification_budget_dropped = len(
         [item for item in rejected if item.get("stage") in {"budget", "unit-budget"}]
     )
-    verification_complete = verification_budget_dropped == 0
+    verification_blocked = len(
+        [item for item in rejected if item.get("stage") == "verification" and item.get("blocked") is True]
+    )
+    verification_complete = verification_budget_dropped == 0 and verification_blocked == 0
     verification_rejected = len([item for item in rejected if item.get("stage") == "verification"])
     summary = {
         "engine": {
@@ -1922,10 +1944,14 @@ def _write_reports(
             "plannedFiles": planned_files,
             "complete": coverage_complete and verification_complete,
             "discoveryComplete": coverage_complete,
+            "assignmentComplete": coverage_complete,
+            "inspectionVerified": False,
+            "inspectionProof": "planner assignment plus reviewed_unit_ids equality; not deterministic proof of model line-by-line inspection",
             "discoveredCandidates": len(raw_candidates),
             "validCandidates": len(valid_candidates),
             "verifiedCandidates": len(selected_candidates),
             "verificationBudgetDropped": verification_budget_dropped,
+            "verificationBlocked": verification_blocked,
             "verificationComplete": verification_complete,
         },
         "finder": {
@@ -1945,8 +1971,12 @@ def _write_reports(
             "confirmed": len(confirmed),
             "rejected": 0,
             "internalRejected": verification_rejected,
-            "blocked": 0,
-            "blockedItems": [],
+            "blocked": verification_blocked,
+            "blockedItems": [
+                {"candidate_id": item.get("candidate_id"), "reason": item.get("reason")}
+                for item in rejected
+                if item.get("stage") == "verification" and item.get("blocked") is True
+            ][:MAX_INTERNAL_DIAGNOSTIC_ITEMS],
         },
         "judge": {
             "implementation": "typed-proof-gate",
@@ -2043,10 +2073,12 @@ def render_debug_markdown(summary: dict, rejected: list[dict]) -> str:
         f"- Raw candidates: `{(summary.get('candidates') or {}).get('raw', 0)}`",
         f"- Verified candidates: `{(summary.get('coverage') or {}).get('verifiedCandidates', 0)}`",
         f"- Verification budget dropped: `{(summary.get('coverage') or {}).get('verificationBudgetDropped', 0)}`",
+        f"- Verification blocked: `{(summary.get('coverage') or {}).get('verificationBlocked', 0)}`",
+        f"- Inspection proof: `{(summary.get('coverage') or {}).get('inspectionProof', '')}`",
         f"- Internal verification rejections: `{(summary.get('repro') or {}).get('internalRejected', 0)}`",
         f"- Confirmed: `{(summary.get('reports') or {}).get('confirmed', 0)}`",
         "",
-        "Only confirmed runtime-command and validated static-proof findings are included. Unconfirmed hypotheses and unsupported descriptions are not exposed.",
+        "Only confirmed runtime-command and labeled static-proof findings are included. Static-proof findings are model-certified from inspected repository evidence, not runtime reproductions.",
     ]
     if reason_counts:
         lines.extend(["", "Internal rejection reason counts:"])

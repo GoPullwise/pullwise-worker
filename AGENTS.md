@@ -226,11 +226,12 @@ static-analysis, parser, or database dependencies for this pipeline.
   private copy of the immutable full-repository snapshot. Do not create base or
   alternate checkout directories for reproduction.
 - User-facing reports are confirmed-only. A runtime-command finding must pass reproduction and
-  judge gates with real command, exit code, log evidence, and filesystem-boundary
+  judge gates with a real command, exit code, log evidence, and filesystem-boundary
   checks before it is shown. A static-proof finding may be shown only when it is
   backed by inspected repository files, covers every primary evidence file,
   has concrete verification steps, leaves runtime command fields empty, and is
-  clearly labeled as static-proof; a narrative description alone is not evidence.
+  clearly labeled as `static-proof` and `model-self-certified`; a narrative
+  description alone is not evidence.
 - When adding or changing graph/review schemas or prompts, update
   `codereview/templates.py` so `python -m codereview init` and fresh checkouts
   receive the same assets.
