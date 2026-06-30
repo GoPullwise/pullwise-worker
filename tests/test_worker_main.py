@@ -153,6 +153,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["agentReport"]["nextActions"][0]["type"], "inspect_file")
         self.assertIn("Auth cache can return stale permissions", payload["humanReport"]["summaryMarkdown"])
         self.assertEqual(payload["readingGuide"]["forAgentDeep"], "graphVerifiedReport.finalJson.confirmed")
+        self.assertEqual(payload["readingGuide"]["forAgentFix"], "agentFixPrompt")
 
     def test_worker_config_tolerates_bad_numeric_environment_values(self) -> None:
         env = {
@@ -2072,6 +2073,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             self.assertEqual(payload["agentReport"]["schemaVersion"], "pullwise-agent-result/1")
             self.assertEqual(payload["agentReport"]["issueIndex"], [])
             self.assertEqual(payload["readingGuide"]["forAgentQuick"], "agentReport.issueIndex")
+            self.assertEqual(payload["readingGuide"]["forAgentFix"], "agentFixPrompt")
             summary_log = config.log_dir / "scan-summary.log"
             self.assertTrue(summary_log.is_file())
             summary_text = summary_log.read_text(encoding="utf-8")

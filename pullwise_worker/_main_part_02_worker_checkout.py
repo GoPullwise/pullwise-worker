@@ -1079,6 +1079,7 @@ def result_reading_guide() -> dict:
         "forUser": "humanReport.summaryMarkdown",
         "forAgentQuick": "agentReport.issueIndex",
         "forAgentDeep": "graphVerifiedReport.finalJson.confirmed",
+        "forAgentFix": "agentFixPrompt",
         "forDebug": "graphVerifiedReport.debugMarkdown",
     }
 
