@@ -33,6 +33,7 @@ ENGINE_VERSION = "simple-full-repository/1"
 MAX_EVENT_BYTES = 8 * 1024 * 1024
 MAX_EVENT_LINE_CHARS = 2 * 1024 * 1024
 MAX_COMMAND_OUTPUT_CHARS = 32_000
+MAX_COMMAND_EVENTS = 2000
 MAX_DEBUG_REASON_CHARS = 800
 MAX_INTERNAL_DIAGNOSTIC_ITEMS = 50
 MAX_DEBUG_REASON_BUCKETS = 12
@@ -991,11 +992,11 @@ def parse_command_events(path: Path) -> list[CommandEvidence]:
                         status=str(item.get("status") or "completed").strip(),
                     )
                 )
-                if len(commands) > 400:
-                    del commands[:-200]
+                if len(commands) > MAX_COMMAND_EVENTS * 2:
+                    del commands[:-MAX_COMMAND_EVENTS]
     except OSError:
         return []
-    return commands[-200:]
+    return commands[-MAX_COMMAND_EVENTS:]
 
 
 def command_event_text(value: object) -> str:
@@ -1045,7 +1046,7 @@ def command_event_exit_code(item: dict) -> object:
 def verification_payload_proof_type(payload: dict) -> str:
     raw = _clean_text(payload.get("proof_type") or payload.get("proofType"), 80)
     proof_type = raw.lower().replace("_", "-").strip()
-    if proof_type in {"", "runtime", "runtime-command"}:
+    if proof_type in {"runtime", "runtime-command"}:
         return "runtime-command"
     if proof_type in {
         "static",

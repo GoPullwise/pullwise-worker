@@ -85,12 +85,12 @@ class SimpleReviewTests(unittest.TestCase):
     def test_rejected_record_keeps_raw_title_out_of_candidate_id(self) -> None:
         record = _rejected_record(
             "discovery",
-            {"title": "静态证明可无命令证据进入 confirmed", "unit_id": "unit-0001"},
+            {"title": "闂堟瑦鈧浇鐦夐弰搴″讲閺冪姴鎳℃禒銈堢槈閹诡喛绻橀崗?confirmed", "unit_id": "unit-0001"},
             "candidate primary evidence is outside its reviewed unit",
         )
 
         self.assertEqual(record["candidate_id"], "")
-        self.assertEqual(record["title"], "静态证明可无命令证据进入 confirmed")
+        self.assertEqual(record["title"], "闂堟瑦鈧浇鐦夐弰搴″讲閺冪姴鎳℃禒銈堢槈閹诡喛绻橀崗?confirmed")
         self.assertEqual(record["unit_id"], "unit-0001")
 
     def test_auto_parallelism_uses_app_server_and_resource_budget(self) -> None:
@@ -354,6 +354,7 @@ class SimpleReviewTests(unittest.TestCase):
             payload = {
                 "candidate_id": "cand-1",
                 "status": "confirmed",
+                "proof_type": "runtime-command",
                 "safe_to_show_user": True,
                 "reason": "The command reaches the bad branch.",
                 "expected_behavior": "The handler should return true.",
@@ -414,6 +415,7 @@ class SimpleReviewTests(unittest.TestCase):
             payload = {
                 "candidate_id": "cand-1",
                 "status": "confirmed",
+                "proof_type": "runtime-command",
                 "safe_to_show_user": True,
                 "reason": "The command reaches the branch.",
                 "expected_behavior": "The handler is allowed to return false.",
@@ -460,6 +462,7 @@ class SimpleReviewTests(unittest.TestCase):
             payload = {
                 "candidate_id": "cand-1",
                 "status": "confirmed",
+                "proof_type": "runtime-command",
                 "safe_to_show_user": True,
                 "reason": "The command reaches the bad branch.",
                 "expected_behavior": "The handler should return true.",
@@ -501,6 +504,7 @@ class SimpleReviewTests(unittest.TestCase):
             payload = {
                 "candidate_id": "cand-1",
                 "status": "confirmed",
+                "proof_type": "runtime-command",
                 "safe_to_show_user": True,
                 "reason": "The command reaches the bad branch.",
                 "expected_behavior": "The handler should return true.",
@@ -634,6 +638,7 @@ class SimpleReviewTests(unittest.TestCase):
             payload = {
                 "candidate_id": "cand-1",
                 "status": "confirmed",
+                "proof_type": "runtime-command",
                 "safe_to_show_user": True,
                 "reason": "The command reaches the bad branch.",
                 "expected_behavior": "The handler should return true.",
@@ -678,6 +683,7 @@ class SimpleReviewTests(unittest.TestCase):
             payload = {
                 "candidate_id": "cand-1",
                 "status": "confirmed",
+                "proof_type": "runtime-command",
                 "safe_to_show_user": True,
                 "reason": "The command claims to reach the bad branch.",
                 "expected_behavior": "The handler should return true.",
@@ -804,6 +810,7 @@ class SimpleReviewTests(unittest.TestCase):
                 return {
                     "candidate_id": candidate["candidate_id"],
                     "status": "confirmed",
+                    "proof_type": "runtime-command",
                     "safe_to_show_user": True,
                     "reason": "The observed command reports the same wrong value.",
                     "expected_behavior": "The handler should return true.",
@@ -889,6 +896,7 @@ class SimpleReviewTests(unittest.TestCase):
                 return {
                     "candidate_id": candidate["candidate_id"],
                     "status": "confirmed",
+                    "proof_type": "runtime-command",
                     "safe_to_show_user": True,
                     "reason": "The observed command reports the same wrong value.",
                     "expected_behavior": "The handler should return true.",
@@ -966,6 +974,7 @@ class SimpleReviewTests(unittest.TestCase):
                 return {
                     "candidate_id": candidate["candidate_id"],
                     "status": "confirmed",
+                    "proof_type": "runtime-command",
                     "safe_to_show_user": True,
                     "reason": "The observed command reports the same wrong value.",
                     "expected_behavior": "The handler should return true.",
@@ -1044,6 +1053,7 @@ class SimpleReviewTests(unittest.TestCase):
                 return {
                     "candidate_id": candidate["candidate_id"],
                     "status": "confirmed",
+                    "proof_type": "runtime-command",
                     "safe_to_show_user": True,
                     "reason": "The observed command reports the same wrong value.",
                     "expected_behavior": "The handler should return true.",

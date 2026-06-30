@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import concurrent.futures
 import json
@@ -8,12 +8,10 @@ from pathlib import Path
 
 from ..codex_runner import run_codex_turn
 from ..config import CodexConfig, ReviewConfig
-from ..judge.precheck import verify_repro_events_and_paths
-from ..judge.validate import validate_repro_result
-from ..units.context import unit_file_stem
 from ..utils.paths import ensure_dir, safe_path_component
 from ..utils.jsonl import read_json_strict
 from ..utils.process import compact_process_output, raise_if_cancelled_callback_exception, run_process
+from .event_parser import command_mentioned, event_stream_text
 from .filesystem_guard import guard_worker_result
 from .worker_dir import create_worker_dir
 
@@ -215,6 +213,56 @@ def blocked_repro_result(issue_id: str, reason: str) -> dict:
         "safety_notes": "",
     }
 
+def validate_repro_result(result: dict, *, expected_candidate_id: str) -> list[str]:
+    violations: list[str] = []
+    if not isinstance(result, dict):
+        return ["repro result must be an object"]
+    candidate_id = safe_path_component(result.get("candidate_id"), default="")
+    if candidate_id != expected_candidate_id:
+        violations.append("repro result candidate_id does not match candidate")
+    status = str(result.get("status") or "").strip().lower()
+    if status not in {"reproduced", "blocked", "not_reproduced", "static_proof"}:
+        violations.append("repro result status is unsupported")
+    commands = result.get("commands_run") if isinstance(result.get("commands_run"), list) else []
+    if status == "reproduced" and not commands:
+        violations.append("reproduced result must include commands_run evidence")
+    for command in commands:
+        if not isinstance(command, dict):
+            violations.append("commands_run entries must be objects")
+            continue
+        if not str(command.get("cmd") or command.get("command") or "").strip():
+            violations.append("commands_run entry is missing command text")
+        if "exit_code" not in command and "exitCode" not in command:
+            violations.append("commands_run entry is missing exit code")
+        if not str(command.get("log_path") or command.get("logPath") or "").strip():
+            violations.append("commands_run entry is missing log_path")
+    return violations
+
+
+def verify_repro_events_and_paths(payload: dict) -> dict:
+    process = payload.get("process") if isinstance(payload.get("process"), dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    events_path = Path(str(process.get("events_path") or ""))
+    events_text = event_stream_text(events_path) if str(events_path) else ""
+    commands = result.get("commands_run") if isinstance(result.get("commands_run"), list) else []
+    missing_commands: list[str] = []
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        command_text = str(command.get("cmd") or command.get("command") or "").strip()
+        if command_text and not command_mentioned(events_text, command_text):
+            missing_commands.append(command_text[:500])
+    return {
+        "events_path": str(events_path) if str(events_path) else "",
+        "events_readable": bool(events_text),
+        "commands_checked": len(commands),
+        "missing_commands": missing_commands[:20],
+        "ok": bool(events_text) and not missing_commands,
+    }
+
+
+def unit_file_stem(unit_id: object) -> str:
+    return safe_path_component(unit_id, default="unit")
 
 def git_status_porcelain(path: Path, ignore_prefixes: tuple[str, ...] = ()) -> list[str]:
     if not (path / ".git").exists():
@@ -256,3 +304,4 @@ def process_failure_reason(stage: str, result: object) -> str:
     timed_out = getattr(result, "timed_out", False)
     timeout_text = " timed out" if timed_out else ""
     return f"{stage}{timeout_text} failed with exit code {returncode}: {compact_process_output(result)}"
+
