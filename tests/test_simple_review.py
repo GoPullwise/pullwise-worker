@@ -505,6 +505,92 @@ class SimpleReviewTests(unittest.TestCase):
             self.assertEqual(marker, "OBSERVED_FALSE")
 
 
+    def test_verification_gate_rejects_runtime_proof_missing_primary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "src" / "handler.py"
+            other = repo / "src" / "other.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            other.write_text("EXPECTED = True\n", encoding="utf-8")
+            harness = repo / ".codereview" / "repro" / "check.py"
+            harness.parent.mkdir(parents=True)
+            harness.write_text("from src.handler import handle\nprint(handle())\n", encoding="utf-8")
+            candidate = {
+                "candidate_id": "cand-1",
+                "evidence": [
+                    {"file": "src/handler.py", "lines": "1-2", "why_it_matters": "observed"},
+                    {"file": "src/other.py", "lines": "1", "why_it_matters": "contract"},
+                ],
+            }
+            payload = {
+                "candidate_id": "cand-1",
+                "status": "confirmed",
+                "proof_type": "runtime-command",
+                "safe_to_show_user": True,
+                "reason": "The command reaches the bad branch.",
+                "expected_behavior": "The handler should return true.",
+                "observed_behavior": "The handler returns false.",
+                "reproduction_command": "python3 .codereview/repro/check.py",
+                "output_marker": "OBSERVED_FALSE",
+                "exercised_files": ["src/handler.py"],
+                "skeptic_agreed": True,
+                "independent_check": "The skeptic traced the same branch.",
+                "limitations": [],
+            }
+            commands = [
+                CommandEvidence(
+                    command="python3 .codereview/repro/check.py",
+                    cwd=str(repo),
+                    exit_code=0,
+                    output="OBSERVED_FALSE",
+                    status="completed",
+                )
+            ]
+
+            with self.assertRaisesRegex(ValueError, "runtime proof did not exercise every primary evidence file"):
+                validate_verification_result(candidate, payload, commands, repo, source_changed=False)
+
+    def test_verification_gate_rejects_output_only_source_grounding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            harness = repo / ".codereview" / "repro" / "check.py"
+            harness.parent.mkdir(parents=True)
+            harness.write_text("print('ok')\n", encoding="utf-8")
+            candidate = {
+                "candidate_id": "cand-1",
+                "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+            }
+            payload = {
+                "candidate_id": "cand-1",
+                "status": "confirmed",
+                "proof_type": "runtime-command",
+                "safe_to_show_user": True,
+                "reason": "The command claims to reach the bad branch.",
+                "expected_behavior": "The handler should return true.",
+                "observed_behavior": "The handler returns false.",
+                "reproduction_command": "python3 .codereview/repro/check.py",
+                "output_marker": "OBSERVED_FALSE",
+                "exercised_files": ["src/handler.py"],
+                "skeptic_agreed": True,
+                "independent_check": "The skeptic accepted the proof.",
+                "limitations": [],
+            }
+            commands = [
+                CommandEvidence(
+                    command="python3 .codereview/repro/check.py",
+                    cwd=str(repo),
+                    exit_code=0,
+                    output="src/handler.py OBSERVED_FALSE",
+                    status="completed",
+                )
+            ]
+
+            with self.assertRaisesRegex(ValueError, "do not ground execution"):
+                validate_verification_result(candidate, payload, commands, repo, source_changed=False)
     def test_verification_gate_rejects_missing_command_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -686,6 +772,49 @@ class SimpleReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "do not ground execution"):
                 validate_verification_result(candidate, payload, commands, repo, source_changed=False)
 
+    def test_verification_gate_rejects_dynamically_hardcoded_harness_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "src" / "handler.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("def handle():\n    return False\n", encoding="utf-8")
+            harness = repo / ".codereview" / "repro" / "check.py"
+            harness.parent.mkdir(parents=True)
+            harness.write_text(
+                "from src.handler import handle\nhandle()\nmarker = 'DYNAMIC_' + 'MARKER'\nprint(marker)\n",
+                encoding="utf-8",
+            )
+            candidate = {
+                "candidate_id": "cand-1",
+                "evidence": [{"file": "src/handler.py", "lines": "1-2", "why_it_matters": "branch"}],
+            }
+            payload = {
+                "candidate_id": "cand-1",
+                "status": "confirmed",
+                "proof_type": "runtime-command",
+                "safe_to_show_user": True,
+                "reason": "The command reaches the bad branch.",
+                "expected_behavior": "The handler should return true.",
+                "observed_behavior": "The handler returns false.",
+                "reproduction_command": "python3 .codereview/repro/check.py",
+                "output_marker": "DYNAMIC_MARKER",
+                "exercised_files": ["src/handler.py"],
+                "skeptic_agreed": True,
+                "independent_check": "The skeptic traced the same branch.",
+                "limitations": [],
+            }
+            commands = [
+                CommandEvidence(
+                    command="python3 .codereview/repro/check.py",
+                    cwd=str(repo),
+                    exit_code=0,
+                    output="DYNAMIC_MARKER",
+                    status="completed",
+                )
+            ]
+
+            with self.assertRaisesRegex(ValueError, "do not ground execution"):
+                validate_verification_result(candidate, payload, commands, repo, source_changed=False)
     def test_verification_gate_rejects_inline_marker_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

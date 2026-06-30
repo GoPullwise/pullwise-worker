@@ -26,6 +26,17 @@ class ReproEventParserTest(unittest.TestCase):
             self.assertEqual(event_stream_text(event_path), "")
             self.assertEqual(outside.read_text(encoding="utf-8"), "secret\n")
 
+    def test_event_stream_text_rejects_symlinked_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "events.jsonl").write_text("secret\n", encoding="utf-8")
+            linked = root / "linked"
+            linked.symlink_to(outside, target_is_directory=True)
+
+            self.assertEqual(event_stream_text(linked / "events.jsonl"), "")
+            self.assertEqual((outside / "events.jsonl").read_text(encoding="utf-8"), "secret\n")
     def test_event_stream_text_is_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             event_path = Path(tmp_dir) / "events.jsonl"

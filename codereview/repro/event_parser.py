@@ -14,19 +14,40 @@ def event_stream_text(path: Path) -> str:
         mode = path.lstat().st_mode
     except OSError:
         return ""
-    if not stat.S_ISREG(mode) or path.parent.is_symlink():
+    if not stat.S_ISREG(mode) or _has_symlink_ancestor(path):
         return ""
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    fd = -1
     try:
         fd = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return ""
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                data = handle.read(MAX_EVENT_STREAM_BYTES)
+        finally:
+            if fd >= 0:
+                os.close(fd)
     except OSError:
         return ""
-    with os.fdopen(fd, "rb") as handle:
-        data = handle.read(MAX_EVENT_STREAM_BYTES)
     return data.decode("utf-8", errors="replace")
 
+
+def _has_symlink_ancestor(path: Path) -> bool:
+    current = path.parent
+    while True:
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 def command_mentioned(events_text: str, command: str) -> bool:
     command = str(command or "").strip()

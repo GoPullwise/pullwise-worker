@@ -82,6 +82,34 @@ class ImmutableSnapshotTest(unittest.TestCase):
                     run,
                 )
 
+            snapshot_root = run / "workers" / "coordinator" / "snapshot"
+            self.assertFalse((snapshot_root / "repo").exists())
+            self.assertFalse((snapshot_root / "repo.tmp").exists())
+
+    def test_snapshot_rejects_missing_file_without_partial_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            checkout = Path(tmp_dir) / "repo"
+            checkout.mkdir()
+            source = checkout / "app.py"
+            source.write_text("print('ok')\n", encoding="utf-8")
+            run = checkout / ".codereview" / "runs" / "run_1"
+
+            with self.assertRaisesRegex(RuntimeError, "immutable snapshot missing analyzable inventory files"):
+                create_immutable_snapshot(
+                    checkout,
+                    {
+                        "files": [
+                            {"path": "app.py", "content_hash": sha256_file(source), "scope": "analyze"},
+                            {"path": "missing.py", "content_hash": "sha256:missing", "scope": "analyze"},
+                        ]
+                    },
+                    run,
+                )
+
+            snapshot_root = run / "workers" / "coordinator" / "snapshot"
+            self.assertFalse((snapshot_root / "repo").exists())
+            self.assertFalse((snapshot_root / "repo.tmp").exists())
+
     def test_snapshot_manifest_records_inventory_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkout = Path(tmp_dir) / "repo"

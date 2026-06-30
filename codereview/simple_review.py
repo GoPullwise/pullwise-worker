@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import concurrent.futures
 import hashlib
 import json
@@ -1135,6 +1136,10 @@ def validate_verification_result(
             raise VerificationRejected("static proof must not claim runtime command evidence")
         return None, ""
 
+    missing_runtime_files = sorted(set(primary_files) - set(exercised_files))
+    if missing_runtime_files:
+        raise VerificationRejected("runtime proof did not exercise every primary evidence file")
+
     if (
         not declared_command
         or not marker
@@ -1161,7 +1166,7 @@ def validate_verification_result(
         raise VerificationRejected("final reproduction command must execute a repro harness file, not inline code")
     if not command_references_repro_harness(actual.command, worker_repo):
         raise VerificationRejected("final reproduction command must execute a harness under .codereview/repro")
-    if not verification_source_is_grounded(candidate, matching, worker_repo, marker=marker):
+    if not verification_source_is_grounded(candidate, exercised_files, matching, worker_repo, marker=marker):
         raise VerificationRejected(
             "reproduction command, output, and referenced harnesses do not ground execution in the cited source files"
         )
@@ -1206,6 +1211,7 @@ def command_references_repro_harness(command: str, worker_repo: Path) -> bool:
 
 def verification_source_is_grounded(
     candidate: dict,
+    exercised_files: list[str],
     commands: list[CommandEvidence],
     worker_repo: Path,
     *,
@@ -1219,26 +1225,67 @@ def verification_source_is_grounded(
     evidence_files = [path for path in evidence_files if path]
     if not evidence_files:
         return False
+    exercised_file_set = {path for path in exercised_files if path}
+    if set(evidence_files) - exercised_file_set:
+        return False
+
     corpus = [item.command for item in commands]
-    corpus.extend(item.output for item in commands)
+    referenced_repro_harness = False
     for command in commands:
         for path in _command_referenced_files(command.command, worker_repo):
             try:
+                relative = path.relative_to(worker_repo).as_posix()
                 if path.stat().st_size > _MAX_HARNESS_BYTES:
                     continue
                 content = path.read_text(encoding="utf-8", errors="replace")
-                relative = path.relative_to(worker_repo).as_posix()
-                if relative.startswith(".codereview/repro/") and marker in content:
-                    return False
+                if relative.startswith(".codereview/repro/"):
+                    referenced_repro_harness = True
+                    if _harness_contains_static_marker(marker, content, path.suffix.lower()):
+                        return False
                 corpus.append(content)
             except (OSError, ValueError):
                 continue
+    if not referenced_repro_harness:
+        return False
     normalized_corpus = "\n".join(corpus).replace("\\", "/").lower()
-    return any(
-        variant in normalized_corpus
+    return all(
+        any(variant in normalized_corpus for variant in _source_reference_variants(source))
         for source in evidence_files
-        for variant in _source_reference_variants(source)
     )
+
+
+def _harness_contains_static_marker(marker: str, content: str, suffix: str) -> bool:
+    if marker and marker in content:
+        return True
+    if suffix != ".py" or not marker:
+        return False
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if _static_string_value(node) == marker:
+            return True
+    return False
+
+
+def _static_string_value(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_string_value(node.left)
+        right = _static_string_value(node.right)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for value in node.values:
+            piece = _static_string_value(value)
+            if piece is None:
+                return None
+            parts.append(piece)
+        return "".join(parts)
+    return None
 
 
 def _shell_command_segments(command: str) -> list[list[str]]:

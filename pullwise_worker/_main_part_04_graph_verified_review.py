@@ -532,6 +532,9 @@ def write_graph_verified_codereview_config(
     verification_parallel = graph_config.get("simpleVerificationParallel")
     if verification_parallel is None:
         verification_parallel = graph_config.get("reproMaxParallel")
+    scan_deadline_seconds = graph_config.get("simpleScanDeadlineSeconds")
+    if scan_deadline_seconds is None:
+        scan_deadline_seconds = graph_config.get("scanDeadlineSeconds")
     current["finders"] = {
         "enabled": True,
         "timeout_seconds": graph_verified_positive_int(
@@ -570,7 +573,7 @@ def write_graph_verified_codereview_config(
             verification_parallel,
             default=0,
             minimum=0,
-            maximum=4,
+            maximum=6,
         ),
         "subagents_per_turn": finder_max_parallel,
         "max_candidates": repro_limit,
@@ -601,7 +604,7 @@ def write_graph_verified_codereview_config(
             graph_config.get("reproTimeoutSeconds"), default=default_turn_timeout_seconds, minimum=60, maximum=3600
         ),
         "scan_deadline_seconds": graph_verified_positive_int(
-            graph_config.get("simpleScanDeadlineSeconds") or graph_config.get("scanDeadlineSeconds"),
+            scan_deadline_seconds,
             default=14400,
             minimum=0,
             maximum=21600,

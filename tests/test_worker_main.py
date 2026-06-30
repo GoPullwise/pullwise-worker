@@ -3484,7 +3484,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 "commit": first_commit,
             }
 
-            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1", "PULLWISE_LOCAL_CLONE_ROOTS": str(root)}), patch.object(
                 worker_main, "run_git_command", wraps=worker_main.run_git_command
             ) as run_git:
                 resolved_first = worker_main.clone_repository(job, first_checkout)
@@ -3528,7 +3528,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
                 "commit": first_commit,
             }
 
-            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1", "PULLWISE_LOCAL_CLONE_ROOTS": str(root)}), patch.object(
                 worker_main, "run_git_command"
             ) as run_git:
                 with self.assertRaisesRegex(RuntimeError, "cache root must not be a symlink"):
@@ -3556,7 +3556,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             mirror_dir.parent.mkdir()
             mirror_dir.symlink_to(outside_mirror, target_is_directory=True)
 
-            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1", "PULLWISE_LOCAL_CLONE_ROOTS": str(root)}), patch.object(
                 worker_main, "run_git_command"
             ) as run_git:
                 with self.assertRaisesRegex(RuntimeError, "mirror directory must not be a symlink"):
@@ -3632,6 +3632,34 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
             run_git.assert_not_called()
 
+    def test_local_clone_urls_require_allowlisted_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source = root / "source"
+            source.mkdir()
+
+            with patch.dict(
+                "os.environ",
+                {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1", "PULLWISE_LOCAL_CLONE_ROOTS": ""},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PULLWISE_LOCAL_CLONE_ROOTS"):
+                    worker_main.trusted_or_local_clone_url({"repo": "owner/repo"}, str(source))
+
+    def test_local_clone_urls_must_stay_inside_allowlisted_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            allowed = root / "allowed"
+            allowed.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+
+            with patch.dict(
+                "os.environ",
+                {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1", "PULLWISE_LOCAL_CLONE_ROOTS": str(allowed)},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "outside PULLWISE_LOCAL_CLONE_ROOTS"):
+                    worker_main.trusted_or_local_clone_url({"repo": "owner/repo"}, str(outside))
+
     @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_clone_repository_checks_git_tree_limits_before_materializing_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3646,7 +3674,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             }
             config = SimpleNamespace(max_repo_files=0, max_repo_bytes=1, provider="codex")
 
-            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1"}), patch.object(
+            with patch.dict("os.environ", {"PULLWISE_ALLOW_LOCAL_CLONE_URLS": "1", "PULLWISE_LOCAL_CLONE_ROOTS": str(root)}), patch.object(
                 worker_main,
                 "clone_checkout_from_mirror",
             ) as checkout_from_mirror:
@@ -4280,6 +4308,23 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertEqual(payload["simple"]["scan_deadline_seconds"], 1500)
         self.assertEqual(payload["simple"]["output_language"], "Chinese")
 
+    def test_write_graph_verified_codereview_config_preserves_zero_deadline_and_parallel_six(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cfg = config_for(root)
+
+            worker_main.write_graph_verified_codereview_config(
+                cfg,
+                root,
+                {"simpleScanDeadlineSeconds": 0, "scanDeadlineSeconds": 999, "simpleVerificationParallel": 6},
+                "standard",
+                job={},
+            )
+
+            payload = json.loads((root / ".codereview" / "config.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["simple"]["scan_deadline_seconds"], 0)
+        self.assertEqual(payload["simple"]["verification_parallel"], 6)
     def test_write_graph_verified_codereview_config_defaults_timeouts_to_requested_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -5473,6 +5518,19 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
             with self.subTest(detail=detail):
                 self.assertEqual(worker_main.codex_readiness_issue_kind(detail), expected)
 
+    def test_redact_secrets_redacts_authorization_headers_and_github_tokens(self) -> None:
+        redacted = worker_main.redact_secrets(
+            "Authorization: Bearer ghs_bearerSecret Authorization: Basic abc123 github_pat_secretValue ghp_plainSecret secret-token",
+            SimpleNamespace(worker_token="secret-token"),
+        )
+
+        self.assertIn("Authorization: Bearer [redacted]", redacted)
+        self.assertIn("Authorization: Basic [redacted]", redacted)
+        self.assertNotIn("ghs_bearerSecret", redacted)
+        self.assertNotIn("abc123", redacted)
+        self.assertNotIn("github_pat_secretValue", redacted)
+        self.assertNotIn("ghp_plainSecret", redacted)
+        self.assertNotIn("secret-token", redacted)
     def test_codex_readiness_issue_detail_redacts_worker_token(self) -> None:
         cfg = SimpleNamespace(worker_token="secret-token")
 

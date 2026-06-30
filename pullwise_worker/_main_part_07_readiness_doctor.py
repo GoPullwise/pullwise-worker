@@ -21,9 +21,14 @@ def redact_secrets(text: str, config: WorkerConfig | None = None) -> str:
     redacted = str(text or "")
     if config and config.worker_token:
         redacted = redacted.replace(config.worker_token, "[redacted]")
-    redacted = re.sub(r"x-access-token:[^@\s]+@", "x-access-token:[redacted]@", redacted)
+    redacted = re.sub(
+        r"(?i)\b(authorization\s*:\s*)(bearer|basic)\s+([^\s,;]+)",
+        lambda match: f"{match.group(1)}{match.group(2)} [redacted]",
+        redacted,
+    )
+    redacted = re.sub(r"(?i)x-access-token:[^@\s]+@", "x-access-token:[redacted]@", redacted)
+    redacted = re.sub(r"\b(?:gh[oprsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b", "[redacted]", redacted)
     return redacted
-
 
 def write_scan_summary(
     config: WorkerConfig,

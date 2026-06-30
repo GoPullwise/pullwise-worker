@@ -2862,6 +2862,80 @@ def trusted_clone_url_for_token(job: dict | None, clone_url: object, clone_token
     return trusted_clone_url_for_repo(expected_clone_repo(job, clone_token), clone_url)
 
 
+def trusted_local_clone_url(text: str) -> str:
+    if not text or any(char in text for char in "\r\n"):
+        raise RuntimeError("Repository local clone path must not be empty or contain newlines.")
+    parsed = urllib.parse.urlparse(text)
+    windows_drive_path = len(text) >= 2 and text[1] == ":" and text[0].isalpha()
+    if parsed.scheme and not windows_drive_path:
+        if parsed.scheme != "file":
+            raise RuntimeError("Repository local clone URL must be a local filesystem path.")
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
+            raise RuntimeError("Repository file clone URL must not use a remote host.")
+        if parsed.params or parsed.query or parsed.fragment:
+            raise RuntimeError("Repository file clone URL must not include params, query, or fragment.")
+        candidate = Path(urllib.request.url2pathname(parsed.path)).expanduser()
+    else:
+        candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        raise RuntimeError("Repository local clone path must be absolute.")
+    if _path_has_symlink_component_or_self(candidate):
+        raise RuntimeError("Repository local clone path must not include symlink components.")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("Repository local clone path must exist.") from exc
+    roots = _local_clone_allowlist_roots()
+    if not roots:
+        raise RuntimeError("Repository local clone paths require PULLWISE_LOCAL_CLONE_ROOTS.")
+    if not any(_resolved_path_is_within(resolved, root) for root in roots):
+        raise RuntimeError("Repository local clone path is outside PULLWISE_LOCAL_CLONE_ROOTS.")
+    return str(resolved)
+
+
+def _local_clone_allowlist_roots() -> list[Path]:
+    raw = os.environ.get("PULLWISE_LOCAL_CLONE_ROOTS", "")
+    roots: list[Path] = []
+    for item in str(raw or "").split(os.pathsep):
+        text = item.strip().strip('"')
+        if not text:
+            continue
+        root = Path(text).expanduser()
+        if not root.is_absolute():
+            raise RuntimeError("PULLWISE_LOCAL_CLONE_ROOTS entries must be absolute paths.")
+        if _path_has_symlink_component_or_self(root):
+            raise RuntimeError("PULLWISE_LOCAL_CLONE_ROOTS entries must not include symlink components.")
+        try:
+            resolved = root.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError("PULLWISE_LOCAL_CLONE_ROOTS entries must exist.") from exc
+        if not resolved.is_dir():
+            raise RuntimeError("PULLWISE_LOCAL_CLONE_ROOTS entries must be directories.")
+        roots.append(resolved)
+    return roots
+
+
+def _path_has_symlink_component_or_self(path: Path) -> bool:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    parts = path.parts[1:] if path.is_absolute() else path.parts
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _resolved_path_is_within(child: Path, parent: Path) -> bool:
+    try:
+        common = os.path.commonpath([str(child), str(parent)])
+    except ValueError:
+        return False
+    return os.path.normcase(common) == os.path.normcase(str(parent))
+
+
 def trusted_or_local_clone_url(job: dict | None, clone_url: object, clone_token: object = None) -> str:
     text = str(clone_url or "").strip()
     parsed = urllib.parse.urlparse(text)
@@ -2870,9 +2944,7 @@ def trusted_or_local_clone_url(job: dict | None, clone_url: object, clone_token:
     if clone_token_value(clone_token):
         return trusted_clone_url_for_token(job, text, clone_token)
     if env_bool("PULLWISE_ALLOW_LOCAL_CLONE_URLS", False):
-        if not text or any(char in text for char in "\r\n"):
-            raise RuntimeError("Repository clone URL must not be empty or contain newlines.")
-        return text
+        return trusted_local_clone_url(text)
     raise RuntimeError("Repository clone URL must be an HTTP(S) GitHub URL.")
 
 

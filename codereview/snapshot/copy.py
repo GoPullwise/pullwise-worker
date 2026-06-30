@@ -12,57 +12,69 @@ from .integrity import source_state_from_inventory
 def create_immutable_snapshot(checkout: Path, inventory: dict, run: Path) -> dict:
     snapshot_root = run / "workers" / "coordinator" / "snapshot"
     repo = snapshot_root / "repo"
-    if repo.is_symlink():
-        repo.unlink()
-    elif repo.exists():
-        shutil.rmtree(repo)
-    ensure_dir(repo)
-    copied: list[str] = []
-    copied_hashes: dict[str, str] = {}
-    missing: list[str] = []
-    hash_mismatches: list[str] = []
-    for item in inventory.get("files", []):
-        if not isinstance(item, dict) or item.get("scope") != "analyze":
-            continue
-        rel = safe_relative_path(item.get("path"))
-        if not rel:
-            missing.append(str(item.get("path") or ""))
-            continue
-        source = _safe_regular_checkout_file(checkout, rel)
-        if source is None:
-            missing.append(rel)
-            continue
-        target = repo / rel
-        ensure_dir(target.parent)
-        shutil.copy2(source, target)
-        expected_hash = str(item.get("content_hash") or "")
-        actual_hash = sha256_file(target)
-        if not expected_hash or actual_hash != expected_hash:
-            hash_mismatches.append(f"{rel} expected {expected_hash or 'missing'} got {actual_hash or 'missing'}")
-            continue
-        copied.append(rel)
-        copied_hashes[rel] = actual_hash
-    if missing:
-        sample = ", ".join(missing[:20])
-        more = f" and {len(missing) - 20} more" if len(missing) > 20 else ""
-        raise RuntimeError(f"immutable snapshot missing analyzable inventory files: {sample}{more}")
-    if hash_mismatches:
-        sample = "; ".join(hash_mismatches[:10])
-        more = f" and {len(hash_mismatches) - 10} more" if len(hash_mismatches) > 10 else ""
-        raise RuntimeError(f"immutable snapshot inventory hash mismatch: {sample}{more}")
-    copied_assets = _copy_codereview_assets(checkout, repo)
-    source_state = source_state_from_inventory(inventory)
-    manifest = {
-        "snapshot_repo": str(repo),
-        "copied_files": copied,
-        "copied_files_count": len(copied),
-        "copied_file_hashes": copied_hashes,
-        "inventory_manifest_hash": source_state.get("manifest_hash") or "",
-        "copied_codereview_assets": copied_assets,
-        "source_checkout": str(checkout),
-    }
-    write_json(snapshot_root / "manifest.json", manifest)
-    return manifest
+    staging = snapshot_root / "repo.tmp"
+    ensure_dir(snapshot_root)
+    _remove_snapshot_path(staging)
+    ensure_dir(staging)
+    try:
+        copied: list[str] = []
+        copied_hashes: dict[str, str] = {}
+        missing: list[str] = []
+        hash_mismatches: list[str] = []
+        for item in inventory.get("files", []):
+            if not isinstance(item, dict) or item.get("scope") != "analyze":
+                continue
+            rel = safe_relative_path(item.get("path"))
+            if not rel:
+                missing.append(str(item.get("path") or ""))
+                continue
+            source = _safe_regular_checkout_file(checkout, rel)
+            if source is None:
+                missing.append(rel)
+                continue
+            target = staging / rel
+            ensure_dir(target.parent)
+            shutil.copy2(source, target)
+            expected_hash = str(item.get("content_hash") or "")
+            actual_hash = sha256_file(target)
+            if not expected_hash or actual_hash != expected_hash:
+                hash_mismatches.append(f"{rel} expected {expected_hash or 'missing'} got {actual_hash or 'missing'}")
+                continue
+            copied.append(rel)
+            copied_hashes[rel] = actual_hash
+        if missing:
+            sample = ", ".join(missing[:20])
+            more = f" and {len(missing) - 20} more" if len(missing) > 20 else ""
+            raise RuntimeError(f"immutable snapshot missing analyzable inventory files: {sample}{more}")
+        if hash_mismatches:
+            sample = "; ".join(hash_mismatches[:10])
+            more = f" and {len(hash_mismatches) - 10} more" if len(hash_mismatches) > 10 else ""
+            raise RuntimeError(f"immutable snapshot inventory hash mismatch: {sample}{more}")
+        copied_assets = _copy_codereview_assets(checkout, staging)
+        source_state = source_state_from_inventory(inventory)
+        _remove_snapshot_path(repo)
+        staging.rename(repo)
+        manifest = {
+            "snapshot_repo": str(repo),
+            "copied_files": copied,
+            "copied_files_count": len(copied),
+            "copied_file_hashes": copied_hashes,
+            "inventory_manifest_hash": source_state.get("manifest_hash") or "",
+            "copied_codereview_assets": copied_assets,
+            "source_checkout": str(checkout),
+        }
+        write_json(snapshot_root / "manifest.json", manifest)
+        return manifest
+    except Exception:
+        _remove_snapshot_path(staging)
+        raise
+
+
+def _remove_snapshot_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
 
 
 def _copy_codereview_assets(checkout: Path, repo: Path) -> list[str]:
