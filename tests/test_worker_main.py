@@ -163,7 +163,7 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
         self.assertFalse(config.lifecycle_watcher_enabled)
         self.assertEqual(config.watcher_poll_seconds, 5)
         self.assertTrue(config.remote_uninstall_finalizer)
-        self.assertEqual(config.codex_timeout_seconds, 1800)
+        self.assertEqual(config.codex_timeout_seconds, 3600)
         self.assertEqual(config.codex_doctor_timeout_seconds, 60)
         self.assertEqual(config.active_readiness_check_seconds, 60)
         self.assertEqual(config.degraded_readiness_check_seconds, 600)

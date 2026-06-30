@@ -930,7 +930,7 @@ class WorkerConfig:
             os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", DEFAULT_CODEX_REASONING_EFFORT).strip()
             or DEFAULT_CODEX_REASONING_EFFORT
         )
-        self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or env_int("PULLWISE_CODEX_TIMEOUT_SECONDS", 1800)))
+        self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or env_int("PULLWISE_CODEX_TIMEOUT_SECONDS", 3600)))
         self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
         legacy_readiness_check_seconds = env_int(
             "PULLWISE_READINESS_CHECK_SECONDS",
