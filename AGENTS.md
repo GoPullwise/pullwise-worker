@@ -66,12 +66,20 @@ Hard invariants:
   enters the heartbeat/lease loop.
 - The worker may call `POST /v1/workers/{worker_id}/lease` only when
   `active_job == null`, state is `idle`, and the local queue depth is zero.
+  The request must include `review-worker-protocol/v1`, `active_jobs = 0`,
+  `available_job_slots = 1`, `maintains_local_queue = false`,
+  `local_queue_depth = 0`, and required capabilities for full repo scan, Codex
+  App Server, isolated Codex home, progress events, cancellation, and intent
+  test validation.
 - A busy, cancelling, or finishing worker must heartbeat with zero available job
   slots through `POST /v1/workers/{worker_id}/heartbeat` and must not claim
   another job. The heartbeat payload must use the fixed v1 shape:
   `protocol_version`, `status`, `active_run_id`, `concurrency`,
-  `codex_app_server`, and optional `progress`; do not make legacy
-  `running_jobs`/`active_job_ids` the worker-facing protocol.
+  `codex_app_server`, and active-run `progress`; do not make legacy
+  `running_jobs`/`active_job_ids` the worker-facing protocol. Idle heartbeats
+  must report `active_jobs = 0` and `available_job_slots = 1`; active heartbeats
+  must report `active_jobs = 1`, `available_job_slots = 0`, and a progress
+  snapshot whose `run_id` matches `active_run_id`.
 - Each worker instance owns an isolated `WORKER_ROOT`, lock file, `CODEX_HOME`,
   `CODEX_SQLITE_HOME`, Codex auth/config/log/session/cache directories,
   workspace root, artifact root, and worker log.
