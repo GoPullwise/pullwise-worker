@@ -298,12 +298,16 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         active.overall_percent = 42.0
         active.current_phase = "intent_test_running"
         active.current_phase_status = "running"
+        active.apply_progress_data({"reviewer_runs_total": 3, "reviewer_runs_completed": 2})
         worker.state.set_active(active)
 
         worker.heartbeat()
 
         self.assertEqual(calls[0]["running_jobs"], 1)
         self.assertEqual(calls[0]["progress"]["current_phase"], "intent_test_running")
+        self.assertEqual(calls[0]["progress"]["counters"]["reviewer_runs_total"], 3)
+        self.assertEqual(calls[0]["progress"]["counters"]["reviewer_runs_completed"], 2)
+        self.assertIn("active_unit", calls[0]["progress"])
 
     def test_pullwise_client_uses_v1_review_protocol_routes(self) -> None:
         calls = []
@@ -815,6 +819,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 message="Reviewer fanout progress.",
                 data=counters,
             )
+            progress_snapshot = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
 
         self.assertEqual(posted[0][0], "run_1")
         event = posted[0][1]
@@ -823,6 +828,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(event["progress"]["status"], "running")
         self.assertEqual(event["data"]["reviewer_runs_total"], 2)
         self.assertEqual(event["data"]["reviewer_runs_completed"], 1)
+        self.assertEqual(progress_snapshot["counters"]["reviewer_runs_total"], 2)
+        self.assertEqual(progress_snapshot["counters"]["reviewer_runs_completed"], 1)
 
     def test_phase_prompt_uses_phase_specific_contract_and_prompt_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

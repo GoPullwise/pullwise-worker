@@ -156,6 +156,10 @@ Review pipeline rules:
   `worker_id`, positive monotonic `sequence`, `timestamp`, supported
   `event_type`, `phase`, `severity`, `message`, and `progress` with
   `overall_percent`, `current_phase_percent`, and `status`.
+- Active heartbeat `progress` snapshots must include the v1 counter set
+  (`source_like_files_*`, `bundles_*`, `reviewer_runs_*`,
+  `intent_tests_*`, `validator_candidates_*`, and `artifacts_*`) plus
+  `active_unit`, even when counters are zero.
 - Long-running phases must post `progress_updated` events, not only
   `phase_started`/`phase_completed`. `reviewer_fanout` progress data must
   include `reviewer_runs_total` and `reviewer_runs_completed`;

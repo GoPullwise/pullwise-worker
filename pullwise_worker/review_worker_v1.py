@@ -242,6 +242,27 @@ Rules:
 """
 
 
+PROGRESS_COUNTER_KEYS = (
+    "source_like_files_total",
+    "source_like_files_classified",
+    "bundles_total",
+    "bundles_packed",
+    "reviewer_runs_total",
+    "reviewer_runs_completed",
+    "intent_tests_total",
+    "intent_tests_written",
+    "intent_tests_run",
+    "validator_candidates_total",
+    "validator_candidates_completed",
+    "artifacts_total",
+    "artifacts_uploaded",
+)
+
+
+def default_progress_counters() -> dict[str, int]:
+    return {key: 0 for key in PROGRESS_COUNTER_KEYS}
+
+
 @dataclass
 class ActiveJob:
     job_id: str
@@ -260,6 +281,8 @@ class ActiveJob:
     current_phase_status: str = "pending"
     current_phase_percent: float = 0.0
     message: str = ""
+    counters: dict[str, int] = field(default_factory=default_progress_counters)
+    active_unit: dict[str, Any] = field(default_factory=dict)
 
     def heartbeat_payload(self) -> dict[str, Any]:
         return {
@@ -280,9 +303,25 @@ class ActiveJob:
             "current_phase_status": self.current_phase_status,
             "current_phase_percent": self.current_phase_percent,
             "message": self.message,
+            "counters": dict(self.counters),
+            "active_unit": dict(self.active_unit),
             "last_event_sequence": self.last_event_sequence,
             "updated_at": iso_time(time.time()),
         }
+
+    def apply_progress_data(self, data: dict[str, Any] | None) -> None:
+        if not isinstance(data, dict):
+            return
+        for key in PROGRESS_COUNTER_KEYS:
+            if key not in data:
+                continue
+            try:
+                self.counters[key] = max(0, int(data[key]))
+            except (TypeError, ValueError):
+                continue
+        active_unit = data.get("active_unit")
+        if isinstance(active_unit, dict):
+            self.active_unit = dict(active_unit)
 
 
 class WorkerState:
@@ -1102,6 +1141,7 @@ class ReviewWorkerV1:
         active.current_phase_status = status
         active.current_phase_percent = round(float(current_phase_percent), 2)
         active.message = message
+        active.apply_progress_data(data)
         event = {
             "protocol_version": PROTOCOL_VERSION,
             "run_id": active.run_id,
