@@ -26,6 +26,7 @@ PIPELINE_PHASES = (
     ("prepare_workspace", 4),
     ("start_codex_app_server", 8),
     ("initialize_codex_connection", 10),
+    ("check_codex_auth", 12),
     ("bootstrap_helper_scripts", 14),
     ("inventory_repository", 18),
     ("token_budget", 22),
@@ -63,6 +64,87 @@ REQUIRED_COMPLETED_ARTIFACTS = {
     "qa",
     "token_budget",
 }
+REQUIRED_TOOL_FILES = (
+    "00_bootstrap_check.py",
+    "01_inventory.py",
+    "02_estimate_budget.py",
+    "03_plan_bundles.py",
+    "04_pack_bundle.py",
+    "05_validate_reviewer_json.py",
+    "06_verify_locations.py",
+    "07_prepare_cluster_input.py",
+    "08_render_reports.py",
+    "09_run_qa_gate.py",
+    "10_hash_artifacts.py",
+)
+REQUIRED_SCHEMA_FILES = (
+    "repo-map.schema.json",
+    "risk-routing.schema.json",
+    "bundle-plan.schema.json",
+    "reviewer-output.schema.json",
+    "cluster-output.schema.json",
+    "validation-output.schema.json",
+    "final-report.schema.json",
+    "server-result-envelope.schema.json",
+)
+REQUIRED_PROMPT_FILES = (
+    "00_repo_mapper.md",
+    "01_risk_router.md",
+    "02_bundle_planner.md",
+    "reviewers/security.md",
+    "reviewers/correctness.md",
+    "reviewers/test_gap.md",
+    "reviewers/correctness_lite.md",
+    "03_clusterer.md",
+    "04_validator.md",
+    "05_reporter.md",
+)
+CODEX_ERROR_CODES = {
+    "UsageLimitExceeded": "CODEX_USAGE_LIMIT_EXCEEDED",
+    "ContextWindowExceeded": "CODEX_CONTEXT_WINDOW_EXCEEDED",
+    "Unauthorized": "CODEX_UNAUTHORIZED",
+    "SandboxError": "CODEX_SANDBOX_ERROR",
+    "HttpConnectionFailed": "CODEX_UPSTREAM_CONNECTION_FAILED",
+    "InternalServerError": "CODEX_INTERNAL_SERVER_ERROR",
+}
+GLOBAL_AGENTS_TEXT = """# Codex Repo Review Worker Global Instructions
+
+You are running inside an isolated Codex repo review worker.
+
+Rules:
+- Full repository scan, not diff review.
+- Do not install dependencies.
+- Do not call external review or scanning tools.
+- Do not modify application source files.
+- Write only under .codex-review/** when file writes are needed.
+- Helper scripts must use Python 3 standard library only.
+- Helper scripts perform mechanical tasks only.
+- Codex performs semantic code review judgment.
+- Every main finding must be concrete, located, evidenced, and actionable.
+"""
+REVIEW_AGENTS_TEXT = """# Codex Full Repository Review Instructions
+
+This is a full repository scan, not a diff review.
+
+Required outputs:
+- report.md
+- report.agent.json
+- coverage.json
+- token-budget.json
+- qa.json
+- artifact-manifest.json
+- codex-events.jsonl
+- worker.log.jsonl
+
+Rules:
+- Do not modify application source files.
+- Do not install dependencies.
+- Do not call external review/scanning tools.
+- Every main finding must have path, line range, evidence, impact, recommendation, severity, confidence, and next_agent_task.
+- Weak findings go to appendix.
+- Disproven findings do not appear in main findings.
+- Coverage and skipped scope must be reported.
+"""
 
 
 @dataclass
@@ -191,11 +273,7 @@ class Isolation:
             config_toml.chmod(0o600)
         agents = self.codex_home / "AGENTS.md"
         if not agents.exists():
-            agents.write_text(
-                "You are running inside Pullwise full-repository review worker isolation.\n"
-                "Do not modify application source files. Write only under .codex-review.\n",
-                encoding="utf-8",
-            )
+            agents.write_text(GLOBAL_AGENTS_TEXT, encoding="utf-8")
             agents.chmod(0o600)
 
     def env(self, config: Any) -> dict[str, str]:
@@ -543,12 +621,15 @@ class ReviewWorkerV1:
         app_server: JsonRpcAppServer | None = None
         started = time.time()
         try:
+            validate_job_policy(job)
             repo_dir, run_dir, artifact_dir = self.prepare_workspace(job, run_id)
             events_path = artifact_dir / "codex-events.jsonl"
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_started", "job_id": job_id, "run_id": run_id, "time": iso_time(started)})
             for phase, progress in PIPELINE_PHASES:
                 active.current_phase = phase
                 active.state = "busy" if phase not in {"upload_artifacts", "submit_result_envelope"} else "finishing"
                 self.client.progress(job_id, phase, progress, phase.replace("_", " "))
+                append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_started", "phase": phase, "progress": progress, "time": iso_time(time.time())})
                 if active.cancel_requested:
                     raise JobCancelled("cancel requested")
                 if phase == "start_codex_app_server":
@@ -562,6 +643,8 @@ class ReviewWorkerV1:
                 elif phase == "initialize_codex_connection":
                     thread_id = app_server.start_thread(repo_dir, model_for_job(job)) if app_server else ""
                     write_json(run_dir / "run-state.json", {"thread_id": thread_id, "active_job": active.heartbeat_payload()})
+                elif phase == "check_codex_auth":
+                    self.run_codex_auth_check(app_server, repo_dir, run_dir, job)
                 elif phase in SEMANTIC_PHASES:
                     self.run_semantic_phase(app_server, repo_dir, run_dir, job, phase)
                 elif phase in MECHANICAL_PHASES:
@@ -572,6 +655,7 @@ class ReviewWorkerV1:
         except JobCancelled:
             artifact_dir = self.isolation.artifacts / run_id
             run_dir = self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_cancelled", "error": "cancel requested", "time": iso_time(time.time())})
             envelope = self.build_envelope(job, run_id, "cancelled", started, artifact_dir, run_dir, error="cancel requested")
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
@@ -581,6 +665,7 @@ class ReviewWorkerV1:
         except Exception as exc:
             artifact_dir = self.isolation.artifacts / run_id
             run_dir = self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_failed", "error": str(exc), "time": iso_time(time.time())})
             envelope = self.build_envelope(job, run_id, "failed", started, artifact_dir, run_dir, error=str(exc))
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
@@ -608,7 +693,25 @@ class ReviewWorkerV1:
         for path in (repo_dir / ".codex-review", run_dir, run_dir / "bundles", run_dir / "raw-reviewers", run_dir / "verified-reviewers"):
             path.mkdir(parents=True, exist_ok=True)
         write_worker_config(repo_dir / ".codex-review" / "worker-config.json", job, self.config)
+        write_review_instruction_tree(repo_dir)
         return repo_dir, run_dir, artifact_dir
+
+    def run_codex_auth_check(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
+        if app_server is None:
+            raise RuntimeError("Codex app-server is missing")
+        state = read_json(run_dir / "run-state.json")
+        thread_id = str(state.get("thread_id") or "")
+        if not thread_id:
+            raise RuntimeError("Codex thread is missing")
+        app_server.run_turn(
+            thread_id=thread_id,
+            repo_dir=repo_dir,
+            prompt='Codex auth check: return only JSON {"ok": true}.',
+            effort="medium",
+            read_only=True,
+            timeout_seconds=int(getattr(self.config, "codex_timeout_seconds", 3600) or 3600),
+            cancel_requested=self.poll_cancel_requested,
+        )
 
     def run_semantic_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
         if app_server is None:
@@ -712,7 +815,7 @@ class ReviewWorkerV1:
                 "completed_at": iso_time(now),
                 "duration_ms": int((now - started) * 1000),
             },
-            "error": {"code": "CODEX_UNKNOWN_ERROR", "message": error, "retryable": True} if error else None,
+            "error": {"code": codex_error_code(error), "message": error, "retryable": True} if error else None,
             "summary": summary_payload(run_dir, status),
             "quality_gate": read_json(run_dir / "qa.json", {"status": "fail", "errors": ["run did not reach qa gate"], "warnings": []}),
             "artifact_manifest": manifest,
@@ -734,20 +837,38 @@ def iso_time(value: float) -> str:
 
 
 def model_for_job(job: dict[str, Any]) -> str:
-    agent = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
-    codex = agent.get("codex") if isinstance(agent.get("codex"), dict) else {}
-    return str(codex.get("model") or "")
+    return str(validate_job_policy(job)["model"])
 
 
 def core_effort_for_job(job: dict[str, Any]) -> str:
-    agent = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
-    codex = agent.get("codex") if isinstance(agent.get("codex"), dict) else {}
-    effort = str(codex.get("reasoningEffort") or "high").lower()
-    return effort if effort in {"low", "medium", "high", "xhigh"} else "high"
+    return str(validate_job_policy(job)["reasoning_effort"])
 
 
 def effort_for_phase(job: dict[str, Any], phase: str) -> str:
     return core_effort_for_job(job) if phase in CORE_EFFORT_PHASES else "medium"
+
+
+def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
+    agent = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
+    provider = str(agent.get("provider") or "").strip().lower()
+    if provider and provider != "codex":
+        raise ValueError("agentConfig.provider must be codex")
+    codex = agent.get("codex") if isinstance(agent.get("codex"), dict) else {}
+    model = str(codex.get("model") or "").strip()
+    if not model:
+        raise ValueError("claimed job must include agentConfig.codex.model")
+    effort = str(codex.get("reasoningEffort") or "").strip().lower()
+    if effort not in {"low", "medium", "high", "xhigh"}:
+        raise ValueError("claimed job must include agentConfig.codex.reasoningEffort")
+    limits = job.get("repositoryLimits") if isinstance(job.get("repositoryLimits"), dict) else {}
+    try:
+        max_files = int(limits.get("maxFiles"))
+        max_bytes = int(limits.get("maxBytes"))
+    except (TypeError, ValueError):
+        raise ValueError("claimed job must include repositoryLimits.maxFiles and repositoryLimits.maxBytes") from None
+    if max_files <= 0 or max_bytes <= 0:
+        raise ValueError("repositoryLimits.maxFiles and repositoryLimits.maxBytes must be positive")
+    return {"model": model, "reasoning_effort": effort, "repository_limits": {"maxFiles": max_files, "maxBytes": max_bytes}}
 
 
 def phase_prompt(phase: str, run_dir: Path) -> str:
@@ -767,6 +888,48 @@ def inventory(repo_dir: Path) -> dict[str, Any]:
         rel = path.relative_to(repo_dir).as_posix()
         files.append({"path": rel, "size_bytes": path.stat().st_size})
     return {"source_like_files_total": len(files), "files": files}
+
+
+def write_review_instruction_tree(repo_dir: Path) -> None:
+    review_root = repo_dir / ".codex-review"
+    (review_root / "tools").mkdir(parents=True, exist_ok=True)
+    (review_root / "schemas").mkdir(parents=True, exist_ok=True)
+    (review_root / "prompts" / "reviewers").mkdir(parents=True, exist_ok=True)
+    (review_root / "AGENTS.review.md").write_text(REVIEW_AGENTS_TEXT, encoding="utf-8")
+    tool_body = (
+        "#!/usr/bin/env python3\n"
+        "\"\"\"Pullwise review helper.\n\n"
+        "Generated helpers must use only the Python standard library and perform mechanical tasks only.\n"
+        "\"\"\"\n"
+        "from __future__ import annotations\n\n"
+        "import json\n"
+        "import sys\n\n"
+        "def main() -> int:\n"
+        "    json.dump({'ok': True, 'tool': __file__}, sys.stdout, sort_keys=True)\n"
+        "    sys.stdout.write('\\n')\n"
+        "    return 0\n\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main())\n"
+    )
+    for name in REQUIRED_TOOL_FILES:
+        path = review_root / "tools" / name
+        if not path.exists():
+            path.write_text(tool_body, encoding="utf-8")
+            path.chmod(0o700)
+    schema_body = {"type": "object", "additionalProperties": True}
+    for name in REQUIRED_SCHEMA_FILES:
+        path = review_root / "schemas" / name
+        if not path.exists():
+            write_json(path, schema_body)
+    for name in REQUIRED_PROMPT_FILES:
+        path = review_root / "prompts" / name
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "# Pullwise Codex Full Repository Review Phase\n\n"
+                "Follow .codex-review/AGENTS.review.md. Return the phase artifact requested by the worker design.\n",
+                encoding="utf-8",
+            )
 
 
 def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -> None:
@@ -947,6 +1110,34 @@ def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str) -> 
         "error": (envelope.get("error") or {}).get("message", ""),
         "error_code": (envelope.get("error") or {}).get("code", ""),
     }
+
+
+def codex_error_code(error: object) -> str:
+    if not error:
+        return "CODEX_UNKNOWN_ERROR"
+    if isinstance(error, dict):
+        candidates = [
+            error.get("codexErrorInfo"),
+            error.get("codex_error_info"),
+            error.get("code"),
+            error.get("type"),
+            error.get("message"),
+        ]
+    else:
+        text = str(error)
+        try:
+            parsed = json.loads(text)
+        except (TypeError, json.JSONDecodeError):
+            candidates = [text]
+        else:
+            if isinstance(parsed, dict):
+                return codex_error_code(parsed)
+            candidates = [text]
+    for candidate in candidates:
+        code = CODEX_ERROR_CODES.get(str(candidate or "").strip())
+        if code:
+            return code
+    return "CODEX_UNKNOWN_ERROR"
 
 
 def copy_tree(source: Path, dest: Path) -> None:

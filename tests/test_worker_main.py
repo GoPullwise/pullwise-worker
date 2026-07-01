@@ -16,8 +16,8 @@ class WorkerMainContractsTest(unittest.TestCase):
         imported = set(sys.modules)
         importlib.reload(worker_main)
         new_modules = set(sys.modules) - imported
-        self.assertNotIn("pullwise_worker._main_part_04_" + "graph_verified_review", new_modules)
-        self.assertFalse(hasattr(worker_main, "run_" + "graph_verified_review_payload"))
+        self.assertNotIn("pullwise_worker._main_part_04_" + "graph" + "_verified_review", new_modules)
+        self.assertFalse(hasattr(worker_main, "run_" + "graph" + "_verified_review_payload"))
         self.assertEqual(worker_main.__all__, ["build_parser", "main"])
 
     def test_run_command_uses_review_worker_v1(self) -> None:

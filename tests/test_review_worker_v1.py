@@ -6,21 +6,27 @@ from types import SimpleNamespace
 from pathlib import Path
 
 from pullwise_worker.review_worker_v1 import (
+    PIPELINE_PHASES,
     REQUIRED_COMPLETED_ARTIFACTS,
+    REQUIRED_PROMPT_FILES,
+    REQUIRED_SCHEMA_FILES,
+    REQUIRED_TOOL_FILES,
     ActiveJob,
     JobCancelled,
     JsonRpcAppServer,
     ReviewWorkerV1,
     WorkerState,
+    codex_error_code,
     decide_approval,
     default_agent_report,
     effort_for_phase,
+    model_for_job,
     result_payload,
     materialize_artifacts,
     materialize_terminal_artifacts,
     upload_artifacts,
+    validate_job_policy,
 )
-
 class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_worker_state_allows_lease_only_when_idle_without_active_job(self) -> None:
         state = WorkerState()
@@ -100,8 +106,57 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(denied_install, "decline")
         self.assertEqual(denied_cwd, "decline")
 
+    def test_pipeline_has_explicit_codex_auth_check_before_bootstrap(self) -> None:
+        phases = [phase for phase, _progress in PIPELINE_PHASES]
+
+        self.assertLess(phases.index("initialize_codex_connection"), phases.index("check_codex_auth"))
+        self.assertLess(phases.index("check_codex_auth"), phases.index("bootstrap_helper_scripts"))
+
+    def test_job_policy_requires_server_agent_config_and_repository_limits(self) -> None:
+        with self.assertRaisesRegex(ValueError, "agentConfig.codex.model"):
+            validate_job_policy({"repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
+        with self.assertRaisesRegex(ValueError, "reasoningEffort"):
+            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5"}}, "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
+        with self.assertRaisesRegex(ValueError, "repositoryLimits"):
+            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}}})
+
+    def test_model_and_effort_come_from_job_policy(self) -> None:
+        job = {
+            "agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}},
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        self.assertEqual(model_for_job(job), "gpt-5.5")
+        self.assertEqual(effort_for_phase(job, "reviewer_fanout"), "high")
+        self.assertEqual(effort_for_phase(job, "inventory_repository"), "medium")
+
+    def test_prepare_workspace_bootstraps_design_review_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source = root / "source"
+            source.mkdir()
+            (source / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+
+            repo_dir, run_dir, _artifact_dir = worker.prepare_workspace({"job_id": "job_1", "checkout_dir": str(source)}, "run_1")
+
+            review_root = repo_dir / ".codex-review"
+            self.assertTrue((review_root / "AGENTS.review.md").is_file())
+            self.assertTrue((run_dir / "bundles").is_dir())
+            self.assertTrue(all((review_root / "tools" / name).is_file() for name in REQUIRED_TOOL_FILES))
+            self.assertTrue(all((review_root / "schemas" / name).is_file() for name in REQUIRED_SCHEMA_FILES))
+            self.assertTrue(all((review_root / "prompts" / name).is_file() for name in REQUIRED_PROMPT_FILES))
+
+    def test_codex_error_mapper_returns_stable_protocol_codes(self) -> None:
+        self.assertEqual(codex_error_code({"codexErrorInfo": "UsageLimitExceeded"}), "CODEX_USAGE_LIMIT_EXCEEDED")
+        self.assertEqual(codex_error_code('{"codexErrorInfo":"ContextWindowExceeded"}'), "CODEX_CONTEXT_WINDOW_EXCEEDED")
+        self.assertEqual(codex_error_code("unexpected"), "CODEX_UNKNOWN_ERROR")
+
     def test_core_semantic_phases_use_plan_effort_and_other_phases_use_medium(self) -> None:
-        job = {"agentConfig": {"codex": {"reasoningEffort": "high"}}}
+        job = {
+            "agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}},
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
 
         self.assertEqual(effort_for_phase(job, "reviewer_fanout"), "high")
         self.assertEqual(effort_for_phase(job, "repo_map"), "high")
