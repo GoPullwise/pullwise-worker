@@ -1112,17 +1112,17 @@ class PullwiseClient:
         machine_metrics: dict | None = None,
         codex_quota: dict | None = None,
         progress: dict | None = None,
+        worker_state: str | None = None,
     ) -> dict:
         reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
         active_run_id = ""
-        progress_status = ""
         if isinstance(progress, dict):
             active_run_id = str(progress.get("run_id") or progress.get("runId") or "").strip()
-            progress_status = client_protocol_text(progress.get("current_phase_status") or progress.get("status"), self.config, 80)
         codex_server_status = "ready" if codex_ready is not False else "needs_attention"
+        worker_state_status = client_protocol_text(worker_state, self.config, 80)
         status = "idle"
         if reported_running_jobs:
-            status = progress_status if progress_status in {"cancelling", "finishing", "failure_handling"} else "busy"
+            status = worker_state_status if worker_state_status in {"cancelling", "finishing", "failure_handling"} else "busy"
         payload = {
             "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
             "worker_id": self.config.worker_id,

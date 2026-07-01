@@ -380,7 +380,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         client.heartbeat(
             running_jobs=1,
             active_job_ids=["job_1"],
-            progress={"run_id": "run_1", "current_phase_status": "cancelling"},
+            progress={"run_id": "run_1", "current_phase_status": "running"},
+            worker_state="cancelling",
         )
 
         payload = calls[0][1]
@@ -419,14 +420,88 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(active.cancel_requested)
         self.assertEqual(active.cancel_reason, "user_requested")
         self.assertEqual(active.state, "cancelling")
-        self.assertEqual(active.current_phase_status, "cancelling")
+        self.assertEqual(active.current_phase_status, "running")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0][0], "run_1")
         self.assertEqual(events[0][1]["event_type"], "run_cancel_requested")
-        self.assertEqual(events[0][1]["progress"]["status"], "cancelling")
+        self.assertEqual(events[0][1]["progress"]["status"], "running")
         self.assertEqual(events[0][1]["data"]["reason"], "user_requested")
         self.assertEqual(len(event_lines), 1)
         self.assertEqual(json.loads(event_lines[0])["event_type"], "run_cancel_requested")
+
+    def test_cancelled_run_posts_cancel_requested_before_cancelled_result(self) -> None:
+        events = []
+        results = []
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, run_id: str, event: dict) -> dict:
+                events.append((run_id, event))
+                return {}
+
+            def artifact(self, _job_id: str, _artifact_id: str, _payload: dict) -> dict:
+                return {}
+
+            def result(self, job_id: str, payload: dict) -> None:
+                results.append((job_id, payload))
+
+        class CancellingWorker(ReviewWorkerV1):
+            def prepare_workspace(self, job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                artifact_dir = root / "artifacts" / run_id
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+            def start_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int) -> None:
+                super().start_phase(active, run_dir, phase, progress)
+                if phase == "prepare_workspace":
+                    self.request_cancel(active, reason="user_requested")
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {
+                "default_model": "gpt-5.5",
+                "core_effort": "high",
+                "non_core_effort": "medium",
+            },
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = CancellingWorker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+
+            worker.run_job(job)
+
+            log_events = [
+                json.loads(line)["event_type"]
+                for line in (root / "repo" / ".codex-review" / "runs" / "run_1" / "progress.log.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        posted_event_types = [event["event_type"] for _run_id, event in events]
+        self.assertLess(posted_event_types.index("run_cancel_requested"), posted_event_types.index("run_cancelled"))
+        self.assertLess(log_events.index("run_cancel_requested"), log_events.index("run_cancelled"))
+        self.assertEqual(results[0][0], "job_1")
+        self.assertEqual(results[0][1]["reviewWorkerProtocol"]["execution"]["status"], "cancelled")
 
     def test_worker_registers_before_heartbeat_and_lease(self) -> None:
         calls = []

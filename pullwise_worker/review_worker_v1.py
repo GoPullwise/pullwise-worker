@@ -1056,10 +1056,12 @@ class ReviewWorkerV1:
         }
         if active is not None:
             heartbeat_payload["progress"] = active.progress_snapshot()
+            heartbeat_payload["worker_state"] = active.state
         try:
             response = self.client.heartbeat(**heartbeat_payload)
         except TypeError:
             heartbeat_payload.pop("progress", None)
+            heartbeat_payload.pop("worker_state", None)
             response = self.client.heartbeat(**heartbeat_payload)
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
         if active and active.job_id in (cancelled or []):
@@ -1137,7 +1139,6 @@ class ReviewWorkerV1:
         active.cancel_requested = True
         active.cancel_reason = reason_text
         active.state = "cancelling"
-        active.current_phase_status = "cancelling"
         active.message = "Cancellation requested."
         if active.run_dir is not None:
             self.emit_cancel_requested(active, active.run_dir)
@@ -1155,7 +1156,7 @@ class ReviewWorkerV1:
             run_dir,
             "run_cancel_requested",
             active.current_phase,
-            status="cancelling",
+            status="running",
             progress=active.overall_percent,
             current_phase_percent=active.current_phase_percent,
             message="Cancellation requested.",
