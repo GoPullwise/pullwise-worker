@@ -144,10 +144,15 @@ Review pipeline rules:
   findings. Generated tests must live in the disposable validation workspace or
   `.codex-review/generated-tests/**`, must not install dependencies or use
   network, and must execute with `cwd` inside the disposable validation repo.
-  The worker must record stdout/stderr under `intent/test-output/` and report
+  The worker must record stdout/stderr under `intent/test-output/`, include
+  those logs in artifact manifests with unique artifact ids, and report
   skipped/error/timeout cases as degraded intent-test evidence, not as direct
   job failure. Failing generated tests must be classified before they influence
-  confidence.
+  confidence. If Codex does not materialize `intent-test-results.json`, the
+  fallback must preserve raw project test runs as neutral classifications
+  (`passed_no_bug_reproduced`, `skipped_not_runnable`,
+  `test_harness_error`, or `unclear_requirement`) with no positive finding
+  confidence impact.
 - Required completed artifacts are `report.md`, `report.agent.json`,
   `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`,
   `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.

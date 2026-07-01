@@ -488,6 +488,44 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertIn("escapes validation workspace", result["test_runs"][0]["skip_reason"])
 
+    def test_intent_failure_analysis_fallback_classifies_raw_runs_conservatively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-run-results.raw.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-run-results/v1",
+                        "test_runs": [
+                            {
+                                "test_id": "ITV-pass",
+                                "status": "passed",
+                                "exit_code": 0,
+                                "duration_ms": 12,
+                                "stdout_path": str(run_dir / "intent" / "test-output" / "ITV-pass.stdout.log"),
+                            },
+                            {"test_id": "ITV-fail", "status": "failed", "exit_code": 1, "duration_ms": 13},
+                            {"test_id": "ITV-timeout", "status": "timeout", "timed_out": True, "duration_ms": 5000},
+                            {"test_id": "ITV-skip", "status": "skipped", "skip_reason": "no command"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_test_failure_analysis")
+            payload = json.loads((run_dir / "intent" / "intent-test-results.json").read_text(encoding="utf-8"))
+
+        classes = {result["test_id"]: result["classification"] for result in payload["test_results"]}
+        self.assertEqual(classes["ITV-pass"], "passed_no_bug_reproduced")
+        self.assertEqual(classes["ITV-fail"], "unclear_requirement")
+        self.assertEqual(classes["ITV-timeout"], "test_harness_error")
+        self.assertEqual(classes["ITV-skip"], "skipped_not_runnable")
+        self.assertTrue(all(result["finding_confidence_impact"] == "none" for result in payload["test_results"]))
+        self.assertFalse({"confirmed_bug", "plausible_bug"} & set(classes.values()))
+        fallback_by_id = {result["test_id"]: result for result in payload["test_results"]}
+        self.assertEqual(fallback_by_id["ITV-pass"]["artifact_refs"], ["art_intent_test_output_ITV_pass_stdout_log"])
+
     def test_qa_gate_rejects_invalid_main_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
@@ -1098,15 +1136,24 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             artifact_dir = root / "artifacts" / "run_1"
             write_completed_artifact_inputs(run_dir)
+            (run_dir / "intent" / "test-output").mkdir(parents=True)
+            (run_dir / "intent" / "test-output" / "ITV-001.stdout.log").write_text("ok\n", encoding="utf-8")
+            (run_dir / "intent" / "test-output" / "ITV-001.stderr.log").write_text("", encoding="utf-8")
             materialize_artifacts(run_dir, artifact_dir)
 
             manifest_payload = __import__("json").loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
             run_manifest = __import__("json").loads((run_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
             manifest = artifact_manifest_items(manifest_payload)
             kinds = {item["kind"] for item in manifest if item.get("required")}
+            output_items = [item for item in manifest if item["kind"] == "intent_test_output"]
             self.assertEqual(manifest_payload["schema_version"], "artifact-manifest/v1")
             self.assertEqual(manifest_payload["items"], manifest)
             self.assertTrue(REQUIRED_COMPLETED_ARTIFACTS.issubset(kinds))
+            self.assertEqual(
+                {item["name"] for item in output_items},
+                {"intent-test-output-ITV-001.stdout.log", "intent-test-output-ITV-001.stderr.log"},
+            )
+            self.assertEqual(len({item["artifact_id"] for item in output_items}), 2)
             self.assertEqual(manifest_payload, run_manifest)
             for item in manifest:
                 self.assertIn("sha256", item)

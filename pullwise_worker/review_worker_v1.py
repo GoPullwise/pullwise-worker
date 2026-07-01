@@ -2545,6 +2545,11 @@ def _intent_output_path(run_dir: Path, test_id: str, suffix: str) -> Path:
     return run_dir / "intent" / "test-output" / f"{safe or 'intent-test'}.{suffix}.log"
 
 
+def _intent_output_artifact_id(name: str) -> str:
+    suffix = "".join(char if char.isalnum() else "_" for char in name).strip("_") or "log"
+    return f"art_intent_test_output_{suffix}"
+
+
 def _intent_test_env() -> dict[str, str]:
     env = dict(os.environ)
     for key in list(env):
@@ -2676,6 +2681,53 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
                 }
             )
     return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": raw_results}
+
+
+def _fallback_intent_classification(raw_result: dict[str, Any]) -> str:
+    status = str(raw_result.get("status") or "").strip().lower()
+    if status == "passed":
+        return "passed_no_bug_reproduced"
+    if status == "skipped":
+        return "skipped_not_runnable"
+    if status in {"timeout", "error"}:
+        return "test_harness_error"
+    return "unclear_requirement"
+
+
+def fallback_intent_test_results(run_dir: Path) -> dict[str, Any]:
+    ensure_intent_directories(run_dir)
+    raw = read_json(run_dir / "intent" / "intent-test-run-results.raw.json", {})
+    raw_results = raw.get("test_runs") if isinstance(raw, dict) and isinstance(raw.get("test_runs"), list) else []
+    test_results = []
+    for index, raw_result in enumerate(raw_results):
+        if not isinstance(raw_result, dict):
+            continue
+        test_id = str(raw_result.get("test_id") or raw_result.get("id") or f"ITV-{index + 1:03d}").strip()
+        status = str(raw_result.get("status") or "unknown").strip() or "unknown"
+        output_refs = []
+        for key in ("stdout_path", "stderr_path"):
+            output_path = str(raw_result.get(key) or "").strip()
+            if output_path:
+                output_refs.append(_intent_output_artifact_id(Path(output_path).name))
+        test_results.append(
+            {
+                "test_id": test_id,
+                "classification": _fallback_intent_classification(raw_result),
+                "raw_status": status,
+                "exit_code": raw_result.get("exit_code"),
+                "timed_out": bool(raw_result.get("timed_out")),
+                "duration_ms": _qa_int(raw_result.get("duration_ms")),
+                "evidence_summary": (
+                    "Analyzer output was not materialized; this conservative fallback preserves the raw test "
+                    "run without treating it as proof of a product bug."
+                ),
+                "finding_confidence_impact": "none",
+                "confidence_delta": 0.0,
+                "artifact_refs": output_refs,
+                "fallback_generated": True,
+            }
+        )
+    return {"schema_version": "intent-test-result/v1", "test_results": test_results}
 
 
 def _qa_int(value: object, default: int = 0) -> int:
@@ -3094,7 +3146,7 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
     elif phase == "intent_test_writing" and not (run_dir / "intent" / "intent-test-source.json").exists():
         write_json(run_dir / "intent" / "intent-test-source.json", {"schema_version": "intent-test-source/v1", "generated_tests": []})
     elif phase == "intent_test_failure_analysis" and not (run_dir / "intent" / "intent-test-results.json").exists():
-        write_json(run_dir / "intent" / "intent-test-results.json", {"schema_version": "intent-test-result/v1", "test_results": []})
+        write_json(run_dir / "intent" / "intent-test-results.json", fallback_intent_test_results(run_dir))
     elif phase == "validator_disproof" and not (run_dir / "validated-findings.json").exists():
         write_json(run_dir / "validated-findings.json", {"schema_version": "validation-output/v1", "validated_findings": [], "disproven_findings": []})
     elif phase == "final_report_json" and not (run_dir / "report.agent.json").exists():
@@ -3260,14 +3312,36 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         dest = artifact_dir / src.name
         shutil.copy2(src, dest)
         manifest.append(artifact_item(dest, kind, media_type, schema_id, False))
+    for src in sorted((run_dir / "intent" / "test-output").glob("*.log")):
+        if not src.is_file():
+            continue
+        dest = artifact_dir / f"intent-test-output-{src.name}"
+        shutil.copy2(src, dest)
+        manifest.append(
+            artifact_item(
+                dest,
+                "intent_test_output",
+                "text/plain",
+                "project-test-output",
+                False,
+                artifact_id=_intent_output_artifact_id(src.name),
+            )
+        )
     manifest_payload = artifact_manifest_payload(artifact_dir.name, manifest)
     write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
     write_json(run_dir / "artifact-manifest.json", manifest_payload)
 
 
-def artifact_item(path: Path, kind: str, media_type: str, schema_id: str, required: bool) -> dict[str, Any]:
+def artifact_item(
+    path: Path,
+    kind: str,
+    media_type: str,
+    schema_id: str,
+    required: bool,
+    artifact_id: str | None = None,
+) -> dict[str, Any]:
     data = path.read_bytes() if path.exists() else b""
-    artifact_id = "art_" + kind.replace(".", "_")
+    artifact_id = artifact_id or "art_" + kind.replace(".", "_")
     return {
         "artifact_id": artifact_id,
         "kind": kind,
