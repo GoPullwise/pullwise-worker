@@ -100,7 +100,7 @@ REQUIRED_PROMPT_FILES = (
     "05_reporter.md",
 )
 CODEX_ERROR_CODES = {
-    "UsageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
+    "UsageLimitExceeded": "CODEX_USAGE_LIMIT_EXCEEDED",
     "RateLimitReached": "CODEX_QUOTA_EXHAUSTED",
     "rate_limit_reached": "CODEX_QUOTA_EXHAUSTED",
     "workspace_owner_credits_depleted": "CODEX_QUOTA_EXHAUSTED",
@@ -314,7 +314,14 @@ class Isolation:
 
 
 class JsonRpcAppServer:
-    def __init__(self, command: str, env: dict[str, str], cwd: Path, events_path: Path) -> None:
+    def __init__(
+        self,
+        command: str,
+        env: dict[str, str],
+        cwd: Path,
+        events_path: Path,
+        rate_limit_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.command = command or "codex"
         self.env = env
         self.cwd = cwd
@@ -327,6 +334,7 @@ class JsonRpcAppServer:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
+        self.rate_limit_callback = rate_limit_callback
 
     def start(self) -> None:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -489,6 +497,10 @@ class JsonRpcAppServer:
                         event = self._turns.get(turn_id)
                     if event is not None:
                         event.set()
+            elif message.get("method") == "account/rateLimits/updated":
+                params = message.get("params") if isinstance(message.get("params"), dict) else {}
+                if self.rate_limit_callback is not None:
+                    self.rate_limit_callback(params)
             elif "id" in message and "method" in message:
                 method = str(message.get("method") or "")
                 if "approval" in method.lower():
@@ -546,8 +558,19 @@ def quota_window_payload(name: str, value: object) -> dict[str, Any] | None:
     if used is None and duration is None and resets_at is None:
         return None
     remaining = quota_remaining_percent(used)
+    if duration == 300:
+        window_kind = "five_hour"
+        label = "5 hour"
+    elif duration == 10080:
+        window_kind = "weekly"
+        label = "weekly"
+    else:
+        window_kind = "custom"
+        label = f"{duration} minute" if duration else name
     return {
         "name": name,
+        "windowKind": window_kind,
+        "label": label,
         "usedPercent": round(used, 3) if used is not None else None,
         "remainingPercent": round(remaining, 3) if remaining is not None else None,
         "windowDurationMins": duration,
@@ -567,6 +590,52 @@ def codex_rate_limit_snapshot(response: dict[str, Any]) -> dict[str, Any]:
     rate_limits = response.get("rateLimits")
     return rate_limits if isinstance(rate_limits, dict) else {}
 
+
+def merge_rate_limit_bucket(current: object, update: object) -> dict[str, Any]:
+    merged = dict(current) if isinstance(current, dict) else {}
+    if not isinstance(update, dict):
+        return merged
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+        elif value is not None:
+            merged[key] = value
+    return merged
+
+
+def merge_rate_limit_response(current: object, params: object) -> dict[str, Any]:
+    merged = dict(current) if isinstance(current, dict) else {}
+    if not isinstance(params, dict):
+        return merged
+    rate_limits_update = params.get("rateLimits") if isinstance(params.get("rateLimits"), dict) else None
+    if rate_limits_update is None and any(
+        key in params
+        for key in ("limitId", "limit_id", "primary", "secondary", "rateLimitReachedType", "rate_limit_reached_type")
+    ):
+        rate_limits_update = params
+    if rate_limits_update is not None:
+        merged["rateLimits"] = merge_rate_limit_bucket(merged.get("rateLimits"), rate_limits_update)
+        limit_id = quota_text(merged["rateLimits"].get("limitId") or merged["rateLimits"].get("limit_id"), 80) or "codex"
+        by_limit = dict(merged.get("rateLimitsByLimitId")) if isinstance(merged.get("rateLimitsByLimitId"), dict) else {}
+        by_limit[limit_id] = merge_rate_limit_bucket(by_limit.get(limit_id), merged["rateLimits"])
+        merged["rateLimitsByLimitId"] = by_limit
+    by_limit_update = params.get("rateLimitsByLimitId") if isinstance(params.get("rateLimitsByLimitId"), dict) else None
+    if by_limit_update is not None:
+        by_limit = dict(merged.get("rateLimitsByLimitId")) if isinstance(merged.get("rateLimitsByLimitId"), dict) else {}
+        for limit_id, bucket in by_limit_update.items():
+            if isinstance(bucket, dict):
+                key = quota_text(limit_id, 80) or "codex"
+                by_limit[key] = merge_rate_limit_bucket(by_limit.get(key), bucket)
+                if key.lower() == "codex":
+                    merged["rateLimits"] = merge_rate_limit_bucket(merged.get("rateLimits"), by_limit[key])
+        merged["rateLimitsByLimitId"] = by_limit
+    reset_update = params.get("rateLimitResetCredits") if isinstance(params.get("rateLimitResetCredits"), dict) else None
+    if reset_update is not None:
+        current_reset = merged.get("rateLimitResetCredits") if isinstance(merged.get("rateLimitResetCredits"), dict) else {}
+        merged["rateLimitResetCredits"] = merge_rate_limit_bucket(current_reset, reset_update)
+    return merged
 
 def codex_quota_payload_from_rate_limits(
     response: dict[str, Any],
@@ -591,6 +660,10 @@ def codex_quota_payload_from_rate_limits(
         window = quota_window_payload(name, snapshot.get(name))
         if window:
             windows.append(window)
+    reset_source = response.get("rateLimitResetCredits") if isinstance(response.get("rateLimitResetCredits"), dict) else {}
+    reset_credits = {
+        "availableCount": quota_int(reset_source.get("availableCount")) if reset_source else None,
+    }
     credits_source = snapshot.get("credits") if isinstance(snapshot.get("credits"), dict) else {}
     credits = {
         "hasCredits": bool(credits_source.get("hasCredits")) if "hasCredits" in credits_source else None,
@@ -603,8 +676,7 @@ def codex_quota_payload_from_rate_limits(
     used = max(used_values) if used_values else None
     blocked_windows = [window for window in windows if window.get("remainingPercent") is not None and window["remainingPercent"] <= threshold_percent]
     reached_type = quota_text(snapshot.get("rateLimitReachedType") or snapshot.get("rate_limit_reached_type"), 120)
-    credits_depleted = credits["hasCredits"] is False and credits["unlimited"] is not True
-    exhausted = bool(reached_type) or credits_depleted or any((window.get("remainingPercent") or 0) <= 0 for window in windows)
+    exhausted = bool(reached_type) or any(window.get("remainingPercent") is not None and window["remainingPercent"] <= 0 for window in windows)
     low = bool(blocked_windows)
     status = "exhausted" if exhausted else "low" if low else "ok"
     ready = status == "ok"
@@ -623,6 +695,7 @@ def codex_quota_payload_from_rate_limits(
         "usedPercent": round(used, 3) if used is not None else None,
         "remainingPercent": round(remaining, 3) if remaining is not None else None,
         "rateLimitReachedType": reached_type or None,
+        "rateLimitResetCredits": reset_credits,
         "credits": credits,
         "windows": windows,
         "blockedWindows": blocked_windows,
@@ -649,6 +722,7 @@ class CodexQuotaMonitor:
         self.config = config
         self.isolation = isolation
         self.snapshot: dict[str, Any] | None = None
+        self.rate_limits_response: dict[str, Any] = {}
         self.next_check_at = 0
 
     def snapshot_if_due(self, *, active: bool = False) -> dict[str, Any] | None:
@@ -676,6 +750,7 @@ class CodexQuotaMonitor:
             )
             server.start()
             response = server.request("account/rateLimits/read", {}, timeout_seconds=15)
+            self.rate_limits_response = response
             self.snapshot = codex_quota_payload_from_rate_limits(
                 response,
                 threshold_percent=threshold,
@@ -701,6 +776,22 @@ class CodexQuotaMonitor:
                 server.close()
         self.next_check_at = int((self.snapshot or {}).get("nextCheckAt") or next_check_at)
         return self.snapshot or {}
+
+    def apply_rate_limit_update(self, params: dict[str, Any]) -> None:
+        current_time = int(time.time())
+        threshold = codex_quota_threshold_percent(self.config)
+        degraded = bool(self.snapshot) and not bool((self.snapshot or {}).get("ready", True))
+        next_check_at = current_time + codex_quota_check_seconds(self.config, degraded=degraded)
+        self.rate_limits_response = merge_rate_limit_response(self.rate_limits_response, params)
+        if not self.rate_limits_response:
+            return
+        self.snapshot = codex_quota_payload_from_rate_limits(
+            self.rate_limits_response,
+            threshold_percent=threshold,
+            checked_at=current_time,
+            next_check_at=next_check_at,
+        )
+        self.next_check_at = int((self.snapshot or {}).get("nextCheckAt") or next_check_at)
 
     def mark_exhausted(self, error: object, *, checked_at: int | None = None) -> dict[str, Any]:
         current_time = int(checked_at if checked_at is not None else time.time())
@@ -876,6 +967,7 @@ class ReviewWorkerV1:
                         self.isolation.env(self.config),
                         repo_dir,
                         events_path,
+                        rate_limit_callback=self.quota_monitor.apply_rate_limit_update,
                     )
                     app_server.start()
                 elif phase == "initialize_codex_connection":
@@ -1032,6 +1124,7 @@ class ReviewWorkerV1:
             materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
         manifest = read_json(artifact_dir / "artifact-manifest.json", [])
         now = time.time()
+        error_code = codex_error_code(error) if error else ""
         return {
             "protocol_version": PROTOCOL_VERSION,
             "message_type": "review_run_result",
@@ -1056,7 +1149,7 @@ class ReviewWorkerV1:
                 "completed_at": iso_time(now),
                 "duration_ms": int((now - started) * 1000),
             },
-            "error": {"code": codex_error_code(error), "message": error, "retryable": True} if error else None,
+            "error": {"code": error_code, "message": error, "retryable": error_code != "CODEX_QUOTA_EXHAUSTED"} if error else None,
             "summary": summary_payload(run_dir, status),
             "quality_gate": read_json(run_dir / "qa.json", {"status": "fail", "errors": ["run did not reach qa gate"], "warnings": []}),
             "artifact_manifest": manifest,
@@ -1399,9 +1492,16 @@ def codex_error_code(error: object) -> str:
                 return codex_error_code(parsed)
             candidates = [text]
     for candidate in candidates:
-        code = CODEX_ERROR_CODES.get(str(candidate or "").strip())
+        normalized = str(candidate or "").strip()
+        code = CODEX_ERROR_CODES.get(normalized)
         if code:
             return code
+        public_code = normalized.replace("-", "_").upper()
+        if public_code == "CODEX_QUOTA_EXHAUSTED":
+            return "CODEX_QUOTA_EXHAUSTED"
+        lowered = normalized.lower()
+        if any(marker in lowered for marker in CODEX_QUOTA_ERROR_MARKERS):
+            return "CODEX_QUOTA_EXHAUSTED"
     return "CODEX_UNKNOWN_ERROR"
 
 
@@ -1504,6 +1604,4 @@ def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Pa
                 "content_base64": base64.b64encode(data).decode("ascii"),
             },
         )
-
-
 

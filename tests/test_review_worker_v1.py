@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import unittest
@@ -12,11 +12,13 @@ from pullwise_worker.review_worker_v1 import (
     REQUIRED_SCHEMA_FILES,
     REQUIRED_TOOL_FILES,
     ActiveJob,
+    CodexQuotaMonitor,
     JobCancelled,
     JsonRpcAppServer,
     ReviewWorkerV1,
     WorkerState,
     codex_error_code,
+    codex_quota_payload_from_rate_limits,
     decide_approval,
     default_agent_report,
     effort_for_phase,
@@ -29,6 +31,7 @@ from pullwise_worker.review_worker_v1 import (
     upload_artifacts,
     validate_job_policy,
 )
+
 class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_worker_state_allows_lease_only_when_idle_without_active_job(self) -> None:
         state = WorkerState()
@@ -158,9 +161,84 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertTrue(all((review_root / "prompts" / name).is_file() for name in REQUIRED_PROMPT_FILES))
 
     def test_codex_error_mapper_returns_stable_protocol_codes(self) -> None:
-        self.assertEqual(codex_error_code({"codexErrorInfo": "UsageLimitExceeded"}), "CODEX_USAGE_LIMIT_EXCEEDED")
+        self.assertEqual(codex_error_code({"codexErrorInfo": "UsageLimitExceeded"}), "CODEX_QUOTA_EXHAUSTED")
         self.assertEqual(codex_error_code('{"codexErrorInfo":"ContextWindowExceeded"}'), "CODEX_CONTEXT_WINDOW_EXCEEDED")
         self.assertEqual(codex_error_code("unexpected"), "CODEX_UNKNOWN_ERROR")
+
+
+    def test_codex_quota_payload_selects_main_codex_bucket(self) -> None:
+        payload = codex_quota_payload_from_rate_limits(
+            {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 8, "windowDurationMins": 300, "resetsAt": 1782918371},
+                    "secondary": {"usedPercent": 22, "windowDurationMins": 10080, "resetsAt": 1783419385},
+                    "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+                    "planType": "pro",
+                    "rateLimitReachedType": None,
+                },
+                "rateLimitsByLimitId": {
+                    "codex_bengalfox": {
+                        "limitId": "codex_bengalfox",
+                        "limitName": "GPT-5.3-Codex-Spark",
+                        "primary": {"usedPercent": 80, "windowDurationMins": 300, "resetsAt": 1782918371},
+                    },
+                    "codex": {
+                        "limitId": "codex",
+                        "primary": {"usedPercent": 8, "windowDurationMins": 300, "resetsAt": 1782918371},
+                        "secondary": {"usedPercent": 22, "windowDurationMins": 10080, "resetsAt": 1783419385},
+                        "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+                        "planType": "pro",
+                        "rateLimitReachedType": None,
+                    },
+                },
+                "rateLimitResetCredits": {"availableCount": 1},
+            },
+            threshold_percent=5,
+            checked_at=1782900000,
+            next_check_at=1782900300,
+        )
+
+        self.assertEqual(payload["limitId"], "codex")
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["remainingPercent"], 78)
+        self.assertEqual(payload["planType"], "pro")
+        self.assertEqual(payload["rateLimitResetCredits"]["availableCount"], 1)
+        self.assertEqual(payload["credits"]["hasCredits"], False)
+        self.assertEqual([window["windowKind"] for window in payload["windows"]], ["five_hour", "weekly"])
+        self.assertEqual(payload["windows"][0]["remainingPercent"], 92)
+        self.assertEqual(payload["windows"][1]["remainingPercent"], 78)
+    def test_codex_quota_monitor_merges_rate_limit_updates(self) -> None:
+        monitor = CodexQuotaMonitor(
+            SimpleNamespace(
+                codex_quota_check_seconds=60,
+                codex_quota_degraded_check_seconds=30,
+                codex_quota_min_remaining_percent=20,
+            ),
+            SimpleNamespace(),
+        )
+
+        monitor.apply_rate_limit_update(
+            {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 90, "windowDurationMins": 300, "resetsAt": 123},
+                    "credits": {"hasCredits": False, "unlimited": False},
+                },
+                "rateLimitResetCredits": {"availableCount": 1},
+            }
+        )
+
+        self.assertEqual(monitor.snapshot["status"], "low")
+        self.assertFalse(monitor.snapshot["ready"])
+        self.assertEqual(monitor.snapshot["rateLimitResetCredits"]["availableCount"], 1)
+        self.assertEqual(monitor.snapshot["blockedWindows"][0]["windowKind"], "five_hour")
+
+        monitor.apply_rate_limit_update({"rateLimits": {"primary": {"usedPercent": 100}}})
+
+        self.assertEqual(monitor.snapshot["status"], "exhausted")
+        self.assertEqual(monitor.snapshot["reason"], "codex_quota_exhausted")
 
     def test_core_semantic_phases_use_plan_effort_and_other_phases_use_medium(self) -> None:
         job = {
@@ -304,3 +382,4 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

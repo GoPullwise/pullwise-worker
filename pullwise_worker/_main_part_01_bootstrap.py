@@ -834,6 +834,21 @@ class WorkerConfig:
             minimum=10,
         )
         self.readiness_check_seconds = self.active_readiness_check_seconds
+        self.codex_quota_check_seconds = env_int(
+            "PULLWISE_CODEX_QUOTA_CHECK_SECONDS",
+            self.active_readiness_check_seconds,
+            minimum=10,
+        )
+        self.codex_quota_degraded_check_seconds = env_int(
+            "PULLWISE_CODEX_QUOTA_DEGRADED_CHECK_SECONDS",
+            self.degraded_readiness_check_seconds,
+            minimum=10,
+        )
+        self.codex_quota_min_remaining_percent = env_float(
+            "PULLWISE_CODEX_QUOTA_MIN_REMAINING_PERCENT",
+            5.0,
+            minimum=0.0,
+        )
         self.machine_metrics_interval_seconds = env_int(
             "PULLWISE_WORKER_MACHINE_METRICS_SECONDS",
             DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS,
@@ -1018,6 +1033,7 @@ class PullwiseClient:
         systemd_active: bool | None = None,
         doctor_checked_at: int | None = None,
         machine_metrics: dict | None = None,
+        codex_quota: dict | None = None,
     ) -> dict:
         reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
         payload = {
@@ -1039,6 +1055,8 @@ class PullwiseClient:
             payload["active_job_ids"] = client_active_job_ids(active_job_ids)
         if isinstance(machine_metrics, dict):
             payload["machine_metrics"] = machine_metrics
+        if isinstance(codex_quota, dict):
+            payload["codexQuota"] = codex_quota
         response = self.post("/worker/heartbeat", payload)
         return response.json()
 
