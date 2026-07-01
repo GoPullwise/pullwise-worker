@@ -22,6 +22,7 @@ from pullwise_worker.review_worker_v1 import (
     JsonRpcAppServer,
     ReviewWorkerV1,
     WorkerState,
+    artifact_manifest_items,
     codex_error_code,
     codex_quota_payload_from_rate_limits,
     decide_approval,
@@ -466,7 +467,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
             artifact_dir = root / "service" / "workers" / "wk_1" / "artifacts" / "run_1"
             qa = json.loads((run_dir / "qa.json").read_text(encoding="utf-8"))
-            manifest = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            manifest = artifact_manifest_items(manifest_payload)
             qa_item = next(item for item in manifest if item["kind"] == "qa")
             run_qa_bytes = (run_dir / "qa.json").read_bytes()
             artifact_qa_bytes = (artifact_dir / "qa.json").read_bytes()
@@ -972,11 +974,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             write_completed_artifact_inputs(run_dir)
             materialize_artifacts(run_dir, artifact_dir)
 
-            manifest = __import__("json").loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            manifest_payload = __import__("json").loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
             run_manifest = __import__("json").loads((run_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            manifest = artifact_manifest_items(manifest_payload)
             kinds = {item["kind"] for item in manifest if item.get("required")}
+            self.assertEqual(manifest_payload["schema_version"], "artifact-manifest/v1")
+            self.assertEqual(manifest_payload["items"], manifest)
             self.assertTrue(REQUIRED_COMPLETED_ARTIFACTS.issubset(kinds))
-            self.assertEqual(manifest, run_manifest)
+            self.assertEqual(manifest_payload, run_manifest)
             for item in manifest:
                 self.assertIn("sha256", item)
                 self.assertIn("size_bytes", item)
@@ -992,8 +997,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir.mkdir(parents=True)
             materialize_terminal_artifacts(run_dir, artifact_dir, "failed", error="boom")
 
-            manifest = __import__("json").loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            manifest_payload = __import__("json").loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            manifest = artifact_manifest_items(manifest_payload)
             self.assertTrue(manifest)
+            self.assertEqual(manifest_payload["schema_version"], "artifact-manifest/v1")
             required_kinds = {item["kind"] for item in manifest if item.get("required")}
             self.assertTrue({"worker_log", "qa", "error_report"}.issubset(required_kinds))
             self.assertIn("qa.json", {item["name"] for item in manifest})
@@ -1188,19 +1195,22 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             validate_phase_outputs(run_dir, "repo_map")
             validate_phase_outputs(run_dir, "risk_routing")
 
-    def test_hash_artifact_phase_requires_list_manifest_in_artifact_dir(self) -> None:
+    def test_hash_artifact_phase_requires_v1_manifest_object_in_artifact_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             artifact_dir = root / "artifacts" / "run_1"
             run_dir.mkdir(parents=True)
             artifact_dir.mkdir(parents=True)
-            (artifact_dir / "artifact-manifest.json").write_text("{}", encoding="utf-8")
+            (artifact_dir / "artifact-manifest.json").write_text("[]", encoding="utf-8")
 
-            with self.assertRaisesRegex(RuntimeError, "must be a list"):
+            with self.assertRaisesRegex(RuntimeError, "must be an object"):
                 validate_phase_outputs(run_dir, "hash_artifacts", artifact_dir)
 
-            (artifact_dir / "artifact-manifest.json").write_text("[]", encoding="utf-8")
+            (artifact_dir / "artifact-manifest.json").write_text(
+                json.dumps({"schema_version": "artifact-manifest/v1", "items": []}),
+                encoding="utf-8",
+            )
             validate_phase_outputs(run_dir, "hash_artifacts", artifact_dir)
 
     def test_build_envelope_contains_stable_v1_protocol_fields(self) -> None:

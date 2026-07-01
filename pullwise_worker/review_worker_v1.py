@@ -1656,7 +1656,7 @@ class ReviewWorkerV1:
                 materialize_artifacts(run_dir, artifact_dir)
         else:
             materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
-        manifest = read_json(artifact_dir / "artifact-manifest.json", [])
+        manifest = artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))
         now = time.time()
         error_code = codex_error_code(error) if error else ""
         return {
@@ -2458,22 +2458,56 @@ def _qa_artifact_path(artifact_dir: Path, item: dict[str, Any]) -> Path:
     return artifact_dir / str(item.get("name") or "")
 
 
+def artifact_manifest_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if isinstance(items, list):
+        return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def artifact_manifest_payload(run_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema_version": "artifact-manifest/v1",
+        "run_id": run_id,
+        "created_at": iso_time(time.time()),
+        "summary": {
+            "artifacts_total": len(items),
+            "required_artifacts": sum(1 for item in items if item.get("required") is True),
+        },
+        "items": items,
+        "errors": [],
+        "warnings": [],
+    }
+
+
 def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors: list[str]) -> None:
     manifest_path = artifact_dir / "artifact-manifest.json"
     if not manifest_path.is_file():
         errors.append("artifact-manifest.json is missing")
         return
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         errors.append("artifact-manifest.json is not valid JSON")
         return
+    if not isinstance(manifest_payload, dict):
+        errors.append("artifact-manifest.json must be an object")
+        return
+    if manifest_payload.get("schema_version") != "artifact-manifest/v1":
+        errors.append("artifact-manifest.json schema_version must be artifact-manifest/v1")
+    manifest = manifest_payload.get("items")
     if not isinstance(manifest, list):
-        errors.append("artifact-manifest.json must be a list")
+        errors.append("artifact-manifest.json items must be a list")
         return
     run_manifest = run_dir / "artifact-manifest.json"
     if not run_manifest.is_file():
         errors.append("run artifact-manifest.json is missing")
+    else:
+        run_payload = read_json(run_manifest, {})
+        if not isinstance(run_payload, dict) or run_payload.get("schema_version") != "artifact-manifest/v1":
+            errors.append("run artifact-manifest.json must be artifact-manifest/v1")
     required_kinds = {str(item.get("kind") or "") for item in manifest if isinstance(item, dict) and item.get("required")}
     missing_required = sorted(REQUIRED_COMPLETED_ARTIFACTS - required_kinds)
     if missing_required:
@@ -2482,10 +2516,28 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
         if not isinstance(item, dict):
             errors.append(f"artifact-manifest[{index}] is not an object")
             continue
-        for field in ("artifact_id", "kind", "name", "schema_id", "schema_version", "encoding", "compression", "sha256", "size_bytes"):
+        for field in (
+            "artifact_id",
+            "kind",
+            "name",
+            "media_type",
+            "schema_id",
+            "schema_version",
+            "encoding",
+            "compression",
+            "required",
+            "storage",
+            "sha256",
+            "size_bytes",
+        ):
             if item.get(field) in (None, ""):
                 errors.append(f"artifact-manifest[{index}].{field} is missing")
         path = _qa_artifact_path(artifact_dir, item)
+        try:
+            path.resolve(strict=False).relative_to(artifact_dir.resolve(strict=False))
+        except ValueError:
+            errors.append(f"artifact {item.get('name') or index} path escapes artifact directory")
+            continue
         if not path.is_file():
             errors.append(f"artifact {item.get('name') or index} is missing")
             continue
@@ -2500,6 +2552,16 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
             errors.append(f"artifact {path.name} encoding must be utf-8")
         if item.get("compression") != "none":
             errors.append(f"artifact {path.name} compression must be none")
+        if item.get("required") not in {True, False}:
+            errors.append(f"artifact {path.name} required must be boolean")
+        storage = item.get("storage") if isinstance(item.get("storage"), dict) else {}
+        storage_url = str(storage.get("url") or "")
+        if (
+            storage.get("type") != "server_artifact"
+            or not storage_url.startswith("/v1/review-runs/")
+            or not storage_url.endswith(f"/artifacts/{item.get('artifact_id')}")
+        ):
+            errors.append(f"artifact {path.name} storage must reference server_artifact")
 
 
 def validate_source_unmodified_for_qa(repo_dir: Path, run_dir: Path, errors: list[str]) -> None:
@@ -2630,15 +2692,12 @@ def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = N
         }
     if phase == "upload_artifacts":
         manifest_dir = artifact_dir or run_dir
-        manifest = read_json(manifest_dir / "artifact-manifest.json", [])
+        manifest = artifact_manifest_items(read_json(manifest_dir / "artifact-manifest.json", {}))
         uploadable = 0
-        if isinstance(manifest, list):
-            for item in manifest:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or "").strip()
-                if name and (manifest_dir / name).is_file():
-                    uploadable += 1
+        for item in manifest:
+            name = str(item.get("name") or "").strip()
+            if name and (manifest_dir / name).is_file():
+                uploadable += 1
         return {"artifacts_total": uploadable, "artifacts_uploaded": uploadable}
     return {}
 
@@ -2678,8 +2737,12 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
                 manifest = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise RuntimeError("artifact-manifest.json must be valid JSON") from exc
-            if not isinstance(manifest, list):
-                raise RuntimeError("artifact-manifest.json must be a list")
+            if not isinstance(manifest, dict):
+                raise RuntimeError("artifact-manifest.json must be an object")
+            if manifest.get("schema_version") != "artifact-manifest/v1":
+                raise RuntimeError("artifact-manifest.json must use schema_version artifact-manifest/v1")
+            if not isinstance(manifest.get("items"), list):
+                raise RuntimeError("artifact-manifest.json items must be a list")
 
 
 def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> dict[str, Any]:
@@ -2909,8 +2972,9 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
         artifact_item(artifact_dir / "codex-events.jsonl", "codex_event_log", "application/jsonl", "codex-events", False),
         artifact_item(artifact_dir / "progress.log.jsonl", "progress_log", "application/jsonl", "progress-log", False),
     ]
-    write_json(artifact_dir / "artifact-manifest.json", manifest)
-    write_json(run_dir / "artifact-manifest.json", manifest)
+    manifest_payload = artifact_manifest_payload(artifact_dir.name, manifest)
+    write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
+    write_json(run_dir / "artifact-manifest.json", manifest_payload)
 
 
 def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
@@ -2965,8 +3029,9 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         dest = artifact_dir / src.name
         shutil.copy2(src, dest)
         manifest.append(artifact_item(dest, kind, media_type, schema_id, False))
-    write_json(artifact_dir / "artifact-manifest.json", manifest)
-    write_json(run_dir / "artifact-manifest.json", manifest)
+    manifest_payload = artifact_manifest_payload(artifact_dir.name, manifest)
+    write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
+    write_json(run_dir / "artifact-manifest.json", manifest_payload)
 
 
 def artifact_item(path: Path, kind: str, media_type: str, schema_id: str, required: bool) -> dict[str, Any]:
@@ -3181,9 +3246,10 @@ def upload_artifacts(
     *,
     progress_callback: Any | None = None,
 ) -> None:
-    manifest = read_json(artifact_dir / "artifact-manifest.json", [])
-    if not isinstance(manifest, list):
-        raise RuntimeError("artifact manifest must be a list before upload")
+    manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
+    manifest = artifact_manifest_items(manifest_payload)
+    if not isinstance(manifest_payload, (dict, list)) or not manifest:
+        raise RuntimeError("artifact manifest must contain artifact items before upload")
     uploadable: list[tuple[dict[str, Any], Path]] = []
     for item in manifest:
         if not isinstance(item, dict):

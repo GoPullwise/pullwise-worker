@@ -139,7 +139,7 @@ Review pipeline rules:
 - A phase may emit `phase_completed` only after its required output files or
   directories exist and local validation passes. Schema-bound phase outputs must
   be parseable JSON objects with the expected `schema_version`; hash-artifact
-  completion requires a valid list-shaped `artifact-manifest.json`.
+  completion requires an `artifact-manifest/v1` object with an `items` list.
 - Intent-driven tests are allowed only for selected P0/P1 high-value candidate
   findings. Generated tests must live in the disposable validation workspace or
   `.codex-review/generated-tests/**`, must not install dependencies or use
@@ -151,7 +151,7 @@ Review pipeline rules:
 - Artifact manifest/upload entries must include stable v1 metadata:
   `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
   `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,
-  `sha256`, and `size_bytes`.
+  `storage`, `sha256`, and `size_bytes`.
 - Post run progress through `POST /v1/review-runs/{run_id}/events`, upload
   artifacts through `POST /v1/review-runs/{run_id}/artifacts`, and upload
   artifacts before submitting the terminal result envelope through
