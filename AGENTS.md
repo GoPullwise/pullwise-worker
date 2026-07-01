@@ -237,7 +237,7 @@ Terminal result envelopes must include the stable v1 summary shape:
 
 Do not require derived topology artifacts for worker output. New review logic,
 protocols, reports, tests, and documentation must depend on the stable envelope
-and versioned artifacts, not on retired report data structures.
+and versioned artifacts.
 
 Completed-run artifacts must be real outputs produced by the run, not
 placeholders synthesized during hashing or envelope construction. The QA gate
@@ -247,7 +247,7 @@ classifications and generated-test artifact refs, and the final
 `artifact-manifest.json` required kinds, sizes, and SHA-256 values before
 upload/result submission.
 
-Legacy worker lifecycle endpoints for operator commands, logs, and registry state
+Worker lifecycle endpoints for operator commands, logs, and registry state
 are not the core review protocol. Do not route new review leasing, progress,
 artifact, or result behavior through `/worker/...` compatibility paths.
 
