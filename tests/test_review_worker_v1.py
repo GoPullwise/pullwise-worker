@@ -1631,6 +1631,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "intent" / "test-output").mkdir(parents=True)
             (run_dir / "intent" / "test-output" / "ITV-001.stdout.log").write_text("ok\n", encoding="utf-8")
             (run_dir / "intent" / "test-output" / "ITV-001.stderr.log").write_text("", encoding="utf-8")
+            (run_dir / "raw-reviewers").mkdir(parents=True)
+            (run_dir / "verified-reviewers").mkdir(parents=True)
+            reviewer_payload = {"schema_version": "codex-reviewer-output/v1", "findings": []}
+            (run_dir / "raw-reviewers" / "security.json").write_text(json.dumps(reviewer_payload), encoding="utf-8")
+            (run_dir / "verified-reviewers" / "security.json").write_text(json.dumps(reviewer_payload), encoding="utf-8")
             materialize_artifacts(run_dir, artifact_dir)
 
             manifest_payload = __import__("json").loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
@@ -1638,6 +1643,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             manifest = artifact_manifest_items(manifest_payload)
             kinds = {item["kind"] for item in manifest if item.get("required")}
             output_items = [item for item in manifest if item["kind"] == "intent_test_output"]
+            reviewer_items = [item for item in manifest if item["kind"] in {"raw_reviewer_output", "verified_reviewer_output"}]
             self.assertEqual(manifest_payload["schema_version"], "artifact-manifest/v1")
             self.assertEqual(manifest_payload["items"], manifest)
             self.assertTrue(REQUIRED_COMPLETED_ARTIFACTS.issubset(kinds))
@@ -1646,6 +1652,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 {"intent-test-output-ITV-001.stdout.log", "intent-test-output-ITV-001.stderr.log"},
             )
             self.assertEqual(len({item["artifact_id"] for item in output_items}), 2)
+            self.assertEqual({item["kind"] for item in reviewer_items}, {"raw_reviewer_output", "verified_reviewer_output"})
+            self.assertEqual({item["name"] for item in reviewer_items}, {"raw-reviewer-security.json", "verified-reviewer-security.json"})
+            self.assertEqual(len({item["artifact_id"] for item in reviewer_items}), 2)
             self.assertEqual(manifest_payload, run_manifest)
             for item in manifest:
                 self.assertIn("sha256", item)

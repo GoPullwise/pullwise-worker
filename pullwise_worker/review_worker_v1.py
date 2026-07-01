@@ -2608,8 +2608,11 @@ def _intent_output_path(run_dir: Path, test_id: str, suffix: str) -> Path:
 
 
 def _intent_output_artifact_id(name: str) -> str:
-    suffix = "".join(char if char.isalnum() else "_" for char in name).strip("_") or "log"
-    return f"art_intent_test_output_{suffix}"
+    return f"art_intent_test_output_{safe_artifact_suffix(name, fallback='log')}"
+
+
+def safe_artifact_suffix(name: str, *, fallback: str = "artifact") -> str:
+    return "".join(char if char.isalnum() else "_" for char in name).strip("_") or fallback
 
 
 def _intent_test_env() -> dict[str, str]:
@@ -3461,6 +3464,23 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         dest = artifact_dir / src.name
         shutil.copy2(src, dest)
         manifest.append(artifact_item(dest, kind, media_type, schema_id, False))
+    for source_dir, name_prefix, artifact_prefix, kind in (
+        (run_dir / "raw-reviewers", "raw-reviewer", "art_raw_reviewer_output", "raw_reviewer_output"),
+        (run_dir / "verified-reviewers", "verified-reviewer", "art_verified_reviewer_output", "verified_reviewer_output"),
+    ):
+        for src in sorted(source_dir.glob("*.json")) if source_dir.is_dir() else []:
+            dest = artifact_dir / f"{name_prefix}-{src.name}"
+            shutil.copy2(src, dest)
+            manifest.append(
+                artifact_item(
+                    dest,
+                    kind,
+                    "application/json",
+                    "reviewer-output",
+                    False,
+                    artifact_id=f"{artifact_prefix}_{safe_artifact_suffix(src.name)}",
+                )
+            )
     for src in sorted((run_dir / "intent" / "test-output").glob("*.log")):
         if not src.is_file():
             continue

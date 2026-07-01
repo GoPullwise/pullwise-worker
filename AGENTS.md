@@ -170,6 +170,9 @@ Review pipeline rules:
 - Required completed artifacts are `report.md`, `report.agent.json`,
   `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`,
   `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
+- Optional v1 artifact catalog entries must be preserved when present,
+  including `raw_reviewer_output`, `verified_reviewer_output`,
+  `intent_test_output`, and the intent planning/source/result artifacts.
 - Artifact manifest/upload entries must include stable v1 metadata:
   `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
   `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,
