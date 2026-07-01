@@ -358,19 +358,75 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(calls[-2][2])
         self.assertTrue(calls[-1][2])
 
+    def test_pullwise_client_reports_cancelling_heartbeat_status(self) -> None:
+        calls = []
+
+        class Client(PullwiseClient):
+            def post(self, path: str, payload: dict, *, compress: bool = False) -> PullwiseResponse:
+                calls.append((path, payload, compress))
+                return PullwiseResponse(b"{\"ok\": true}")
+
+        client = Client(
+            SimpleNamespace(
+                worker_id="wk_1",
+                worker_token="secret",
+                server_url="https://api.pullwise.dev",
+                provider="codex",
+                provider_chain=["codex"],
+                result_upload_compress_min_bytes=1024,
+            )
+        )
+
+        client.heartbeat(
+            running_jobs=1,
+            active_job_ids=["job_1"],
+            progress={"run_id": "run_1", "current_phase_status": "cancelling"},
+        )
+
+        payload = calls[0][1]
+        self.assertEqual(calls[0][0], "/v1/workers/wk_1/heartbeat")
+        self.assertEqual(payload["status"], "cancelling")
+        self.assertEqual(payload["concurrency"]["active_jobs"], 1)
+        self.assertEqual(payload["concurrency"]["available_job_slots"], 0)
+
     def test_worker_honors_v1_cancel_run_command_from_heartbeat(self) -> None:
+        events = []
+
         class Client:
             def heartbeat(self, **_payload: dict) -> dict:
                 return {"commands": [{"type": "cancel_run", "run_id": "run_1", "reason": "user_requested"}]}
 
-        worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home="/tmp"), client=Client())
-        worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
-        active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
-        worker.state.set_active(active)
+            def event(self, run_id: str, event: dict) -> dict:
+                events.append((run_id, event))
+                return {}
 
-        worker.heartbeat()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir(parents=True)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home="/tmp"), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+            active.run_dir = run_dir
+            active.current_phase = "reviewer_fanout"
+            active.overall_percent = 64.0
+            active.current_phase_percent = 20.0
+            worker.state.set_active(active)
+
+            worker.heartbeat()
+            worker.heartbeat()
+            event_lines = (run_dir / "progress.log.jsonl").read_text(encoding="utf-8").splitlines()
 
         self.assertTrue(active.cancel_requested)
+        self.assertEqual(active.cancel_reason, "user_requested")
+        self.assertEqual(active.state, "cancelling")
+        self.assertEqual(active.current_phase_status, "cancelling")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "run_1")
+        self.assertEqual(events[0][1]["event_type"], "run_cancel_requested")
+        self.assertEqual(events[0][1]["progress"]["status"], "cancelling")
+        self.assertEqual(events[0][1]["data"]["reason"], "user_requested")
+        self.assertEqual(len(event_lines), 1)
+        self.assertEqual(json.loads(event_lines[0])["event_type"], "run_cancel_requested")
 
     def test_worker_registers_before_heartbeat_and_lease(self) -> None:
         calls = []

@@ -163,6 +163,11 @@ Review pipeline rules:
   `intent_tests_written`, and `intent_tests_run`; `upload_artifacts` progress
   data must include `artifacts_total` and `artifacts_uploaded` and update after
   each successfully uploaded artifact.
+- V1 `cancel_run` commands must mark the active job `cancelling`, keep
+  available job slots at zero, emit exactly one `run_cancel_requested` event
+  before the terminal `run_cancelled` event, interrupt the active Codex turn,
+  and still submit a valid cancelled result envelope with partial artifacts
+  when possible.
 - Failed and cancelled jobs must still submit valid terminal envelopes when
   possible, including required `qa`, `worker_log`, and either `error_report` or
   partial `report.agent` artifacts.

@@ -252,6 +252,9 @@ class ActiveJob:
     started_at: float = field(default_factory=time.time)
     current_phase: str = "prepare_workspace"
     cancel_requested: bool = False
+    cancel_reason: str = ""
+    cancel_requested_reported: bool = False
+    run_dir: Path | None = None
     last_event_sequence: int = 0
     overall_percent: float = 0.0
     current_phase_status: str = "pending"
@@ -1060,14 +1063,14 @@ class ReviewWorkerV1:
             response = self.client.heartbeat(**heartbeat_payload)
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
         if active and active.job_id in (cancelled or []):
-            active.cancel_requested = True
+            self.request_cancel(active, reason="server_cancelled")
         commands = response.get("commands") if isinstance(response, dict) and isinstance(response.get("commands"), list) else []
         if active:
             for command in commands:
                 if not isinstance(command, dict):
                     continue
                 if command.get("type") == "cancel_run" and str(command.get("run_id") or "") == active.run_id:
-                    active.cancel_requested = True
+                    self.request_cancel(active, reason=str(command.get("reason") or "server_cancelled"))
         return response if isinstance(response, dict) else {}
 
     def poll_cancel_requested(self) -> bool:
@@ -1128,6 +1131,36 @@ class ReviewWorkerV1:
             except Exception:
                 append_jsonl(run_dir / "worker.log.jsonl", {"event": "progress_event_post_failed", "phase": phase, "time": iso_time(time.time())})
         return event
+
+    def request_cancel(self, active: ActiveJob, *, reason: str = "server_cancelled") -> None:
+        reason_text = str(reason or "server_cancelled").strip() or "server_cancelled"
+        active.cancel_requested = True
+        active.cancel_reason = reason_text
+        active.state = "cancelling"
+        active.current_phase_status = "cancelling"
+        active.message = "Cancellation requested."
+        if active.run_dir is not None:
+            self.emit_cancel_requested(active, active.run_dir)
+
+    def emit_cancel_requested(self, active: ActiveJob, run_dir: Path) -> None:
+        if active.cancel_requested_reported:
+            return
+        reason = active.cancel_reason or "server_cancelled"
+        active.cancel_requested = True
+        active.state = "cancelling"
+        active.cancel_requested_reported = True
+        append_jsonl(run_dir / "worker.log.jsonl", {"event": "run_cancel_requested", "reason": reason, "time": iso_time(time.time())})
+        self.emit_event(
+            active,
+            run_dir,
+            "run_cancel_requested",
+            active.current_phase,
+            status="cancelling",
+            progress=active.overall_percent,
+            current_phase_percent=active.current_phase_percent,
+            message="Cancellation requested.",
+            data={"reason": reason, "cancel_requested": True},
+        )
 
     def start_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int) -> None:
         active.state = "finishing" if phase in {"upload_artifacts", "submit_result_envelope", "cleanup_active_job"} else "busy"
@@ -1221,13 +1254,16 @@ class ReviewWorkerV1:
         try:
             validate_job_policy(job)
             repo_dir, run_dir, artifact_dir = self.prepare_workspace(job, run_id)
+            active.run_dir = run_dir
             events_path = artifact_dir / "codex-events.jsonl"
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_started", "job_id": job_id, "run_id": run_id, "time": iso_time(started)})
             self.emit_event(active, run_dir, "run_started", "prepare_workspace", status="running", progress=0, message="Run started.")
             for phase, progress in PIPELINE_PHASES:
+                if active.cancel_requested:
+                    raise JobCancelled(active.cancel_reason or "cancel requested")
                 self.start_phase(active, run_dir, phase, progress)
                 if active.cancel_requested:
-                    raise JobCancelled("cancel requested")
+                    raise JobCancelled(active.cancel_reason or "cancel requested")
                 try:
                     if phase == "prepare_workspace":
                         pass
@@ -1282,9 +1318,22 @@ class ReviewWorkerV1:
         except JobCancelled:
             artifact_dir = artifact_dir or self.isolation.artifacts / run_id
             run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
-            append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_cancelled", "error": "cancel requested", "time": iso_time(time.time())})
-            self.emit_event(active, run_dir, "run_cancelled", active.current_phase, status="cancelled", progress=active.overall_percent, message="Run cancelled.")
-            envelope = self.build_envelope(job, run_id, "cancelled", started, artifact_dir, run_dir, error="cancel requested")
+            active.run_dir = active.run_dir or run_dir
+            cancel_reason = active.cancel_reason or "cancel requested"
+            self.request_cancel(active, reason=cancel_reason)
+            self.emit_cancel_requested(active, run_dir)
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_cancelled", "error": "cancel requested", "reason": cancel_reason, "time": iso_time(time.time())})
+            self.emit_event(
+                active,
+                run_dir,
+                "run_cancelled",
+                active.current_phase,
+                status="cancelled",
+                progress=active.overall_percent,
+                message="Run cancelled.",
+                data={"reason": cancel_reason},
+            )
+            envelope = self.build_envelope(job, run_id, "cancelled", started, artifact_dir, run_dir, error=f"cancel requested: {cancel_reason}")
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error

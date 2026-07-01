@@ -946,6 +946,30 @@ def read_pullwise_response_body(response: object) -> bytes:
     return body
 
 
+def clean_protocol_text(value: object, max_length: int = 500) -> str:
+    try:
+        limit = max(0, int(max_length))
+    except (TypeError, ValueError):
+        limit = 500
+    text = re.sub(r"\s+", " ", str(value or "").replace("\x00", " ")).strip()
+    return text[:limit]
+
+
+def redact_secrets(text: object, config: WorkerConfig | None = None) -> str:
+    redacted = str(text or "")
+    token = str(getattr(config, "worker_token", "") or "") if config else ""
+    if token:
+        redacted = redacted.replace(token, "[redacted]")
+    redacted = re.sub(
+        r"(?i)\b(authorization\s*:\s*)(bearer|basic)\s+([^\s,;]+)",
+        lambda match: f"{match.group(1)}{match.group(2)} [redacted]",
+        redacted,
+    )
+    redacted = re.sub(r"(?i)x-access-token:[^@\s]+@", "x-access-token:[redacted]@", redacted)
+    redacted = re.sub(r"\b(?:gh[oprsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b", "[redacted]", redacted)
+    return redacted
+
+
 def client_protocol_text(value: object, config: WorkerConfig | None = None, max_length: int = 500) -> str:
     return clean_protocol_text(redact_secrets(value, config), max_length)
 
@@ -1091,13 +1115,18 @@ class PullwiseClient:
     ) -> dict:
         reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
         active_run_id = ""
+        progress_status = ""
         if isinstance(progress, dict):
             active_run_id = str(progress.get("run_id") or progress.get("runId") or "").strip()
+            progress_status = client_protocol_text(progress.get("current_phase_status") or progress.get("status"), self.config, 80)
         codex_server_status = "ready" if codex_ready is not False else "needs_attention"
+        status = "idle"
+        if reported_running_jobs:
+            status = progress_status if progress_status in {"cancelling", "finishing", "failure_handling"} else "busy"
         payload = {
             "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
             "worker_id": self.config.worker_id,
-            "status": "busy" if reported_running_jobs else "idle",
+            "status": status,
             "active_run_id": active_run_id or None,
             "hostname": socket.gethostname(),
             "concurrency": {
