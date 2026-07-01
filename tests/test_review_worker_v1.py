@@ -2159,6 +2159,139 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             validate_phase_outputs(run_dir, "intent_test_failure_analysis")
 
+    def test_validate_phase_outputs_rejects_malformed_intent_map(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            map_path = run_dir / "intent" / "intent-map.json"
+            map_path.write_text(json.dumps({"schema_version": "intent-map/v1", "bundle_id": "all"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "behavioral_contracts"):
+                validate_phase_outputs(run_dir, "intent_mining")
+
+            map_path.write_text(
+                json.dumps({"schema_version": "intent-map/v1", "bundle_id": "all", "behavioral_contracts": []}),
+                encoding="utf-8",
+            )
+            validate_phase_outputs(run_dir, "intent_mining")
+
+    def test_validate_phase_outputs_rejects_duplicate_intent_plan_test_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "clusters.json").write_text(
+                json.dumps({"schema_version": "cluster-output/v1", "clusters": [{"cluster_id": "C-001"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-plan.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-plan/v1",
+                        "test_targets": [
+                            {
+                                "test_id": "ITV-001",
+                                "linked_finding_ids": ["C-001"],
+                                "title": "first",
+                                "expected_result_before_fix": "fail",
+                            },
+                            {
+                                "test_id": "ITV-001",
+                                "linked_finding_ids": ["C-001"],
+                                "title": "second",
+                                "expected_result_before_fix": "fail",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "duplicated"):
+                validate_phase_outputs(run_dir, "intent_test_planning")
+
+    def test_validate_phase_outputs_rejects_unknown_intent_linked_finding_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "clusters.json").write_text(
+                json.dumps({"schema_version": "cluster-output/v1", "clusters": [{"cluster_id": "C-001"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-plan.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-plan/v1",
+                        "test_targets": [
+                            {
+                                "test_id": "ITV-001",
+                                "linked_finding_ids": ["C-999"],
+                                "title": "unknown cluster link",
+                                "expected_result_before_fix": "fail",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "unknown cluster id C-999"):
+                validate_phase_outputs(run_dir, "intent_test_planning")
+
+    def test_validate_phase_outputs_rejects_missing_generated_test_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-001",
+                                "path": ".codex-review/generated-tests/missing.test.py",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "path does not exist"):
+                validate_phase_outputs(run_dir, "intent_test_writing")
+
+    def test_validate_phase_outputs_rejects_missing_intent_raw_output_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            output_dir = run_dir / "intent" / "test-output"
+            output_dir.mkdir(parents=True)
+            raw_path = run_dir / "intent" / "intent-test-results.raw.json"
+            stdout_path = output_dir / "ITV-001.stdout.log"
+            stderr_path = output_dir / "ITV-001.stderr.log"
+            raw_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-run-results/v1",
+                        "test_runs": [
+                            {
+                                "test_id": "ITV-001",
+                                "status": "failed",
+                                "command": "pytest .codex-review/generated-tests/test_intent.py",
+                                "stdout_path": str(stdout_path),
+                                "stderr_path": str(stderr_path),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stdout_path output artifact is missing"):
+                validate_phase_outputs(run_dir, "intent_test_running")
+
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text("failed\n", encoding="utf-8")
+            validate_phase_outputs(run_dir, "intent_test_running")
+
     def test_fallback_semantic_outputs_satisfy_phase_output_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"

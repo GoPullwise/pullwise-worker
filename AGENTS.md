@@ -157,6 +157,12 @@ Review pipeline rules:
   findings. Generated tests must live in the disposable validation workspace or
   `.codex-review/generated-tests/**`, must not install dependencies or use
   network, and must execute with `cwd` inside the disposable validation repo.
+  Local phase validation must enforce the v1.2 intent artifact contract:
+  `intent-map.json` has `bundle_id` and `behavioral_contracts`, every planned,
+  generated, raw, and analyzed test has a unique `test_id`, plan/source/result
+  `linked_finding_ids` reference IDs present in `clusters.json`, generated test
+  files exist, non-skipped raw runs include a command plus existing stdout and
+  stderr log artifacts, and final classifications use only the allowed enum.
   When `intent_test_validation.enabled` is false in the canonical job policy,
   the worker must skip the intent child phases without Codex turns or local test
   execution after writing the parent intent validation config artifact.
