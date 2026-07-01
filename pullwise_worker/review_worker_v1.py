@@ -1330,7 +1330,28 @@ class ReviewWorkerV1:
         )
 
     def fail_phase(self, active: ActiveJob, run_dir: Path, phase: str, error: object) -> None:
-        append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_failed", "phase": phase, "error": str(error), "time": iso_time(time.time())})
+        failure = failure_payload_for_error(error, status="failed", phase=phase)
+        failure_record = {
+            "event": "phase_failed",
+            "phase": phase,
+            "error": str(error),
+            "time": iso_time(time.time()),
+            "failure_category": failure.get("category"),
+            "failure_action": failure.get("failure_action"),
+        }
+        append_jsonl(run_dir / "worker.log.jsonl", failure_record)
+        run_state = read_json(run_dir / "run-state.json", {})
+        if not isinstance(run_state, dict):
+            run_state = {}
+        run_state["failure"] = {
+            "phase": phase,
+            "message": str(error),
+            "category": failure.get("category"),
+            "failure_action": failure.get("failure_action"),
+            "retryable": failure.get("retryable"),
+            "updated_at": iso_time(time.time()),
+        }
+        write_json(run_dir / "run-state.json", run_state)
         self.emit_event(
             active,
             run_dir,
@@ -1495,7 +1516,16 @@ class ReviewWorkerV1:
                 message="Run cancelled.",
                 data={"reason": cancel_reason},
             )
-            envelope = self.build_envelope(job, run_id, "cancelled", started, artifact_dir, run_dir, error=f"cancel requested: {cancel_reason}")
+            envelope = self.build_envelope(
+                job,
+                run_id,
+                "cancelled",
+                started,
+                artifact_dir,
+                run_dir,
+                error=f"cancel requested: {cancel_reason}",
+                phase=active.current_phase,
+            )
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
@@ -1521,7 +1551,16 @@ class ReviewWorkerV1:
                 message="Run produced a partial result.",
                 data={"reason": reason},
             )
-            envelope = self.build_envelope(job, run_id, "partial_completed", started, artifact_dir, run_dir, error=reason)
+            envelope = self.build_envelope(
+                job,
+                run_id,
+                "partial_completed",
+                started,
+                artifact_dir,
+                run_dir,
+                error=reason,
+                phase=active.current_phase,
+            )
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
@@ -1537,7 +1576,16 @@ class ReviewWorkerV1:
             run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_failed", "error": str(exc), "time": iso_time(time.time())})
             self.emit_event(active, run_dir, "run_failed", active.current_phase, status="failed", progress=active.overall_percent, message=str(exc))
-            envelope = self.build_envelope(job, run_id, "failed", started, artifact_dir, run_dir, error=str(exc))
+            envelope = self.build_envelope(
+                job,
+                run_id,
+                "failed",
+                started,
+                artifact_dir,
+                run_dir,
+                error=str(exc),
+                phase=active.current_phase,
+            )
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
@@ -1803,6 +1851,7 @@ class ReviewWorkerV1:
         run_dir: Path,
         *,
         error: str = "",
+        phase: str = "",
     ) -> dict[str, Any]:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         if status == "completed":
@@ -1812,7 +1861,7 @@ class ReviewWorkerV1:
             materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
         manifest = artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))
         now = time.time()
-        error_code = codex_error_code(error) if error else ""
+        error_payload = failure_payload_for_error(error, status=status, phase=phase) if error else None
         return {
             "protocol_version": PROTOCOL_VERSION,
             "message_type": "review_run_result",
@@ -1838,7 +1887,7 @@ class ReviewWorkerV1:
                 "duration_ms": int((now - started) * 1000),
             },
             "progress_final": progress_final_payload(run_dir, run_id, status),
-            "error": {"code": error_code, "message": error, "retryable": error_code != "CODEX_QUOTA_EXHAUSTED"} if error else None,
+            "error": error_payload,
             "summary": summary_payload(run_dir, status),
             "quality_gate": read_json(run_dir / "qa.json", {"status": "fail", "errors": ["run did not reach qa gate"], "warnings": []}),
             "artifact_manifest": manifest,
@@ -3963,6 +4012,61 @@ def codex_error_code(error: object) -> str:
         if any(marker in lowered for marker in CODEX_QUOTA_ERROR_MARKERS):
             return "CODEX_QUOTA_EXHAUSTED"
     return "CODEX_UNKNOWN_ERROR"
+
+
+def failure_payload_for_error(error: object, *, status: str = "", phase: str = "") -> dict[str, Any]:
+    status_text = str(status or "").strip().lower()
+    phase_text = str(phase or "").strip().lower()
+    message = str(error or "").strip()
+    lowered = message.lower()
+    code = codex_error_code(error)
+
+    category = "codex_turn_failure"
+    action = "fail_job_retryable"
+    retryable = True
+
+    if status_text == "cancelled" or "cancel" in lowered:
+        category, action, retryable = "job_cancelled", "cancel_job", False
+    elif status_text == "partial_completed":
+        category, action, retryable = "qa_failure", "partial_result", False
+    elif phase_text == "start_codex_app_server":
+        category, action, retryable = "codex_app_server_failure", "disable_worker", False
+    elif phase_text == "check_codex_auth" or code == "CODEX_UNAUTHORIZED":
+        category, action, retryable = "codex_auth_failure", "fail_job_retryable", True
+    elif code == "CODEX_QUOTA_EXHAUSTED":
+        category, action, retryable = "codex_usage_limit_exceeded", "fail_job_retryable", True
+    elif code == "CODEX_CONTEXT_WINDOW_EXCEEDED":
+        category, action, retryable = "context_budget_failure", "split_bundle_and_retry", True
+    elif code == "CODEX_SANDBOX_ERROR":
+        category, action, retryable = "worker_environment_failure", "fail_job_terminal", False
+    elif "artifact" in lowered and "upload" in lowered:
+        category, action, retryable = "artifact_upload_failure", "retry_phase", True
+    elif "result submit" in lowered or "pending-submit" in lowered:
+        category, action, retryable = "result_submit_failure", "retry_phase", True
+    elif "server unavailable" in lowered or "connection" in lowered:
+        category, action, retryable = "server_connection_failure", "retry_phase", True
+    elif phase_text in {"reviewer_json_validation"} or "json" in lowered or "schema" in lowered:
+        category, action, retryable = "json_schema_failure", "repair_output", True
+    elif phase_text == "location_validation":
+        category, action, retryable = "location_validation_failure", "degrade_scope", False
+    elif phase_text == "intent_test_planning":
+        category, action, retryable = "intent_test_planning_failure", "skip_intent_test", False
+    elif phase_text == "intent_test_writing":
+        category, action, retryable = "intent_test_generation_failure", "skip_intent_test", False
+    elif phase_text == "intent_test_running":
+        category, action, retryable = "intent_test_runtime_failure", "degrade_scope", False
+    elif phase_text == "intent_test_failure_analysis":
+        category, action, retryable = "intent_test_oracle_failure", "degrade_scope", False
+    elif phase_text == "qa_gate" or "qa" in lowered:
+        category, action, retryable = "qa_failure", "partial_result", False
+
+    return {
+        "code": code,
+        "category": category,
+        "message": message,
+        "retryable": retryable,
+        "failure_action": action,
+    }
 
 
 def copy_tree(source: Path, dest: Path) -> None:
