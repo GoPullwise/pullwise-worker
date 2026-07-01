@@ -1686,13 +1686,185 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
+    "bootstrap_helper_scripts": {
+        "role": "Bootstrap Helper Script Maintainer",
+        "prompt_files": [],
+        "inputs": ["v1.2 worker spec", ".codex-review/AGENTS.review.md"],
+        "outputs": [".codex-review/tools/*.py", ".codex-review/schemas/*.schema.json", ".codex-review/prompts/*.md"],
+        "instructions": [
+            "Create or repair only review helper tools, schemas, and prompt templates.",
+            "Helper scripts must use Python 3 standard library only and perform mechanical tasks only.",
+            "Return a concise implementation summary; do not include secrets.",
+        ],
+    },
+    "repo_map": {
+        "role": "Repo Mapper",
+        "prompt_files": ["00_repo_mapper.md"],
+        "inputs": ["inventory.json", "README/docs/manifest files", "AGENTS"],
+        "outputs": ["repo-map.json"],
+        "instructions": [
+            "Identify languages, frameworks, entrypoints, trust boundaries, critical areas, data flows, and test strategy.",
+            "Do not report bugs in this phase.",
+            "Write JSON only using repo-map/v1.",
+        ],
+    },
+    "risk_routing": {
+        "role": "Risk Router",
+        "prompt_files": ["01_risk_router.md"],
+        "inputs": ["repo-map.json", "inventory.json"],
+        "outputs": ["risk-routing.json", "coverage.json when coverage is refined"],
+        "instructions": [
+            "Classify files and directories into P0/P1/P2/P3/SKIP using role, entrypoint, trust boundary, auth/payment/data/upload/config/concurrency signals.",
+            "Do not report findings in this phase.",
+            "Write JSON only using risk-routing/v1.",
+        ],
+    },
+    "reviewer_fanout": {
+        "role": "Sequential Logical Reviewer Fanout",
+        "prompt_files": [
+            "reviewers/security.md",
+            "reviewers/correctness.md",
+            "reviewers/test_gap.md",
+            "reviewers/correctness_lite.md",
+        ],
+        "inputs": ["bundles/*.md", "repo-map.json", "risk-routing.json", "reviewer prompts"],
+        "outputs": ["raw-reviewers/*.json"],
+        "instructions": [
+            "Review bundles in tier order using security, correctness, test-gap, and correctness-lite perspectives as applicable.",
+            "Every finding must be concrete, located, evidenced, actionable, and include false-positive risk.",
+            "Write JSON only using codex-reviewer-output/v1.",
+        ],
+    },
+    "clustering_and_voting": {
+        "role": "Finding Clusterer and Vote Aggregator",
+        "prompt_files": ["03_clusterer.md"],
+        "inputs": ["verified-reviewers/*.json", "location-verification.json"],
+        "outputs": ["clusters.json", "validation-input.json"],
+        "instructions": [
+            "Merge duplicate findings, preserve supporting agents, compute weighted confidence, and suppress vague findings.",
+            "Do not inspect source code and do not create new findings.",
+            "Write JSON only using cluster-output/v1 and validation-input/v1 compatible fields.",
+        ],
+    },
+    "intent_mining": {
+        "role": "Intent Miner",
+        "prompt_files": ["intent/04_intent_miner.md"],
+        "inputs": ["repo-map.json", "clusters.json", "selected bundle sources", "docs/tests/API contracts/types"],
+        "outputs": ["intent/intent-map.json"],
+        "instructions": [
+            "Extract behavioral contracts from docs, tests, API specs, types, comments, route definitions, and error messages.",
+            "Do not infer intent only from implementation code.",
+            "Write JSON only using intent-map/v1.",
+        ],
+    },
+    "intent_test_planning": {
+        "role": "Intent Test Planner",
+        "prompt_files": ["intent/05_intent_test_planner.md"],
+        "inputs": ["clusters.json", "intent/intent-map.json", "validation-input.json"],
+        "outputs": ["intent/intent-test-plan.json"],
+        "instructions": [
+            "Select only high-value P0/P1 candidate findings for temporary tests.",
+            "Every test target must link to finding IDs and behavioral contract IDs.",
+            "Write JSON only using intent-test-plan/v1.",
+        ],
+    },
+    "intent_test_writing": {
+        "role": "Intent Test Writer",
+        "prompt_files": ["intent/06_intent_test_writer.md"],
+        "inputs": ["intent/intent-test-plan.json", "target snippets", "existing tests", "disposable validation workspace"],
+        "outputs": ["intent/intent-test-source.json", "intent/generated-tests/** or disposable validation workspace tests"],
+        "instructions": [
+            "Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**.",
+            "Do not modify the main repo workspace, install dependencies, use production secrets, or use network.",
+            "Return JSON describing created test files.",
+        ],
+    },
+    "intent_test_failure_analysis": {
+        "role": "Test Failure Analyzer",
+        "prompt_files": ["intent/07_intent_test_failure_analyzer.md"],
+        "inputs": ["intent/intent-test-run-results.raw.json", "generated tests", "linked findings"],
+        "outputs": ["intent/intent-test-results.json"],
+        "instructions": [
+            "Classify each generated test result as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, or unclear_requirement.",
+            "A failing generated test is not automatically a bug.",
+            "Write JSON only using intent-test-result/v1.",
+        ],
+    },
+    "validator_disproof": {
+        "role": "Validation Reviewer",
+        "prompt_files": ["08_validator.md"],
+        "inputs": ["clusters.json", "location-verification.json", "intent/intent-test-results.json", "related snippets"],
+        "outputs": ["validated-findings.json"],
+        "instructions": [
+            "Try to disprove each candidate finding using reviewer evidence, location verification, related code, existing tests, and intent-test evidence.",
+            "Classify confirmed, plausible, weak, or disproven; do not add unrelated findings.",
+            "Write JSON only using validation-output/v1.",
+        ],
+    },
+    "final_report_json": {
+        "role": "Final Reporter",
+        "prompt_files": ["09_reporter.md"],
+        "inputs": ["validated-findings.json", "coverage.json", "token-budget.json", "artifact refs"],
+        "outputs": ["report.agent.json"],
+        "instructions": [
+            "Include only confirmed or plausible actionable findings in the main list.",
+            "Weak findings go to appendix; disproven findings are excluded from main findings.",
+            "Preserve coverage, skipped scope, validation sources, and next_agent_task.",
+            "Write JSON only using codex-full-repo-review/v1.",
+        ],
+    },
+}
+
+
+def review_root_for_run_dir(run_dir: Path) -> Path:
+    return run_dir.parent.parent
+
+
+def prompt_template_text(run_dir: Path, name: str) -> str:
+    path = review_root_for_run_dir(run_dir) / "prompts" / name
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return prompt_template_for_name(name).strip()
+
+
 def phase_prompt(phase: str, run_dir: Path) -> str:
-    return (
-        f"Phase: {phase}\n"
-        "Perform only the requested full-repository review phase. "
-        "Do not modify application source files. Write outputs only under .codex-review/runs.\n"
-        f"Run artifact directory: {run_dir}\n"
-    )
+    spec = SEMANTIC_PHASE_PROMPT_SPECS.get(phase, {})
+    role = str(spec.get("role") or phase.replace("_", " ").title())
+    inputs = [str(item) for item in spec.get("inputs", []) if str(item).strip()]
+    outputs = [str(item) for item in spec.get("outputs", []) if str(item).strip()]
+    instructions = [str(item) for item in spec.get("instructions", []) if str(item).strip()]
+    prompt_files = [str(item) for item in spec.get("prompt_files", []) if str(item).strip()]
+    lines = [
+        f"Phase: {phase}",
+        f"Role: {role}",
+        "Perform only this full-repository review phase.",
+        "Do not modify application source files.",
+        "Do not install dependencies.",
+        "Do not call external review/scanning services.",
+        "Write phase outputs only under the active .codex-review tree.",
+        f"Run artifact directory: {run_dir}",
+    ]
+    if inputs:
+        lines.append("Inputs:")
+        lines.extend(f"- {item}" for item in inputs)
+    if outputs:
+        lines.append("Required outputs:")
+        lines.extend(f"- {item}" for item in outputs)
+    if instructions:
+        lines.append("Phase instructions:")
+        lines.extend(f"- {item}" for item in instructions)
+    if prompt_files:
+        lines.append("Prompt templates:")
+        for name in prompt_files:
+            lines.append(f"--- {name} ---")
+            lines.append(prompt_template_text(run_dir, name))
+    lines.append("Required output discipline:")
+    lines.append("- Produce the required output file(s); do not rely on prose in the turn response.")
+    lines.append("- For schema-bound outputs, return/write JSON only with no Markdown wrapper.")
+    lines.append("- If required evidence is missing, record the uncertainty in the phase output rather than inventing facts.")
+    return "\n".join(lines) + "\n"
 
 
 RISK_HINT_KEYWORDS = {

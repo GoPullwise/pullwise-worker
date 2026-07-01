@@ -127,6 +127,11 @@ Review pipeline rules:
   preparation, intent-test writing, intent-test running, intent-test failure
   analysis, validator disproof, final report JSON, markdown render, QA gate,
   hash artifacts, upload artifacts, submit envelope, and cleanup active job.
+- Codex semantic phases must use phase-specific prompts/templates that name the
+  role, inputs, required output files, schema discipline, and safety rules for
+  that phase. Do not send generic `Phase: <name>` prompts for repo mapping,
+  risk routing, reviewer fanout, clustering, intent mining/planning/writing,
+  test failure analysis, validator disproof, or final report generation.
 - Intent-driven tests are allowed only for selected P0/P1 high-value candidate
   findings. Generated tests must live in the disposable validation workspace or
   `.codex-review/generated-tests/**`, must not install dependencies or use

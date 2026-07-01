@@ -33,6 +33,7 @@ from pullwise_worker.review_worker_v1 import (
     bundle_plan_payload,
     phase_completion_data,
     phase_progress_data,
+    phase_prompt,
     inventory,
     materialize_artifacts,
     materialize_terminal_artifacts,
@@ -689,6 +690,41 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(event["progress"]["status"], "running")
         self.assertEqual(event["data"]["reviewer_runs_total"], 2)
         self.assertEqual(event["data"]["reviewer_runs_completed"], 1)
+
+    def test_phase_prompt_uses_phase_specific_contract_and_prompt_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            review_root = root / "repo" / ".codex-review"
+            run_dir = review_root / "runs" / "run_1"
+            prompts = review_root / "prompts"
+            run_dir.mkdir(parents=True)
+            prompts.mkdir(parents=True)
+            (prompts / "00_repo_mapper.md").write_text("CUSTOM REPO MAP TEMPLATE\n", encoding="utf-8")
+
+            prompt = phase_prompt("repo_map", run_dir)
+
+        self.assertIn("Role: Repo Mapper", prompt)
+        self.assertIn("Required outputs:\n- repo-map.json", prompt)
+        self.assertIn("--- 00_repo_mapper.md ---", prompt)
+        self.assertIn("CUSTOM REPO MAP TEMPLATE", prompt)
+        self.assertIn("Do not report bugs in this phase.", prompt)
+
+    def test_phase_prompt_names_reviewer_outputs_and_exact_intent_classifications(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            reviewer_prompt = phase_prompt("reviewer_fanout", run_dir)
+            failure_prompt = phase_prompt("intent_test_failure_analysis", run_dir)
+
+        self.assertIn("raw-reviewers/*.json", reviewer_prompt)
+        self.assertIn("reviewers/security.md", reviewer_prompt)
+        self.assertIn("reviewers/correctness.md", reviewer_prompt)
+        self.assertIn("codex-reviewer-output/v1", reviewer_prompt)
+        self.assertIn("intent/intent-test-results.json", failure_prompt)
+        self.assertIn("flaky_or_nondeterministic", failure_prompt)
+        self.assertNotIn("flaky_nondeterministic", failure_prompt)
 
     def test_build_envelope_contains_stable_v1_protocol_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
