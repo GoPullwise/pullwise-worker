@@ -17,6 +17,8 @@ from pullwise_worker.review_worker_v1 import (
     REQUIRED_PROMPT_FILES,
     REQUIRED_SCHEMA_FILES,
     REQUIRED_TOOL_FILES,
+    SEMANTIC_PHASES,
+    SEMANTIC_PHASE_PROMPT_SPECS,
     ActiveJob,
     CodexQuotaMonitor,
     JobCancelled,
@@ -45,6 +47,7 @@ from pullwise_worker.review_worker_v1 import (
     prepare_validation_workspace,
     qa_gate_payload,
     run_intent_tests,
+    scoped_codex_command,
     upload_artifacts,
     validate_job_policy,
     validate_phase_outputs,
@@ -163,6 +166,32 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(initialize[2]["clientInfo"]["name"], "codex_repo_review_worker")
         self.assertEqual(initialize[2]["capabilities"], {"experimentalApi": False})
         self.assertEqual(calls[1], ("notify", "initialized", {}, 0))
+
+    def test_scoped_codex_command_defaults_inside_service_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service_home = Path(tmp_dir) / "service"
+            command = scoped_codex_command(SimpleNamespace(service_home=str(service_home)))
+
+        self.assertEqual(command, str(service_home / ".codex" / "bin" / "codex"))
+
+    def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service_home = Path(tmp_dir) / "service"
+            with self.assertRaisesRegex(RuntimeError, "inside worker service_home"):
+                scoped_codex_command(SimpleNamespace(service_home=str(service_home), codex_command="/usr/bin/codex"))
+            with self.assertRaisesRegex(RuntimeError, "absolute path"):
+                scoped_codex_command(SimpleNamespace(service_home=str(service_home), codex_command="codex"))
+
+    def test_codex_quota_refresh_rejects_unscoped_codex_command_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = SimpleNamespace(worker_id="wk_1", service_home=str(Path(tmp_dir) / "service"), codex_command="/usr/bin/codex")
+            worker = ReviewWorkerV1(config, client=object())
+            with patch("pullwise_worker.review_worker_v1.subprocess.Popen") as popen:
+                snapshot = worker.quota_monitor.refresh(current_time=123)
+
+        popen.assert_not_called()
+        self.assertEqual(snapshot["status"], "unavailable")
+        self.assertIn("inside worker service_home", snapshot["lastError"])
 
     def test_approval_policy_allows_only_review_workspace_and_safe_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

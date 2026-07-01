@@ -26,6 +26,9 @@ worker instance's config.
   `service_home`, for example:
   - `$service_home/.local/bin/codex`
   - `$service_home/.codex/bin/codex`
+- Review execution and Codex quota refresh must enforce this at runtime before
+  starting the app-server; do not fall back to `codex` from `PATH` or any global
+  Codex binary.
 - Provider subprocesses must run with instance-scoped environment values:
   - `HOME=$service_home`
   - `USERPROFILE=$service_home`

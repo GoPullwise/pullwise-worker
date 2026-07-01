@@ -455,6 +455,21 @@ class Isolation:
         return env
 
 
+def scoped_codex_command(config: Any) -> str:
+    service_home = Path(str(getattr(config, "service_home", "") or "/var/lib/pullwise-worker")).expanduser()
+    command = str(getattr(config, "codex_command", "") or "").strip()
+    if not command:
+        command = str(service_home / ".codex" / "bin" / "codex")
+    command_path = Path(command).expanduser()
+    if not command_path.is_absolute():
+        raise RuntimeError(f"Codex command must be an absolute path inside worker service_home: {command}")
+    try:
+        command_path.resolve(strict=False).relative_to(service_home.resolve(strict=False))
+    except ValueError as exc:
+        raise RuntimeError(f"Codex command must be inside worker service_home {service_home}: {command}") from exc
+    return str(command_path)
+
+
 class JsonRpcAppServer:
     def __init__(
         self,
@@ -888,7 +903,7 @@ class CodexQuotaMonitor:
             self.isolation.runtime.mkdir(parents=True, exist_ok=True)
             self.isolation.logs.mkdir(parents=True, exist_ok=True)
             server = JsonRpcAppServer(
-                str(getattr(self.config, "codex_command", "") or "codex"),
+                scoped_codex_command(self.config),
                 self.isolation.env(self.config),
                 self.isolation.runtime,
                 self.isolation.logs / "codex-quota-events.jsonl",
@@ -1331,7 +1346,7 @@ class ReviewWorkerV1:
                         pass
                     elif phase == "start_codex_app_server":
                         app_server = JsonRpcAppServer(
-                            str(getattr(self.config, "codex_command", "") or "codex"),
+                            scoped_codex_command(self.config),
                             self.isolation.env(self.config),
                             repo_dir,
                             events_path,
