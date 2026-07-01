@@ -1431,7 +1431,7 @@ class ReviewWorkerV1:
                 run_dir,
                 "run_partial_completed",
                 active.current_phase,
-                status="failed",
+                status="partial_completed",
                 progress=active.overall_percent,
                 message="Run produced a partial result.",
                 data={"reason": reason},

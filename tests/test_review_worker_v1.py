@@ -661,6 +661,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertLess(posted_event_types.index("qa_failed"), posted_event_types.index("run_partial_completed"))
         self.assertLess(log_events.index("phase_failed"), log_events.index("qa_failed"))
         self.assertLess(log_events.index("qa_failed"), log_events.index("run_partial_completed"))
+        partial_events = [event for _run_id, event in events if event["event_type"] == "run_partial_completed"]
+        self.assertEqual(partial_events[0]["progress"]["status"], "partial_completed")
         self.assertEqual(results[0][0], "job_1")
         self.assertEqual(results[0][1]["status"], "partial_completed")
         envelope = results[0][1]["reviewWorkerProtocol"]
