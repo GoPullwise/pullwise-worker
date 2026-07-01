@@ -167,6 +167,10 @@ Review pipeline rules:
   keyed by `run_id + artifact_id`.
 - Artifact upload must reject manifest names that resolve outside the artifact
   directory before reading or posting any file.
+- Artifact storage URLs must exactly reference the active artifact run directory:
+  `/v1/review-runs/<run_id>/artifacts/<artifact_id>`.
+- `artifact-manifest.json` must use `artifact-manifest/v1` and its `run_id`
+  must match the active artifact directory/run before QA or upload can pass.
 - Post run progress through `POST /v1/review-runs/{run_id}/events`, upload
   artifacts through `POST /v1/review-runs/{run_id}/artifacts`, and upload
   artifacts before submitting the terminal result envelope through

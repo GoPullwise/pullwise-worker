@@ -645,6 +645,99 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(qa["status"], "fail")
         self.assertTrue(any("artifact_id is duplicated" in error for error in qa["errors"]))
 
+    def test_qa_gate_rejects_artifact_storage_url_for_wrong_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            artifact_dir = Path(tmp_dir) / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-validation/v1",
+                        "enabled": True,
+                        "require_intent_evidence": True,
+                        "skip_reason": "no P0/P1 intent targets selected",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest_path = artifact_dir / "artifact-manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact_id = manifest_payload["items"][0]["artifact_id"]
+            manifest_payload["items"][0]["storage"]["url"] = f"/v1/review-runs/run_2/artifacts/{artifact_id}"
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+            qa = qa_gate_payload(repo, run_dir, artifact_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertTrue(any("storage must reference server_artifact" in error for error in qa["errors"]))
+
+    def test_qa_gate_rejects_artifact_manifest_run_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            artifact_dir = Path(tmp_dir) / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-validation/v1",
+                        "enabled": True,
+                        "require_intent_evidence": True,
+                        "skip_reason": "no P0/P1 intent targets selected",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest_path = artifact_dir / "artifact-manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_payload["run_id"] = "run_2"
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+            qa = qa_gate_payload(repo, run_dir, artifact_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertTrue(any("run_id must match artifact directory" in error for error in qa["errors"]))
+
     def test_qa_gate_rejects_intent_result_entries_missing_required_schema_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
@@ -1472,6 +1565,53 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     return {"accepted": True}
 
             with self.assertRaisesRegex(RuntimeError, "escapes artifact directory"):
+                upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+
+        self.assertEqual(calls, [])
+
+    def test_upload_artifacts_rejects_wrong_run_storage_url_before_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest_path = artifact_dir / "artifact-manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact_id = manifest_payload["items"][0]["artifact_id"]
+            manifest_payload["items"][0]["storage"]["url"] = f"/v1/review-runs/run_2/artifacts/{artifact_id}"
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+            calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+            with self.assertRaisesRegex(RuntimeError, "storage does not match upload run"):
+                upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+
+        self.assertEqual(calls, [])
+
+    def test_upload_artifacts_rejects_manifest_run_id_mismatch_before_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest_path = artifact_dir / "artifact-manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_payload["run_id"] = "run_2"
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+            calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+            with self.assertRaisesRegex(RuntimeError, "run_id does not match upload run"):
                 upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
 
         self.assertEqual(calls, [])

@@ -2848,6 +2848,8 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
         return
     if manifest_payload.get("schema_version") != "artifact-manifest/v1":
         errors.append("artifact-manifest.json schema_version must be artifact-manifest/v1")
+    if str(manifest_payload.get("run_id") or "").strip() != artifact_dir.name:
+        errors.append("artifact-manifest.json run_id must match artifact directory")
     manifest = manifest_payload.get("items")
     if not isinstance(manifest, list):
         errors.append("artifact-manifest.json items must be a list")
@@ -3636,8 +3638,12 @@ def upload_artifacts(
 ) -> None:
     manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
     manifest = artifact_manifest_items(manifest_payload)
-    if not isinstance(manifest_payload, (dict, list)) or not manifest:
+    if not isinstance(manifest_payload, dict) or not manifest:
         raise RuntimeError("artifact manifest must contain artifact items before upload")
+    if manifest_payload.get("schema_version") != "artifact-manifest/v1":
+        raise RuntimeError("artifact manifest must use schema_version artifact-manifest/v1 before upload")
+    if str(manifest_payload.get("run_id") or "").strip() != artifact_dir.name:
+        raise RuntimeError("artifact manifest run_id does not match upload run before upload")
     uploadable: list[tuple[dict[str, Any], Path]] = []
     seen_artifact_ids: set[str] = set()
     for item in manifest:
