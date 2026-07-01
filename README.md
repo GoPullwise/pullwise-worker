@@ -33,9 +33,6 @@ Required environment:
 - `PULLWISE_WORKER_WORK_DIR` optional
 - `PULLWISE_LOG_DIR` optional, defaults to the temp directory
 - `PULLWISE_CODEX_COMMAND` optional, defaults to `/var/lib/pullwise-worker/.codex/bin/codex`
-- `PULLWISE_CODEX_MODEL` optional, defaults to `gpt-5.5`
-- `PULLWISE_CODEX_REASONING_EFFORT` optional, defaults to `medium`
-- `PULLWISE_CODEX_TIMEOUT_SECONDS` optional, defaults to `3600`
 - `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_APP_SERVER_MAX_TURNS` optional, defaults to `8`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
@@ -44,32 +41,21 @@ Required environment:
 - `PULLWISE_WORKER_CLEANUP_INTERVAL_SECONDS` optional, defaults to `3600`
 - `PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS` optional, defaults to `0`
 - `PULLWISE_MAX_CHECKOUT_BYTES` optional, defaults to `21474836480` (20 GiB)
-- `PULLWISE_REVIEW_CALIBRATION_MODE` optional, defaults to `shadow`; use `audit_only` or `enforce` only after server-side shadow evaluation passes
-- `PULLWISE_REVIEW_CALIBRATION_MODEL` optional, defaults to `relative_factor`; set to `logit_beta` to emit `truth_probability`
-- `PULLWISE_REVIEW_CALIBRATION_HALF_LIFE_DAYS` optional, defaults to `45`
-- `PULLWISE_REVIEW_CALIBRATION_MIN_EFFECTIVE_SAMPLES` optional, defaults to `20`
-- `PULLWISE_REVIEW_CALIBRATION_ENABLE_BUCKETS` optional, defaults to `false`
-- `PULLWISE_REVIEW_CALIBRATION_ENABLE_HIERARCHY` optional, defaults to `false`
-- `PULLWISE_REVIEW_CALIBRATION_ENABLE_DRIFT` optional, defaults to `false`
-- `PULLWISE_REVIEW_CALIBRATION_SAMPLE_AUDIT_RATE` optional, defaults to `0.02`; sampled candidates are kept in audit artifacts for manual/internal review without becoming truth labels
-- `PULLWISE_REVIEW_CALIBRATION_BORDERLINE_SAMPLE_WINDOW` optional, defaults to `0.03`; candidates near report/audit thresholds are marked for manual/internal review to reduce selection bias
 - `PULLWISE_LOG_RETENTION_SECONDS` optional, defaults to `1209600` (14 days)
 - `PULLWISE_MAX_LOG_BYTES` optional, defaults to `1073741824` (1 GiB)
 - `PULLWISE_SCAN_SUMMARY_LOG_MAX_BYTES` optional, defaults to `10485760` (10 MiB)
 
 Each worker processes exactly one job at a time. Queuing is maintained on the server; after a job finishes, the worker returns to the server to claim the next job. Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old run logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
-Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. Review provider/model policy comes from the server-side subscription plan `agentConfig`; executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
+Review model, reasoning effort, repository file/byte limits, and worker review deadlines come from the claimed job payload. The payload must include `agentConfig.codex.model`, `agentConfig.codex.reasoningEffort`, `repositoryLimits`, and the server-owned `reviewWorker` policy. Executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for server-owned review policy.
 
-Codex review work runs through one instance-scoped `codex app-server` per worker identity. A worker has one active job slot, never prefetches jobs, and drives one root Codex thread with sequential turns by default. Review output is the `review-worker-protocol/v1` result envelope plus `.codex-review/runs/<run_id>/` artifacts such as `report.md`, `report.agent.json`, `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`, `codex-events.jsonl`, and `worker.log.jsonl`. Core semantic phases use the server subscription plan reasoning effort; mechanical and non-core phases use the same model with medium reasoning effort. Do not add replaced graph-generation review flows, `codex exec` review flows, local job queues, or worker-side prefetch.
+Codex review work runs through one instance-scoped `codex app-server` per worker identity. A worker has one active job slot, never prefetches jobs, and drives one root Codex thread with sequential turns by default. Review output is the `review-worker-protocol/v1` result envelope plus `.codex-review/runs/<run_id>/` artifacts such as `report.md`, `report.agent.json`, `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`, `codex-events.jsonl`, and `worker.log.jsonl`. Core semantic phases use the server subscription plan reasoning effort; mechanical and non-core phases use the same model with medium reasoning effort. Do not add alternate review pipelines, per-task CLI review flows, local job queues, or worker-side prefetch.
 
 Production local capability example:
 
 ```bash
 PULLWISE_PROVIDER_CHAIN=codex
 PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/.codex/bin/codex
-PULLWISE_CODEX_MODEL=gpt-5.5
-PULLWISE_CODEX_REASONING_EFFORT=medium
 ```
 
 ## Deploy

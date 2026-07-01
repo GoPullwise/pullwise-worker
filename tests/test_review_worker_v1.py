@@ -21,6 +21,8 @@ from pullwise_worker.review_worker_v1 import (
     default_agent_report,
     effort_for_phase,
     model_for_job,
+    review_worker_policy_for_job,
+    turn_timeout_for_job,
     result_payload,
     materialize_artifacts,
     materialize_terminal_artifacts,
@@ -117,16 +119,24 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             validate_job_policy({"repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
         with self.assertRaisesRegex(ValueError, "reasoningEffort"):
             validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5"}}, "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
+        with self.assertRaisesRegex(ValueError, "reviewWorker"):
+            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}}, "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
         with self.assertRaisesRegex(ValueError, "repositoryLimits"):
-            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}}})
+            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}, "reviewWorker": {"turnTimeoutSeconds": 1800, "scanDeadlineSeconds": 14400}}})
 
-    def test_model_and_effort_come_from_job_policy(self) -> None:
+    def test_model_effort_and_timeout_come_from_job_policy(self) -> None:
         job = {
-            "agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}},
+            "agentConfig": {
+                "provider": "codex",
+                "codex": {"model": "gpt-5.5", "reasoningEffort": "high"},
+                "reviewWorker": {"turnTimeoutSeconds": 1800, "scanDeadlineSeconds": 14400},
+            },
             "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
         }
 
         self.assertEqual(model_for_job(job), "gpt-5.5")
+        self.assertEqual(turn_timeout_for_job(job), 1800)
+        self.assertEqual(review_worker_policy_for_job(job)["scanDeadlineSeconds"], 14400)
         self.assertEqual(effort_for_phase(job, "reviewer_fanout"), "high")
         self.assertEqual(effort_for_phase(job, "inventory_repository"), "medium")
 
@@ -154,7 +164,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
     def test_core_semantic_phases_use_plan_effort_and_other_phases_use_medium(self) -> None:
         job = {
-            "agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}},
+            "agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}, "reviewWorker": {"turnTimeoutSeconds": 1800, "scanDeadlineSeconds": 14400}},
             "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
         }
 

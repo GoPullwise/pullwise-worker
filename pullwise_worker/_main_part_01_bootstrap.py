@@ -62,8 +62,6 @@ WORKER_HTTP_TIMEOUT_SECONDS = 60
 WORKER_HTTP_RESPONSE_MAX_BYTES = 1024 * 1024
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
-DEFAULT_CODEX_MODEL = "gpt-5.5"
-DEFAULT_CODEX_REASONING_EFFORT = "medium"
 DEFAULT_ACTIVE_READINESS_CHECK_SECONDS = 60
 DEFAULT_DEGRADED_READINESS_CHECK_SECONDS = 600
 DEFAULT_READINESS_CHECK_SECONDS = DEFAULT_ACTIVE_READINESS_CHECK_SECONDS
@@ -819,12 +817,6 @@ class WorkerConfig:
         )
         default_codex_command = default_provider_command(self.service_home, "codex")
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or default_codex_command
-        self.codex_model = os.environ.get("PULLWISE_CODEX_MODEL", DEFAULT_CODEX_MODEL).strip() or DEFAULT_CODEX_MODEL
-        self.codex_reasoning_effort = (
-            os.environ.get("PULLWISE_CODEX_REASONING_EFFORT", DEFAULT_CODEX_REASONING_EFFORT).strip()
-            or DEFAULT_CODEX_REASONING_EFFORT
-        )
-        self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or env_int("PULLWISE_CODEX_TIMEOUT_SECONDS", 3600)))
         self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
         readiness_check_seconds_fallback = env_int(
             "PULLWISE_READINESS_CHECK_SECONDS",
@@ -1210,7 +1202,6 @@ def main() -> None:
     parser.add_argument("--log-dir")
     parser.add_argument("--provider")
     parser.add_argument("--codex-command")
-    parser.add_argument("--codex-timeout-seconds", type=int)
     parser.add_argument("--lines", type=int, default=120)
     parser.add_argument("--follow", action="store_true")
     parser.add_argument("--once", action="store_true", help="Process at most one job and exit.")

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -100,13 +100,33 @@ REQUIRED_PROMPT_FILES = (
     "05_reporter.md",
 )
 CODEX_ERROR_CODES = {
-    "UsageLimitExceeded": "CODEX_USAGE_LIMIT_EXCEEDED",
+    "UsageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
+    "RateLimitReached": "CODEX_QUOTA_EXHAUSTED",
+    "rate_limit_reached": "CODEX_QUOTA_EXHAUSTED",
+    "workspace_owner_credits_depleted": "CODEX_QUOTA_EXHAUSTED",
+    "workspace_member_credits_depleted": "CODEX_QUOTA_EXHAUSTED",
+    "workspace_owner_usage_limit_reached": "CODEX_QUOTA_EXHAUSTED",
+    "workspace_member_usage_limit_reached": "CODEX_QUOTA_EXHAUSTED",
     "ContextWindowExceeded": "CODEX_CONTEXT_WINDOW_EXCEEDED",
     "Unauthorized": "CODEX_UNAUTHORIZED",
     "SandboxError": "CODEX_SANDBOX_ERROR",
     "HttpConnectionFailed": "CODEX_UPSTREAM_CONNECTION_FAILED",
     "InternalServerError": "CODEX_INTERNAL_SERVER_ERROR",
 }
+CODEX_QUOTA_ERROR_MARKERS = (
+    "insufficient_quota",
+    "insufficient quota",
+    "quota exceeded",
+    "quota exhausted",
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "no credits",
+    "credits exhausted",
+    "out of credits",
+    "429",
+)
 GLOBAL_AGENTS_TEXT = """# Codex Repo Review Worker Global Instructions
 
 You are running inside an isolated Codex repo review worker.
@@ -174,6 +194,7 @@ class WorkerState:
     def __init__(self) -> None:
         self.state = "starting"
         self.active_job: ActiveJob | None = None
+        self.provider_ready = True
 
     @property
     def local_queue_depth(self) -> int:
@@ -181,10 +202,10 @@ class WorkerState:
 
     @property
     def available_job_slots(self) -> int:
-        return 1 if self.state == "idle" and self.active_job is None else 0
+        return 1 if self.state == "idle" and self.active_job is None and self.provider_ready else 0
 
     def can_lease(self) -> bool:
-        return self.active_job is None and self.state == "idle" and self.local_queue_depth == 0
+        return self.active_job is None and self.state == "idle" and self.local_queue_depth == 0 and self.provider_ready
 
     def set_active(self, job: ActiveJob) -> None:
         if self.active_job is not None:
@@ -489,6 +510,216 @@ class JsonRpcAppServer:
             self.process.stdin.flush()
 
 
+def quota_float(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not number == number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def quota_int(value: object) -> int | None:
+    number = quota_float(value)
+    return int(number) if number is not None else None
+
+
+def quota_text(value: object, limit: int = 160) -> str:
+    return " ".join(str(value or "").replace("\x00", "").split())[:limit]
+
+
+def quota_remaining_percent(used_percent: float | None) -> float | None:
+    if used_percent is None:
+        return None
+    return max(0.0, min(100.0, 100.0 - used_percent))
+
+
+def quota_window_payload(name: str, value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    used = quota_float(value.get("usedPercent") if "usedPercent" in value else value.get("used_percent"))
+    duration = quota_int(value.get("windowDurationMins") if "windowDurationMins" in value else value.get("window_duration_mins"))
+    resets_at = quota_int(value.get("resetsAt") if "resetsAt" in value else value.get("resets_at"))
+    if used is None and duration is None and resets_at is None:
+        return None
+    remaining = quota_remaining_percent(used)
+    return {
+        "name": name,
+        "usedPercent": round(used, 3) if used is not None else None,
+        "remainingPercent": round(remaining, 3) if remaining is not None else None,
+        "windowDurationMins": duration,
+        "resetsAt": resets_at,
+    }
+
+
+def codex_rate_limit_snapshot(response: dict[str, Any]) -> dict[str, Any]:
+    by_limit = response.get("rateLimitsByLimitId") if isinstance(response.get("rateLimitsByLimitId"), dict) else None
+    if by_limit:
+        for key, value in by_limit.items():
+            if quota_text(key).lower() == "codex" and isinstance(value, dict):
+                return value
+        for key, value in by_limit.items():
+            if "codex" in quota_text(key).lower() and isinstance(value, dict):
+                return value
+    rate_limits = response.get("rateLimits")
+    return rate_limits if isinstance(rate_limits, dict) else {}
+
+
+def codex_quota_payload_from_rate_limits(
+    response: dict[str, Any],
+    *,
+    threshold_percent: float,
+    checked_at: int,
+    next_check_at: int,
+) -> dict[str, Any]:
+    snapshot = codex_rate_limit_snapshot(response)
+    if not snapshot:
+        return {
+            "provider": "codex",
+            "status": "unavailable",
+            "ready": True,
+            "reason": "codex_quota_unavailable",
+            "checkedAt": checked_at,
+            "nextCheckAt": next_check_at,
+            "thresholdPercent": threshold_percent,
+        }
+    windows = []
+    for name in ("primary", "secondary"):
+        window = quota_window_payload(name, snapshot.get(name))
+        if window:
+            windows.append(window)
+    credits_source = snapshot.get("credits") if isinstance(snapshot.get("credits"), dict) else {}
+    credits = {
+        "hasCredits": bool(credits_source.get("hasCredits")) if "hasCredits" in credits_source else None,
+        "unlimited": bool(credits_source.get("unlimited")) if "unlimited" in credits_source else None,
+        "balance": quota_text(credits_source.get("balance"), 80) if credits_source.get("balance") is not None else None,
+    }
+    remaining_values = [window["remainingPercent"] for window in windows if window.get("remainingPercent") is not None]
+    used_values = [window["usedPercent"] for window in windows if window.get("usedPercent") is not None]
+    remaining = min(remaining_values) if remaining_values else None
+    used = max(used_values) if used_values else None
+    blocked_windows = [window for window in windows if window.get("remainingPercent") is not None and window["remainingPercent"] <= threshold_percent]
+    reached_type = quota_text(snapshot.get("rateLimitReachedType") or snapshot.get("rate_limit_reached_type"), 120)
+    credits_depleted = credits["hasCredits"] is False and credits["unlimited"] is not True
+    exhausted = bool(reached_type) or credits_depleted or any((window.get("remainingPercent") or 0) <= 0 for window in windows)
+    low = bool(blocked_windows)
+    status = "exhausted" if exhausted else "low" if low else "ok"
+    ready = status == "ok"
+    reason = "" if ready else "codex_quota_exhausted" if exhausted else "codex_quota_low"
+    return {
+        "provider": "codex",
+        "limitId": quota_text(snapshot.get("limitId") or snapshot.get("limit_id"), 80) or None,
+        "limitName": quota_text(snapshot.get("limitName") or snapshot.get("limit_name"), 120) or None,
+        "planType": quota_text(snapshot.get("planType") or snapshot.get("plan_type"), 80) or None,
+        "status": status,
+        "ready": ready,
+        "reason": reason,
+        "checkedAt": checked_at,
+        "nextCheckAt": next_check_at,
+        "thresholdPercent": threshold_percent,
+        "usedPercent": round(used, 3) if used is not None else None,
+        "remainingPercent": round(remaining, 3) if remaining is not None else None,
+        "rateLimitReachedType": reached_type or None,
+        "credits": credits,
+        "windows": windows,
+        "blockedWindows": blocked_windows,
+    }
+
+
+def codex_quota_check_seconds(config: Any, *, degraded: bool = False) -> int:
+    if degraded:
+        default = int(getattr(config, "degraded_readiness_check_seconds", 300) or 300)
+        return max(10, int(getattr(config, "codex_quota_degraded_check_seconds", default) or default))
+    default = int(getattr(config, "active_readiness_check_seconds", 300) or 300)
+    return max(10, int(getattr(config, "codex_quota_check_seconds", default) or default))
+
+
+def codex_quota_threshold_percent(config: Any) -> float:
+    raw = quota_float(getattr(config, "codex_quota_min_remaining_percent", 5.0))
+    if raw is None:
+        return 5.0
+    return max(0.0, min(100.0, raw))
+
+
+class CodexQuotaMonitor:
+    def __init__(self, config: Any, isolation: Isolation) -> None:
+        self.config = config
+        self.isolation = isolation
+        self.snapshot: dict[str, Any] | None = None
+        self.next_check_at = 0
+
+    def snapshot_if_due(self, *, active: bool = False) -> dict[str, Any] | None:
+        current_time = int(time.time())
+        if active and self.snapshot is not None:
+            return self.snapshot
+        if active or current_time < self.next_check_at:
+            return self.snapshot
+        return self.refresh(current_time)
+
+    def refresh(self, current_time: int | None = None) -> dict[str, Any]:
+        checked_at = int(current_time if current_time is not None else time.time())
+        threshold = codex_quota_threshold_percent(self.config)
+        interval = codex_quota_check_seconds(self.config)
+        next_check_at = checked_at + interval
+        server: JsonRpcAppServer | None = None
+        try:
+            self.isolation.runtime.mkdir(parents=True, exist_ok=True)
+            self.isolation.logs.mkdir(parents=True, exist_ok=True)
+            server = JsonRpcAppServer(
+                str(getattr(self.config, "codex_command", "") or "codex"),
+                self.isolation.env(self.config),
+                self.isolation.runtime,
+                self.isolation.logs / "codex-quota-events.jsonl",
+            )
+            server.start()
+            response = server.request("account/rateLimits/read", {}, timeout_seconds=15)
+            self.snapshot = codex_quota_payload_from_rate_limits(
+                response,
+                threshold_percent=threshold,
+                checked_at=checked_at,
+                next_check_at=next_check_at,
+            )
+        except Exception as exc:
+            if codex_error_code(str(exc)) == "CODEX_QUOTA_EXHAUSTED":
+                self.mark_exhausted(str(exc), checked_at=checked_at)
+            else:
+                self.snapshot = {
+                    "provider": "codex",
+                    "status": "unavailable",
+                    "ready": True,
+                    "reason": "codex_quota_unavailable",
+                    "checkedAt": checked_at,
+                    "nextCheckAt": next_check_at,
+                    "thresholdPercent": threshold,
+                    "lastError": quota_text(exc, 500),
+                }
+        finally:
+            if server is not None:
+                server.close()
+        self.next_check_at = int((self.snapshot or {}).get("nextCheckAt") or next_check_at)
+        return self.snapshot or {}
+
+    def mark_exhausted(self, error: object, *, checked_at: int | None = None) -> dict[str, Any]:
+        current_time = int(checked_at if checked_at is not None else time.time())
+        threshold = codex_quota_threshold_percent(self.config)
+        next_check_at = current_time + codex_quota_check_seconds(self.config, degraded=True)
+        self.snapshot = {
+            "provider": "codex",
+            "status": "exhausted",
+            "ready": False,
+            "reason": "codex_quota_exhausted",
+            "checkedAt": current_time,
+            "nextCheckAt": next_check_at,
+            "thresholdPercent": threshold,
+            "remainingPercent": 0.0,
+            "lastError": quota_text(error, 500),
+        }
+        self.next_check_at = next_check_at
+        return self.snapshot
+
 READ_ONLY_COMMANDS = {"git", "find", "wc", "cat", "sed", "awk", "grep", "rg"}
 DENIED_COMMAND_TOKENS = {
     "brew",
@@ -567,6 +798,7 @@ class ReviewWorkerV1:
         self.client = client
         self.state = WorkerState()
         self.isolation = Isolation(config)
+        self.quota_monitor = CodexQuotaMonitor(config, self.isolation)
         self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id))
 
     def run(self, *, once: bool = False) -> None:
@@ -590,12 +822,18 @@ class ReviewWorkerV1:
 
     def heartbeat(self) -> dict[str, Any]:
         active = self.state.active_job
+        quota = self.quota_monitor.snapshot_if_due(active=active is not None)
+        quota_ready = bool((quota or {}).get("ready", True))
+        self.state.provider_ready = quota_ready
+        readiness_reason = quota_text((quota or {}).get("reason") or (quota or {}).get("status"), 160)
         response = self.client.heartbeat(
             running_jobs=1 if active else 0,
             active_job_ids=[active.job_id] if active else [],
-            doctor_status="ok",
-            codex_ready=True,
-            ready_providers=["codex"],
+            last_error=readiness_reason if not quota_ready else None,
+            doctor_status="ok" if quota_ready else "degraded",
+            codex_ready=quota_ready,
+            ready_providers=["codex"] if quota_ready else [],
+            codex_quota=quota,
         )
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
         if active and active.job_id in (cancelled or []):
@@ -663,6 +901,8 @@ class ReviewWorkerV1:
             self.client.result(job_id, result_payload(active, envelope, "failed"))
             terminal_state = "cancelled"
         except Exception as exc:
+            if codex_error_code(str(exc)) == "CODEX_QUOTA_EXHAUSTED":
+                self.quota_monitor.mark_exhausted(str(exc))
             artifact_dir = self.isolation.artifacts / run_id
             run_dir = self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_failed", "error": str(exc), "time": iso_time(time.time())})
@@ -709,7 +949,7 @@ class ReviewWorkerV1:
             prompt='Codex auth check: return only JSON {"ok": true}.',
             effort="medium",
             read_only=True,
-            timeout_seconds=int(getattr(self.config, "codex_timeout_seconds", 3600) or 3600),
+            timeout_seconds=turn_timeout_for_job(job),
             cancel_requested=self.poll_cancel_requested,
         )
 
@@ -728,7 +968,7 @@ class ReviewWorkerV1:
             prompt=prompt,
             effort=effort,
             read_only=phase not in {"bootstrap_helper_scripts", "final_report_json"},
-            timeout_seconds=int(getattr(self.config, "codex_timeout_seconds", 3600) or 3600),
+            timeout_seconds=turn_timeout_for_job(job),
             cancel_requested=self.poll_cancel_requested,
         )
 
@@ -742,6 +982,7 @@ class ReviewWorkerV1:
                     "model": model_for_job(job),
                     "core_effort": core_effort_for_job(job),
                     "non_core_effort": "medium",
+                    "review_worker": review_worker_policy_for_job(job),
                 },
             )
         elif phase == "bundle_planning":
@@ -844,6 +1085,14 @@ def core_effort_for_job(job: dict[str, Any]) -> str:
     return str(validate_job_policy(job)["reasoning_effort"])
 
 
+def review_worker_policy_for_job(job: dict[str, Any]) -> dict[str, int]:
+    return dict(validate_job_policy(job)["review_worker"])
+
+
+def turn_timeout_for_job(job: dict[str, Any]) -> int:
+    return int(review_worker_policy_for_job(job)["turnTimeoutSeconds"])
+
+
 def effort_for_phase(job: dict[str, Any], phase: str) -> str:
     return core_effort_for_job(job) if phase in CORE_EFFORT_PHASES else "medium"
 
@@ -860,6 +1109,14 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
     effort = str(codex.get("reasoningEffort") or "").strip().lower()
     if effort not in {"low", "medium", "high", "xhigh"}:
         raise ValueError("claimed job must include agentConfig.codex.reasoningEffort")
+    review_worker = agent.get("reviewWorker") if isinstance(agent.get("reviewWorker"), dict) else {}
+    try:
+        turn_timeout_seconds = int(review_worker.get("turnTimeoutSeconds"))
+        scan_deadline_seconds = int(review_worker.get("scanDeadlineSeconds"))
+    except (TypeError, ValueError):
+        raise ValueError("claimed job must include agentConfig.reviewWorker.turnTimeoutSeconds and scanDeadlineSeconds") from None
+    if turn_timeout_seconds <= 0 or scan_deadline_seconds < 0:
+        raise ValueError("agentConfig.reviewWorker turn timeout must be positive and scan deadline must be non-negative")
     limits = job.get("repositoryLimits") if isinstance(job.get("repositoryLimits"), dict) else {}
     try:
         max_files = int(limits.get("maxFiles"))
@@ -868,7 +1125,15 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("claimed job must include repositoryLimits.maxFiles and repositoryLimits.maxBytes") from None
     if max_files <= 0 or max_bytes <= 0:
         raise ValueError("repositoryLimits.maxFiles and repositoryLimits.maxBytes must be positive")
-    return {"model": model, "reasoning_effort": effort, "repository_limits": {"maxFiles": max_files, "maxBytes": max_bytes}}
+    return {
+        "model": model,
+        "reasoning_effort": effort,
+        "review_worker": {
+            "turnTimeoutSeconds": turn_timeout_seconds,
+            "scanDeadlineSeconds": scan_deadline_seconds,
+        },
+        "repository_limits": {"maxFiles": max_files, "maxBytes": max_bytes},
+    }
 
 
 def phase_prompt(phase: str, run_dir: Path) -> str:
@@ -1239,3 +1504,6 @@ def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Pa
                 "content_base64": base64.b64encode(data).decode("ascii"),
             },
         )
+
+
+

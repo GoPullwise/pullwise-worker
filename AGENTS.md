@@ -52,7 +52,7 @@ own `service_home` for Codex binaries, config, cache, and auth state.
 
 `../worker-design.md` is the source of truth for worker review behavior. The
 current worker is the `review-worker-protocol/v1` Codex full-repository review
-worker; do not reintroduce graph-generation review pipelines, `codex exec` review flows,
+worker; do not reintroduce alternate review pipelines, per-task CLI review flows,
 local job queues, or worker-side prefetch compatibility.
 
 Hard invariants:
@@ -165,9 +165,9 @@ and line locations, include a clear failure scenario or risk, and provide an
 actionable recommendation. Weak or uncertain observations belong in appendix or
 internal artifacts, not as confirmed findings.
 
-Do not require evidence graph generation for worker output. New review logic,
+Do not require derived topology artifacts for worker output. New review logic,
 protocols, reports, tests, and documentation must depend on the stable envelope
-and versioned artifacts, not on replaced graph-report data structures.
+and versioned artifacts, not on retired report data structures.
 
 ## Server-Controlled Agent Policy
 

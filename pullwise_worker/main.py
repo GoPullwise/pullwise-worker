@@ -36,7 +36,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-dir")
     parser.add_argument("--provider")
     parser.add_argument("--codex-command")
-    parser.add_argument("--codex-timeout-seconds", type=int)
     parser.add_argument("--lines", type=int, default=120)
     parser.add_argument("--follow", action="store_true")
     parser.add_argument("--once", action="store_true", help="Process at most one job and exit.")

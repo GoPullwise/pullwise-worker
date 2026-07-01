@@ -50,7 +50,6 @@ def write_scan_summary(
             payload["review_provider"] = provider
         payload["codex_queue_wait_ms"] = nonnegative_int(review_execution.get("queueWaitMs"))
         payload["codex_exec_duration_ms"] = nonnegative_int(review_execution.get("execDurationMs"))
-        payload["codex_timeout_seconds"] = nonnegative_int(review_execution.get("timeoutSeconds"))
     line = json.dumps(
         payload,
         sort_keys=True,
@@ -179,7 +178,8 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
             command_ok([config.codex_command, "--version"], env=provider_env) if codex_scope_ok else (False, codex_scope_detail)
         )
         checks.append(("codex", codex_cli_ok, codex_cli_detail))
-        codex_login_ok, codex_login_detail = codex_ready_check(config) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
+        codex_ready_model = subscription_plan_codex_model(agent_configs) if agent_configs_ok else ""
+        codex_login_ok, codex_login_detail = codex_ready_check(config, codex_ready_model) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
         if (
             not codex_login_ok
             and "deferred" in str(codex_login_detail or "").lower()
@@ -394,6 +394,17 @@ def subscription_plan_required_providers(payload: dict | None) -> list[str]:
 
 
 
+def subscription_plan_codex_model(payload: dict | None) -> str:
+    for plan in ("free", "pro", "max"):
+        agent_config = subscription_plan_agent_configs(payload).get(plan)
+        if not isinstance(agent_config, dict):
+            continue
+        codex = agent_config.get("codex") if isinstance(agent_config.get("codex"), dict) else {}
+        model = normalized_agent_config_text(codex.get("model"))
+        if model:
+            return model
+    return ""
+
 def node_version_check(*, env: dict[str, str] | None = None) -> tuple[bool, str]:
     ok, detail = command_ok(["node", "--version"], env=env)
     if not ok:
@@ -428,7 +439,10 @@ def codex_ready_probe_confirmed(text: str) -> bool:
     return False
 
 
-def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
+def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
+    model = str(model or "").strip()
+    if not model:
+        return False, "subscription plan Codex model is required"
     scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
     if not scope_ok:
         return False, scope_detail
@@ -438,7 +452,7 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         server = JsonRpcAppServer(config.codex_command, provider_env, tmp_path, tmp_path / "codex-events.jsonl")
         try:
             server.start()
-            thread_id = server.start_thread(tmp_path, config.codex_model)
+            thread_id = server.start_thread(tmp_path, model)
             if not thread_id:
                 return False, "codex app-server ready check did not create a thread"
             server.run_turn(
