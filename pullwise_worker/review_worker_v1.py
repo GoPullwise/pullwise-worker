@@ -1360,7 +1360,20 @@ class ReviewWorkerV1:
                             message=f"{phase.replace('_', ' ')} progress updated.",
                             data=phase_progress_data(run_dir, phase),
                         )
-                    validate_phase_outputs(run_dir, phase, artifact_dir)
+                    try:
+                        validate_phase_outputs(run_dir, phase, artifact_dir)
+                    except Exception as validation_exc:
+                        if phase not in SEMANTIC_PHASES:
+                            raise
+                        self.repair_semantic_phase_outputs(
+                            app_server,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            phase,
+                            validation_exc,
+                        )
+                        validate_phase_outputs(run_dir, phase, artifact_dir)
                     if phase == "qa_gate":
                         qa = read_json(run_dir / "qa.json", {})
                         if isinstance(qa, dict) and str(qa.get("status") or "").strip().lower() == "fail":
@@ -1564,6 +1577,40 @@ class ReviewWorkerV1:
                 repo_dir=repo_dir,
                 prompt=prompt,
                 effort=effort,
+                read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
+                timeout_seconds=turn_timeout_for_job(job),
+                cancel_requested=self.poll_cancel_requested,
+            )
+        fallback_semantic_artifact(run_dir, job, phase)
+
+    def repair_semantic_phase_outputs(
+        self,
+        app_server: JsonRpcAppServer | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        phase: str,
+        validation_error: object,
+    ) -> None:
+        append_jsonl(
+            run_dir / "worker.log.jsonl",
+            {
+                "event": "semantic_phase_output_repair",
+                "phase": phase,
+                "error": str(validation_error),
+                "time": iso_time(time.time()),
+            },
+        )
+        if app_server is not None:
+            state = read_json(run_dir / "run-state.json")
+            thread_id = str(state.get("thread_id") or "")
+            if not thread_id:
+                raise RuntimeError("Codex thread is missing")
+            app_server.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                prompt=phase_repair_prompt(phase, run_dir, validation_error),
+                effort=effort_for_phase(job, phase),
                 read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
                 timeout_seconds=turn_timeout_for_job(job),
                 cancel_requested=self.poll_cancel_requested,
@@ -2049,6 +2096,22 @@ def phase_prompt(phase: str, run_dir: Path) -> str:
     lines.append("- For schema-bound outputs, return/write JSON only with no Markdown wrapper.")
     lines.append("- If required evidence is missing, record the uncertainty in the phase output rather than inventing facts.")
     return "\n".join(lines) + "\n"
+
+
+def phase_repair_prompt(phase: str, run_dir: Path, validation_error: object) -> str:
+    return "\n".join(
+        [
+            f"Phase output repair: {phase}",
+            f"Local validation failed: {validation_error}",
+            "Repair only the required output file(s) for this phase.",
+            "Do not modify application source files.",
+            "Do not install dependencies.",
+            "Do not call external review/scanning services.",
+            "Preserve valid existing evidence and fields; fix malformed or missing JSON/output files.",
+            "",
+            phase_prompt(phase, run_dir).rstrip(),
+        ]
+    ) + "\n"
 
 
 RISK_HINT_KEYWORDS = {

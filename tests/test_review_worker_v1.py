@@ -123,6 +123,44 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertIn(("turn/interrupt", {"threadId": "thread_1", "turnId": "turn_1"}), calls)
 
+    def test_codex_app_server_start_uses_stdio_and_initialize_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            calls = []
+            launched = []
+
+            class Process:
+                stdin = None
+                stdout = None
+                stderr = None
+
+            class AppServer(JsonRpcAppServer):
+                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
+                    calls.append(("request", method, params or {}, timeout_seconds))
+                    return {}
+
+                def notify(self, method: str, params: dict | None = None) -> None:
+                    calls.append(("notify", method, params or {}, 0))
+
+                def _reader(self) -> None:
+                    return
+
+            def popen(args: list[str], **kwargs: object) -> Process:
+                launched.append((args, kwargs))
+                return Process()
+
+            with patch("pullwise_worker.review_worker_v1.subprocess.Popen", popen):
+                server = AppServer("/opt/pullwise/codex", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
+                server.start()
+
+        self.assertEqual(launched[0][0], ["/opt/pullwise/codex", "app-server", "--listen", "stdio://"])
+        self.assertEqual(launched[0][1]["cwd"], str(workspace))
+        initialize = calls[0]
+        self.assertEqual(initialize[1], "initialize")
+        self.assertEqual(initialize[2]["clientInfo"]["name"], "codex_repo_review_worker")
+        self.assertEqual(initialize[2]["capabilities"], {"experimentalApi": False})
+        self.assertEqual(calls[1], ("notify", "initialized", {}, 0))
+
     def test_approval_policy_allows_only_review_workspace_and_safe_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -1194,6 +1232,51 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             validate_phase_outputs(run_dir, "repo_map")
             validate_phase_outputs(run_dir, "risk_routing")
+
+    def test_semantic_phase_output_repair_turn_fixes_invalid_schema_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run-state.json").write_text(json.dumps({"thread_id": "thread_1"}), encoding="utf-8")
+            (run_dir / "repo-map.json").write_text(json.dumps({"schema_version": "wrong/v1"}), encoding="utf-8")
+            calls = []
+
+            class AppServer:
+                def run_turn(self, **kwargs: object) -> None:
+                    calls.append(kwargs)
+                    (run_dir / "repo-map.json").write_text(
+                        json.dumps({"schema_version": "repo-map/v1", "areas": []}),
+                        encoding="utf-8",
+                    )
+
+            job = {
+                "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
+                "review_request": {
+                    "budget": {"max_wall_time_seconds": 14400},
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                    },
+                },
+                "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+            }
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+
+            with self.assertRaisesRegex(RuntimeError, "repo-map/v1"):
+                validate_phase_outputs(run_dir, "repo_map")
+            worker.repair_semantic_phase_outputs(AppServer(), repo, run_dir, job, "repo_map", RuntimeError("bad schema"))
+            validate_phase_outputs(run_dir, "repo_map")
+
+        self.assertEqual(calls[0]["thread_id"], "thread_1")
+        self.assertEqual(calls[0]["effort"], "high")
+        self.assertTrue(calls[0]["read_only"])
+        self.assertIn("Phase output repair: repo_map", calls[0]["prompt"])
+        self.assertIn("Repair only the required output file", calls[0]["prompt"])
 
     def test_hash_artifact_phase_requires_v1_manifest_object_in_artifact_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
