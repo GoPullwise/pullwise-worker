@@ -135,6 +135,10 @@ Review pipeline rules:
 - Required completed artifacts are `report.md`, `report.agent.json`,
   `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`,
   `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
+- Artifact manifest/upload entries must include stable v1 metadata:
+  `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
+  `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,
+  `sha256`, and `size_bytes`.
 - Post run progress through `POST /v1/review-runs/{run_id}/events`, upload
   artifacts through `POST /v1/review-runs/{run_id}/artifacts`, and upload
   artifacts before submitting the terminal result envelope through

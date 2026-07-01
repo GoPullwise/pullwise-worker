@@ -550,6 +550,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 self.assertIn("sha256", item)
                 self.assertIn("size_bytes", item)
                 self.assertEqual(item["schema_version"], "v1")
+                self.assertEqual(item["encoding"], "utf-8")
+                self.assertEqual(item["compression"], "none")
 
     def test_terminal_artifacts_do_not_require_completed_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -600,6 +602,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("art_report_agent", uploaded_ids)
         for job_id, _artifact_id, payload in calls:
             self.assertEqual(job_id, "job_1")
+            self.assertEqual(payload["protocol_version"], "review-worker-protocol/v1")
             self.assertEqual(payload["attempt_id"], "wk_1-1")
             self.assertEqual(payload["run_id"], "run_1")
             self.assertIn("content_base64", payload)

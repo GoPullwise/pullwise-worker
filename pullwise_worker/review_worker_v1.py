@@ -2353,6 +2353,8 @@ def artifact_item(path: Path, kind: str, media_type: str, schema_id: str, requir
         "media_type": media_type,
         "schema_id": schema_id,
         "schema_version": "v1",
+        "encoding": "utf-8",
+        "compression": "none",
         "required": required,
         "storage": {"type": "server_artifact", "url": f"/v1/review-runs/{path.parent.name}/artifacts/{artifact_id}"},
         "sha256": hashlib.sha256(data).hexdigest(),
@@ -2571,6 +2573,7 @@ def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Pa
             job_id,
             artifact_id,
             {
+                "protocol_version": PROTOCOL_VERSION,
                 "attempt_id": attempt_id,
                 "run_id": artifact_dir.name,
                 "artifact": item,
