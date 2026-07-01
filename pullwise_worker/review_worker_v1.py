@@ -1359,6 +1359,18 @@ class ReviewWorkerV1:
                         if isinstance(qa, dict) and str(qa.get("status") or "").strip().lower() == "fail":
                             errors = qa.get("errors") if isinstance(qa.get("errors"), list) else []
                             reason = "; ".join(str(item) for item in errors if str(item).strip()) or "qa gate failed"
+                            append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_failed", "phase": phase, "error": reason, "time": iso_time(time.time())})
+                            self.emit_event(
+                                active,
+                                run_dir,
+                                "phase_failed",
+                                phase,
+                                status="failed",
+                                progress=progress,
+                                current_phase_percent=100.0,
+                                message=reason,
+                                data={"errors": errors},
+                            )
                             self.emit_event(
                                 active,
                                 run_dir,

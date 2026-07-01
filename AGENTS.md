@@ -177,8 +177,9 @@ Review pipeline rules:
   and still submit a valid cancelled result envelope with partial artifacts
   when possible.
 - Unrepaired QA gate failure must not be submitted as a completed run. It must
-  emit `qa_failed`, then `run_partial_completed`, upload terminal artifacts, and
-  submit a `partial_completed` result envelope.
+  emit `phase_failed` for `qa_gate`, then `qa_failed`, then
+  `run_partial_completed`, upload terminal artifacts, and submit a
+  `partial_completed` result envelope.
 - Failed, cancelled, and partial-completed jobs must still submit valid
   terminal envelopes when possible, including required `qa`, `worker_log`, and
   either `error_report` or partial `report.agent` artifacts.
