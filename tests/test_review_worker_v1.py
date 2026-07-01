@@ -155,15 +155,52 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("intent/07_intent_test_failure_analyzer.md", REQUIRED_PROMPT_FILES)
         self.assertIn("plausible_bug", INTENT_TEST_CLASSIFICATIONS)
 
-    def test_job_policy_requires_server_agent_config_and_repository_limits(self) -> None:
+    def test_job_policy_requires_canonical_v1_policy_and_repository_limits(self) -> None:
         with self.assertRaisesRegex(ValueError, "model_profile.default_model"):
-            validate_job_policy({"repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
+            validate_job_policy({
+                "agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}},
+                "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000},
+            })
         with self.assertRaisesRegex(ValueError, "model_profile.core_effort"):
-            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5"}}, "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
+            validate_job_policy({
+                "model_profile": {"default_model": "gpt-5.5"},
+                "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000},
+            })
         with self.assertRaisesRegex(ValueError, "turn_timeout_seconds"):
-            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}}, "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000}})
+            validate_job_policy({
+                "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
+                "agentConfig": {"provider": "codex", "reviewWorker": {"turnTimeoutSeconds": 1800}},
+                "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000},
+            })
+        with self.assertRaisesRegex(ValueError, "max_wall_time_seconds"):
+            validate_job_policy({
+                "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                    },
+                },
+                "agentConfig": {"provider": "codex", "reviewWorker": {"scanDeadlineSeconds": 14400}},
+                "repositoryLimits": {"maxFiles": 10, "maxBytes": 1000},
+            })
         with self.assertRaisesRegex(ValueError, "repositoryLimits"):
-            validate_job_policy({"agentConfig": {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "high"}, "reviewWorker": {"turnTimeoutSeconds": 1800, "scanDeadlineSeconds": 14400}}})
+            validate_job_policy({
+                "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
+                "review_request": {
+                    "budget": {"max_wall_time_seconds": 14400},
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                    },
+                },
+            })
         unsafe_job = {
             "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
             "review_request": {
@@ -221,6 +258,35 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         parsed = validate_job_policy(job)["intent_test_validation"]
         self.assertEqual(parsed["max_tests_per_run"], 7)
         self.assertEqual(parsed["max_test_run_seconds_per_test"], 45)
+        fallback_job = dict(job)
+        fallback_job["review_request"] = {
+            "budget": {"max_wall_time_seconds": 14400},
+            "policy": {
+                "allow_source_modification": False,
+                "allow_dependency_install": False,
+                "allow_network": False,
+                "helper_scripts_standard_library_only": True,
+                "turn_timeout_seconds": 1800,
+            },
+        }
+        fallback_job["agentConfig"] = {
+            "provider": "codex",
+            "reviewWorker": {
+                "intentTestValidation": {
+                    "enabled": False,
+                    "onlyTiers": ["P3"],
+                    "maxTestsPerRun": 99,
+                    "maxTestsPerBundle": 99,
+                    "maxTestRunSecondsPerTest": 99,
+                    "maxTotalTestRunSeconds": 99,
+                },
+            },
+        }
+        fallback_policy = validate_job_policy(fallback_job)["intent_test_validation"]
+        self.assertTrue(fallback_policy["enabled"])
+        self.assertEqual(fallback_policy["only_tiers"], ["P0", "P1"])
+        self.assertEqual(fallback_policy["max_tests_per_run"], 20)
+        self.assertEqual(fallback_policy["max_test_run_seconds_per_test"], 60)
 
     def test_prepare_workspace_bootstraps_design_review_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -1784,24 +1784,22 @@ def _validate_restrictive_review_policy(policy: dict[str, Any]) -> None:
 def intent_validation_policy_for_job(job: dict[str, Any]) -> dict[str, Any]:
     policy = _job_review_policy(job)
     canonical = policy.get("intent_test_validation") if isinstance(policy.get("intent_test_validation"), dict) else {}
-    review_worker = _job_agent_config(job).get("reviewWorker") if isinstance(_job_agent_config(job).get("reviewWorker"), dict) else {}
-    configured = review_worker.get("intentTestValidation") if isinstance(review_worker.get("intentTestValidation"), dict) else {}
     return {
-        "enabled": canonical.get("enabled", configured.get("enabled", True)) is not False,
-        "only_tiers": canonical.get("only_tiers") or canonical.get("onlyTiers") or configured.get("onlyTiers") or ["P0", "P1"],
-        "max_tests_per_run": _policy_int(canonical, "max_tests_per_run", "maxTestsPerRun", default=int(configured.get("maxTestsPerRun") or 20)),
-        "max_tests_per_bundle": _policy_int(canonical, "max_tests_per_bundle", "maxTestsPerBundle", default=int(configured.get("maxTestsPerBundle") or 2)),
+        "enabled": canonical.get("enabled", True) is not False,
+        "only_tiers": canonical.get("only_tiers") or canonical.get("onlyTiers") or ["P0", "P1"],
+        "max_tests_per_run": _policy_int(canonical, "max_tests_per_run", "maxTestsPerRun", default=20),
+        "max_tests_per_bundle": _policy_int(canonical, "max_tests_per_bundle", "maxTestsPerBundle", default=2),
         "max_test_run_seconds_per_test": _policy_int(
             canonical,
             "max_test_run_seconds_per_test",
             "maxTestRunSecondsPerTest",
-            default=int(configured.get("maxTestRunSecondsPerTest") or 60),
+            default=60,
         ),
         "max_total_test_run_seconds": _policy_int(
             canonical,
             "max_total_test_run_seconds",
             "maxTotalTestRunSeconds",
-            default=int(configured.get("maxTotalTestRunSeconds") or 900),
+            default=900,
         ),
     }
 
@@ -1811,34 +1809,26 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
     provider = str(agent.get("provider") or "").strip().lower()
     if provider and provider != "codex":
         raise ValueError("agentConfig.provider must be codex")
-    codex = agent.get("codex") if isinstance(agent.get("codex"), dict) else {}
     model_profile = _job_model_profile(job)
-    model = str(model_profile.get("default_model") or codex.get("model") or "").strip()
+    model = str(model_profile.get("default_model") or "").strip()
     if not model:
         raise ValueError("claimed job must include model_profile.default_model")
     effort = _clean_effort(
-        model_profile.get("core_effort") or model_profile.get("reviewer_effort") or codex.get("reasoningEffort"),
+        model_profile.get("core_effort") or model_profile.get("reviewer_effort"),
         field="model_profile.core_effort",
     )
     non_core_effort = _clean_effort(model_profile.get("non_core_effort") or "medium", field="model_profile.non_core_effort")
-    review_worker = agent.get("reviewWorker") if isinstance(agent.get("reviewWorker"), dict) else {}
     review_policy = _job_review_policy(job)
     review_budget = _job_review_budget(job)
     _validate_restrictive_review_policy(review_policy)
     try:
         turn_timeout_seconds = _policy_int(review_policy, "turn_timeout_seconds", "turnTimeoutSeconds", default=None)
     except (TypeError, ValueError):
-        try:
-            turn_timeout_seconds = int(review_worker.get("turnTimeoutSeconds"))
-        except (TypeError, ValueError):
-            raise ValueError("claimed job must include review_request.policy.turn_timeout_seconds") from None
+        raise ValueError("claimed job must include review_request.policy.turn_timeout_seconds") from None
     try:
         scan_deadline_seconds = _policy_int(review_budget, "max_wall_time_seconds", "maxWallTimeSeconds", default=None)
     except (TypeError, ValueError):
-        try:
-            scan_deadline_seconds = int(review_worker.get("scanDeadlineSeconds"))
-        except (TypeError, ValueError):
-            raise ValueError("claimed job must include review_request.budget.max_wall_time_seconds") from None
+        raise ValueError("claimed job must include review_request.budget.max_wall_time_seconds") from None
     if turn_timeout_seconds <= 0 or scan_deadline_seconds < 0:
         raise ValueError("review worker turn timeout must be positive and scan deadline must be non-negative")
     limits = job.get("repositoryLimits") if isinstance(job.get("repositoryLimits"), dict) else {}

@@ -256,10 +256,10 @@ server-provided subscription plan agent configs attached to the claimed job.
   `review_request.policy`, `review_request.budget`, and `repositoryLimits`;
   reject jobs that omit required server-owned policy instead of using local
   defaults.
-- Prefer `model_profile.default_model`, `model_profile.*_effort`, and
-  `review_request.policy` over compatibility `agentConfig` fields when driving
-  Codex. `agentConfig` is server-derived backing data for admin/doctor
-  consistency, not worker-local policy.
+- Drive Codex from `model_profile.default_model`, `model_profile.*_effort`,
+  `review_request.policy`, and `review_request.budget`; do not fall back to
+  `agentConfig.codex` or `agentConfig.reviewWorker` for model, effort, timeout,
+  deadline, or intent-test validation-limit decisions.
 - Reject jobs whose `review_request.policy` allows source modification,
   dependency install, network access, or non-standard-library helper scripts.
 - Repository size limits used by worker preflight come from the job's
