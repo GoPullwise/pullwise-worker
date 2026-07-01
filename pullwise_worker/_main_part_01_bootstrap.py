@@ -1104,6 +1104,10 @@ class PullwiseClient:
         }
         self.post(f"/worker/jobs/{url_path_segment(job_id)}/progress", payload)
 
+    def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+        response = self.post(f"/worker/jobs/{url_path_segment(job_id)}/artifacts/{url_path_segment(artifact_id)}", payload, compress=True)
+        return response.json()
+
     def result(self, job_id: str, payload: dict) -> None:
         self.post(f"/worker/jobs/{url_path_segment(job_id)}/result", payload, compress=True)
 
@@ -1257,7 +1261,9 @@ def main() -> None:
     if args.command == "cleanup":
         cleanup_worker_resources(config)
         raise SystemExit(0)
-    worker = Worker(config)
+    from .review_worker_v1 import ReviewWorkerV1
+
+    worker = ReviewWorkerV1(config, client=PullwiseClient(config))
     worker.run(once=args.once)
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]

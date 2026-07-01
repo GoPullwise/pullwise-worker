@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import fcntl
+import base64
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -13,6 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - runtime is Linux only; import stays testable elsewhere.
+    fcntl = None
 
 PROTOCOL_VERSION = "review-worker-protocol/v1"
 WORKER_VERSION = "0.1.0"
@@ -49,6 +54,7 @@ SEMANTIC_PHASES = {
     "validator_disproof",
     "final_report_json",
 }
+CORE_EFFORT_PHASES = SEMANTIC_PHASES - {"bootstrap_helper_scripts"}
 MECHANICAL_PHASES = {phase for phase, _progress in PIPELINE_PHASES} - SEMANTIC_PHASES
 REQUIRED_COMPLETED_ARTIFACTS = {
     "report.human",
@@ -119,6 +125,8 @@ class WorkerLock:
         self._handle: Any = None
 
     def acquire(self) -> None:
+        if fcntl is None:
+            raise RuntimeError("worker lock requires Linux/POSIX fcntl")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+", encoding="utf-8")
         try:
@@ -365,7 +373,11 @@ class JsonRpcAppServer:
                     if event is not None:
                         event.set()
             elif "id" in message and "method" in message:
-                self._send({"id": message.get("id"), "error": {"code": -32601, "message": "unsupported server request"}})
+                method = str(message.get("method") or "")
+                if "approval" in method.lower():
+                    self._send({"id": message.get("id"), "result": approval_response_for_request(message, self.cwd)})
+                else:
+                    self._send({"id": message.get("id"), "error": {"code": -32601, "message": "unsupported server request"}})
 
     def _next_request_id(self) -> int:
         with self._lock:
@@ -379,6 +391,78 @@ class JsonRpcAppServer:
         with self._send_lock:
             self.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
             self.process.stdin.flush()
+
+
+READ_ONLY_COMMANDS = {"git", "find", "wc", "cat", "sed", "awk", "grep", "rg"}
+DENIED_COMMAND_TOKENS = {
+    "brew",
+    "cargo",
+    "checkout",
+    "commit",
+    "curl",
+    "install",
+    "npm",
+    "pip",
+    "push",
+    "reset",
+    "rm",
+    "wget",
+}
+
+
+def approval_response_for_request(message: dict[str, Any], workspace: Path) -> dict[str, Any]:
+    decision, reason = decide_approval(message, workspace)
+    return {"decision": decision, "outcome": decision, "reason": reason}
+
+
+def decide_approval(message: dict[str, Any], workspace: Path) -> tuple[str, str]:
+    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    request = params.get("request") if isinstance(params.get("request"), dict) else params
+    request_type = str(request.get("type") or request.get("kind") or message.get("method") or "").lower()
+    if "file" in request_type or request.get("paths") or request.get("path"):
+        paths = request.get("paths") if isinstance(request.get("paths"), list) else [request.get("path")]
+        if paths and all(path_is_under_codex_review(workspace, path) for path in paths if path):
+            return "acceptForSession", "write is limited to .codex-review"
+        return "decline", "file changes outside .codex-review are not allowed"
+    if "command" in request_type or request.get("command") or request.get("argv"):
+        command = request.get("argv") if isinstance(request.get("argv"), list) else request.get("command")
+        if command_is_allowed(command, workspace, request.get("cwd")):
+            return "acceptForSession", "command is an allowed mechanical helper"
+        return "decline", "command is not allowed by worker policy"
+    return "decline", "unknown approval request type"
+
+
+def path_is_under_codex_review(workspace: Path, raw_path: object) -> bool:
+    if not raw_path:
+        return False
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = workspace / path
+    try:
+        path.resolve(strict=False).relative_to((workspace / ".codex-review").resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None) -> bool:
+    argv = [str(part) for part in command] if isinstance(command, list) else shlex.split(str(command or ""))
+    if not argv:
+        return False
+    executable = Path(argv[0]).name
+    lowered = {part.lower() for part in argv}
+    if lowered.intersection(DENIED_COMMAND_TOKENS):
+        return False
+    cwd = Path(str(raw_cwd)) if raw_cwd else workspace
+    if not cwd.is_absolute():
+        cwd = workspace / cwd
+    try:
+        cwd.resolve(strict=False).relative_to(workspace.resolve(strict=False))
+    except ValueError:
+        return False
+    if executable in {"python", "python3"} and len(argv) >= 2:
+        return path_is_under_codex_review(workspace, argv[1]) and "/tools/" in Path(argv[1]).as_posix()
+    return executable in READ_ONLY_COMMANDS
 
 
 class ReviewWorkerV1:
@@ -460,13 +544,21 @@ class ReviewWorkerV1:
             self.client.result(job_id, legacy_result_payload(active, envelope, "done"))
             terminal_state = "completed"
         except JobCancelled:
-            envelope = self.build_envelope(job, run_id, "cancelled", started, self.isolation.artifacts / run_id, self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id)
+            artifact_dir = self.isolation.artifacts / run_id
+            run_dir = self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
+            envelope = self.build_envelope(job, run_id, "cancelled", started, artifact_dir, run_dir, error="cancel requested")
+            upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
+            if upload_error:
+                envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             self.client.result(job_id, legacy_result_payload(active, envelope, "failed"))
             terminal_state = "cancelled"
         except Exception as exc:
             artifact_dir = self.isolation.artifacts / run_id
             run_dir = self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
             envelope = self.build_envelope(job, run_id, "failed", started, artifact_dir, run_dir, error=str(exc))
+            upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
+            if upload_error:
+                envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             self.client.result(job_id, legacy_result_payload(active, envelope, "failed"))
             terminal_state = "failed"
         finally:
@@ -499,9 +591,7 @@ class ReviewWorkerV1:
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
-        effort = "medium"
-        if phase == "validator_disproof":
-            effort = core_effort_for_job(job)
+        effort = effort_for_phase(job, phase)
         prompt = phase_prompt(phase, run_dir)
         app_server.run_turn(
             thread_id=thread_id,
@@ -516,7 +606,14 @@ class ReviewWorkerV1:
         if phase == "inventory_repository":
             write_json(run_dir / "inventory.json", inventory(repo_dir))
         elif phase == "token_budget":
-            write_json(run_dir / "token-budget.json", {"model": model_for_job(job), "reviewer_effort": "medium", "validator_effort": core_effort_for_job(job)})
+            write_json(
+                run_dir / "token-budget.json",
+                {
+                    "model": model_for_job(job),
+                    "core_effort": core_effort_for_job(job),
+                    "non_core_effort": "medium",
+                },
+            )
         elif phase == "bundle_planning":
             inv = read_json(run_dir / "inventory.json")
             files = inv.get("files") if isinstance(inv.get("files"), list) else []
@@ -532,6 +629,13 @@ class ReviewWorkerV1:
             (run_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
         elif phase == "qa_gate":
             write_json(run_dir / "qa.json", {"status": "pass", "errors": [], "warnings": []})
+        elif phase == "upload_artifacts":
+            upload_artifacts(
+                self.client,
+                safe_id(job.get("job_id"), "job"),
+                active_attempt_id(self.config, job),
+                self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"),
+            )
         elif phase == "hash_artifacts":
             materialize_artifacts(run_dir, self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"))
         elif phase in {"repo_map", "risk_routing", "clustering_and_voting", "validator_disproof", "final_report_json"}:
@@ -550,8 +654,11 @@ class ReviewWorkerV1:
         error: str = "",
     ) -> dict[str, Any]:
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        if not (artifact_dir / "artifact-manifest.json").exists():
-            materialize_artifacts(run_dir, artifact_dir)
+        if status == "completed":
+            if not (artifact_dir / "artifact-manifest.json").exists():
+                materialize_artifacts(run_dir, artifact_dir)
+        else:
+            materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
         manifest = read_json(artifact_dir / "artifact-manifest.json", [])
         now = time.time()
         return {
@@ -610,6 +717,10 @@ def core_effort_for_job(job: dict[str, Any]) -> str:
     codex = agent.get("codex") if isinstance(agent.get("codex"), dict) else {}
     effort = str(codex.get("reasoningEffort") or "high").lower()
     return effort if effort in {"low", "medium", "high", "xhigh"} else "high"
+
+
+def effort_for_phase(job: dict[str, Any], phase: str) -> str:
+    return core_effort_for_job(job) if phase in CORE_EFFORT_PHASES else "medium"
 
 
 def phase_prompt(phase: str, run_dir: Path) -> str:
@@ -678,6 +789,31 @@ def render_markdown(report: dict[str, Any]) -> str:
             "No confirmed findings." if not findings else "",
         ]
     )
+
+
+def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: str, *, error: str = "") -> None:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    for name, content in (
+        ("worker.log.jsonl", ""),
+        ("codex-events.jsonl", ""),
+    ):
+        src = run_dir / name
+        if not src.exists():
+            src.parent.mkdir(parents=True, exist_ok=True)
+            src.write_text(content, encoding="utf-8")
+        shutil.copy2(src, artifact_dir / name)
+    error_report = {
+        "status": status,
+        "error": error,
+        "created_at": iso_time(time.time()),
+    }
+    write_json(artifact_dir / "error-report.json", error_report)
+    manifest = [
+        artifact_item(artifact_dir / "worker.log.jsonl", "worker_log", "application/jsonl", "worker-log", False),
+        artifact_item(artifact_dir / "codex-events.jsonl", "codex_event_log", "application/jsonl", "codex-events", False),
+        artifact_item(artifact_dir / "error-report.json", "error_report", "application/json", "error-report", False),
+    ]
+    write_json(artifact_dir / "artifact-manifest.json", manifest)
 
 
 def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
@@ -847,3 +983,53 @@ def write_worker_config(path: Path, job: dict[str, Any], config: Any) -> None:
             "maintains_local_queue": False,
         },
     )
+
+
+def active_attempt_id(config: Any, job: dict[str, Any]) -> str:
+    try:
+        attempt = int(job.get("attempt") or 1)
+    except (TypeError, ValueError):
+        attempt = 1
+    return f"{config.worker_id}-{attempt}"
+
+
+def upload_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, artifact_dir: Path) -> str:
+    try:
+        upload_artifacts(client, job_id, attempt_id, artifact_dir)
+    except Exception as exc:
+        return str(exc)
+    return ""
+
+
+def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Path) -> None:
+    manifest = read_json(artifact_dir / "artifact-manifest.json", [])
+    if not isinstance(manifest, list):
+        raise RuntimeError("artifact manifest must be a list before upload")
+    for item in manifest:
+        if not isinstance(item, dict):
+            continue
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not artifact_id or not name:
+            raise RuntimeError("artifact manifest entries require artifact_id and name")
+        path = artifact_dir / name
+        if not path.is_file():
+            if item.get("required") is True:
+                raise RuntimeError(f"required artifact is missing: {name}")
+            continue
+        data = path.read_bytes()
+        actual_sha = hashlib.sha256(data).hexdigest()
+        if str(item.get("sha256") or "").lower() != actual_sha:
+            raise RuntimeError(f"artifact sha256 mismatch before upload: {name}")
+        if int(item.get("size_bytes") if item.get("size_bytes") is not None else -1) != len(data):
+            raise RuntimeError(f"artifact size mismatch before upload: {name}")
+        client.artifact(
+            job_id,
+            artifact_id,
+            {
+                "attempt_id": attempt_id,
+                "run_id": artifact_dir.name,
+                "artifact": item,
+                "content_base64": base64.b64encode(data).decode("ascii"),
+            },
+        )
