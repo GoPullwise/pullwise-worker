@@ -1132,6 +1132,40 @@ class ReviewWorkerV1:
             data=data,
         )
 
+    def progress_phase(
+        self,
+        active: ActiveJob,
+        run_dir: Path,
+        phase: str,
+        progress: int,
+        *,
+        current_phase_percent: float,
+        message: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        append_jsonl(
+            run_dir / "worker.log.jsonl",
+            {
+                "event": "progress_updated",
+                "phase": phase,
+                "progress": progress,
+                "current_phase_percent": round(float(current_phase_percent), 2),
+                "time": iso_time(time.time()),
+                "data": data or {},
+            },
+        )
+        self.emit_event(
+            active,
+            run_dir,
+            "progress_updated",
+            phase,
+            status="running",
+            progress=progress,
+            current_phase_percent=current_phase_percent,
+            message=message,
+            data=data,
+        )
+
     def fail_phase(self, active: ActiveJob, run_dir: Path, phase: str, error: object) -> None:
         append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_failed", "phase": phase, "error": str(error), "time": iso_time(time.time())})
         self.emit_event(
@@ -1201,8 +1235,18 @@ class ReviewWorkerV1:
                     elif phase in SEMANTIC_PHASES:
                         self.run_semantic_phase(app_server, repo_dir, run_dir, job, phase)
                     elif phase in MECHANICAL_PHASES:
-                        self.run_mechanical_phase(repo_dir, run_dir, job, phase)
-                    self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase))
+                        self.run_mechanical_phase(repo_dir, run_dir, job, phase, active=active, progress=progress)
+                    if phase in {"reviewer_fanout", "intent_test_validation"}:
+                        self.progress_phase(
+                            active,
+                            run_dir,
+                            phase,
+                            progress,
+                            current_phase_percent=90.0,
+                            message=f"{phase.replace('_', ' ')} progress updated.",
+                            data=phase_progress_data(run_dir, phase),
+                        )
+                    self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
                 except JobCancelled:
                     raise
                 except Exception as phase_exc:
@@ -1341,7 +1385,16 @@ class ReviewWorkerV1:
             )
         fallback_semantic_artifact(run_dir, job, phase)
 
-    def run_mechanical_phase(self, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
+    def run_mechanical_phase(
+        self,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        phase: str,
+        *,
+        active: ActiveJob | None = None,
+        progress: int = 0,
+    ) -> None:
         if phase == "inventory_repository":
             write_json(run_dir / "inventory.json", inventory(repo_dir))
         elif phase == "token_budget":
@@ -1367,11 +1420,31 @@ class ReviewWorkerV1:
         elif phase == "qa_gate":
             write_json(run_dir / "qa.json", qa_gate_payload(repo_dir, run_dir))
         elif phase == "upload_artifacts":
+            artifact_dir = self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run")
+
+            def upload_progress(uploaded: int, total: int, item: dict[str, Any]) -> None:
+                if active is None:
+                    return
+                self.progress_phase(
+                    active,
+                    run_dir,
+                    "upload_artifacts",
+                    progress,
+                    current_phase_percent=(100.0 if total <= 0 else min(100.0, (uploaded / total) * 100.0)),
+                    message=f"Uploaded artifact {uploaded} of {total}.",
+                    data={
+                        "artifacts_total": total,
+                        "artifacts_uploaded": uploaded,
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                    },
+                )
+
             upload_artifacts(
                 self.client,
                 safe_id(job.get("job_id"), "job"),
                 active_attempt_id(self.config, job),
-                self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"),
+                artifact_dir,
+                progress_callback=upload_progress,
             )
         elif phase == "hash_artifacts":
             materialize_artifacts(run_dir, self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"))
@@ -2071,7 +2144,42 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
     }
 
 
-def phase_completion_data(run_dir: Path, phase: str) -> dict[str, Any]:
+def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> dict[str, Any]:
+    if phase == "reviewer_fanout":
+        bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
+        raw_dir = run_dir / "raw-reviewers"
+        completed = len(list(raw_dir.glob("*.json"))) if raw_dir.is_dir() else 0
+        total = len(bundles) if isinstance(bundles, list) else completed
+        return {"reviewer_runs_total": total, "reviewer_runs_completed": min(completed, total) if total else completed}
+    if phase == "intent_test_validation":
+        plan_targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
+        generated = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
+        raw_runs = read_json(run_dir / "intent" / "intent-test-run-results.raw.json", {}).get("test_runs", [])
+        analyzed_runs = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
+        return {
+            "intent_tests_total": len(plan_targets) if isinstance(plan_targets, list) else 0,
+            "intent_tests_written": len(generated) if isinstance(generated, list) else 0,
+            "intent_tests_run": len(raw_runs) if isinstance(raw_runs, list) else len(analyzed_runs) if isinstance(analyzed_runs, list) else 0,
+        }
+    if phase == "upload_artifacts":
+        manifest_dir = artifact_dir or run_dir
+        manifest = read_json(manifest_dir / "artifact-manifest.json", [])
+        uploadable = 0
+        if isinstance(manifest, list):
+            for item in manifest:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if name and (manifest_dir / name).is_file():
+                    uploadable += 1
+        return {"artifacts_total": uploadable, "artifacts_uploaded": uploadable}
+    return {}
+
+
+def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> dict[str, Any]:
+    progress_data = phase_progress_data(run_dir, phase, artifact_dir)
+    if progress_data:
+        return progress_data
     if phase == "inventory_repository":
         summary = read_json(run_dir / "inventory.json", {}).get("summary", {})
         return summary if isinstance(summary, dict) else {}
@@ -2547,10 +2655,18 @@ def upload_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, arti
     return ""
 
 
-def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Path) -> None:
+def upload_artifacts(
+    client: Any,
+    job_id: str,
+    attempt_id: str,
+    artifact_dir: Path,
+    *,
+    progress_callback: Any | None = None,
+) -> None:
     manifest = read_json(artifact_dir / "artifact-manifest.json", [])
     if not isinstance(manifest, list):
         raise RuntimeError("artifact manifest must be a list before upload")
+    uploadable: list[tuple[dict[str, Any], Path]] = []
     for item in manifest:
         if not isinstance(item, dict):
             continue
@@ -2563,6 +2679,11 @@ def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Pa
             if item.get("required") is True:
                 raise RuntimeError(f"required artifact is missing: {name}")
             continue
+        uploadable.append((item, path))
+    total = len(uploadable)
+    for uploaded, (item, path) in enumerate(uploadable, start=1):
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        name = str(item.get("name") or "").strip()
         data = path.read_bytes()
         actual_sha = hashlib.sha256(data).hexdigest()
         if str(item.get("sha256") or "").lower() != actual_sha:
@@ -2580,3 +2701,5 @@ def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Pa
                 "content_base64": base64.b64encode(data).decode("ascii"),
             },
         )
+        if progress_callback is not None:
+            progress_callback(uploaded, total, item)

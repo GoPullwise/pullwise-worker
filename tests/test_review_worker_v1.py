@@ -31,6 +31,8 @@ from pullwise_worker.review_worker_v1 import (
     turn_timeout_for_job,
     result_payload,
     bundle_plan_payload,
+    phase_completion_data,
+    phase_progress_data,
     inventory,
     materialize_artifacts,
     materialize_terminal_artifacts,
@@ -589,23 +591,104 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir.mkdir(parents=True)
             materialize_artifacts(run_dir, artifact_dir)
             calls = []
+            progress_calls = []
 
             class Client:
                 def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
                     calls.append((job_id, artifact_id, payload))
                     return {"accepted": True}
 
-            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+            upload_artifacts(
+                Client(),
+                "job_1",
+                "wk_1-1",
+                artifact_dir,
+                progress_callback=lambda uploaded, total, item: progress_calls.append((uploaded, total, item["artifact_id"])),
+            )
 
         uploaded_ids = {artifact_id for _job_id, artifact_id, _payload in calls}
         self.assertIn("art_report_human", uploaded_ids)
         self.assertIn("art_report_agent", uploaded_ids)
+        self.assertEqual(progress_calls[-1][0], progress_calls[-1][1])
+        self.assertEqual(progress_calls[-1][1], len(calls))
         for job_id, _artifact_id, payload in calls:
             self.assertEqual(job_id, "job_1")
             self.assertEqual(payload["protocol_version"], "review-worker-protocol/v1")
             self.assertEqual(payload["attempt_id"], "wk_1-1")
             self.assertEqual(payload["run_id"], "run_1")
             self.assertIn("content_base64", payload)
+
+    def test_phase_progress_data_reports_required_v1_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            (run_dir / "raw-reviewers").mkdir(parents=True)
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "bundle-plan.json").write_text(
+                json.dumps({"bundles": [{"bundle_id": "b1"}, {"bundle_id": "b2"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "raw-reviewers" / "b1.json").write_text("{}", encoding="utf-8")
+            (run_dir / "intent" / "intent-test-plan.json").write_text(
+                json.dumps({"test_targets": [{"id": "itv_1"}, {"id": "itv_2"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps({"generated_tests": [{"id": "itv_1"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-run-results.raw.json").write_text(
+                json.dumps({"test_runs": [{"id": "itv_1"}]}),
+                encoding="utf-8",
+            )
+            materialize_artifacts(run_dir, artifact_dir)
+
+            reviewer = phase_progress_data(run_dir, "reviewer_fanout")
+            intent = phase_progress_data(run_dir, "intent_test_validation")
+            upload = phase_completion_data(run_dir, "upload_artifacts", artifact_dir)
+
+        self.assertEqual(reviewer["reviewer_runs_total"], 2)
+        self.assertEqual(reviewer["reviewer_runs_completed"], 1)
+        self.assertEqual(intent["intent_tests_total"], 2)
+        self.assertEqual(intent["intent_tests_written"], 1)
+        self.assertEqual(intent["intent_tests_run"], 1)
+        self.assertGreaterEqual(upload["artifacts_total"], 5)
+        self.assertEqual(upload["artifacts_uploaded"], upload["artifacts_total"])
+
+    def test_progress_phase_posts_v1_progress_updated_event_with_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            posted = []
+
+            class Client:
+                def event(self, run_id: str, payload: dict) -> dict:
+                    posted.append((run_id, payload))
+                    return {"ack": True}
+
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+            counters = {"reviewer_runs_total": 2, "reviewer_runs_completed": 1}
+
+            worker.progress_phase(
+                active,
+                run_dir,
+                "reviewer_fanout",
+                70,
+                current_phase_percent=50,
+                message="Reviewer fanout progress.",
+                data=counters,
+            )
+
+        self.assertEqual(posted[0][0], "run_1")
+        event = posted[0][1]
+        self.assertEqual(event["event_type"], "progress_updated")
+        self.assertEqual(event["phase"], "reviewer_fanout")
+        self.assertEqual(event["progress"]["status"], "running")
+        self.assertEqual(event["data"]["reviewer_runs_total"], 2)
+        self.assertEqual(event["data"]["reviewer_runs_completed"], 1)
 
     def test_build_envelope_contains_stable_v1_protocol_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

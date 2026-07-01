@@ -147,6 +147,13 @@ Review pipeline rules:
   `worker_id`, positive monotonic `sequence`, `timestamp`, supported
   `event_type`, `phase`, `severity`, `message`, and `progress` with
   `overall_percent`, `current_phase_percent`, and `status`.
+- Long-running phases must post `progress_updated` events, not only
+  `phase_started`/`phase_completed`. `reviewer_fanout` progress data must
+  include `reviewer_runs_total` and `reviewer_runs_completed`;
+  `intent_test_validation` progress data must include `intent_tests_total`,
+  `intent_tests_written`, and `intent_tests_run`; `upload_artifacts` progress
+  data must include `artifacts_total` and `artifacts_uploaded` and update after
+  each successfully uploaded artifact.
 - Failed and cancelled jobs must still submit valid terminal envelopes when
   possible, including required `qa`, `worker_log`, and either `error_report` or
   partial `report.agent` artifacts.
