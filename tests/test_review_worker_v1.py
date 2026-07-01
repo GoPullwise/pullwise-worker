@@ -1941,10 +1941,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "schema_version"):
                 validate_reviewer_outputs(run_dir)
 
-            validation = json.loads((run_dir / "reviewer-json-validation.json").read_text(encoding="utf-8"))
+            validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
             self.assertEqual(validation["schema_version"], "reviewer-json-validation/v1")
             self.assertTrue(validation["errors"])
             self.assertFalse((run_dir / "verified-reviewers" / "security.json").exists())
+            with self.assertRaisesRegex(RuntimeError, "reviewer JSON validation failed"):
+                validate_phase_outputs(run_dir, "reviewer_json_validation")
 
     def test_validate_reviewer_outputs_copies_valid_outputs_to_verified_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1956,10 +1958,61 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             validate_reviewer_outputs(run_dir)
 
-            validation = json.loads((run_dir / "reviewer-json-validation.json").read_text(encoding="utf-8"))
+            validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
             verified = json.loads((run_dir / "verified-reviewers" / "security.json").read_text(encoding="utf-8"))
             self.assertEqual(validation["errors"], [])
             self.assertEqual(verified, payload)
+
+    def test_reviewer_json_validation_repair_turn_fixes_invalid_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            (run_dir / "run-state.json").write_text(json.dumps({"thread_id": "thread_1"}), encoding="utf-8")
+            (raw_dir / "security.json").write_text(json.dumps({"findings": []}), encoding="utf-8")
+            calls = []
+
+            class AppServer:
+                def run_turn(self, **kwargs: object) -> None:
+                    calls.append(kwargs)
+                    (raw_dir / "security.json").write_text(
+                        json.dumps({"schema_version": "codex-reviewer-output/v1", "findings": []}),
+                        encoding="utf-8",
+                    )
+
+            job = {
+                "model_profile": {
+                    "default_model": "gpt-5.5",
+                    "core_effort": "high",
+                    "non_core_effort": "medium",
+                },
+                "review_request": {
+                    "budget": {"max_wall_time_seconds": 14400},
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                    },
+                },
+                "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+            }
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+
+            worker.run_reviewer_json_validation_phase(AppServer(), repo, run_dir, job)
+
+            validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
+            verified = json.loads((run_dir / "verified-reviewers" / "security.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(validation["errors"], [])
+        self.assertEqual(verified["schema_version"], "codex-reviewer-output/v1")
+        self.assertEqual(calls[0]["thread_id"], "thread_1")
+        self.assertEqual(calls[0]["effort"], "medium")
+        self.assertFalse(calls[0]["read_only"])
+        self.assertIn("Reviewer JSON output repair", calls[0]["prompt"])
 
     def test_progress_phase_posts_v1_progress_updated_event_with_counters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

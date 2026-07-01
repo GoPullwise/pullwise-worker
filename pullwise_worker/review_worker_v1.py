@@ -99,7 +99,7 @@ PHASE_JSON_OUTPUTS: dict[str, tuple[tuple[str, str], ...]] = {
     "repo_map": (("repo-map.json", "repo-map/v1"),),
     "risk_routing": (("risk-routing.json", "risk-routing/v1"),),
     "bundle_planning": (("bundle-plan.json", "bundle-plan/v1"), ("coverage.json", "coverage/v1")),
-    "reviewer_json_validation": (("reviewer-json-validation.json", "reviewer-json-validation/v1"),),
+    "reviewer_json_validation": (("json-errors.json", "reviewer-json-validation/v1"),),
     "location_validation": (("location-verification.json", "location-verification/v1"),),
     "clustering_and_voting": (("clusters.json", "cluster-output/v1"), ("validation-input.json", "validation-input/v1")),
     "intent_test_validation": (("intent/intent-test-validation.json", "intent-test-validation/v1"),),
@@ -2218,6 +2218,23 @@ def phase_repair_prompt(phase: str, run_dir: Path, validation_error: object) -> 
     ) + "\n"
 
 
+def reviewer_json_repair_prompt(run_dir: Path, validation_error: object) -> str:
+    return "\n".join(
+        [
+            "Reviewer JSON output repair",
+            f"Local validation failed: {validation_error}",
+            "Repair only malformed files under .codex-review/runs/*/raw-reviewers/.",
+            "Each repaired file must be JSON using schema_version codex-reviewer-output/v1 with a findings array.",
+            "Preserve valid reviewer evidence, locations, severity, confidence, and false-positive context.",
+            "Do not add unrelated findings.",
+            "Do not modify application source files.",
+            "Do not install dependencies or call external review/scanning services.",
+            "",
+            f"Run artifact directory: {run_dir}",
+        ]
+    ) + "\n"
+
+
 RISK_HINT_KEYWORDS = {
     "auth",
     "session",
@@ -2527,7 +2544,7 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
             errors.append({"file": path.name, "error": "findings must be a list"})
             continue
         write_json(verified_dir / path.name, payload)
-    write_json(run_dir / "reviewer-json-validation.json", {"schema_version": "reviewer-json-validation/v1", "errors": errors})
+    write_json(run_dir / "json-errors.json", {"schema_version": "reviewer-json-validation/v1", "errors": errors})
     if errors:
         first = errors[0]
         raise RuntimeError(f"reviewer JSON validation failed for {first.get('file')}: {first.get('error')}")
@@ -3209,6 +3226,13 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
         payload = parse_required_json_output(path)
         if expected_schema and str(payload.get("schema_version") or "").strip() != expected_schema:
             raise RuntimeError(f"required phase output {path.name} must use schema_version {expected_schema}")
+        if rel == "json-errors.json":
+            errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+            if errors:
+                first = errors[0]
+                if isinstance(first, dict):
+                    raise RuntimeError(f"reviewer JSON validation failed for {first.get('file')}: {first.get('error')}")
+                raise RuntimeError(f"reviewer JSON validation failed: {first}")
         if rel == "intent/intent-test-results.json":
             errors = intent_test_result_errors(payload)
             if errors:

@@ -129,9 +129,10 @@ Review pipeline rules:
   `.codex-review/runs/**`, and perform mechanical tasks only.
 - Codex performs semantic judgment. Helper scripts must not decide whether a
   finding is real, severe, exploitable, or worth fixing.
-- Reviewer JSON validation must reject malformed reviewer outputs instead of
-  silently defaulting missing schemas or `findings` arrays into verified
-  reviewer artifacts.
+- Reviewer JSON validation must reject malformed reviewer outputs and use a
+  Codex repair turn before retrying validation; never silently default missing
+  schemas or `findings` arrays into verified reviewer artifacts. The phase
+  error artifact is `json-errors.json`.
 - Required phases follow the v1.2 spec: prepare workspace, start app server,
   initialize, auth check, bootstrap helper scripts, inventory, token budget,
   repo map, risk routing, bundle planning/packing, reviewer fanout, reviewer
