@@ -45,6 +45,35 @@ from pullwise_worker.review_worker_v1 import (
     validate_phase_outputs,
 )
 
+
+def write_completed_artifact_inputs(run_dir: Path) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "report.md").write_text("# Codex Full Repository Review Report\n", encoding="utf-8")
+    (run_dir / "report.agent.json").write_text(
+        json.dumps({"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": []}),
+        encoding="utf-8",
+    )
+    (run_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "coverage/v1",
+                "source_like_files_total": 0,
+                "deep_reviewed_files": 0,
+                "standard_reviewed_files": 0,
+                "light_reviewed_files": 0,
+                "inventory_only_files": 0,
+                "skipped_files": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "token-budget.json").write_text(json.dumps({"schema_version": "token-budget/v1"}), encoding="utf-8")
+    (run_dir / "qa.json").write_text(
+        json.dumps({"schema_version": "qa/v1", "status": "pass", "errors": [], "warnings": []}),
+        encoding="utf-8",
+    )
+
+
 class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_worker_state_allows_lease_only_when_idle_without_active_job(self) -> None:
         state = WorkerState()
@@ -337,8 +366,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = repo / ".codex-review" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
             (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
-            (run_dir / "coverage.json").write_text('{"source_like_files_total":1,"deep_reviewed_files":1}', encoding="utf-8")
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                '{"schema_version":"coverage/v1","source_like_files_total":1,"deep_reviewed_files":1,"standard_reviewed_files":0,"light_reviewed_files":0,"inventory_only_files":0,"skipped_files":0}',
+                encoding="utf-8",
+            )
             (run_dir / "token-budget.json").write_text('{"schema_version":"token-budget/v1"}', encoding="utf-8")
+            (run_dir / "report.md").write_text("# Report\n", encoding="utf-8")
             (run_dir / "report.agent.json").write_text(
                 '{"schema_id":"codex-full-repo-review","schema_version":"v1","findings":[{"title":"Bad","severity":"high","confidence":1.2,"locations":[]}]}',
                 encoding="utf-8",
@@ -349,6 +383,51 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(qa["status"], "fail")
         self.assertTrue(any("locations" in error for error in qa["errors"]))
         self.assertTrue(any("confidence" in error for error in qa["errors"]))
+
+    def test_qa_gate_validates_source_intent_refs_and_artifact_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            app_file = repo / "app.py"
+            app_file.write_text("print('ok')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            artifact_dir = Path(tmp_dir) / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "intent").mkdir(parents=True, exist_ok=True)
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps({"schema_version": "intent-test-source/v1", "generated_tests": [{"id": "itv_1"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-results.json").write_text(
+                json.dumps({"schema_version": "intent-test-result/v1", "test_results": [{"test_id": "itv_1", "classification": "not-a-classification"}]}),
+                encoding="utf-8",
+            )
+            materialize_artifacts(run_dir, artifact_dir)
+            (artifact_dir / "report.md").write_text("tampered\n", encoding="utf-8")
+            app_file.write_text("print('changed')\n", encoding="utf-8")
+
+            qa = qa_gate_payload(repo, run_dir, artifact_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertTrue(any("source file modified" in error for error in qa["errors"]))
+        self.assertTrue(any("generated_tests[0] missing artifact_refs" in error for error in qa["errors"]))
+        self.assertTrue(any("invalid classification" in error for error in qa["errors"]))
+        self.assertTrue(any("report.md sha256 mismatch" in error for error in qa["errors"]))
 
     def test_heartbeat_includes_progress_snapshot_when_busy(self) -> None:
         calls = []
@@ -841,11 +920,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             root = Path(tmp_dir)
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             artifact_dir = root / "artifacts" / "run_1"
-            run_dir.mkdir(parents=True)
-            (run_dir / "report.agent.json").write_text(
-                '{"schema_id":"codex-full-repo-review","schema_version":"v1","findings":[]}',
-                encoding="utf-8",
-            )
+            write_completed_artifact_inputs(run_dir)
             materialize_artifacts(run_dir, artifact_dir)
 
             manifest = __import__("json").loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
@@ -893,7 +968,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             root = Path(tmp_dir)
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             artifact_dir = root / "artifacts" / "run_1"
-            run_dir.mkdir(parents=True)
+            write_completed_artifact_inputs(run_dir)
             materialize_artifacts(run_dir, artifact_dir)
             calls = []
             progress_calls = []
@@ -930,6 +1005,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             artifact_dir = root / "artifacts" / "run_1"
             (run_dir / "raw-reviewers").mkdir(parents=True)
             (run_dir / "intent").mkdir(parents=True)
+            write_completed_artifact_inputs(run_dir)
             (run_dir / "bundle-plan.json").write_text(
                 json.dumps({"bundles": [{"bundle_id": "b1"}, {"bundle_id": "b2"}]}),
                 encoding="utf-8",
@@ -1083,7 +1159,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             root = Path(tmp_dir)
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             artifact_dir = root / "artifacts" / "run_1"
-            run_dir.mkdir(parents=True)
+            write_completed_artifact_inputs(run_dir)
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
             job = {
                 "job_id": "job_1",
@@ -1105,7 +1181,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(envelope["progress_final"]["status"], "completed")
         self.assertEqual(envelope["progress_final"]["overall_percent"], 100.0)
         self.assertEqual(envelope["progress_final"]["run_id"], "run_1")
-        self.assertEqual(envelope["quality_gate"]["status"], "fail")
+        self.assertEqual(envelope["quality_gate"]["status"], "pass")
         self.assertTrue(envelope["artifact_manifest"])
         for item in envelope["artifact_manifest"]:
             self.assertIn("artifact_id", item)

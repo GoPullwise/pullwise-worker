@@ -77,6 +77,13 @@ REQUIRED_COMPLETED_ARTIFACTS = {
     "qa",
     "token_budget",
 }
+REQUIRED_COMPLETED_ARTIFACT_FILES = {
+    "report.md": "report.human",
+    "report.agent.json": "report.agent",
+    "coverage.json": "coverage",
+    "qa.json": "qa",
+    "token-budget.json": "token_budget",
+}
 PHASE_JSON_OUTPUTS: dict[str, tuple[tuple[str, str], ...]] = {
     "inventory_repository": (("inventory.json", "inventory/v1"),),
     "token_budget": (("token-budget.json", "token-budget/v1"),),
@@ -1596,7 +1603,12 @@ class ReviewWorkerV1:
             report = read_json(run_dir / "report.agent.json", default_agent_report(job))
             (run_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
         elif phase == "qa_gate":
+            artifact_dir = self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run")
             write_json(run_dir / "qa.json", qa_gate_payload(repo_dir, run_dir))
+            for _attempt in range(2):
+                materialize_artifacts(run_dir, artifact_dir)
+                write_json(run_dir / "qa.json", qa_gate_payload(repo_dir, run_dir, artifact_dir))
+            materialize_artifacts(run_dir, artifact_dir)
         elif phase == "upload_artifacts":
             artifact_dir = self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run")
 
@@ -2435,12 +2447,97 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": raw_results}
 
 
-def qa_gate_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
+def _qa_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _qa_artifact_path(artifact_dir: Path, item: dict[str, Any]) -> Path:
+    return artifact_dir / str(item.get("name") or "")
+
+
+def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors: list[str]) -> None:
+    manifest_path = artifact_dir / "artifact-manifest.json"
+    if not manifest_path.is_file():
+        errors.append("artifact-manifest.json is missing")
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        errors.append("artifact-manifest.json is not valid JSON")
+        return
+    if not isinstance(manifest, list):
+        errors.append("artifact-manifest.json must be a list")
+        return
+    run_manifest = run_dir / "artifact-manifest.json"
+    if not run_manifest.is_file():
+        errors.append("run artifact-manifest.json is missing")
+    required_kinds = {str(item.get("kind") or "") for item in manifest if isinstance(item, dict) and item.get("required")}
+    missing_required = sorted(REQUIRED_COMPLETED_ARTIFACTS - required_kinds)
+    if missing_required:
+        errors.append("artifact-manifest.json missing required artifacts: " + ", ".join(missing_required))
+    for index, item in enumerate(manifest):
+        if not isinstance(item, dict):
+            errors.append(f"artifact-manifest[{index}] is not an object")
+            continue
+        for field in ("artifact_id", "kind", "name", "schema_id", "schema_version", "encoding", "compression", "sha256", "size_bytes"):
+            if item.get(field) in (None, ""):
+                errors.append(f"artifact-manifest[{index}].{field} is missing")
+        path = _qa_artifact_path(artifact_dir, item)
+        if not path.is_file():
+            errors.append(f"artifact {item.get('name') or index} is missing")
+            continue
+        data = path.read_bytes()
+        if item.get("sha256") != hashlib.sha256(data).hexdigest():
+            errors.append(f"artifact {path.name} sha256 mismatch")
+        if _qa_int(item.get("size_bytes"), -1) != len(data):
+            errors.append(f"artifact {path.name} size_bytes mismatch")
+        if item.get("schema_version") != "v1":
+            errors.append(f"artifact {path.name} schema_version must be v1")
+        if item.get("encoding") != "utf-8":
+            errors.append(f"artifact {path.name} encoding must be utf-8")
+        if item.get("compression") != "none":
+            errors.append(f"artifact {path.name} compression must be none")
+
+
+def validate_source_unmodified_for_qa(repo_dir: Path, run_dir: Path, errors: list[str]) -> None:
+    inventory_payload = read_json(run_dir / "inventory.json", {})
+    files = inventory_payload.get("files") if isinstance(inventory_payload.get("files"), list) else None
+    if files is None:
+        errors.append("inventory.json is missing or invalid; cannot verify source files are unmodified")
+        return
+    repo_root = repo_dir.resolve(strict=False)
+    for index, item in enumerate(files):
+        if not isinstance(item, dict) or not item.get("is_source_like"):
+            continue
+        rel = str(item.get("path") or "").strip()
+        expected_sha = str(item.get("sha256") or "").strip()
+        if not rel or not expected_sha:
+            errors.append(f"inventory.files[{index}] missing source path or sha256")
+            continue
+        path = (repo_dir / rel).resolve(strict=False)
+        try:
+            path.relative_to(repo_root)
+        except ValueError:
+            errors.append(f"inventory.files[{index}] path escapes repository")
+            continue
+        if not path.is_file():
+            errors.append(f"source file modified or removed since inventory: {rel}")
+            continue
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha:
+            errors.append(f"source file modified since inventory: {rel}")
+
+
+def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = None) -> dict[str, Any]:
     errors = []
     warnings = []
-    for name in ("report.agent.json", "coverage.json", "token-budget.json"):
+    for name in ("report.agent.json", "report.md", "coverage.json", "token-budget.json"):
         if not (run_dir / name).is_file():
             errors.append(f"{name} is missing")
+    if artifact_dir is not None and not (run_dir / "qa.json").is_file():
+        errors.append("qa.json is missing")
     report = read_json(run_dir / "report.agent.json", {})
     if not isinstance(report, dict) or report.get("schema_id") != "codex-full-repo-review":
         errors.append("report.agent.json is not a codex-full-repo-review object")
@@ -2460,18 +2557,32 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
                 errors.append(f"finding[{index}].locations has invalid entry")
                 continue
             rel = str(location.get("path") or "")
-            start = int(location.get("start_line") or 0)
-            if not rel or start <= 0 or not (repo_dir / rel).is_file():
+            start = _qa_int(location.get("start_line") or location.get("line"))
+            end = _qa_int(location.get("end_line") or start)
+            try:
+                location_path = (repo_dir / rel).resolve(strict=False)
+                location_path.relative_to(repo_dir.resolve(strict=False))
+            except ValueError:
+                location_path = repo_dir / "__invalid__"
+            if not rel or start <= 0 or end < start or not location_path.is_file():
                 errors.append(f"finding[{index}] has invalid location")
         confidence = finding.get("confidence")
-        if isinstance(confidence, (int, float)) and not 0 <= float(confidence) <= 1:
+        if not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
             errors.append(f"finding[{index}].confidence is outside 0..1")
     coverage = read_json(run_dir / "coverage.json", {})
     if isinstance(coverage, dict):
-        total = int(coverage.get("source_like_files_total") or 0)
-        reviewed = sum(int(coverage.get(key) or 0) for key in ("deep_reviewed_files", "standard_reviewed_files", "light_reviewed_files", "inventory_only_files"))
+        total = _qa_int(coverage.get("source_like_files_total"))
+        reviewed = sum(_qa_int(coverage.get(key)) for key in ("deep_reviewed_files", "standard_reviewed_files", "light_reviewed_files", "inventory_only_files"))
+        skipped = _qa_int(coverage.get("skipped_files"))
         if reviewed > total:
             errors.append("coverage reviewed counts exceed source_like_files_total")
+        if total and reviewed + skipped != total:
+            errors.append("coverage reviewed and skipped counts must add up to source_like_files_total")
+        if skipped and not (coverage.get("skipped_reasons") or coverage.get("skipped_files_explained")):
+            errors.append("coverage skipped files must be explained")
+    else:
+        errors.append("coverage.json is not valid")
+    validate_source_unmodified_for_qa(repo_dir, run_dir, errors)
     intent_results = run_dir / "intent" / "intent-test-results.json"
     if not intent_results.exists():
         warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
@@ -2480,6 +2591,17 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
         for result in (payload.get("test_results", []) if isinstance(payload, dict) else []):
             if isinstance(result, dict) and str(result.get("classification")) not in INTENT_TEST_CLASSIFICATIONS:
                 errors.append(f"intent test {result.get('test_id')} has invalid classification")
+    generated_tests = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
+    if isinstance(generated_tests, list):
+        for index, generated in enumerate(generated_tests):
+            if not isinstance(generated, dict):
+                errors.append(f"generated_tests[{index}] is not an object")
+                continue
+            refs = generated.get("artifact_refs") or generated.get("artifactRefs") or []
+            if not refs:
+                errors.append(f"generated_tests[{index}] missing artifact_refs")
+    if artifact_dir is not None:
+        validate_artifact_manifest_for_qa(run_dir, artifact_dir, errors)
     return {
         "schema_version": "qa/v1",
         "run_id": run_dir.name,
@@ -2793,21 +2915,22 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
 
 def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    required_defaults = {
-        "report.md": "# Codex Full Repository Review Report\n",
-        "report.agent.json": json.dumps(default_agent_report({"job_id": "unknown"}), sort_keys=True),
-        "coverage.json": json.dumps({"schema_version": "coverage/v1"}),
-        "token-budget.json": json.dumps({"schema_version": "token-budget/v1"}),
-        "qa.json": json.dumps({"schema_version": "qa/v1", "status": "fail", "errors": ["missing qa gate"], "warnings": []}),
+    required_files = ("report.md", "report.agent.json", "coverage.json", "qa.json", "token-budget.json")
+    missing = [name for name in required_files if not (run_dir / name).is_file()]
+    if missing:
+        raise RuntimeError("required completed artifact source is missing: " + ", ".join(missing))
+    optional_defaults = {
         "codex-events.jsonl": "",
         "worker.log.jsonl": "",
         "progress.log.jsonl": "",
     }
-    for name, content in required_defaults.items():
+    for name, content in optional_defaults.items():
         src = run_dir / name
         if not src.exists():
             src.parent.mkdir(parents=True, exist_ok=True)
             src.write_text(content, encoding="utf-8")
+    for name in (*required_files, *optional_defaults.keys()):
+        src = run_dir / name
         shutil.copy2(src, artifact_dir / name)
     manifest = []
     for name, kind, media_type, schema_id, required in (
