@@ -99,6 +99,10 @@ Codex execution rules:
   turns by default; the default active Codex turns per worker is one.
 - Start the app-server with the worker-owned `CODEX_HOME` and
   `CODEX_SQLITE_HOME`, then initialize the JSON-RPC connection before turns.
+- After root thread initialization, store the `thread_id` on the active job and
+  include it as `codex_app_server.active_thread_id` in busy heartbeats until the
+  job reaches a terminal state. Idle heartbeats must keep `active_thread_id`
+  null.
 - Capture Codex events to `codex-events.jsonl` and treat completion/error events
   as authoritative for terminal handling.
 - Implement a fixed approval handler even when approval policy is `never`:

@@ -298,6 +298,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         active.overall_percent = 42.0
         active.current_phase = "intent_test_running"
         active.current_phase_status = "running"
+        active.thread_id = "thr_123"
         active.apply_progress_data({"reviewer_runs_total": 3, "reviewer_runs_completed": 2})
         worker.state.set_active(active)
 
@@ -308,6 +309,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(calls[0]["progress"]["counters"]["reviewer_runs_total"], 3)
         self.assertEqual(calls[0]["progress"]["counters"]["reviewer_runs_completed"], 2)
         self.assertIn("active_unit", calls[0]["progress"])
+        self.assertEqual(calls[0]["active_thread_id"], "thr_123")
 
     def test_pullwise_client_uses_v1_review_protocol_routes(self) -> None:
         calls = []
@@ -330,7 +332,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
 
         client.register()
-        client.heartbeat(running_jobs=1, active_job_ids=["job_1"], progress={"run_id": "run_job_1"})
+        client.heartbeat(running_jobs=1, active_job_ids=["job_1"], progress={"run_id": "run_job_1"}, active_thread_id="thr_123")
         self.assertEqual(client.claim()["run_id"], "run_job_1")
         client.event("run_job_1", {"run_id": "run_job_1", "event_type": "phase_started"})
         client.artifact("job_1", "art_report_human", {"run_id": "run_job_1", "artifact": {"artifact_id": "art_report_human"}})
@@ -358,6 +360,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(heartbeat_payload["concurrency"]["active_jobs"], 1)
         self.assertEqual(heartbeat_payload["concurrency"]["available_job_slots"], 0)
         self.assertEqual(heartbeat_payload["codex_app_server"]["status"], "ready")
+        self.assertEqual(heartbeat_payload["codex_app_server"]["active_thread_id"], "thr_123")
         self.assertNotIn("running_jobs", heartbeat_payload)
         self.assertTrue(calls[-2][2])
         self.assertTrue(calls[-1][2])

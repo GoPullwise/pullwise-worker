@@ -1113,6 +1113,7 @@ class PullwiseClient:
         codex_quota: dict | None = None,
         progress: dict | None = None,
         worker_state: str | None = None,
+        active_thread_id: str | None = None,
     ) -> dict:
         reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
         active_run_id = ""
@@ -1120,6 +1121,7 @@ class PullwiseClient:
             active_run_id = str(progress.get("run_id") or progress.get("runId") or "").strip()
         codex_server_status = "ready" if codex_ready is not False else "needs_attention"
         worker_state_status = client_protocol_text(worker_state, self.config, 80)
+        thread_id = client_protocol_text(active_thread_id, self.config, 160) or None
         status = "idle"
         if reported_running_jobs:
             status = worker_state_status if worker_state_status in {"cancelling", "finishing", "failure_handling"} else "busy"
@@ -1139,7 +1141,7 @@ class PullwiseClient:
             "codex_app_server": {
                 "status": codex_server_status,
                 "transport": "stdio",
-                "active_thread_id": None,
+                "active_thread_id": thread_id,
             },
         }
         if last_error:

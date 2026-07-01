@@ -281,6 +281,7 @@ class ActiveJob:
     current_phase_status: str = "pending"
     current_phase_percent: float = 0.0
     message: str = ""
+    thread_id: str = ""
     counters: dict[str, int] = field(default_factory=default_progress_counters)
     active_unit: dict[str, Any] = field(default_factory=dict)
 
@@ -293,6 +294,7 @@ class ActiveJob:
             "started_at": iso_time(self.started_at),
             "current_phase": self.current_phase,
             "cancel_requested": self.cancel_requested,
+            "thread_id": self.thread_id or None,
         }
 
     def progress_snapshot(self) -> dict[str, Any]:
@@ -1096,11 +1098,13 @@ class ReviewWorkerV1:
         if active is not None:
             heartbeat_payload["progress"] = active.progress_snapshot()
             heartbeat_payload["worker_state"] = active.state
+            heartbeat_payload["active_thread_id"] = active.thread_id or None
         try:
             response = self.client.heartbeat(**heartbeat_payload)
         except TypeError:
             heartbeat_payload.pop("progress", None)
             heartbeat_payload.pop("worker_state", None)
+            heartbeat_payload.pop("active_thread_id", None)
             response = self.client.heartbeat(**heartbeat_payload)
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
         if active and active.job_id in (cancelled or []):
@@ -1319,6 +1323,7 @@ class ReviewWorkerV1:
                         app_server.start()
                     elif phase == "initialize_codex_connection":
                         thread_id = app_server.start_thread(repo_dir, model_for_job(job)) if app_server else ""
+                        active.thread_id = thread_id
                         run_state = read_json(run_dir / "run-state.json", {})
                         if not isinstance(run_state, dict):
                             run_state = {}
