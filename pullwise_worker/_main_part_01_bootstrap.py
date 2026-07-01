@@ -88,6 +88,7 @@ PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "no_proxy",
 )
 REVIEW_DECISION_EVENT_PROTOCOL_VERSION = "pullwise-review-decision/0.1"
+WORKER_REVIEW_PROTOCOL_VERSION = "review-worker-protocol/v1"
 REPOSITORY_TOO_LARGE_ERROR_CODE = "REPOSITORY_TOO_LARGE"
 CODEX_LOGIN_COMMAND = (
     f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
@@ -976,6 +977,54 @@ def client_ready_providers(values: object) -> list[str]:
     return providers
 
 
+def worker_registration_payload(config: WorkerConfig) -> dict:
+    worker_id = str(config.worker_id)
+    service_home = Path(str(getattr(config, "service_home", "") or DEFAULT_SERVICE_HOME))
+    configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
+    worker_root = Path(configured_root) if configured_root else service_home / "workers" / worker_id
+    codex_transport = ["stdio", "unix"] if os.name == "posix" else ["stdio"]
+    return {
+        "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
+        "worker": {
+            "worker_id": worker_id,
+            "worker_group": "default",
+            "worker_version": __version__,
+            "hostname": socket.gethostname(),
+            "concurrency": {
+                "max_active_jobs": 1,
+                "maintains_local_queue": False,
+                "prefetch_jobs": False,
+            },
+            "isolation": {
+                "isolated_codex_home": True,
+                "isolated_codex_sqlite_home": True,
+                "isolated_app_server": True,
+                "isolated_workspace": True,
+                "isolated_auth": True,
+                "codex_home": str(worker_root / "codex-home"),
+                "workspace_root": str(worker_root / "workspaces"),
+            },
+            "platform": {
+                "os": "linux" if sys.platform.startswith("linux") else sys.platform,
+                "arch": platform.machine() or "unknown",
+            },
+            "capabilities": {
+                "codex_app_server": True,
+                "codex_app_server_transport": codex_transport,
+                "full_repo_scan": True,
+                "logical_subagents": True,
+                "physical_parallel_subagents": False,
+                "artifact_upload": True,
+                "progress_events": True,
+                "cancellation": True,
+                "intent_test_validation": True,
+                "disposable_validation_workspace": True,
+                "max_active_jobs": 1,
+            },
+        },
+    }
+
+
 class PullwiseClient:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
@@ -1021,6 +1070,10 @@ class PullwiseClient:
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
+    def register(self) -> dict:
+        response = self.post("/v1/workers/register", worker_registration_payload(self.config))
+        return response.json()
+
     def heartbeat(
         self,
         *,
@@ -1034,34 +1087,55 @@ class PullwiseClient:
         doctor_checked_at: int | None = None,
         machine_metrics: dict | None = None,
         codex_quota: dict | None = None,
+        progress: dict | None = None,
     ) -> dict:
         reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
+        active_run_id = ""
+        if isinstance(progress, dict):
+            active_run_id = str(progress.get("run_id") or progress.get("runId") or "").strip()
+        codex_server_status = "ready" if codex_ready is not False else "needs_attention"
         payload = {
+            "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
             "worker_id": self.config.worker_id,
-            "version": __version__,
-            "provider": self.config.provider,
-            "providerChain": list(self.config.provider_chain),
-            "running_jobs": reported_running_jobs,
+            "status": "busy" if reported_running_jobs else "idle",
+            "active_run_id": active_run_id or None,
             "hostname": socket.gethostname(),
-            "last_error": client_protocol_text(last_error, self.config, 500) if last_error else None,
-            "doctor_status": client_protocol_text(doctor_status, self.config, 80) if doctor_status else None,
-            "codex_ready": codex_ready,
-            "systemd_active": systemd_active,
-            "doctor_checked_at": doctor_checked_at,
+            "concurrency": {
+                "max_active_jobs": 1,
+                "active_jobs": reported_running_jobs,
+                "available_job_slots": 0 if reported_running_jobs else 1,
+                "maintains_local_queue": False,
+                "local_queue_depth": 0,
+            },
+            "codex_app_server": {
+                "status": codex_server_status,
+                "transport": "stdio",
+                "active_thread_id": None,
+            },
         }
+        if last_error:
+            payload["last_error"] = client_protocol_text(last_error, self.config, 500)
+        if doctor_status:
+            payload["doctor_status"] = client_protocol_text(doctor_status, self.config, 80)
+        if codex_ready is not None:
+            payload["codex_ready"] = codex_ready
         if ready_providers is not None:
-            payload["readyProviders"] = client_ready_providers(ready_providers)
-        if active_job_ids is not None:
-            payload["active_job_ids"] = client_active_job_ids(active_job_ids)
+            payload["ready_providers"] = client_ready_providers(ready_providers)
+        if systemd_active is not None:
+            payload["systemd_active"] = systemd_active
+        if doctor_checked_at is not None:
+            payload["doctor_checked_at"] = doctor_checked_at
         if isinstance(machine_metrics, dict):
             payload["machine_metrics"] = machine_metrics
         if isinstance(codex_quota, dict):
-            payload["codexQuota"] = codex_quota
-        response = self.post("/worker/heartbeat", payload)
+            payload["codex_quota"] = codex_quota
+        if isinstance(progress, dict):
+            payload["progress"] = progress
+        response = self.post(f"/v1/workers/{url_path_segment(self.config.worker_id)}/heartbeat", payload)
         return response.json()
 
     def agent_configs(self) -> dict:
-        response = self.post("/worker/agent-configs", {"worker_id": self.config.worker_id})
+        response = self.post(f"/v1/workers/{url_path_segment(self.config.worker_id)}/agent-configs", {"worker_id": self.config.worker_id})
         return response.json()
 
     def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:
@@ -1082,13 +1156,38 @@ class PullwiseClient:
         return response.json()
 
     def claim(self) -> dict | None:
-        response = self.post("/worker/jobs/claim", {"worker_id": self.config.worker_id})
-        job = response.json().get("job")
+        response = self.post(
+            f"/v1/workers/{url_path_segment(self.config.worker_id)}/lease",
+            {
+                "protocol_version": "review-worker-protocol/v1",
+                "worker_id": self.config.worker_id,
+                "capacity": {
+                    "available_job_slots": 1,
+                    "active_jobs": 0,
+                    "maintains_local_queue": False,
+                    "local_queue_depth": 0,
+                },
+                "capabilities": {
+                    "full_repo_scan": True,
+                    "codex_app_server": True,
+                    "isolated_codex_home": True,
+                    "progress_events": True,
+                    "cancellation": True,
+                    "intent_test_validation": True,
+                },
+            },
+        )
+        parsed = response.json()
+        job = parsed.get("job")
         if job is None:
             return None
         if not isinstance(job, dict):
             raise PullwiseRequestError("claim response job must be an object")
         return job
+
+    def event(self, run_id: str, payload: dict) -> dict:
+        response = self.post(f"/v1/review-runs/{url_path_segment(run_id)}/events", payload)
+        return response.json()
 
     def progress(
         self,
@@ -1115,11 +1214,15 @@ class PullwiseClient:
         self.post(f"/worker/jobs/{url_path_segment(job_id)}/progress", payload)
 
     def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
-        response = self.post(f"/worker/jobs/{url_path_segment(job_id)}/artifacts/{url_path_segment(artifact_id)}", payload, compress=True)
+        run_id = str(payload.get("run_id") or payload.get("runId") or f"run_{job_id}").strip()
+        response = self.post(f"/v1/review-runs/{url_path_segment(run_id)}/artifacts", payload, compress=True)
         return response.json()
 
     def result(self, job_id: str, payload: dict) -> None:
-        self.post(f"/worker/jobs/{url_path_segment(job_id)}/result", payload, compress=True)
+        envelope = payload.get("reviewWorkerProtocol") if isinstance(payload.get("reviewWorkerProtocol"), dict) else {}
+        envelope_job = envelope.get("job") if isinstance(envelope.get("job"), dict) else {}
+        run_id = str(envelope_job.get("run_id") or payload.get("run_id") or f"run_{job_id}").strip()
+        self.post(f"/v1/review-runs/{url_path_segment(run_id)}/result", payload, compress=True)
 
 
 def url_path_segment(value: object) -> str:

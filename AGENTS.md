@@ -50,20 +50,28 @@ own `service_home` for Codex binaries, config, cache, and auth state.
 
 ## Codex Review Worker Architecture
 
-`../worker-design.md` is the source of truth for worker review behavior. The
-current worker is the `review-worker-protocol/v1` Codex full-repository review
-worker; do not reintroduce alternate review pipelines, per-task CLI review flows,
-local job queues, or worker-side prefetch compatibility.
+`../codex_full_repo_review_worker_spec_v1_2_FULL_SELF_CONTAINED.md` is the
+source of truth for worker review behavior. The current worker is the
+`review-worker-protocol/v1` Codex full-repository review worker; do not
+reintroduce alternate review pipelines, per-task CLI review flows, local job
+queues, or worker-side prefetch compatibility.
 
 Hard invariants:
 
 - One worker instance may process at most one active job at a time.
 - The worker must not maintain `pending_jobs`, `prefetched_jobs`, `next_job`, or
   any local job queue.
-- The worker may call lease only when `active_job == null`, state is `idle`, and
-  the local queue depth is zero.
+- The worker must call `POST /v1/workers/register` during startup with v1
+  capability, isolation, platform, and one-slot/no-prefetch metadata before it
+  enters the heartbeat/lease loop.
+- The worker may call `POST /v1/workers/{worker_id}/lease` only when
+  `active_job == null`, state is `idle`, and the local queue depth is zero.
 - A busy, cancelling, or finishing worker must heartbeat with zero available job
-  slots and must not claim another job.
+  slots through `POST /v1/workers/{worker_id}/heartbeat` and must not claim
+  another job. The heartbeat payload must use the fixed v1 shape:
+  `protocol_version`, `status`, `active_run_id`, `concurrency`,
+  `codex_app_server`, and optional `progress`; do not make legacy
+  `running_jobs`/`active_job_ids` the worker-facing protocol.
 - Each worker instance owns an isolated `WORKER_ROOT`, lock file, `CODEX_HOME`,
   `CODEX_SQLITE_HOME`, Codex auth/config/log/session/cache directories,
   workspace root, artifact root, and worker log.
@@ -86,11 +94,13 @@ Codex execution rules:
 - Capture Codex events to `codex-events.jsonl` and treat completion/error events
   as authoritative for terminal handling.
 - Implement a fixed approval handler even when approval policy is `never`:
-  allow writes only under `.codex-review/**`, allow Python standard-library
-  helper scripts under `.codex-review/tools/*.py`, allow read-only repository
-  inspection commands, and deny source modifications, installs, downloads,
-  network access, branch changes, commit, push, and access to other worker
-  directories.
+  allow writes only under `.codex-review/**` in the main repo or the disposable
+  validation workspace, allow Python standard-library helper scripts under
+  `.codex-review/tools/*.py`, allow read-only repository inspection commands,
+  allow bounded project test commands only inside the disposable validation
+  workspace, and deny source modifications in the main repo, installs,
+  downloads, network access, branch changes, commit, push, and access to other
+  worker directories.
 
 Review pipeline rules:
 
@@ -101,19 +111,29 @@ Review pipeline rules:
   `.codex-review/runs/**`, and perform mechanical tasks only.
 - Codex performs semantic judgment. Helper scripts must not decide whether a
   finding is real, severe, exploitable, or worth fixing.
-- Required phases follow `worker-design.md`: prepare workspace, start app
-  server, initialize, auth check, bootstrap helper scripts, inventory, token
-  budget, repo map, risk routing, bundle planning/packing, reviewer fanout,
-  reviewer JSON validation, location validation, clustering/voting, validator
-  disproof, final report JSON, markdown render, QA gate, hash artifacts, upload
-  artifacts, submit envelope, cleanup active job.
+- Required phases follow the v1.2 spec: prepare workspace, start app server,
+  initialize, auth check, bootstrap helper scripts, inventory, token budget,
+  repo map, risk routing, bundle planning/packing, reviewer fanout, reviewer
+  JSON validation, location validation, clustering/voting, intent-test
+  validation, intent mining, intent-test planning, validation workspace
+  preparation, intent-test writing, intent-test running, intent-test failure
+  analysis, validator disproof, final report JSON, markdown render, QA gate,
+  hash artifacts, upload artifacts, submit envelope, and cleanup active job.
+- Intent-driven tests are allowed only for selected P0/P1 high-value candidate
+  findings. Generated tests must live in the disposable validation workspace or
+  `.codex-review/generated-tests/**`, must not install dependencies or use
+  network, and failing generated tests must be classified before they influence
+  confidence.
 - Required completed artifacts are `report.md`, `report.agent.json`,
   `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`,
-  `codex-events.jsonl`, and `worker.log.jsonl`.
-- Upload artifacts before submitting the terminal result envelope.
+  `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
+- Post run progress through `POST /v1/review-runs/{run_id}/events`, upload
+  artifacts through `POST /v1/review-runs/{run_id}/artifacts`, and upload
+  artifacts before submitting the terminal result envelope through
+  `POST /v1/review-runs/{run_id}/result`.
 - Failed and cancelled jobs must still submit valid terminal envelopes when
-  possible, with optional worker log, Codex event log, and error report
-  artifacts.
+  possible, including required `qa`, `worker_log`, and either `error_report` or
+  partial `report.agent` artifacts.
 
 Plan policy:
 
@@ -129,18 +149,15 @@ local job queue and must claim a new server-side job only after the current job
 has finished. The only job slot must not be occupied by avoidable retry sleep or
 cleanup IO.
 
-- Final result upload should attempt the immediate request once. Retryable
-  network, HTTP 408/429, and 5xx failures should be written to the pending result upload spool and
-  retried by the background upload worker.
-- Pending result uploads must remain in heartbeat `active_job_ids` so the server
-  renews the claimed job lease while the final payload is being retried. They do
-  not count as active Codex/job execution capacity.
+- Final result upload should attempt the immediate request once. If submission
+  fails, write `result-envelope.json` and `pending-submit.json` under the run's
+  artifact directory, keep `active_job` in `finishing`, continue heartbeat with
+  the active job id, and do not claim another job until the pending submit is
+  resolved by recovery code or operator action.
 - Result upload payloads should use gzip compression for large JSON. Keep server
   gzip JSON support and worker compression thresholds aligned.
-- Do not add `time.sleep()`-based retry loops to `run_job()` or other code that
-  holds the only job execution slot. Put backoff in a background path.
-- Pending result upload files live under `.pullwise-result-uploads`; keep this
-  directory protected from checkout cleanup.
+- Do not add unbounded `time.sleep()` retry loops to `run_job()` or other code
+  that holds the only job execution slot.
 - Cleanup should run only when the worker is idle or on a low-priority
   background path. Do not run checkout/log cleanup before heartbeat/claim in the
   hot loop.
@@ -165,23 +182,37 @@ and line locations, include a clear failure scenario or risk, and provide an
 actionable recommendation. Weak or uncertain observations belong in appendix or
 internal artifacts, not as confirmed findings.
 
+Terminal result envelopes must include the stable v1 summary shape:
+`overall_risk`, `result_status`, `finding_counts`, `coverage`, and
+`top_findings`. Do not submit top-findings-only summaries.
+
 Do not require derived topology artifacts for worker output. New review logic,
 protocols, reports, tests, and documentation must depend on the stable envelope
 and versioned artifacts, not on retired report data structures.
 
+Legacy worker lifecycle endpoints for operator commands, logs, and registry state
+are not the core review protocol. Do not route new review leasing, progress,
+artifact, or result behavior through `/worker/...` compatibility paths.
+
 ## Server-Controlled Agent Policy
 
 The worker can advertise local provider capability, but review policy comes from
-server-provided subscription plan agent configs and per-job `agentConfig`.
+server-provided subscription plan agent configs attached to the claimed job.
 
 - Treat `PULLWISE_PROVIDER_CHAIN` as local installed capability/order, not as the
   source of plan policy.
 - `doctor` must load free/pro/max agent configs from the server. If they cannot
   be loaded or validated, do not silently fall back to the local provider chain.
-- A claimed job must include `agentConfig` and `repositoryLimits`; reject jobs
-  that omit them instead of using local defaults.
-- When a job uses Codex in `agentConfig.provider`, require Codex model
-  and reasoning effort.
+- A claimed v1 job must include canonical `model_profile`,
+  `review_request.policy`, `review_request.budget`, and `repositoryLimits`;
+  reject jobs that omit required server-owned policy instead of using local
+  defaults.
+- Prefer `model_profile.default_model`, `model_profile.*_effort`, and
+  `review_request.policy` over compatibility `agentConfig` fields when driving
+  Codex. `agentConfig` is server-derived backing data for admin/doctor
+  consistency, not worker-local policy.
+- Reject jobs whose `review_request.policy` allows source modification,
+  dependency install, network access, or non-standard-library helper scripts.
 - Repository size limits used by worker preflight come from the job's
   `repositoryLimits`, not from local plan assumptions.
 

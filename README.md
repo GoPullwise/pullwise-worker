@@ -4,20 +4,22 @@ Pull-based Pullwise scan worker.
 
 ## Run
 
-```powershell
-$env:PULLWISE_SERVER_URL = "http://localhost:8080"
-$env:PULLWISE_WORKER_TOKEN = "<server worker token>"
-python -m pullwise_worker.main
+```bash
+export PULLWISE_SERVER_URL="http://localhost:8080"
+export PULLWISE_WORKER_TOKEN="<server worker token>"
+python3 -m pullwise_worker.main
 ```
 
 The worker loop:
 
-1. sends `POST /worker/heartbeat`
-2. claims one queued job with `POST /worker/jobs/claim` when no job is active locally
-3. clones the repository using the short-lived clone token returned by the server
-4. runs Codex through the worker-owned App Server with server-selected model policy
-5. uploads progress, artifacts, and the v1 result envelope
-6. clears the active job only after terminal result handling completes
+1. registers its v1 capability/isolation metadata with `POST /v1/workers/register`
+2. sends `POST /v1/workers/{worker_id}/heartbeat`
+3. claims one queued job with `POST /v1/workers/{worker_id}/lease` when no job is active locally
+4. clones the repository using the short-lived clone token returned by the server
+5. runs Codex through the worker-owned App Server with server-selected model policy
+6. performs the v1.2 full-repository pipeline, including P0/P1 intent-test validation when selected
+7. posts run progress to `POST /v1/review-runs/{run_id}/events`, uploads artifacts to `POST /v1/review-runs/{run_id}/artifacts`, and submits the v1 result envelope to `POST /v1/review-runs/{run_id}/result`
+8. clears the active job only after terminal result handling completes
 
 Required environment:
 
@@ -25,7 +27,7 @@ Required environment:
 - `PULLWISE_WORKER_TOKEN`
 - `PULLWISE_WORKER_ID` optional, defaults to `{hostname}-{pid}`
 - `PULLWISE_PROVIDER` optional, defaults to `codex`
-- `PULLWISE_PROVIDER_CHAIN` optional local install capability list; review policy comes from server `agentConfig`
+- `PULLWISE_PROVIDER_CHAIN` optional local install capability list; review policy comes from server lease `model_profile` and `review_request.policy`
 - `PULLWISE_WORKER_POLL_SECONDS` optional, defaults to `5`
 - `PULLWISE_WORKER_POLL_JITTER_SECONDS` optional, defaults to `2`
 - `PULLWISE_WORKER_MAX_BACKOFF_SECONDS` optional, defaults to `60`
@@ -47,9 +49,15 @@ Required environment:
 
 Each worker processes exactly one job at a time. Queuing is maintained on the server; after a job finishes, the worker returns to the server to claim the next job. Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old run logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
-Review model, reasoning effort, repository file/byte limits, and worker review deadlines come from the claimed job payload. The payload must include `agentConfig.codex.model`, `agentConfig.codex.reasoningEffort`, `repositoryLimits`, and the server-owned `reviewWorker` policy. Executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for server-owned review policy.
+Review model, reasoning effort, repository file/byte limits, intent-test limits, and worker review deadlines come from the claimed job payload. The payload must include canonical v1 `model_profile`, `review_request.policy`, `review_request.budget`, and `repositoryLimits`; compatibility `agentConfig` is server-derived backing data, not a local worker policy source. Executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for server-owned review policy.
 
-Codex review work runs through one instance-scoped `codex app-server` per worker identity. A worker has one active job slot, never prefetches jobs, and drives one root Codex thread with sequential turns by default. Review output is the `review-worker-protocol/v1` result envelope plus `.codex-review/runs/<run_id>/` artifacts such as `report.md`, `report.agent.json`, `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`, `codex-events.jsonl`, and `worker.log.jsonl`. Core semantic phases use the server subscription plan reasoning effort; mechanical and non-core phases use the same model with medium reasoning effort. Do not add alternate review pipelines, per-task CLI review flows, local job queues, or worker-side prefetch.
+Codex review work runs through one instance-scoped `codex app-server` per worker identity. A worker has one active job slot, never prefetches jobs, and drives one root Codex thread with sequential turns by default. Review transport uses the `review-worker-protocol/v1` register, lease, heartbeat, run event, artifact, and terminal result routes under `/v1/workers...` and `/v1/review-runs/{run_id}/...`; lifecycle command/log endpoints are separate operator plumbing, not the core review pipeline. Review output is the v1 result envelope plus `.codex-review/runs/<run_id>/` artifacts such as `report.md`, `report.agent.json`, `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`, `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
+
+The v1.2 pipeline is a full repository scan, not a diff or PR review. It inventories the repo, estimates token budget, maps repo structure, routes files into P0/P1/P2/P3/SKIP coverage, packs line-numbered bundles, runs logical reviewers as sequential Codex turns, validates reviewer JSON and locations, clusters/votes, runs intent-driven test validation only for selected high-value P0/P1 candidates, validates findings, renders reports, QA-checks outputs, uploads artifacts, and submits the terminal envelope. Generated intent tests are temporary evidence only: they live in the disposable validation workspace or `.codex-review/generated-tests/**`, do not install dependencies or use network, and failures must be classified before the validator can use them.
+
+Core semantic phases use the server subscription plan reasoning effort; mechanical and non-core phases use the same model with medium reasoning effort. Do not add alternate review pipelines, per-task CLI review flows, local job queues, or worker-side prefetch.
+
+If terminal result submission fails, the worker writes `result-envelope.json` and `pending-submit.json` under the run artifact directory, keeps the active job in `finishing`, continues heartbeat with the active job id, and must not claim another job until recovery or operator action resolves the pending submit.
 
 Production local capability example:
 

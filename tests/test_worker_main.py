@@ -12,7 +12,7 @@ import pullwise_worker.main as worker_main
 
 
 class WorkerMainContractsTest(unittest.TestCase):
-    def test_main_module_does_not_import_replaced_graph_review_pipeline(self) -> None:
+    def test_main_module_does_not_import_retired_review_pipeline(self) -> None:
         imported = set(sys.modules)
         importlib.reload(worker_main)
         new_modules = set(sys.modules) - imported
@@ -51,7 +51,7 @@ class WorkerMainContractsTest(unittest.TestCase):
         self.assertEqual(calls[0], ("config", ("run", True, True)))
         self.assertEqual(calls[-1], ("run", True))
 
-    def test_project_package_discovery_excludes_replaced_review_package(self) -> None:
+    def test_project_package_discovery_excludes_retired_review_package(self) -> None:
         pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
         text = pyproject.read_text(encoding="utf-8")
         self.assertIn('include = ["pullwise_worker"]', text)

@@ -8,6 +8,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -23,28 +24,36 @@ PROTOCOL_VERSION = "review-worker-protocol/v1"
 WORKER_VERSION = "0.1.0"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 PIPELINE_PHASES = (
-    ("prepare_workspace", 4),
-    ("start_codex_app_server", 8),
+    ("prepare_workspace", 3),
+    ("start_codex_app_server", 7),
     ("initialize_codex_connection", 10),
     ("check_codex_auth", 12),
-    ("bootstrap_helper_scripts", 14),
-    ("inventory_repository", 18),
-    ("token_budget", 22),
-    ("repo_map", 30),
-    ("risk_routing", 38),
-    ("bundle_planning", 46),
-    ("bundle_packing", 54),
-    ("reviewer_fanout", 68),
-    ("reviewer_json_validation", 72),
+    ("bootstrap_helper_scripts", 17),
+    ("inventory_repository", 24),
+    ("token_budget", 27),
+    ("repo_map", 33),
+    ("risk_routing", 39),
+    ("bundle_planning", 43),
+    ("bundle_packing", 47),
+    ("reviewer_fanout", 70),
+    ("reviewer_json_validation", 73),
     ("location_validation", 76),
-    ("clustering_and_voting", 82),
-    ("validator_disproof", 88),
-    ("final_report_json", 92),
-    ("render_markdown_report", 95),
-    ("qa_gate", 97),
-    ("hash_artifacts", 98),
-    ("upload_artifacts", 99),
+    ("clustering_and_voting", 81),
+    ("intent_test_validation", 82),
+    ("intent_mining", 84),
+    ("intent_test_planning", 86),
+    ("validation_workspace_prepare", 88),
+    ("intent_test_writing", 90),
+    ("intent_test_running", 92),
+    ("intent_test_failure_analysis", 94),
+    ("validator_disproof", 96),
+    ("final_report_json", 97),
+    ("render_markdown_report", 98),
+    ("qa_gate", 99),
+    ("hash_artifacts", 99),
+    ("upload_artifacts", 100),
     ("submit_result_envelope", 100),
+    ("cleanup_active_job", 100),
 )
 SEMANTIC_PHASES = {
     "bootstrap_helper_scripts",
@@ -52,6 +61,10 @@ SEMANTIC_PHASES = {
     "risk_routing",
     "reviewer_fanout",
     "clustering_and_voting",
+    "intent_mining",
+    "intent_test_planning",
+    "intent_test_writing",
+    "intent_test_failure_analysis",
     "validator_disproof",
     "final_report_json",
 }
@@ -76,16 +89,32 @@ REQUIRED_TOOL_FILES = (
     "08_render_reports.py",
     "09_run_qa_gate.py",
     "10_hash_artifacts.py",
+    "11_prepare_validation_workspace.py",
+    "12_run_project_test.py",
+    "13_collect_test_outputs.py",
+    "14_validate_intent_test_json.py",
 )
 REQUIRED_SCHEMA_FILES = (
+    "inventory.schema.json",
+    "token-budget.schema.json",
     "repo-map.schema.json",
     "risk-routing.schema.json",
     "bundle-plan.schema.json",
     "reviewer-output.schema.json",
+    "location-verification.schema.json",
     "cluster-output.schema.json",
+    "intent-map.schema.json",
+    "intent-test-plan.schema.json",
+    "intent-test-result.schema.json",
     "validation-output.schema.json",
     "final-report.schema.json",
+    "qa.schema.json",
+    "artifact-manifest.schema.json",
     "server-result-envelope.schema.json",
+    "progress-event.schema.json",
+    "heartbeat.schema.json",
+    "worker-register.schema.json",
+    "lease.schema.json",
 )
 REQUIRED_PROMPT_FILES = (
     "00_repo_mapper.md",
@@ -96,9 +125,25 @@ REQUIRED_PROMPT_FILES = (
     "reviewers/test_gap.md",
     "reviewers/correctness_lite.md",
     "03_clusterer.md",
-    "04_validator.md",
-    "05_reporter.md",
+    "intent/04_intent_miner.md",
+    "intent/05_intent_test_planner.md",
+    "intent/06_intent_test_writer.md",
+    "intent/07_intent_test_failure_analyzer.md",
+    "08_validator.md",
+    "09_reporter.md",
 )
+INTENT_TEST_CLASSIFICATIONS = {
+    "confirmed_bug",
+    "plausible_bug",
+    "test_oracle_wrong",
+    "test_harness_error",
+    "environment_error",
+    "flaky_or_nondeterministic",
+    "dependency_missing",
+    "unclear_requirement",
+    "passed_no_bug_reproduced",
+    "skipped_not_runnable",
+}
 CODEX_ERROR_CODES = {
     "UsageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
     "RateLimitReached": "CODEX_QUOTA_EXHAUSTED",
@@ -137,10 +182,12 @@ Rules:
 - Do not call external review or scanning tools.
 - Do not modify application source files.
 - Write only under .codex-review/** when file writes are needed.
+- For dynamic tests, write only to the disposable validation workspace or .codex-review/generated-tests/**.
 - Helper scripts must use Python 3 standard library only.
 - Helper scripts perform mechanical tasks only.
 - Codex performs semantic code review judgment.
 - Every main finding must be concrete, located, evidenced, and actionable.
+- A generated test failure is evidence, not automatically a confirmed bug.
 """
 REVIEW_AGENTS_TEXT = """# Codex Full Repository Review Instructions
 
@@ -155,6 +202,7 @@ Required outputs:
 - artifact-manifest.json
 - codex-events.jsonl
 - worker.log.jsonl
+- progress.log.jsonl
 
 Rules:
 - Do not modify application source files.
@@ -164,6 +212,8 @@ Rules:
 - Weak findings go to appendix.
 - Disproven findings do not appear in main findings.
 - Coverage and skipped scope must be reported.
+- Intent-driven tests may be generated only for selected P0/P1 candidate findings.
+- Test failures must be classified as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, passed_no_bug_reproduced, skipped_not_runnable, or unclear_requirement.
 """
 
 
@@ -177,6 +227,11 @@ class ActiveJob:
     started_at: float = field(default_factory=time.time)
     current_phase: str = "prepare_workspace"
     cancel_requested: bool = False
+    last_event_sequence: int = 0
+    overall_percent: float = 0.0
+    current_phase_status: str = "pending"
+    current_phase_percent: float = 0.0
+    message: str = ""
 
     def heartbeat_payload(self) -> dict[str, Any]:
         return {
@@ -187,6 +242,18 @@ class ActiveJob:
             "started_at": iso_time(self.started_at),
             "current_phase": self.current_phase,
             "cancel_requested": self.cancel_requested,
+        }
+
+    def progress_snapshot(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "overall_percent": self.overall_percent,
+            "current_phase": self.current_phase,
+            "current_phase_status": self.current_phase_status,
+            "current_phase_percent": self.current_phase_percent,
+            "message": self.message,
+            "last_event_sequence": self.last_event_sequence,
+            "updated_at": iso_time(time.time()),
         }
 
 
@@ -391,10 +458,13 @@ class JsonRpcAppServer:
     ) -> None:
         sandbox = {"type": "readOnly", "networkAccess": False}
         if not read_only:
+            writable_roots = [str(repo_dir / ".codex-review")]
+            validation_repo = repo_dir.parent / "validation-repo"
+            writable_roots.append(str(validation_repo))
             sandbox = {
                 "type": "workspaceWrite",
                 "networkAccess": False,
-                "writableRoots": [str(repo_dir / ".codex-review")],
+                "writableRoots": writable_roots,
             }
         result = self.request(
             "turn/start",
@@ -812,14 +882,13 @@ class CodexQuotaMonitor:
         return self.snapshot
 
 READ_ONLY_COMMANDS = {"git", "find", "wc", "cat", "sed", "awk", "grep", "rg"}
+PROJECT_TEST_COMMANDS = {"npm", "pnpm", "yarn", "pytest", "python", "python3", "go", "cargo", "mvn", "gradle", "make"}
 DENIED_COMMAND_TOKENS = {
     "brew",
-    "cargo",
     "checkout",
     "commit",
     "curl",
     "install",
-    "npm",
     "pip",
     "push",
     "reset",
@@ -839,9 +908,9 @@ def decide_approval(message: dict[str, Any], workspace: Path) -> tuple[str, str]
     request_type = str(request.get("type") or request.get("kind") or message.get("method") or "").lower()
     if "file" in request_type or request.get("paths") or request.get("path"):
         paths = request.get("paths") if isinstance(request.get("paths"), list) else [request.get("path")]
-        if paths and all(path_is_under_codex_review(workspace, path) for path in paths if path):
-            return "acceptForSession", "write is limited to .codex-review"
-        return "decline", "file changes outside .codex-review are not allowed"
+        if paths and all(path_is_under_allowed_write_root(workspace, path) for path in paths if path):
+            return "acceptForSession", "write is limited to .codex-review or disposable validation workspace"
+        return "decline", "file changes outside approved review workspaces are not allowed"
     if "command" in request_type or request.get("command") or request.get("argv"):
         command = request.get("argv") if isinstance(request.get("argv"), list) else request.get("command")
         if command_is_allowed(command, workspace, request.get("cwd")):
@@ -863,6 +932,24 @@ def path_is_under_codex_review(workspace: Path, raw_path: object) -> bool:
     return True
 
 
+def path_is_under_validation_workspace(workspace: Path, raw_path: object) -> bool:
+    if not raw_path:
+        return False
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = workspace / path
+    validation_root = workspace.parent / "validation-repo"
+    try:
+        path.resolve(strict=False).relative_to(validation_root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def path_is_under_allowed_write_root(workspace: Path, raw_path: object) -> bool:
+    return path_is_under_codex_review(workspace, raw_path) or path_is_under_validation_workspace(workspace, raw_path)
+
+
 def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None) -> bool:
     argv = [str(part) for part in command] if isinstance(command, list) else shlex.split(str(command or ""))
     if not argv:
@@ -874,12 +961,23 @@ def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None)
     cwd = Path(str(raw_cwd)) if raw_cwd else workspace
     if not cwd.is_absolute():
         cwd = workspace / cwd
+    cwd_in_workspace = False
     try:
         cwd.resolve(strict=False).relative_to(workspace.resolve(strict=False))
+        cwd_in_workspace = True
     except ValueError:
+        cwd_in_workspace = False
+    cwd_in_validation = path_is_under_validation_workspace(workspace, cwd)
+    if not cwd_in_workspace and not cwd_in_validation:
         return False
     if executable in {"python", "python3"} and len(argv) >= 2:
-        return path_is_under_codex_review(workspace, argv[1]) and "/tools/" in Path(argv[1]).as_posix()
+        if path_is_under_codex_review(workspace, argv[1]) and "/tools/" in Path(argv[1]).as_posix():
+            return True
+    if executable in PROJECT_TEST_COMMANDS and cwd_in_validation:
+        lowered_text = " ".join(part.lower() for part in argv)
+        if any(token in lowered_text for token in (" install", " add ", " publish", " curl", " wget")):
+            return False
+        return any(token in lowered for token in {"test", "pytest", "go", "cargo", "mvn", "gradle", "make"}) or executable in {"pytest", "make"}
     return executable in READ_ONLY_COMMANDS
 
 
@@ -893,11 +991,13 @@ class ReviewWorkerV1:
         self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id))
 
     def run(self, *, once: bool = False) -> None:
-        if os.name != "posix":
-            raise RuntimeError("Pullwise review worker v1 is Linux/POSIX only")
+        if not sys.platform.startswith("linux"):
+            raise RuntimeError("Pullwise review worker v1 is Linux only")
         self.isolation.prepare()
         self.lock.acquire()
         try:
+            if hasattr(self.client, "register"):
+                self.client.register()
             self.state.state = "idle"
             while True:
                 self.heartbeat()
@@ -917,18 +1017,32 @@ class ReviewWorkerV1:
         quota_ready = bool((quota or {}).get("ready", True))
         self.state.provider_ready = quota_ready
         readiness_reason = quota_text((quota or {}).get("reason") or (quota or {}).get("status"), 160)
-        response = self.client.heartbeat(
-            running_jobs=1 if active else 0,
-            active_job_ids=[active.job_id] if active else [],
-            last_error=readiness_reason if not quota_ready else None,
-            doctor_status="ok" if quota_ready else "degraded",
-            codex_ready=quota_ready,
-            ready_providers=["codex"] if quota_ready else [],
-            codex_quota=quota,
-        )
+        heartbeat_payload = {
+            "running_jobs": 1 if active else 0,
+            "active_job_ids": [active.job_id] if active else [],
+            "last_error": readiness_reason if not quota_ready else None,
+            "doctor_status": "ok" if quota_ready else "degraded",
+            "codex_ready": quota_ready,
+            "ready_providers": ["codex"] if quota_ready else [],
+            "codex_quota": quota,
+        }
+        if active is not None:
+            heartbeat_payload["progress"] = active.progress_snapshot()
+        try:
+            response = self.client.heartbeat(**heartbeat_payload)
+        except TypeError:
+            heartbeat_payload.pop("progress", None)
+            response = self.client.heartbeat(**heartbeat_payload)
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
         if active and active.job_id in (cancelled or []):
             active.cancel_requested = True
+        commands = response.get("commands") if isinstance(response, dict) and isinstance(response.get("commands"), list) else []
+        if active:
+            for command in commands:
+                if not isinstance(command, dict):
+                    continue
+                if command.get("type") == "cancel_run" and str(command.get("run_id") or "") == active.run_id:
+                    active.cancel_requested = True
         return response if isinstance(response, dict) else {}
 
     def poll_cancel_requested(self) -> bool:
@@ -937,6 +1051,99 @@ class ReviewWorkerV1:
             return False
         self.heartbeat()
         return bool(active.cancel_requested)
+
+    def emit_event(
+        self,
+        active: ActiveJob,
+        run_dir: Path,
+        event_type: str,
+        phase: str,
+        *,
+        status: str = "running",
+        progress: float | int | None = None,
+        current_phase_percent: float = 0.0,
+        message: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        active.last_event_sequence += 1
+        if progress is not None:
+            active.overall_percent = round(float(progress), 2)
+        active.current_phase = phase
+        active.current_phase_status = status
+        active.current_phase_percent = round(float(current_phase_percent), 2)
+        active.message = message
+        event = {
+            "protocol_version": PROTOCOL_VERSION,
+            "run_id": active.run_id,
+            "worker_id": str(self.config.worker_id),
+            "sequence": active.last_event_sequence,
+            "timestamp": iso_time(time.time()),
+            "event_type": event_type,
+            "phase": phase,
+            "severity": "info" if status not in {"failed", "cancelled"} else "error",
+            "message": message,
+            "progress": {
+                "overall_percent": active.overall_percent,
+                "current_phase_percent": active.current_phase_percent,
+                "status": status,
+            },
+            "data": data or {},
+        }
+        append_jsonl(run_dir / "progress.log.jsonl", event)
+        snapshot = active.progress_snapshot()
+        write_json(run_dir / "progress.json", snapshot)
+        run_state = read_json(run_dir / "run-state.json", {})
+        if not isinstance(run_state, dict):
+            run_state = {}
+        run_state.update({"active_job": active.heartbeat_payload(), "progress": snapshot})
+        write_json(run_dir / "run-state.json", run_state)
+        if hasattr(self.client, "event"):
+            try:
+                self.client.event(active.run_id, event)
+            except Exception:
+                append_jsonl(run_dir / "worker.log.jsonl", {"event": "progress_event_post_failed", "phase": phase, "time": iso_time(time.time())})
+        return event
+
+    def start_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int) -> None:
+        active.state = "finishing" if phase in {"upload_artifacts", "submit_result_envelope", "cleanup_active_job"} else "busy"
+        append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_started", "phase": phase, "progress": progress, "time": iso_time(time.time())})
+        self.emit_event(
+            active,
+            run_dir,
+            "phase_started",
+            phase,
+            status="running",
+            progress=progress,
+            current_phase_percent=0.0,
+            message=phase.replace("_", " "),
+        )
+
+    def complete_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int, *, data: dict[str, Any] | None = None) -> None:
+        append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_completed", "phase": phase, "progress": progress, "time": iso_time(time.time())})
+        self.emit_event(
+            active,
+            run_dir,
+            "phase_completed",
+            phase,
+            status="completed",
+            progress=progress,
+            current_phase_percent=100.0,
+            message=f"{phase.replace('_', ' ')} completed.",
+            data=data,
+        )
+
+    def fail_phase(self, active: ActiveJob, run_dir: Path, phase: str, error: object) -> None:
+        append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_failed", "phase": phase, "error": str(error), "time": iso_time(time.time())})
+        self.emit_event(
+            active,
+            run_dir,
+            "phase_failed",
+            phase,
+            status="failed",
+            progress=active.overall_percent,
+            current_phase_percent=active.current_phase_percent,
+            message=str(error),
+        )
 
 
     def run_job(self, job: dict[str, Any]) -> None:
@@ -948,66 +1155,95 @@ class ReviewWorkerV1:
         self.state.set_active(active)
         terminal_state = "failed"
         app_server: JsonRpcAppServer | None = None
+        repo_dir: Path | None = None
+        run_dir: Path | None = None
+        artifact_dir: Path | None = None
         started = time.time()
         try:
             validate_job_policy(job)
             repo_dir, run_dir, artifact_dir = self.prepare_workspace(job, run_id)
             events_path = artifact_dir / "codex-events.jsonl"
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_started", "job_id": job_id, "run_id": run_id, "time": iso_time(started)})
+            self.emit_event(active, run_dir, "run_started", "prepare_workspace", status="running", progress=0, message="Run started.")
             for phase, progress in PIPELINE_PHASES:
-                active.current_phase = phase
-                active.state = "busy" if phase not in {"upload_artifacts", "submit_result_envelope"} else "finishing"
-                self.client.progress(job_id, phase, progress, phase.replace("_", " "))
-                append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_started", "phase": phase, "progress": progress, "time": iso_time(time.time())})
+                self.start_phase(active, run_dir, phase, progress)
                 if active.cancel_requested:
                     raise JobCancelled("cancel requested")
-                if phase == "start_codex_app_server":
-                    app_server = JsonRpcAppServer(
-                        str(getattr(self.config, "codex_command", "") or "codex"),
-                        self.isolation.env(self.config),
-                        repo_dir,
-                        events_path,
-                        rate_limit_callback=self.quota_monitor.apply_rate_limit_update,
-                    )
-                    app_server.start()
-                elif phase == "initialize_codex_connection":
-                    thread_id = app_server.start_thread(repo_dir, model_for_job(job)) if app_server else ""
-                    write_json(run_dir / "run-state.json", {"thread_id": thread_id, "active_job": active.heartbeat_payload()})
-                elif phase == "check_codex_auth":
-                    self.run_codex_auth_check(app_server, repo_dir, run_dir, job)
-                elif phase in SEMANTIC_PHASES:
-                    self.run_semantic_phase(app_server, repo_dir, run_dir, job, phase)
-                elif phase in MECHANICAL_PHASES:
-                    self.run_mechanical_phase(repo_dir, run_dir, job, phase)
-            envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
-            self.client.result(job_id, result_payload(active, envelope, "done"))
-            terminal_state = "completed"
+                try:
+                    if phase == "prepare_workspace":
+                        pass
+                    elif phase == "start_codex_app_server":
+                        app_server = JsonRpcAppServer(
+                            str(getattr(self.config, "codex_command", "") or "codex"),
+                            self.isolation.env(self.config),
+                            repo_dir,
+                            events_path,
+                            rate_limit_callback=self.quota_monitor.apply_rate_limit_update,
+                        )
+                        app_server.start()
+                    elif phase == "initialize_codex_connection":
+                        thread_id = app_server.start_thread(repo_dir, model_for_job(job)) if app_server else ""
+                        run_state = read_json(run_dir / "run-state.json", {})
+                        if not isinstance(run_state, dict):
+                            run_state = {}
+                        run_state.update({"thread_id": thread_id, "active_job": active.heartbeat_payload()})
+                        write_json(run_dir / "run-state.json", run_state)
+                    elif phase == "check_codex_auth":
+                        self.run_codex_auth_check(app_server, repo_dir, run_dir, job)
+                    elif phase == "submit_result_envelope":
+                        envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
+                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done"), artifact_dir, envelope):
+                            terminal_state = "result_submit_pending"
+                            return
+                        terminal_state = "completed"
+                    elif phase == "cleanup_active_job":
+                        pass
+                    elif phase in SEMANTIC_PHASES:
+                        self.run_semantic_phase(app_server, repo_dir, run_dir, job, phase)
+                    elif phase in MECHANICAL_PHASES:
+                        self.run_mechanical_phase(repo_dir, run_dir, job, phase)
+                    self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase))
+                except JobCancelled:
+                    raise
+                except Exception as phase_exc:
+                    self.fail_phase(active, run_dir, phase, phase_exc)
+                    raise
+            self.emit_event(active, run_dir, "run_completed", "cleanup_active_job", status="completed", progress=100, current_phase_percent=100, message="Run completed.")
         except JobCancelled:
-            artifact_dir = self.isolation.artifacts / run_id
-            run_dir = self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
+            artifact_dir = artifact_dir or self.isolation.artifacts / run_id
+            run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_cancelled", "error": "cancel requested", "time": iso_time(time.time())})
+            self.emit_event(active, run_dir, "run_cancelled", active.current_phase, status="cancelled", progress=active.overall_percent, message="Run cancelled.")
             envelope = self.build_envelope(job, run_id, "cancelled", started, artifact_dir, run_dir, error="cancel requested")
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            self.client.result(job_id, result_payload(active, envelope, "failed"))
-            terminal_state = "cancelled"
+            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "failed"), artifact_dir, envelope):
+                terminal_state = "cancelled"
+            else:
+                terminal_state = "result_submit_pending"
+                return
         except Exception as exc:
             if codex_error_code(str(exc)) == "CODEX_QUOTA_EXHAUSTED":
                 self.quota_monitor.mark_exhausted(str(exc))
-            artifact_dir = self.isolation.artifacts / run_id
-            run_dir = self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
+            artifact_dir = artifact_dir or self.isolation.artifacts / run_id
+            run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_failed", "error": str(exc), "time": iso_time(time.time())})
+            self.emit_event(active, run_dir, "run_failed", active.current_phase, status="failed", progress=active.overall_percent, message=str(exc))
             envelope = self.build_envelope(job, run_id, "failed", started, artifact_dir, run_dir, error=str(exc))
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            self.client.result(job_id, result_payload(active, envelope, "failed"))
-            terminal_state = "failed"
+            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "failed"), artifact_dir, envelope):
+                terminal_state = "failed"
+            else:
+                terminal_state = "result_submit_pending"
+                return
         finally:
             if app_server is not None:
                 app_server.close()
-            self.state.clear_active(terminal_state)
+            if terminal_state in TERMINAL_STATES:
+                self.state.clear_active(terminal_state)
             self.heartbeat()
 
     def prepare_workspace(self, job: dict[str, Any], run_id: str) -> tuple[Path, Path, Path]:
@@ -1022,11 +1258,52 @@ class ReviewWorkerV1:
         source = str(job.get("checkout_dir") or job.get("checkoutDir") or "").strip()
         if source:
             copy_tree(Path(source), repo_dir)
-        for path in (repo_dir / ".codex-review", run_dir, run_dir / "bundles", run_dir / "raw-reviewers", run_dir / "verified-reviewers"):
+        for path in (
+            repo_dir / ".codex-review",
+            run_dir,
+            run_dir / "bundles",
+            run_dir / "raw-reviewers",
+            run_dir / "verified-reviewers",
+            run_dir / "intent",
+            run_dir / "intent" / "generated-tests",
+            run_dir / "intent" / "test-output",
+        ):
             path.mkdir(parents=True, exist_ok=True)
         write_worker_config(repo_dir / ".codex-review" / "worker-config.json", job, self.config)
         write_review_instruction_tree(repo_dir)
         return repo_dir, run_dir, artifact_dir
+
+    def submit_result_or_mark_pending(
+        self,
+        active: ActiveJob,
+        job_id: str,
+        payload: dict[str, Any],
+        artifact_dir: Path,
+        envelope: dict[str, Any],
+    ) -> bool:
+        try:
+            self.client.result(job_id, payload)
+            return True
+        except Exception as exc:
+            active.state = "finishing"
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "retrying"
+            active.message = f"Result submit pending: {exc}"
+            write_json(artifact_dir / "result-envelope.json", envelope)
+            write_json(
+                artifact_dir / "pending-submit.json",
+                {
+                    "run_id": active.run_id,
+                    "job_id": active.job_id,
+                    "status": "result_submit_pending",
+                    "created_at": iso_time(time.time()),
+                    "retry_count": 0,
+                    "next_retry_after": None,
+                    "result_envelope_path": "result-envelope.json",
+                    "error": str(exc),
+                },
+            )
+            return False
 
     def run_codex_auth_check(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
         if app_server is None:
@@ -1046,52 +1323,49 @@ class ReviewWorkerV1:
         )
 
     def run_semantic_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
-        if app_server is None:
-            return
-        state = read_json(run_dir / "run-state.json")
-        thread_id = str(state.get("thread_id") or "")
-        if not thread_id:
-            raise RuntimeError("Codex thread is missing")
-        effort = effort_for_phase(job, phase)
-        prompt = phase_prompt(phase, run_dir)
-        app_server.run_turn(
-            thread_id=thread_id,
-            repo_dir=repo_dir,
-            prompt=prompt,
-            effort=effort,
-            read_only=phase not in {"bootstrap_helper_scripts", "final_report_json"},
-            timeout_seconds=turn_timeout_for_job(job),
-            cancel_requested=self.poll_cancel_requested,
-        )
+        if app_server is not None:
+            state = read_json(run_dir / "run-state.json")
+            thread_id = str(state.get("thread_id") or "")
+            if not thread_id:
+                raise RuntimeError("Codex thread is missing")
+            effort = effort_for_phase(job, phase)
+            prompt = phase_prompt(phase, run_dir)
+            app_server.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                prompt=prompt,
+                effort=effort,
+                read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
+                timeout_seconds=turn_timeout_for_job(job),
+                cancel_requested=self.poll_cancel_requested,
+            )
+        fallback_semantic_artifact(run_dir, job, phase)
 
     def run_mechanical_phase(self, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
         if phase == "inventory_repository":
             write_json(run_dir / "inventory.json", inventory(repo_dir))
         elif phase == "token_budget":
-            write_json(
-                run_dir / "token-budget.json",
-                {
-                    "model": model_for_job(job),
-                    "core_effort": core_effort_for_job(job),
-                    "non_core_effort": "medium",
-                    "review_worker": review_worker_policy_for_job(job),
-                },
-            )
+            write_json(run_dir / "token-budget.json", token_budget_payload(run_dir, job))
+        elif phase == "intent_test_validation":
+            ensure_intent_directories(run_dir)
+            write_json(run_dir / "intent" / "intent-test-validation.json", intent_validation_config(job))
         elif phase == "bundle_planning":
-            inv = read_json(run_dir / "inventory.json")
-            files = inv.get("files") if isinstance(inv.get("files"), list) else []
-            write_json(run_dir / "bundle-plan.json", {"bundles": [{"bundle_id": "bundle_001", "depth": "P1", "files": [f.get("path") for f in files[:25]]}]})
+            write_json(run_dir / "bundle-plan.json", bundle_plan_payload(run_dir))
         elif phase == "bundle_packing":
-            (run_dir / "bundles" / "bundle_001.md").write_text("# Bundle bundle_001\n", encoding="utf-8")
+            pack_bundles(repo_dir, run_dir)
         elif phase == "reviewer_json_validation":
-            ensure_json(run_dir / "raw-reviewers")
+            validate_reviewer_outputs(run_dir)
         elif phase == "location_validation":
-            write_json(run_dir / "location-verification.json", {"verified": True, "errors": []})
+            write_json(run_dir / "location-verification.json", location_verification_payload(repo_dir, run_dir))
+        elif phase == "validation_workspace_prepare":
+            prepare_validation_workspace(repo_dir, run_dir)
+        elif phase == "intent_test_running":
+            write_json(run_dir / "intent" / "intent-test-run-results.raw.json", run_intent_tests(run_dir))
         elif phase == "render_markdown_report":
             report = read_json(run_dir / "report.agent.json", default_agent_report(job))
             (run_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
         elif phase == "qa_gate":
-            write_json(run_dir / "qa.json", {"status": "pass", "errors": [], "warnings": []})
+            write_json(run_dir / "qa.json", qa_gate_payload(repo_dir, run_dir))
         elif phase == "upload_artifacts":
             upload_artifacts(
                 self.client,
@@ -1101,9 +1375,6 @@ class ReviewWorkerV1:
             )
         elif phase == "hash_artifacts":
             materialize_artifacts(run_dir, self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"))
-        elif phase in {"repo_map", "risk_routing", "clustering_and_voting", "validator_disproof", "final_report_json"}:
-            fallback_semantic_artifact(run_dir, job, phase)
-        write_json(run_dir / "progress.json", {"phase": phase, "updated_at": iso_time(time.time())})
 
     def build_envelope(
         self,
@@ -1149,6 +1420,7 @@ class ReviewWorkerV1:
                 "completed_at": iso_time(now),
                 "duration_ms": int((now - started) * 1000),
             },
+            "progress_final": progress_final_payload(run_dir, run_id, status),
             "error": {"code": error_code, "message": error, "retryable": error_code != "CODEX_QUOTA_EXHAUSTED"} if error else None,
             "summary": summary_payload(run_dir, status),
             "quality_gate": read_json(run_dir / "qa.json", {"status": "fail", "errors": ["run did not reach qa gate"], "warnings": []}),
@@ -1187,29 +1459,133 @@ def turn_timeout_for_job(job: dict[str, Any]) -> int:
 
 
 def effort_for_phase(job: dict[str, Any], phase: str) -> str:
-    return core_effort_for_job(job) if phase in CORE_EFFORT_PHASES else "medium"
+    policy = validate_job_policy(job)
+    if phase not in CORE_EFFORT_PHASES:
+        return str(policy.get("non_core_effort") or "medium")
+    phase_efforts = policy.get("phase_efforts") if isinstance(policy.get("phase_efforts"), dict) else {}
+    if phase in {"validator_disproof", "intent_test_failure_analysis"}:
+        return str(phase_efforts.get("validator") or policy["reasoning_effort"])
+    if phase == "final_report_json":
+        return str(phase_efforts.get("reporter") or policy["reasoning_effort"])
+    if phase.startswith("intent_"):
+        return str(phase_efforts.get("intent_test") or policy["reasoning_effort"])
+    return str(phase_efforts.get("reviewer") or policy["reasoning_effort"])
+
+
+def _job_agent_config(job: dict[str, Any]) -> dict[str, Any]:
+    return job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
+
+
+def _job_model_profile(job: dict[str, Any]) -> dict[str, Any]:
+    return job.get("model_profile") if isinstance(job.get("model_profile"), dict) else {}
+
+
+def _job_review_request(job: dict[str, Any]) -> dict[str, Any]:
+    return job.get("review_request") if isinstance(job.get("review_request"), dict) else {}
+
+
+def _job_review_policy(job: dict[str, Any]) -> dict[str, Any]:
+    request = _job_review_request(job)
+    return request.get("policy") if isinstance(request.get("policy"), dict) else {}
+
+
+def _job_review_budget(job: dict[str, Any]) -> dict[str, Any]:
+    request = _job_review_request(job)
+    return request.get("budget") if isinstance(request.get("budget"), dict) else {}
+
+
+def _clean_effort(value: object, *, field: str) -> str:
+    effort = str(value or "").strip().lower()
+    if effort not in {"low", "medium", "high", "xhigh"}:
+        raise ValueError(f"claimed job must include valid {field}")
+    return effort
+
+
+def _policy_int(source: dict[str, Any], *keys: str, default: int | None = None) -> int:
+    for key in keys:
+        if source.get(key) is not None:
+            try:
+                return int(source.get(key))
+            except (TypeError, ValueError):
+                break
+    if default is not None:
+        return default
+    raise ValueError(f"claimed job policy is missing {keys[0]}")
+
+
+def _validate_restrictive_review_policy(policy: dict[str, Any]) -> None:
+    if not policy:
+        return
+    if policy.get("allow_source_modification") is not False:
+        raise ValueError("review_request.policy.allow_source_modification must be false")
+    if policy.get("allow_dependency_install") is not False:
+        raise ValueError("review_request.policy.allow_dependency_install must be false")
+    if policy.get("allow_network") is not False:
+        raise ValueError("review_request.policy.allow_network must be false")
+    if policy.get("helper_scripts_standard_library_only") is not True:
+        raise ValueError("review_request.policy.helper_scripts_standard_library_only must be true")
+
+
+def intent_validation_policy_for_job(job: dict[str, Any]) -> dict[str, Any]:
+    policy = _job_review_policy(job)
+    canonical = policy.get("intent_test_validation") if isinstance(policy.get("intent_test_validation"), dict) else {}
+    review_worker = _job_agent_config(job).get("reviewWorker") if isinstance(_job_agent_config(job).get("reviewWorker"), dict) else {}
+    configured = review_worker.get("intentTestValidation") if isinstance(review_worker.get("intentTestValidation"), dict) else {}
+    return {
+        "enabled": canonical.get("enabled", configured.get("enabled", True)) is not False,
+        "only_tiers": canonical.get("only_tiers") or canonical.get("onlyTiers") or configured.get("onlyTiers") or ["P0", "P1"],
+        "max_tests_per_run": _policy_int(canonical, "max_tests_per_run", "maxTestsPerRun", default=int(configured.get("maxTestsPerRun") or 20)),
+        "max_tests_per_bundle": _policy_int(canonical, "max_tests_per_bundle", "maxTestsPerBundle", default=int(configured.get("maxTestsPerBundle") or 2)),
+        "max_test_run_seconds_per_test": _policy_int(
+            canonical,
+            "max_test_run_seconds_per_test",
+            "maxTestRunSecondsPerTest",
+            default=int(configured.get("maxTestRunSecondsPerTest") or 60),
+        ),
+        "max_total_test_run_seconds": _policy_int(
+            canonical,
+            "max_total_test_run_seconds",
+            "maxTotalTestRunSeconds",
+            default=int(configured.get("maxTotalTestRunSeconds") or 900),
+        ),
+    }
 
 
 def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
-    agent = job.get("agentConfig") if isinstance(job.get("agentConfig"), dict) else {}
+    agent = _job_agent_config(job)
     provider = str(agent.get("provider") or "").strip().lower()
     if provider and provider != "codex":
         raise ValueError("agentConfig.provider must be codex")
     codex = agent.get("codex") if isinstance(agent.get("codex"), dict) else {}
-    model = str(codex.get("model") or "").strip()
+    model_profile = _job_model_profile(job)
+    model = str(model_profile.get("default_model") or codex.get("model") or "").strip()
     if not model:
-        raise ValueError("claimed job must include agentConfig.codex.model")
-    effort = str(codex.get("reasoningEffort") or "").strip().lower()
-    if effort not in {"low", "medium", "high", "xhigh"}:
-        raise ValueError("claimed job must include agentConfig.codex.reasoningEffort")
+        raise ValueError("claimed job must include model_profile.default_model")
+    effort = _clean_effort(
+        model_profile.get("core_effort") or model_profile.get("reviewer_effort") or codex.get("reasoningEffort"),
+        field="model_profile.core_effort",
+    )
+    non_core_effort = _clean_effort(model_profile.get("non_core_effort") or "medium", field="model_profile.non_core_effort")
     review_worker = agent.get("reviewWorker") if isinstance(agent.get("reviewWorker"), dict) else {}
+    review_policy = _job_review_policy(job)
+    review_budget = _job_review_budget(job)
+    _validate_restrictive_review_policy(review_policy)
     try:
-        turn_timeout_seconds = int(review_worker.get("turnTimeoutSeconds"))
-        scan_deadline_seconds = int(review_worker.get("scanDeadlineSeconds"))
+        turn_timeout_seconds = _policy_int(review_policy, "turn_timeout_seconds", "turnTimeoutSeconds", default=None)
     except (TypeError, ValueError):
-        raise ValueError("claimed job must include agentConfig.reviewWorker.turnTimeoutSeconds and scanDeadlineSeconds") from None
+        try:
+            turn_timeout_seconds = int(review_worker.get("turnTimeoutSeconds"))
+        except (TypeError, ValueError):
+            raise ValueError("claimed job must include review_request.policy.turn_timeout_seconds") from None
+    try:
+        scan_deadline_seconds = _policy_int(review_budget, "max_wall_time_seconds", "maxWallTimeSeconds", default=None)
+    except (TypeError, ValueError):
+        try:
+            scan_deadline_seconds = int(review_worker.get("scanDeadlineSeconds"))
+        except (TypeError, ValueError):
+            raise ValueError("claimed job must include review_request.budget.max_wall_time_seconds") from None
     if turn_timeout_seconds <= 0 or scan_deadline_seconds < 0:
-        raise ValueError("agentConfig.reviewWorker turn timeout must be positive and scan deadline must be non-negative")
+        raise ValueError("review worker turn timeout must be positive and scan deadline must be non-negative")
     limits = job.get("repositoryLimits") if isinstance(job.get("repositoryLimits"), dict) else {}
     try:
         max_files = int(limits.get("maxFiles"))
@@ -1221,11 +1597,19 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "model": model,
         "reasoning_effort": effort,
+        "non_core_effort": non_core_effort,
+        "phase_efforts": {
+            "reviewer": _clean_effort(model_profile.get("reviewer_effort") or effort, field="model_profile.reviewer_effort"),
+            "validator": _clean_effort(model_profile.get("validator_effort") or effort, field="model_profile.validator_effort"),
+            "reporter": _clean_effort(model_profile.get("reporter_effort") or effort, field="model_profile.reporter_effort"),
+            "intent_test": _clean_effort(model_profile.get("intent_test_effort") or effort, field="model_profile.intent_test_effort"),
+        },
         "review_worker": {
             "turnTimeoutSeconds": turn_timeout_seconds,
             "scanDeadlineSeconds": scan_deadline_seconds,
         },
         "repository_limits": {"maxFiles": max_files, "maxBytes": max_bytes},
+        "intent_test_validation": intent_validation_policy_for_job(job),
     }
 
 
@@ -1238,14 +1622,469 @@ def phase_prompt(phase: str, run_dir: Path) -> str:
     )
 
 
+RISK_HINT_KEYWORDS = {
+    "auth",
+    "session",
+    "token",
+    "oauth",
+    "jwt",
+    "permission",
+    "rbac",
+    "tenant",
+    "payment",
+    "billing",
+    "checkout",
+    "upload",
+    "parser",
+    "path",
+    "sql",
+    "orm",
+    "migration",
+    "crypto",
+    "signature",
+    "webhook",
+    "queue",
+    "lock",
+    "idempotency",
+    "concurrency",
+}
+SOURCE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".php",
+    ".rb",
+    ".cs",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".swift",
+    ".sql",
+    ".sh",
+}
+CONFIG_NAMES = {
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "Cargo.toml",
+    "pom.xml",
+    "build.gradle",
+    "Makefile",
+    "Dockerfile",
+}
+GENERATED_PARTS = {"node_modules", "dist", "build", "target", "vendor", "coverage", ".pytest_cache", "__pycache__"}
+
+
 def inventory(repo_dir: Path) -> dict[str, Any]:
     files = []
     for path in sorted(repo_dir.rglob("*")):
         if not path.is_file() or ".git" in path.parts or ".codex-review" in path.parts:
             continue
         rel = path.relative_to(repo_dir).as_posix()
-        files.append({"path": rel, "size_bytes": path.stat().st_size})
-    return {"source_like_files_total": len(files), "files": files}
+        stat = path.stat()
+        data = path.read_bytes()
+        is_binary = b"\x00" in data[:4096]
+        text = ""
+        if not is_binary:
+            text = data.decode("utf-8", errors="replace")
+        extension = path.suffix
+        name = path.name
+        parts = set(path.parts)
+        is_generated = bool(parts.intersection(GENERATED_PARTS)) or rel.endswith((".min.js", ".lock"))
+        is_test = any(part in {"test", "tests", "__tests__"} for part in path.parts) or ".test." in name or "_test." in name or name.startswith("test_")
+        is_docs = extension.lower() in {".md", ".rst", ".txt", ".adoc"}
+        is_config = name in CONFIG_NAMES or extension.lower() in {".toml", ".yaml", ".yml", ".json", ".ini", ".cfg"}
+        is_source_like = not is_binary and not is_generated and (extension in SOURCE_EXTENSIONS or is_config)
+        lowered = rel.lower().replace("-", "_")
+        risk_hints = [keyword for keyword in sorted(RISK_HINT_KEYWORDS) if keyword in lowered]
+        files.append(
+            {
+                "path": rel,
+                "extension": extension,
+                "size_bytes": stat.st_size,
+                "line_count": text.count("\n") + (1 if text and not text.endswith("\n") else 0),
+                "estimated_tokens": max(1, (stat.st_size + 3) // 4) if stat.st_size else 0,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "is_binary": is_binary,
+                "is_source_like": is_source_like,
+                "is_generated_candidate": is_generated,
+                "is_test_candidate": is_test,
+                "is_config_candidate": is_config,
+                "is_docs_candidate": is_docs,
+                "risk_hints": risk_hints,
+            }
+        )
+    summary = {
+        "total_files": len(files),
+        "source_like_files": sum(1 for item in files if item["is_source_like"]),
+        "estimated_source_tokens": sum(int(item["estimated_tokens"]) for item in files if item["is_source_like"]),
+        "binary_files": sum(1 for item in files if item["is_binary"]),
+        "generated_candidates": sum(1 for item in files if item["is_generated_candidate"]),
+        "test_candidates": sum(1 for item in files if item["is_test_candidate"]),
+        "config_candidates": sum(1 for item in files if item["is_config_candidate"]),
+        "docs_candidates": sum(1 for item in files if item["is_docs_candidate"]),
+    }
+    return {
+        "schema_version": "inventory/v1",
+        "repo": {"root": str(repo_dir), "commit_sha": git_commit(repo_dir), "generated_at": iso_time(time.time())},
+        "summary": summary,
+        "files": files,
+    }
+
+
+def git_commit(repo_dir: Path) -> str:
+    head = repo_dir / ".git" / "HEAD"
+    try:
+        text = head.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+    if text.startswith("ref:"):
+        ref = repo_dir / ".git" / text.split(":", 1)[1].strip()
+        try:
+            return ref.read_text(encoding="utf-8").strip() or "unknown"
+        except OSError:
+            return "unknown"
+    return text or "unknown"
+
+
+def token_budget_payload(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
+    inv = read_json(run_dir / "inventory.json", {})
+    summary = inv.get("summary") if isinstance(inv.get("summary"), dict) else {}
+    estimated = int(summary.get("estimated_source_tokens") or 0)
+    return {
+        "schema_version": "token-budget/v1",
+        "run_id": run_dir.name,
+        "created_at": iso_time(time.time()),
+        "summary": {
+            "max_total_estimated_input_tokens": 800000,
+            "max_bundle_estimated_tokens": 60000,
+            "hard_bundle_estimated_tokens": 80000,
+            "estimated_source_tokens": estimated,
+            "review_budget_ratio": 0.58,
+            "intent_test_budget_ratio": 0.12,
+            "validation_budget_ratio": 0.18,
+            "aggregation_budget_ratio": 0.07,
+            "reserve_ratio": 0.05,
+        },
+        "model_profile": {
+            "default_model": model_for_job(job),
+            "core_effort": core_effort_for_job(job),
+            "non_core_effort": "medium",
+            "intent_test_effort": "medium",
+        },
+        "review_worker": review_worker_policy_for_job(job),
+        "intent_test_validation": intent_validation_config(job),
+    }
+
+
+def intent_validation_config(job: dict[str, Any]) -> dict[str, Any]:
+    configured = validate_job_policy(job)["intent_test_validation"]
+    return {
+        "enabled": configured.get("enabled", True) is not False,
+        "only_tiers": configured.get("only_tiers") or ["P0", "P1"],
+        "max_tests_per_run": int(configured.get("max_tests_per_run") or 20),
+        "max_tests_per_bundle": int(configured.get("max_tests_per_bundle") or 2),
+        "max_test_run_seconds_per_test": int(configured.get("max_test_run_seconds_per_test") or 60),
+        "max_total_test_run_seconds": int(configured.get("max_total_test_run_seconds") or 900),
+        "run_tests_in_disposable_workspace": True,
+        "require_intent_evidence": True,
+    }
+
+
+def file_tier(item: dict[str, Any]) -> str:
+    if item.get("is_binary") or item.get("is_generated_candidate"):
+        return "SKIP"
+    if item.get("risk_hints"):
+        return "P0"
+    path = str(item.get("path") or "").lower()
+    if item.get("is_source_like") and any(part in path for part in ("src/", "app/", "server/", "api/", "lib/")):
+        return "P1"
+    if item.get("is_source_like"):
+        return "P2"
+    return "P3"
+
+
+def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
+    inv = read_json(run_dir / "inventory.json", {})
+    files = inv.get("files") if isinstance(inv.get("files"), list) else []
+    grouped: dict[str, list[dict[str, Any]]] = {"P0": [], "P1": [], "P2": [], "P3": [], "SKIP": []}
+    for item in files:
+        if isinstance(item, dict):
+            grouped[file_tier(item)].append(item)
+    bundles = []
+    for tier in ("P0", "P1", "P2"):
+        tier_files = grouped[tier]
+        chunk: list[dict[str, Any]] = []
+        token_count = 0
+        for item in tier_files:
+            item_tokens = int(item.get("estimated_tokens") or 0)
+            if chunk and (len(chunk) >= 25 or token_count + item_tokens > 60000):
+                bundles.append(bundle_payload(tier, len(bundles) + 1, chunk, token_count))
+                chunk = []
+                token_count = 0
+            chunk.append(item)
+            token_count += item_tokens
+        if chunk:
+            bundles.append(bundle_payload(tier, len(bundles) + 1, chunk, token_count))
+    coverage = {
+        "schema_version": "coverage/v1",
+        "source_like_files_total": sum(1 for item in files if isinstance(item, dict) and item.get("is_source_like")),
+        "deep_reviewed_files": len(grouped["P0"]),
+        "standard_reviewed_files": len(grouped["P1"]),
+        "light_reviewed_files": len(grouped["P2"]),
+        "inventory_only_files": len(grouped["P3"]),
+        "skipped_files": len(grouped["SKIP"]),
+        "intent_tests_planned": 0,
+        "intent_tests_run": 0,
+        "intent_tests_supporting_findings": 0,
+        "skipped_scope": [item.get("path") for item in grouped["SKIP"][:100]],
+    }
+    write_json(run_dir / "coverage.json", coverage)
+    return {"schema_version": "bundle-plan/v1", "run_id": run_dir.name, "bundles": bundles}
+
+
+def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated_tokens: int) -> dict[str, Any]:
+    reviewers = {
+        "P0": ["security", "correctness", "test_gap"],
+        "P1": ["correctness", "test_gap"],
+        "P2": ["correctness_lite"],
+    }[tier]
+    return {
+        "bundle_id": f"{tier.lower()}-bundle-{index:03d}",
+        "tier": tier,
+        "title": f"{tier} review bundle {index}",
+        "estimated_tokens": estimated_tokens,
+        "paths": [str(item.get("path")) for item in files if item.get("path")],
+        "reviewers": reviewers,
+        "validator_required": tier == "P0",
+        "intent_test_eligible": tier in {"P0", "P1"},
+        "risk_reasons": sorted({hint for item in files for hint in item.get("risk_hints", [])})[:12],
+    }
+
+
+def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
+    plan = read_json(run_dir / "bundle-plan.json", {})
+    bundles = plan.get("bundles") if isinstance(plan.get("bundles"), list) else []
+    bundle_dir = run_dir / "bundles"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        bundle_id = safe_id(bundle.get("bundle_id"), "bundle")
+        lines = [
+            f"# Bundle: {bundle_id}",
+            "",
+            f"Tier: {bundle.get('tier') or 'P1'}  ",
+            f"Title: {bundle.get('title') or bundle_id}  ",
+            f"Estimated tokens: {bundle.get('estimated_tokens') or 0}  ",
+            f"Reviewers: {', '.join(bundle.get('reviewers') or [])}  ",
+            f"Intent test eligible: {str(bool(bundle.get('intent_test_eligible'))).lower()}",
+            "",
+            "## Files",
+            "",
+        ]
+        for rel in bundle.get("paths") or []:
+            path = repo_dir / str(rel)
+            lines.append(f"### {rel}")
+            lines.append("")
+            if not path.is_file():
+                lines.append("```text")
+                lines.append("<missing>")
+                lines.append("```")
+                lines.append("")
+                continue
+            suffix = path.suffix.lstrip(".") or "text"
+            lines.append(f"```{suffix}")
+            for index, source_line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+                lines.append(f"{index} | {source_line}")
+            lines.append("```")
+            lines.append("")
+        (bundle_dir / f"{bundle_id}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+
+def validate_reviewer_outputs(run_dir: Path) -> None:
+    raw_dir = run_dir / "raw-reviewers"
+    verified_dir = run_dir / "verified-reviewers"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    verified_dir.mkdir(parents=True, exist_ok=True)
+    errors = []
+    for path in sorted(raw_dir.glob("*.json")):
+        payload = read_json(path, None)
+        if not isinstance(payload, dict):
+            errors.append({"file": path.name, "error": "not an object"})
+            continue
+        payload.setdefault("schema_version", "codex-reviewer-output/v1")
+        payload.setdefault("findings", [])
+        write_json(verified_dir / path.name, payload)
+    write_json(run_dir / "reviewer-json-validation.json", {"schema_version": "reviewer-json-validation/v1", "errors": errors})
+
+
+def location_verification_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
+    checks = []
+    for path in sorted((run_dir / "verified-reviewers").glob("*.json")):
+        payload = read_json(path, {})
+        findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            finding_id = str(finding.get("local_id") or finding.get("id") or "")
+            for location in finding.get("locations") or []:
+                if not isinstance(location, dict):
+                    continue
+                rel = str(location.get("path") or "")
+                start = int(location.get("start_line") or location.get("line") or 0)
+                end = int(location.get("end_line") or start or 0)
+                file_path = repo_dir / rel
+                line_count = len(file_path.read_text(encoding="utf-8", errors="replace").splitlines()) if file_path.is_file() else 0
+                status = "valid" if rel and file_path.is_file() and 1 <= start <= max(line_count, 1) and start <= max(end, start) else "invalid"
+                checks.append(
+                    {
+                        "finding_id": finding_id,
+                        "path": rel,
+                        "start_line": start,
+                        "end_line": end,
+                        "line_count": line_count,
+                        "location_status": status,
+                    }
+                )
+    return {
+        "schema_version": "location-verification/v1",
+        "run_id": run_dir.name,
+        "items": checks,
+        "summary": {
+            "locations_total": len(checks),
+            "valid_locations": sum(1 for item in checks if item.get("location_status") == "valid"),
+            "invalid_locations": sum(1 for item in checks if item.get("location_status") == "invalid"),
+        },
+    }
+
+
+def ensure_intent_directories(run_dir: Path) -> None:
+    for path in (
+        run_dir / "intent",
+        run_dir / "intent" / "generated-tests",
+        run_dir / "intent" / "test-output",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def prepare_validation_workspace(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
+    ensure_intent_directories(run_dir)
+    validation_repo = repo_dir.parent / "validation-repo"
+    if validation_repo.exists():
+        shutil.rmtree(validation_repo)
+    copy_tree(repo_dir, validation_repo)
+    payload = {
+        "schema_version": "validation-workspace/v1",
+        "validation_repo_root": str(validation_repo),
+        "source_repo_root": str(repo_dir),
+        "commit_sha": git_commit(repo_dir),
+        "created_at": iso_time(time.time()),
+    }
+    write_json(run_dir / "intent" / "validation-workspace.json", payload)
+    return payload
+
+
+def run_intent_tests(run_dir: Path) -> dict[str, Any]:
+    ensure_intent_directories(run_dir)
+    plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
+    targets = plan.get("test_targets") if isinstance(plan.get("test_targets"), list) else []
+    raw_results = []
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        test_id = str(target.get("test_id") or f"ITV-{len(raw_results) + 1:03d}")
+        raw_results.append(
+            {
+                "schema_version": "project-test-run/v1",
+                "test_id": test_id,
+                "status": "skipped",
+                "exit_code": None,
+                "duration_ms": 0,
+                "timed_out": False,
+                "skip_reason": "no generated test command was produced",
+            }
+        )
+    return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": raw_results}
+
+
+def qa_gate_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
+    errors = []
+    warnings = []
+    for name in ("report.agent.json", "coverage.json", "token-budget.json"):
+        if not (run_dir / name).is_file():
+            errors.append(f"{name} is missing")
+    report = read_json(run_dir / "report.agent.json", {})
+    if not isinstance(report, dict) or report.get("schema_id") != "codex-full-repo-review":
+        errors.append("report.agent.json is not a codex-full-repo-review object")
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            errors.append(f"finding[{index}] is not an object")
+            continue
+        for field in ("title", "severity", "confidence", "evidence", "impact", "recommendation"):
+            if finding.get(field) in (None, "", []):
+                errors.append(f"finding[{index}].{field} is missing")
+        locations = finding.get("locations") if isinstance(finding.get("locations"), list) else []
+        if not locations:
+            errors.append(f"finding[{index}].locations is missing")
+        for location in locations:
+            if not isinstance(location, dict):
+                errors.append(f"finding[{index}].locations has invalid entry")
+                continue
+            rel = str(location.get("path") or "")
+            start = int(location.get("start_line") or 0)
+            if not rel or start <= 0 or not (repo_dir / rel).is_file():
+                errors.append(f"finding[{index}] has invalid location")
+        confidence = finding.get("confidence")
+        if isinstance(confidence, (int, float)) and not 0 <= float(confidence) <= 1:
+            errors.append(f"finding[{index}].confidence is outside 0..1")
+    coverage = read_json(run_dir / "coverage.json", {})
+    if isinstance(coverage, dict):
+        total = int(coverage.get("source_like_files_total") or 0)
+        reviewed = sum(int(coverage.get(key) or 0) for key in ("deep_reviewed_files", "standard_reviewed_files", "light_reviewed_files", "inventory_only_files"))
+        if reviewed > total:
+            errors.append("coverage reviewed counts exceed source_like_files_total")
+    intent_results = run_dir / "intent" / "intent-test-results.json"
+    if not intent_results.exists():
+        warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
+    else:
+        payload = read_json(intent_results, {})
+        for result in (payload.get("test_results", []) if isinstance(payload, dict) else []):
+            if isinstance(result, dict) and str(result.get("classification")) not in INTENT_TEST_CLASSIFICATIONS:
+                errors.append(f"intent test {result.get('test_id')} has invalid classification")
+    return {
+        "schema_version": "qa/v1",
+        "run_id": run_dir.name,
+        "status": "pass" if not errors else "fail",
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def phase_completion_data(run_dir: Path, phase: str) -> dict[str, Any]:
+    if phase == "inventory_repository":
+        summary = read_json(run_dir / "inventory.json", {}).get("summary", {})
+        return summary if isinstance(summary, dict) else {}
+    if phase == "bundle_planning":
+        bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
+        return {"bundles_total": len(bundles) if isinstance(bundles, list) else 0}
+    if phase == "intent_test_planning":
+        targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
+        return {"intent_tests_total": len(targets) if isinstance(targets, list) else 0}
+    if phase == "intent_test_running":
+        runs = read_json(run_dir / "intent" / "intent-test-run-results.raw.json", {}).get("test_runs", [])
+        return {"intent_tests_run": len(runs) if isinstance(runs, list) else 0}
+    return {}
 
 
 def write_review_instruction_tree(repo_dir: Path) -> None:
@@ -1253,6 +2092,7 @@ def write_review_instruction_tree(repo_dir: Path) -> None:
     (review_root / "tools").mkdir(parents=True, exist_ok=True)
     (review_root / "schemas").mkdir(parents=True, exist_ok=True)
     (review_root / "prompts" / "reviewers").mkdir(parents=True, exist_ok=True)
+    (review_root / "prompts" / "intent").mkdir(parents=True, exist_ok=True)
     (review_root / "AGENTS.review.md").write_text(REVIEW_AGENTS_TEXT, encoding="utf-8")
     tool_body = (
         "#!/usr/bin/env python3\n"
@@ -1274,34 +2114,72 @@ def write_review_instruction_tree(repo_dir: Path) -> None:
         if not path.exists():
             path.write_text(tool_body, encoding="utf-8")
             path.chmod(0o700)
-    schema_body = {"type": "object", "additionalProperties": True}
     for name in REQUIRED_SCHEMA_FILES:
         path = review_root / "schemas" / name
         if not path.exists():
-            write_json(path, schema_body)
+            schema_id = name.removesuffix(".schema.json")
+            write_json(path, {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": f"{schema_id}/v1", "type": "object", "required": ["schema_version"], "additionalProperties": True})
     for name in REQUIRED_PROMPT_FILES:
         path = review_root / "prompts" / name
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                "# Pullwise Codex Full Repository Review Phase\n\n"
-                "Follow .codex-review/AGENTS.review.md. Return the phase artifact requested by the worker design.\n",
-                encoding="utf-8",
-            )
+            path.write_text(prompt_template_for_name(name), encoding="utf-8")
+
+
+def prompt_template_for_name(name: str) -> str:
+    templates = {
+        "00_repo_mapper.md": "You are the Repo Mapper. Produce repo-map.json. Do not report bugs. Return JSON only using repo-map/v1.\n",
+        "01_risk_router.md": "You are the Risk Router. Classify files and directories into P0/P1/P2/P3/SKIP. Return JSON only using risk-routing/v1.\n",
+        "02_bundle_planner.md": "You may adjust mechanical bundle boundaries without changing the review policy. Return JSON only using bundle-plan/v1.\n",
+        "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Return JSON only using codex-reviewer-output/v1.\n",
+        "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only.\n",
+        "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only.\n",
+        "reviewers/correctness_lite.md": "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. Return JSON only.\n",
+        "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Do not create new findings. Return JSON only.\n",
+        "intent/04_intent_miner.md": "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route definitions, and error messages. Do not infer intent only from implementation code. Return JSON only using intent-map/v1.\n",
+        "intent/05_intent_test_planner.md": "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return JSON only using intent-test-plan/v1.\n",
+        "intent/06_intent_test_writer.md": "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**. Do not modify the main repo workspace. Return JSON describing created test files.\n",
+        "intent/07_intent_test_failure_analyzer.md": "You are the Test Failure Analyzer. A failing test is not automatically a bug. Classify each result using intent-test-result/v1. Return JSON only.\n",
+        "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. Return JSON only.\n",
+        "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to appendix. Return JSON only.\n",
+    }
+    discipline = (
+        "\nRequired discipline:\n"
+        "- Do not modify application source files.\n"
+        "- Do not install dependencies.\n"
+        "- Do not call external review/scanning services.\n"
+        "- Do not include Markdown prose outside JSON for schema-bound phases.\n"
+    )
+    return "# Pullwise Codex Full Repository Review Phase\n\n" + templates.get(name, "Follow .codex-review/AGENTS.review.md. Return the requested artifact.\n") + discipline
 
 
 def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -> None:
-    if phase == "repo_map":
+    ensure_intent_directories(run_dir)
+    if phase == "repo_map" and not (run_dir / "repo-map.json").exists():
         write_json(run_dir / "repo-map.json", {"areas": [], "notes": "Codex repo_map phase did not materialize an artifact."})
-    elif phase == "risk_routing":
+    elif phase == "risk_routing" and not (run_dir / "risk-routing.json").exists():
         write_json(run_dir / "risk-routing.json", {"routes": [], "default_depth": "P1"})
-        write_json(run_dir / "coverage.json", {"source_like_files_total": read_json(run_dir / "inventory.json", {}).get("source_like_files_total", 0), "deep_reviewed_files": 0, "standard_reviewed_files": 0, "light_reviewed_files": 0, "inventory_only_files": 0, "skipped_files": 0})
-    elif phase == "clustering_and_voting":
-        write_json(run_dir / "cluster-result.json", {"clusters": []})
-    elif phase == "validator_disproof":
-        write_json(run_dir / "validation-result.json", {"validated": []})
-    elif phase == "final_report_json":
-        write_json(run_dir / "report.agent.json", default_agent_report(job))
+        if not (run_dir / "coverage.json").exists():
+            inv = read_json(run_dir / "inventory.json", {})
+            summary = inv.get("summary") if isinstance(inv.get("summary"), dict) else {}
+            write_json(run_dir / "coverage.json", {"source_like_files_total": int(summary.get("source_like_files") or 0), "deep_reviewed_files": 0, "standard_reviewed_files": 0, "light_reviewed_files": 0, "inventory_only_files": 0, "skipped_files": 0})
+    elif phase == "reviewer_fanout":
+        (run_dir / "raw-reviewers").mkdir(parents=True, exist_ok=True)
+    elif phase == "clustering_and_voting" and not (run_dir / "clusters.json").exists():
+        write_json(run_dir / "clusters.json", {"schema_version": "cluster-output/v1", "clusters": [], "candidate_findings": []})
+        write_json(run_dir / "validation-input.json", {"schema_version": "validation-input/v1", "candidates": []})
+    elif phase == "intent_mining" and not (run_dir / "intent" / "intent-map.json").exists():
+        write_json(run_dir / "intent" / "intent-map.json", {"schema_version": "intent-map/v1", "bundle_id": "all", "behavioral_contracts": [], "unknowns": ["No high-value intent targets were materialized."]})
+    elif phase == "intent_test_planning" and not (run_dir / "intent" / "intent-test-plan.json").exists():
+        write_json(run_dir / "intent" / "intent-test-plan.json", {"schema_version": "intent-test-plan/v1", "test_targets": []})
+    elif phase == "intent_test_writing" and not (run_dir / "intent" / "intent-test-source.json").exists():
+        write_json(run_dir / "intent" / "intent-test-source.json", {"schema_version": "intent-test-source/v1", "generated_tests": []})
+    elif phase == "intent_test_failure_analysis" and not (run_dir / "intent" / "intent-test-results.json").exists():
+        write_json(run_dir / "intent" / "intent-test-results.json", {"schema_version": "intent-test-result/v1", "test_results": []})
+    elif phase == "validator_disproof" and not (run_dir / "validated-findings.json").exists():
+        write_json(run_dir / "validated-findings.json", {"schema_version": "validation-output/v1", "validated_findings": [], "disproven_findings": []})
+    elif phase == "final_report_json" and not (run_dir / "report.agent.json").exists():
+        write_json(run_dir / "report.agent.json", agent_report_payload(run_dir, job))
 
 
 def default_agent_report(job: dict[str, Any]) -> dict[str, Any]:
@@ -1315,13 +2193,34 @@ def default_agent_report(job: dict[str, Any]) -> dict[str, Any]:
         "findings": [],
         "appendix_findings": [],
         "disproven_findings": [],
+        "intent_test_validation": {"schema_version": "intent-test-result/v1", "test_results": []},
         "next_agent_tasks": [],
         "raw_artifact_refs": [],
     }
 
 
+def agent_report_payload(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
+    report = default_agent_report(job)
+    coverage = read_json(run_dir / "coverage.json", {})
+    intent = read_json(run_dir / "intent" / "intent-test-results.json", {"schema_version": "intent-test-result/v1", "test_results": []})
+    report["coverage"] = coverage if isinstance(coverage, dict) else {}
+    report["intent_test_validation"] = intent if isinstance(intent, dict) else {"schema_version": "intent-test-result/v1", "test_results": []}
+    report["raw_artifact_refs"] = [
+        "inventory.json",
+        "repo-map.json",
+        "risk-routing.json",
+        "bundle-plan.json",
+        "clusters.json",
+        "validated-findings.json",
+        "intent-test-results.json",
+    ]
+    return report
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    intent = report.get("intent_test_validation") if isinstance(report.get("intent_test_validation"), dict) else {}
+    tests = intent.get("test_results") if isinstance(intent.get("test_results"), list) else []
     return "\n".join(
         [
             "# Codex Full Repository Review Report",
@@ -1331,10 +2230,15 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- Mode: full repository scan",
             f"- Commit: {report.get('commit_sha') or 'pending'}",
             f"- Confirmed findings: {len(findings)}",
+            f"- Intent tests run: {len(tests)}",
             "",
             "## Top Findings",
             "",
             "No confirmed findings." if not findings else "",
+            "",
+            "## Intent Test Validation Summary",
+            "",
+            "No intent tests were run." if not tests else "",
         ]
     )
 
@@ -1344,24 +2248,44 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
     for name, content in (
         ("worker.log.jsonl", ""),
         ("codex-events.jsonl", ""),
+        ("progress.log.jsonl", ""),
     ):
         src = run_dir / name
         if not src.exists():
             src.parent.mkdir(parents=True, exist_ok=True)
             src.write_text(content, encoding="utf-8")
         shutil.copy2(src, artifact_dir / name)
+    qa_status = "warn" if status in {"cancelled", "partial_completed"} else "fail"
+    qa_message = (
+        "Run was cancelled before full repository scan completed."
+        if status == "cancelled"
+        else "Run produced a partial result before all required review phases completed."
+        if status == "partial_completed"
+        else "Run failed before full repository scan completed."
+    )
+    qa_payload = {"schema_version": "qa/v1", "status": qa_status, "errors": [], "warnings": []}
+    if qa_status == "fail":
+        qa_payload["errors"].append(qa_message)
+    else:
+        qa_payload["warnings"].append(qa_message)
+    write_json(run_dir / "qa.json", qa_payload)
+    shutil.copy2(run_dir / "qa.json", artifact_dir / "qa.json")
     error_report = {
         "status": status,
         "error": error,
         "created_at": iso_time(time.time()),
     }
-    write_json(artifact_dir / "error-report.json", error_report)
+    write_json(run_dir / "error-report.json", error_report)
+    shutil.copy2(run_dir / "error-report.json", artifact_dir / "error-report.json")
     manifest = [
-        artifact_item(artifact_dir / "worker.log.jsonl", "worker_log", "application/jsonl", "worker-log", False),
+        artifact_item(artifact_dir / "worker.log.jsonl", "worker_log", "application/jsonl", "worker-log", True),
+        artifact_item(artifact_dir / "qa.json", "qa", "application/json", "qa-gate", True),
+        artifact_item(artifact_dir / "error-report.json", "error_report", "application/json", "error-report", True),
         artifact_item(artifact_dir / "codex-events.jsonl", "codex_event_log", "application/jsonl", "codex-events", False),
-        artifact_item(artifact_dir / "error-report.json", "error_report", "application/json", "error-report", False),
+        artifact_item(artifact_dir / "progress.log.jsonl", "progress_log", "application/jsonl", "progress-log", False),
     ]
     write_json(artifact_dir / "artifact-manifest.json", manifest)
+    write_json(run_dir / "artifact-manifest.json", manifest)
 
 
 def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
@@ -1374,6 +2298,7 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         "qa.json": json.dumps({"status": "fail", "errors": ["missing qa gate"], "warnings": []}),
         "codex-events.jsonl": "",
         "worker.log.jsonl": "",
+        "progress.log.jsonl": "",
     }
     for name, content in required_defaults.items():
         src = run_dir / name
@@ -1390,10 +2315,32 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         ("token-budget.json", "token_budget", "application/json", "token-budget", True),
         ("codex-events.jsonl", "codex_event_log", "application/jsonl", "codex-events", False),
         ("worker.log.jsonl", "worker_log", "application/jsonl", "worker-log", False),
+        ("progress.log.jsonl", "progress_log", "application/jsonl", "progress-log", False),
     ):
         path = artifact_dir / name
         manifest.append(artifact_item(path, kind, media_type, schema_id, required))
+    optional_artifacts = (
+        ("inventory.json", "repo_inventory", "application/json", "inventory"),
+        ("repo-map.json", "repo_map", "application/json", "repo-map"),
+        ("risk-routing.json", "risk_routing", "application/json", "risk-routing"),
+        ("bundle-plan.json", "bundle_plan", "application/json", "bundle-plan"),
+        ("clusters.json", "cluster_result", "application/json", "cluster-output"),
+        ("validated-findings.json", "validation_result", "application/json", "validation-output"),
+        ("intent/intent-map.json", "intent_map", "application/json", "intent-map"),
+        ("intent/intent-test-plan.json", "intent_test_plan", "application/json", "intent-test-plan"),
+        ("intent/intent-test-source.json", "intent_test_source", "application/json", "intent-test-source"),
+        ("intent/intent-test-results.json", "intent_test_result", "application/json", "intent-test-result"),
+        ("intent/intent-test-run-results.raw.json", "intent_test_output", "application/json", "project-test-run"),
+    )
+    for rel, kind, media_type, schema_id in optional_artifacts:
+        src = run_dir / rel
+        if not src.exists():
+            continue
+        dest = artifact_dir / src.name
+        shutil.copy2(src, dest)
+        manifest.append(artifact_item(dest, kind, media_type, schema_id, False))
     write_json(artifact_dir / "artifact-manifest.json", manifest)
+    write_json(run_dir / "artifact-manifest.json", manifest)
 
 
 def artifact_item(path: Path, kind: str, media_type: str, schema_id: str, required: bool) -> dict[str, Any]:
@@ -1432,6 +2379,32 @@ def summary_payload(run_dir: Path, status: str) -> dict[str, Any]:
         },
         "coverage": coverage if isinstance(coverage, dict) else {},
         "top_findings": findings[:10],
+    }
+
+
+def progress_final_payload(run_dir: Path, run_id: str, status: str) -> dict[str, Any]:
+    snapshot = read_json(run_dir / "progress.json", {})
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    try:
+        overall_percent = float(snapshot.get("overall_percent"))
+    except (TypeError, ValueError):
+        overall_percent = 100.0 if status == "completed" else 0.0
+    if status == "completed":
+        overall_percent = 100.0
+    overall_percent = max(0.0, min(100.0, round(overall_percent, 2)))
+    current_phase = str(snapshot.get("current_phase") or "").strip()
+    if not current_phase:
+        current_phase = "submit_result_envelope" if status == "completed" else "failure_handling"
+    message = str(snapshot.get("message") or "").strip()
+    if not message:
+        message = "Run completed and result accepted by server." if status == "completed" else f"Run ended with status {status}."
+    return {
+        "run_id": run_id,
+        "overall_percent": overall_percent,
+        "current_phase": current_phase,
+        "status": status,
+        "message": message,
     }
 
 
@@ -1604,4 +2577,3 @@ def upload_artifacts(client: Any, job_id: str, attempt_id: str, artifact_dir: Pa
                 "content_base64": base64.b64encode(data).decode("ascii"),
             },
         )
-
