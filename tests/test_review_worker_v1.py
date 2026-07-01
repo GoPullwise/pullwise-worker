@@ -492,7 +492,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             (run_dir / "intent").mkdir(parents=True)
-            (run_dir / "intent" / "intent-test-run-results.raw.json").write_text(
+            (run_dir / "intent" / "intent-test-results.raw.json").write_text(
                 json.dumps(
                     {
                         "schema_version": "intent-test-run-results/v1",
@@ -517,13 +517,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             payload = json.loads((run_dir / "intent" / "intent-test-results.json").read_text(encoding="utf-8"))
 
         classes = {result["test_id"]: result["classification"] for result in payload["test_results"]}
-        self.assertEqual(classes["ITV-pass"], "passed_no_bug_reproduced")
+        self.assertEqual(classes["ITV-pass"], "unclear_requirement")
         self.assertEqual(classes["ITV-fail"], "unclear_requirement")
         self.assertEqual(classes["ITV-timeout"], "test_harness_error")
-        self.assertEqual(classes["ITV-skip"], "skipped_not_runnable")
+        self.assertEqual(classes["ITV-skip"], "test_harness_error")
         self.assertTrue(all(result["finding_confidence_impact"] == "none" for result in payload["test_results"]))
         self.assertFalse({"confirmed_bug", "plausible_bug"} & set(classes.values()))
         fallback_by_id = {result["test_id"]: result for result in payload["test_results"]}
+        self.assertEqual(fallback_by_id["ITV-pass"]["status"], "passed")
+        self.assertEqual(fallback_by_id["ITV-pass"]["confidence"], 0.0)
         self.assertEqual(fallback_by_id["ITV-pass"]["artifact_refs"], ["art_intent_test_output_ITV_pass_stdout_log"])
 
     def test_qa_gate_rejects_invalid_main_findings(self) -> None:
@@ -1248,7 +1250,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 json.dumps({"generated_tests": [{"id": "itv_1"}]}),
                 encoding="utf-8",
             )
-            (run_dir / "intent" / "intent-test-run-results.raw.json").write_text(
+            (run_dir / "intent" / "intent-test-results.raw.json").write_text(
                 json.dumps({"test_runs": [{"id": "itv_1"}]}),
                 encoding="utf-8",
             )

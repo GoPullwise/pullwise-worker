@@ -98,7 +98,7 @@ PHASE_JSON_OUTPUTS: dict[str, tuple[tuple[str, str], ...]] = {
     "intent_test_planning": (("intent/intent-test-plan.json", "intent-test-plan/v1"),),
     "validation_workspace_prepare": (("intent/validation-workspace.json", "validation-workspace/v1"),),
     "intent_test_writing": (("intent/intent-test-source.json", "intent-test-source/v1"),),
-    "intent_test_running": (("intent/intent-test-run-results.raw.json", "intent-test-run-results/v1"),),
+    "intent_test_running": (("intent/intent-test-results.raw.json", "intent-test-run-results/v1"),),
     "intent_test_failure_analysis": (("intent/intent-test-results.json", "intent-test-result/v1"),),
     "validator_disproof": (("validated-findings.json", "validation-output/v1"),),
     "final_report_json": (("report.agent.json", "v1"),),
@@ -173,8 +173,6 @@ INTENT_TEST_CLASSIFICATIONS = {
     "flaky_or_nondeterministic",
     "dependency_missing",
     "unclear_requirement",
-    "passed_no_bug_reproduced",
-    "skipped_not_runnable",
 }
 CODEX_ERROR_CODES = {
     "UsageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
@@ -245,7 +243,7 @@ Rules:
 - Disproven findings do not appear in main findings.
 - Coverage and skipped scope must be reported.
 - Intent-driven tests may be generated only for selected P0/P1 candidate findings.
-- Test failures must be classified as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, passed_no_bug_reproduced, skipped_not_runnable, or unclear_requirement.
+- Test failures must be classified as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, or unclear_requirement.
 """
 
 
@@ -1645,7 +1643,7 @@ class ReviewWorkerV1:
         elif phase == "validation_workspace_prepare":
             prepare_validation_workspace(repo_dir, run_dir)
         elif phase == "intent_test_running":
-            write_json(run_dir / "intent" / "intent-test-run-results.raw.json", run_intent_tests(run_dir))
+            write_json(run_dir / "intent" / "intent-test-results.raw.json", run_intent_tests(run_dir))
         elif phase == "render_markdown_report":
             report = read_json(run_dir / "report.agent.json", default_agent_report(job))
             (run_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
@@ -2014,7 +2012,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
     "intent_test_failure_analysis": {
         "role": "Test Failure Analyzer",
         "prompt_files": ["intent/07_intent_test_failure_analyzer.md"],
-        "inputs": ["intent/intent-test-run-results.raw.json", "generated tests", "linked findings"],
+        "inputs": ["intent/intent-test-results.raw.json", "generated tests", "linked findings"],
         "outputs": ["intent/intent-test-results.json"],
         "instructions": [
             "Classify each generated test result as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, or unclear_requirement.",
@@ -2685,18 +2683,14 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
 
 def _fallback_intent_classification(raw_result: dict[str, Any]) -> str:
     status = str(raw_result.get("status") or "").strip().lower()
-    if status == "passed":
-        return "passed_no_bug_reproduced"
-    if status == "skipped":
-        return "skipped_not_runnable"
-    if status in {"timeout", "error"}:
+    if status in {"skipped", "timeout", "error"}:
         return "test_harness_error"
     return "unclear_requirement"
 
 
 def fallback_intent_test_results(run_dir: Path) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
-    raw = read_json(run_dir / "intent" / "intent-test-run-results.raw.json", {})
+    raw = read_json(run_dir / "intent" / "intent-test-results.raw.json", {})
     raw_results = raw.get("test_runs") if isinstance(raw, dict) and isinstance(raw.get("test_runs"), list) else []
     test_results = []
     for index, raw_result in enumerate(raw_results):
@@ -2712,17 +2706,26 @@ def fallback_intent_test_results(run_dir: Path) -> dict[str, Any]:
         test_results.append(
             {
                 "test_id": test_id,
+                "status": status if status in {"passed", "failed", "skipped", "timeout", "error"} else "error",
                 "classification": _fallback_intent_classification(raw_result),
+                "confidence": 0.0,
                 "raw_status": status,
                 "exit_code": raw_result.get("exit_code"),
                 "timed_out": bool(raw_result.get("timed_out")),
                 "duration_ms": _qa_int(raw_result.get("duration_ms")),
+                "evidence": [
+                    (
+                        "Analyzer output was not materialized; this conservative fallback preserves the raw test "
+                        "run without treating it as proof of a product bug."
+                    )
+                ],
                 "evidence_summary": (
                     "Analyzer output was not materialized; this conservative fallback preserves the raw test "
                     "run without treating it as proof of a product bug."
                 ),
                 "finding_confidence_impact": "none",
                 "confidence_delta": 0.0,
+                "artifacts": output_refs,
                 "artifact_refs": output_refs,
                 "fallback_generated": True,
             }
@@ -2739,6 +2742,40 @@ def _qa_int(value: object, default: int = 0) -> int:
 
 def _qa_artifact_path(artifact_dir: Path, item: dict[str, Any]) -> Path:
     return artifact_dir / str(item.get("name") or "")
+
+
+def intent_test_result_errors(payload: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return ["intent-test-results.json must be a JSON object"]
+    if payload.get("schema_version") != "intent-test-result/v1":
+        errors.append("intent-test-results.json schema_version must be intent-test-result/v1")
+    results = payload.get("test_results")
+    if not isinstance(results, list):
+        errors.append("intent-test-results.json test_results must be a list")
+        return errors
+    allowed_statuses = {"passed", "failed", "skipped", "timeout", "error"}
+    for index, result in enumerate(results):
+        if not isinstance(result, dict):
+            errors.append(f"intent-test-results.json test_results[{index}] must be an object")
+            continue
+        test_id = str(result.get("test_id") or "").strip()
+        if not test_id:
+            errors.append(f"intent-test-results.json test_results[{index}].test_id is missing")
+        status = str(result.get("status") or "").strip()
+        if status not in allowed_statuses:
+            errors.append(f"intent-test-results.json test_results[{index}].status is invalid")
+        classification = str(result.get("classification") or "").strip()
+        if classification not in INTENT_TEST_CLASSIFICATIONS:
+            errors.append(f"intent-test-results.json test_results[{index}].classification is invalid")
+        confidence = result.get("confidence")
+        if not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
+            errors.append(f"intent-test-results.json test_results[{index}].confidence is outside 0..1")
+        for field in ("linked_finding_ids", "evidence", "artifacts"):
+            value = result.get(field)
+            if value is not None and not isinstance(value, list):
+                errors.append(f"intent-test-results.json test_results[{index}].{field} must be a list")
+    return errors
 
 
 def artifact_manifest_items(payload: Any) -> list[dict[str, Any]]:
@@ -2933,9 +2970,7 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
         warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
     else:
         payload = read_json(intent_results, {})
-        for result in (payload.get("test_results", []) if isinstance(payload, dict) else []):
-            if isinstance(result, dict) and str(result.get("classification")) not in INTENT_TEST_CLASSIFICATIONS:
-                errors.append(f"intent test {result.get('test_id')} has invalid classification")
+        errors.extend(intent_test_result_errors(payload))
     generated_tests = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
     if isinstance(generated_tests, list):
         for index, generated in enumerate(generated_tests):
@@ -2966,7 +3001,7 @@ def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = N
     if phase == "intent_test_validation":
         plan_targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
         generated = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
-        raw_runs = read_json(run_dir / "intent" / "intent-test-run-results.raw.json", {}).get("test_runs", [])
+        raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
         analyzed_runs = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
         return {
             "intent_tests_total": len(plan_targets) if isinstance(plan_targets, list) else 0,
@@ -3011,6 +3046,10 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
         payload = parse_required_json_output(path)
         if expected_schema and str(payload.get("schema_version") or "").strip() != expected_schema:
             raise RuntimeError(f"required phase output {path.name} must use schema_version {expected_schema}")
+        if rel == "intent/intent-test-results.json":
+            errors = intent_test_result_errors(payload)
+            if errors:
+                raise RuntimeError(errors[0])
     for rel in PHASE_PATH_OUTPUTS.get(phase, ()):
         path = phase_output_path(run_dir, artifact_dir, rel)
         if not path.exists():
@@ -3042,7 +3081,7 @@ def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None =
         targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
         return {"intent_tests_total": len(targets) if isinstance(targets, list) else 0}
     if phase == "intent_test_running":
-        runs = read_json(run_dir / "intent" / "intent-test-run-results.raw.json", {}).get("test_runs", [])
+        runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
         return {"intent_tests_run": len(runs) if isinstance(runs, list) else 0}
     return {}
 
@@ -3303,7 +3342,7 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         ("intent/intent-test-plan.json", "intent_test_plan", "application/json", "intent-test-plan"),
         ("intent/intent-test-source.json", "intent_test_source", "application/json", "intent-test-source"),
         ("intent/intent-test-results.json", "intent_test_result", "application/json", "intent-test-result"),
-        ("intent/intent-test-run-results.raw.json", "intent_test_output", "application/json", "project-test-run"),
+        ("intent/intent-test-results.raw.json", "intent_test_output", "application/json", "project-test-run"),
     )
     for rel, kind, media_type, schema_id in optional_artifacts:
         src = run_dir / rel

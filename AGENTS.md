@@ -149,10 +149,9 @@ Review pipeline rules:
   skipped/error/timeout cases as degraded intent-test evidence, not as direct
   job failure. Failing generated tests must be classified before they influence
   confidence. If Codex does not materialize `intent-test-results.json`, the
-  fallback must preserve raw project test runs as neutral classifications
-  (`passed_no_bug_reproduced`, `skipped_not_runnable`,
-  `test_harness_error`, or `unclear_requirement`) with no positive finding
-  confidence impact.
+  fallback must preserve raw project test runs using only the
+  `intent-test-result/v1` classification enum, with `confidence = 0.0` and no
+  positive finding confidence impact.
 - Required completed artifacts are `report.md`, `report.agent.json`,
   `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`,
   `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
