@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import fcntl
@@ -271,7 +271,17 @@ class JsonRpcAppServer:
         )
         return str(((result.get("thread") or {}).get("id")) or result.get("threadId") or "")
 
-    def run_turn(self, *, thread_id: str, repo_dir: Path, prompt: str, effort: str, read_only: bool, timeout_seconds: int) -> None:
+    def run_turn(
+        self,
+        *,
+        thread_id: str,
+        repo_dir: Path,
+        prompt: str,
+        effort: str,
+        read_only: bool,
+        timeout_seconds: int,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> None:
         sandbox = {"type": "readOnly", "networkAccess": False}
         if not read_only:
             sandbox = {
@@ -297,9 +307,17 @@ class JsonRpcAppServer:
         event = threading.Event()
         with self._lock:
             self._turns[turn_id] = event
-        if not event.wait(max(1, int(timeout_seconds))):
-            self.interrupt(thread_id, turn_id)
-            raise TimeoutError(f"codex turn timed out: {turn_id}")
+        deadline = time.monotonic() + max(1, int(timeout_seconds))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.interrupt(thread_id, turn_id)
+                raise TimeoutError(f"codex turn timed out: {turn_id}")
+            if event.wait(min(0.5, remaining)):
+                break
+            if cancel_requested is not None and cancel_requested():
+                self.interrupt(thread_id, turn_id)
+                raise JobCancelled("cancel requested")
         error = self._turn_errors.get(turn_id)
         if error:
             raise RuntimeError(error)
@@ -506,6 +524,14 @@ class ReviewWorkerV1:
             active.cancel_requested = True
         return response if isinstance(response, dict) else {}
 
+    def poll_cancel_requested(self) -> bool:
+        active = self.state.active_job
+        if active is None:
+            return False
+        self.heartbeat()
+        return bool(active.cancel_requested)
+
+
     def run_job(self, job: dict[str, Any]) -> None:
         job_id = safe_id(job.get("job_id"), "job")
         run_id = safe_id(job.get("run_id") or f"run_{job_id}", "run")
@@ -600,6 +626,7 @@ class ReviewWorkerV1:
             effort=effort,
             read_only=phase not in {"bootstrap_helper_scripts", "final_report_json"},
             timeout_seconds=int(getattr(self.config, "codex_timeout_seconds", 3600) or 3600),
+            cancel_requested=self.poll_cancel_requested,
         )
 
     def run_mechanical_phase(self, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
@@ -907,24 +934,12 @@ def legacy_result_payload(active: ActiveJob, envelope: dict[str, Any], status: s
     for item in envelope.get("artifact_manifest") or []:
         if item.get("name") == "report.agent.json":
             break
-    summary = envelope.get("summary") if isinstance(envelope.get("summary"), dict) else {}
-    findings = summary.get("top_findings") if isinstance(summary.get("top_findings"), list) else []
-    graph_report = {
-        "version": "codex-full-repo-review/v1",
-        "runId": envelope["job"]["run_id"],
-        "mode": "full_repo",
-        "confirmedCount": len(findings),
-        "finalJson": {"confirmed": []},
-        "summary": summary,
-        "resultEnvelope": envelope,
-    }
     return {
         "status": status,
         "attempt_id": active.attempt_id,
         "result_checksum": hashlib.sha256(json.dumps(envelope, sort_keys=True).encode("utf-8")).hexdigest(),
         "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
         "reviewWorkerProtocol": envelope,
-        "graphVerifiedReport": graph_report,
         "humanReport": {"summaryMarkdown": "# Codex Full Repository Review Report\n"},
         "agentReport": agent_report,
         "readingGuide": {"forAgentDeep": "reviewWorkerProtocol.artifact_manifest"},
