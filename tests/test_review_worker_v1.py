@@ -2494,6 +2494,67 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertIsInstance(item.get("size_bytes"), int)
             self.assertEqual(item.get("storage", {}).get("type"), "server_artifact")
 
+    def test_failed_envelope_includes_failure_category_and_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            job = {"job_id": "job_1", "run_id": "run_1", "lease_id": "lease_1", "repo": "acme/api"}
+
+            envelope = worker.build_envelope(
+                job,
+                "run_1",
+                "failed",
+                1.0,
+                artifact_dir,
+                run_dir,
+                error='{"codexErrorInfo":"ContextWindowExceeded"}',
+                phase="reviewer_fanout",
+            )
+
+        self.assertEqual(envelope["error"]["code"], "CODEX_CONTEXT_WINDOW_EXCEEDED")
+        self.assertEqual(envelope["error"]["category"], "context_budget_failure")
+        self.assertEqual(envelope["error"]["failure_action"], "split_bundle_and_retry")
+        self.assertIs(envelope["error"]["retryable"], True)
+
+    def test_cancelled_envelope_includes_cancel_failure_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            job = {"job_id": "job_1", "run_id": "run_1", "lease_id": "lease_1", "repo": "acme/api"}
+
+            envelope = worker.build_envelope(
+                job,
+                "run_1",
+                "cancelled",
+                1.0,
+                artifact_dir,
+                run_dir,
+                error="cancel requested: user_requested",
+                phase="reviewer_fanout",
+            )
+
+        self.assertEqual(envelope["error"]["category"], "job_cancelled")
+        self.assertEqual(envelope["error"]["failure_action"], "cancel_job")
+        self.assertIs(envelope["error"]["retryable"], False)
+
+    def test_phase_failure_persists_structured_failure_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=tmp_dir))
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+
+            worker.fail_phase(active, run_dir, "reviewer_json_validation", RuntimeError("invalid JSON"))
+
+            run_state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(run_state["failure"]["category"], "json_schema_failure")
+        self.assertEqual(run_state["failure"]["failure_action"], "repair_output")
+        self.assertIs(run_state["failure"]["retryable"], True)
+
     def test_result_submit_failure_spools_pending_and_keeps_active_job(self) -> None:
         class Client:
             def result(self, job_id: str, payload: dict) -> None:
