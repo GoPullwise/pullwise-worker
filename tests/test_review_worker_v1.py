@@ -26,6 +26,7 @@ from pullwise_worker.review_worker_v1 import (
     decide_approval,
     default_agent_report,
     effort_for_phase,
+    fallback_semantic_artifact,
     model_for_job,
     review_worker_policy_for_job,
     turn_timeout_for_job,
@@ -41,6 +42,7 @@ from pullwise_worker.review_worker_v1 import (
     qa_gate_payload,
     upload_artifacts,
     validate_job_policy,
+    validate_phase_outputs,
 )
 
 class ReviewWorkerV1ContractsTest(unittest.TestCase):
@@ -725,6 +727,51 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("intent/intent-test-results.json", failure_prompt)
         self.assertIn("flaky_or_nondeterministic", failure_prompt)
         self.assertNotIn("flaky_nondeterministic", failure_prompt)
+
+    def test_validate_phase_outputs_rejects_missing_or_wrong_schema_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            with self.assertRaisesRegex(RuntimeError, "repo-map.json"):
+                validate_phase_outputs(run_dir, "repo_map")
+
+            (run_dir / "repo-map.json").write_text(json.dumps({"schema_version": "wrong/v1"}), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "repo-map/v1"):
+                validate_phase_outputs(run_dir, "repo_map")
+
+            (run_dir / "repo-map.json").write_text(json.dumps({"schema_version": "repo-map/v1", "areas": []}), encoding="utf-8")
+            validate_phase_outputs(run_dir, "repo_map")
+
+    def test_fallback_semantic_outputs_satisfy_phase_output_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "inventory.json").write_text(
+                json.dumps({"schema_version": "inventory/v1", "summary": {"source_like_files": 2}}),
+                encoding="utf-8",
+            )
+
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "repo_map")
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "risk_routing")
+
+            validate_phase_outputs(run_dir, "repo_map")
+            validate_phase_outputs(run_dir, "risk_routing")
+
+    def test_hash_artifact_phase_requires_list_manifest_in_artifact_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            run_dir.mkdir(parents=True)
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "artifact-manifest.json").write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "must be a list"):
+                validate_phase_outputs(run_dir, "hash_artifacts", artifact_dir)
+
+            (artifact_dir / "artifact-manifest.json").write_text("[]", encoding="utf-8")
+            validate_phase_outputs(run_dir, "hash_artifacts", artifact_dir)
 
     def test_build_envelope_contains_stable_v1_protocol_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

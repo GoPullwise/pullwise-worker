@@ -77,6 +77,31 @@ REQUIRED_COMPLETED_ARTIFACTS = {
     "qa",
     "token_budget",
 }
+PHASE_JSON_OUTPUTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "inventory_repository": (("inventory.json", "inventory/v1"),),
+    "token_budget": (("token-budget.json", "token-budget/v1"),),
+    "repo_map": (("repo-map.json", "repo-map/v1"),),
+    "risk_routing": (("risk-routing.json", "risk-routing/v1"),),
+    "bundle_planning": (("bundle-plan.json", "bundle-plan/v1"), ("coverage.json", "coverage/v1")),
+    "reviewer_json_validation": (("reviewer-json-validation.json", "reviewer-json-validation/v1"),),
+    "location_validation": (("location-verification.json", "location-verification/v1"),),
+    "clustering_and_voting": (("clusters.json", "cluster-output/v1"), ("validation-input.json", "validation-input/v1")),
+    "intent_test_validation": (("intent/intent-test-validation.json", "intent-test-validation/v1"),),
+    "intent_mining": (("intent/intent-map.json", "intent-map/v1"),),
+    "intent_test_planning": (("intent/intent-test-plan.json", "intent-test-plan/v1"),),
+    "validation_workspace_prepare": (("intent/validation-workspace.json", "validation-workspace/v1"),),
+    "intent_test_writing": (("intent/intent-test-source.json", "intent-test-source/v1"),),
+    "intent_test_running": (("intent/intent-test-run-results.raw.json", "intent-test-run-results/v1"),),
+    "intent_test_failure_analysis": (("intent/intent-test-results.json", "intent-test-result/v1"),),
+    "validator_disproof": (("validated-findings.json", "validation-output/v1"),),
+    "final_report_json": (("report.agent.json", "v1"),),
+    "qa_gate": (("qa.json", "qa/v1"),),
+}
+PHASE_PATH_OUTPUTS: dict[str, tuple[str, ...]] = {
+    "bundle_packing": ("bundles",),
+    "reviewer_fanout": ("raw-reviewers",),
+    "hash_artifacts": ("artifact:artifact-manifest.json",),
+}
 REQUIRED_TOOL_FILES = (
     "00_bootstrap_check.py",
     "01_inventory.py",
@@ -1246,6 +1271,7 @@ class ReviewWorkerV1:
                             message=f"{phase.replace('_', ' ')} progress updated.",
                             data=phase_progress_data(run_dir, phase),
                         )
+                    validate_phase_outputs(run_dir, phase, artifact_dir)
                     self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
                 except JobCancelled:
                     raise
@@ -2033,6 +2059,7 @@ def token_budget_payload(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
 def intent_validation_config(job: dict[str, Any]) -> dict[str, Any]:
     configured = validate_job_policy(job)["intent_test_validation"]
     return {
+        "schema_version": "intent-test-validation/v1",
         "enabled": configured.get("enabled", True) is not False,
         "only_tiers": configured.get("only_tiers") or ["P0", "P1"],
         "max_tests_per_run": int(configured.get("max_tests_per_run") or 20),
@@ -2348,6 +2375,45 @@ def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = N
     return {}
 
 
+def phase_output_path(run_dir: Path, artifact_dir: Path | None, output: str) -> Path:
+    if output.startswith("artifact:"):
+        if artifact_dir is None:
+            raise RuntimeError("artifact output validation requires artifact_dir")
+        return artifact_dir / output.removeprefix("artifact:")
+    return run_dir / output
+
+
+def parse_required_json_output(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"required phase output is missing: {path.name}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"required phase output is not valid JSON: {path.name}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"required phase output must be a JSON object: {path.name}")
+    return payload
+
+
+def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> None:
+    for rel, expected_schema in PHASE_JSON_OUTPUTS.get(phase, ()):
+        path = phase_output_path(run_dir, artifact_dir, rel)
+        payload = parse_required_json_output(path)
+        if expected_schema and str(payload.get("schema_version") or "").strip() != expected_schema:
+            raise RuntimeError(f"required phase output {path.name} must use schema_version {expected_schema}")
+    for rel in PHASE_PATH_OUTPUTS.get(phase, ()):
+        path = phase_output_path(run_dir, artifact_dir, rel)
+        if not path.exists():
+            raise RuntimeError(f"required phase output is missing: {path.name}")
+        if path.is_file() and path.name == "artifact-manifest.json":
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError("artifact-manifest.json must be valid JSON") from exc
+            if not isinstance(manifest, list):
+                raise RuntimeError("artifact-manifest.json must be a list")
+
+
 def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> dict[str, Any]:
     progress_data = phase_progress_data(run_dir, phase, artifact_dir)
     if progress_data:
@@ -2436,13 +2502,24 @@ def prompt_template_for_name(name: str) -> str:
 def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -> None:
     ensure_intent_directories(run_dir)
     if phase == "repo_map" and not (run_dir / "repo-map.json").exists():
-        write_json(run_dir / "repo-map.json", {"areas": [], "notes": "Codex repo_map phase did not materialize an artifact."})
+        write_json(run_dir / "repo-map.json", {"schema_version": "repo-map/v1", "areas": [], "notes": "Codex repo_map phase did not materialize an artifact."})
     elif phase == "risk_routing" and not (run_dir / "risk-routing.json").exists():
-        write_json(run_dir / "risk-routing.json", {"routes": [], "default_depth": "P1"})
+        write_json(run_dir / "risk-routing.json", {"schema_version": "risk-routing/v1", "routes": [], "default_depth": "P1"})
         if not (run_dir / "coverage.json").exists():
             inv = read_json(run_dir / "inventory.json", {})
             summary = inv.get("summary") if isinstance(inv.get("summary"), dict) else {}
-            write_json(run_dir / "coverage.json", {"source_like_files_total": int(summary.get("source_like_files") or 0), "deep_reviewed_files": 0, "standard_reviewed_files": 0, "light_reviewed_files": 0, "inventory_only_files": 0, "skipped_files": 0})
+            write_json(
+                run_dir / "coverage.json",
+                {
+                    "schema_version": "coverage/v1",
+                    "source_like_files_total": int(summary.get("source_like_files") or 0),
+                    "deep_reviewed_files": 0,
+                    "standard_reviewed_files": 0,
+                    "light_reviewed_files": 0,
+                    "inventory_only_files": 0,
+                    "skipped_files": 0,
+                },
+            )
     elif phase == "reviewer_fanout":
         (run_dir / "raw-reviewers").mkdir(parents=True, exist_ok=True)
     elif phase == "clustering_and_voting" and not (run_dir / "clusters.json").exists():
@@ -2573,9 +2650,9 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
     required_defaults = {
         "report.md": "# Codex Full Repository Review Report\n",
         "report.agent.json": json.dumps(default_agent_report({"job_id": "unknown"}), sort_keys=True),
-        "coverage.json": "{}",
-        "token-budget.json": "{}",
-        "qa.json": json.dumps({"status": "fail", "errors": ["missing qa gate"], "warnings": []}),
+        "coverage.json": json.dumps({"schema_version": "coverage/v1"}),
+        "token-budget.json": json.dumps({"schema_version": "token-budget/v1"}),
+        "qa.json": json.dumps({"schema_version": "qa/v1", "status": "fail", "errors": ["missing qa gate"], "warnings": []}),
         "codex-events.jsonl": "",
         "worker.log.jsonl": "",
         "progress.log.jsonl": "",
