@@ -2913,11 +2913,8 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
             errors.append(f"artifact {path.name} required must be boolean")
         storage = item.get("storage") if isinstance(item.get("storage"), dict) else {}
         storage_url = str(storage.get("url") or "")
-        if (
-            storage.get("type") != "server_artifact"
-            or not storage_url.startswith("/v1/review-runs/")
-            or not storage_url.endswith(f"/artifacts/{item.get('artifact_id')}")
-        ):
+        expected_storage_url = f"/v1/review-runs/{artifact_dir.name}/artifacts/{item.get('artifact_id')}"
+        if storage.get("type") != "server_artifact" or storage_url != expected_storage_url:
             errors.append(f"artifact {path.name} storage must reference server_artifact")
 
 
@@ -3642,6 +3639,7 @@ def upload_artifacts(
     if not isinstance(manifest_payload, (dict, list)) or not manifest:
         raise RuntimeError("artifact manifest must contain artifact items before upload")
     uploadable: list[tuple[dict[str, Any], Path]] = []
+    seen_artifact_ids: set[str] = set()
     for item in manifest:
         if not isinstance(item, dict):
             continue
@@ -3649,7 +3647,18 @@ def upload_artifacts(
         name = str(item.get("name") or "").strip()
         if not artifact_id or not name:
             raise RuntimeError("artifact manifest entries require artifact_id and name")
+        if artifact_id in seen_artifact_ids:
+            raise RuntimeError(f"artifact manifest contains duplicate artifact_id before upload: {artifact_id}")
+        seen_artifact_ids.add(artifact_id)
+        storage = item.get("storage") if isinstance(item.get("storage"), dict) else {}
+        expected_storage_url = f"/v1/review-runs/{artifact_dir.name}/artifacts/{artifact_id}"
+        if storage.get("type") != "server_artifact" or str(storage.get("url") or "") != expected_storage_url:
+            raise RuntimeError(f"artifact manifest storage does not match upload run before upload: {artifact_id}")
         path = artifact_dir / name
+        try:
+            path.resolve(strict=False).relative_to(artifact_dir.resolve(strict=False))
+        except ValueError as exc:
+            raise RuntimeError(f"artifact path escapes artifact directory before upload: {name}") from exc
         if not path.is_file():
             if item.get("required") is True:
                 raise RuntimeError(f"required artifact is missing: {name}")

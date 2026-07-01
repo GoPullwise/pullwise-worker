@@ -1426,6 +1426,56 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(payload["run_id"], "run_1")
             self.assertIn("content_base64", payload)
 
+    def test_upload_artifacts_rejects_duplicate_manifest_artifact_ids_before_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest_path = artifact_dir / "artifact-manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            duplicate_id = manifest_payload["items"][0]["artifact_id"]
+            manifest_payload["items"][1]["artifact_id"] = duplicate_id
+            manifest_payload["items"][1]["storage"]["url"] = f"/v1/review-runs/run_1/artifacts/{duplicate_id}"
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+            calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+            with self.assertRaisesRegex(RuntimeError, "duplicate artifact_id"):
+                upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+
+        self.assertEqual(calls, [])
+
+    def test_upload_artifacts_rejects_manifest_path_escape_before_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            outside = artifact_dir.parent / "outside.txt"
+            outside.write_text("secret\n", encoding="utf-8")
+            manifest_path = artifact_dir / "artifact-manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_payload["items"][0]["name"] = "../outside.txt"
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+            calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+            with self.assertRaisesRegex(RuntimeError, "escapes artifact directory"):
+                upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+
+        self.assertEqual(calls, [])
+
     def test_phase_progress_data_reports_required_v1_counters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

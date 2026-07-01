@@ -162,8 +162,11 @@ Review pipeline rules:
   `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
   `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,
   `storage`, `sha256`, and `size_bytes`.
-- Artifact IDs in one manifest must be unique because artifact upload
-  idempotency is keyed by `run_id + artifact_id`.
+- Artifact IDs in one manifest must be unique, and upload must reject
+  duplicates before posting any artifact, because artifact upload idempotency is
+  keyed by `run_id + artifact_id`.
+- Artifact upload must reject manifest names that resolve outside the artifact
+  directory before reading or posting any file.
 - Post run progress through `POST /v1/review-runs/{run_id}/events`, upload
   artifacts through `POST /v1/review-runs/{run_id}/artifacts`, and upload
   artifacts before submitting the terminal result envelope through
