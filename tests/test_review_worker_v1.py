@@ -508,6 +508,95 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(results[0][1]["status"], "cancelled")
         self.assertEqual(results[0][1]["reviewWorkerProtocol"]["execution"]["status"], "cancelled")
 
+    def test_qa_gate_failure_submits_partial_completed_result(self) -> None:
+        events = []
+        results = []
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, run_id: str, event: dict) -> dict:
+                events.append((run_id, event))
+                return {}
+
+            def artifact(self, _job_id: str, _artifact_id: str, _payload: dict) -> dict:
+                return {}
+
+            def result(self, job_id: str, payload: dict) -> None:
+                results.append((job_id, payload))
+
+        class PartialWorker(ReviewWorkerV1):
+            def prepare_workspace(self, job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                artifact_dir = root / "artifacts" / run_id
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+            def run_mechanical_phase(
+                self,
+                _repo_dir: Path,
+                run_dir: Path,
+                _job: dict,
+                phase: str,
+                *,
+                active: ActiveJob | None = None,
+                progress: int = 0,
+            ) -> None:
+                if phase == "qa_gate":
+                    (run_dir / "qa.json").write_text(
+                        json.dumps({"schema_version": "qa/v1", "status": "fail", "errors": ["qa failed"], "warnings": []}),
+                        encoding="utf-8",
+                    )
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {
+                "default_model": "gpt-5.5",
+                "core_effort": "high",
+                "non_core_effort": "medium",
+            },
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = PartialWorker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", (("qa_gate", 99),)):
+                worker.run_job(job)
+
+            log_events = [
+                json.loads(line)["event_type"]
+                for line in (root / "repo" / ".codex-review" / "runs" / "run_1" / "progress.log.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        posted_event_types = [event["event_type"] for _run_id, event in events]
+        self.assertLess(posted_event_types.index("qa_failed"), posted_event_types.index("run_partial_completed"))
+        self.assertLess(log_events.index("qa_failed"), log_events.index("run_partial_completed"))
+        self.assertEqual(results[0][0], "job_1")
+        self.assertEqual(results[0][1]["status"], "partial_completed")
+        envelope = results[0][1]["reviewWorkerProtocol"]
+        self.assertEqual(envelope["execution"]["status"], "partial_completed")
+        self.assertEqual(envelope["summary"]["result_status"], "incomplete")
+        self.assertEqual(envelope["quality_gate"]["status"], "warn")
+
     def test_worker_registers_before_heartbeat_and_lease(self) -> None:
         calls = []
 

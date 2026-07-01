@@ -1349,8 +1349,27 @@ class ReviewWorkerV1:
                             data=phase_progress_data(run_dir, phase),
                         )
                     validate_phase_outputs(run_dir, phase, artifact_dir)
+                    if phase == "qa_gate":
+                        qa = read_json(run_dir / "qa.json", {})
+                        if isinstance(qa, dict) and str(qa.get("status") or "").strip().lower() == "fail":
+                            errors = qa.get("errors") if isinstance(qa.get("errors"), list) else []
+                            reason = "; ".join(str(item) for item in errors if str(item).strip()) or "qa gate failed"
+                            self.emit_event(
+                                active,
+                                run_dir,
+                                "qa_failed",
+                                phase,
+                                status="failed",
+                                progress=progress,
+                                current_phase_percent=100.0,
+                                message=reason,
+                                data={"errors": errors},
+                            )
+                            raise JobPartialCompleted(reason)
                     self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
                 except JobCancelled:
+                    raise
+                except JobPartialCompleted:
                     raise
                 except Exception as phase_exc:
                     self.fail_phase(active, run_dir, phase, phase_exc)
@@ -1380,6 +1399,32 @@ class ReviewWorkerV1:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "cancelled"), artifact_dir, envelope):
                 terminal_state = "cancelled"
+            else:
+                terminal_state = "result_submit_pending"
+                return
+        except JobPartialCompleted as exc:
+            artifact_dir = artifact_dir or self.isolation.artifacts / run_id
+            run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
+            active.run_dir = active.run_dir or run_dir
+            reason = str(exc) or "partial result"
+            active.state = "failure_handling"
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_partial_completed", "error": reason, "time": iso_time(time.time())})
+            self.emit_event(
+                active,
+                run_dir,
+                "run_partial_completed",
+                active.current_phase,
+                status="failed",
+                progress=active.overall_percent,
+                message="Run produced a partial result.",
+                data={"reason": reason},
+            )
+            envelope = self.build_envelope(job, run_id, "partial_completed", started, artifact_dir, run_dir, error=reason)
+            upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
+            if upload_error:
+                envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
+            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "partial_completed"), artifact_dir, envelope):
+                terminal_state = "partial_completed"
             else:
                 terminal_state = "result_submit_pending"
                 return
@@ -1619,6 +1664,10 @@ class ReviewWorkerV1:
 
 
 class JobCancelled(RuntimeError):
+    pass
+
+
+class JobPartialCompleted(RuntimeError):
     pass
 
 
