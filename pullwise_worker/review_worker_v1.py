@@ -183,6 +183,7 @@ INTENT_TEST_CLASSIFICATIONS = {
     "dependency_missing",
     "unclear_requirement",
 }
+INTENT_TEST_STATUSES = {"passed", "failed", "skipped", "timeout", "error"}
 CODEX_ERROR_CODES = {
     "UsageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
     "RateLimitReached": "CODEX_QUOTA_EXHAUSTED",
@@ -2797,6 +2798,7 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             )
         except OSError as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
+            stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(str(exc), encoding="utf-8")
             raw_results.append(
                 {
@@ -2878,7 +2880,225 @@ def _qa_artifact_path(artifact_dir: Path, item: dict[str, Any]) -> Path:
     return artifact_dir / str(item.get("name") or "")
 
 
-def intent_test_result_errors(payload: Any) -> list[str]:
+def _repo_root_for_run_dir(run_dir: Path) -> Path | None:
+    codex_review_dir = run_dir.parent.parent
+    if codex_review_dir.name == ".codex-review":
+        return codex_review_dir.parent
+    return None
+
+
+def _string_list_errors(value: Any, artifact_name: str, field_name: str) -> tuple[list[str], list[str]]:
+    if not isinstance(value, list):
+        return [], [f"{artifact_name} {field_name} must be a list"]
+    items = []
+    errors = []
+    for index, item in enumerate(value):
+        item_text = str(item or "").strip() if isinstance(item, str) else ""
+        if not item_text:
+            errors.append(f"{artifact_name} {field_name}[{index}] must be a non-empty string")
+            continue
+        items.append(item_text)
+    return items, errors
+
+
+def _unique_test_id_errors(artifact_name: str, collection_name: str, entries: Any) -> list[str]:
+    if not isinstance(entries, list):
+        return [f"{artifact_name} {collection_name} must be a list"]
+    errors = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            errors.append(f"{artifact_name} {collection_name}[{index}] must be an object")
+            continue
+        test_id = str(entry.get("test_id") or "").strip()
+        if not test_id:
+            errors.append(f"{artifact_name} {collection_name}[{index}].test_id is missing")
+            continue
+        if test_id in seen:
+            errors.append(f"{artifact_name} {collection_name}[{index}].test_id is duplicated: {test_id}")
+        seen.add(test_id)
+    return errors
+
+
+def _cluster_link_ids(run_dir: Path) -> set[str]:
+    payload = read_json(run_dir / "clusters.json", {})
+    ids: set[str] = set()
+
+    def visit(value: Any, depth: int = 0) -> None:
+        if depth > 5 or not isinstance(value, dict):
+            return
+        for field in ("cluster_id", "id", "finding_id", "local_id"):
+            item_id = str(value.get(field) or "").strip()
+            if item_id:
+                ids.add(item_id)
+        for field in ("clusters", "candidate_findings", "findings", "items", "candidates", "source_findings", "merged_findings"):
+            children = value.get(field)
+            if isinstance(children, list):
+                for child in children:
+                    visit(child, depth + 1)
+
+    visit(payload)
+    return ids
+
+
+def _linked_finding_errors(
+    run_dir: Path,
+    artifact_name: str,
+    collection_name: str,
+    entries: Any,
+    *,
+    required: bool,
+) -> list[str]:
+    if not isinstance(entries, list):
+        return []
+    errors = []
+    cluster_ids: set[str] | None = None
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        field_name = f"{collection_name}[{index}].linked_finding_ids"
+        if "linked_finding_ids" not in entry:
+            if required:
+                errors.append(f"{artifact_name} {field_name} is missing")
+            continue
+        linked_ids, field_errors = _string_list_errors(entry.get("linked_finding_ids"), artifact_name, field_name)
+        errors.extend(field_errors)
+        if not linked_ids:
+            continue
+        if cluster_ids is None:
+            cluster_ids = _cluster_link_ids(run_dir)
+        for linked_id in linked_ids:
+            if linked_id not in cluster_ids:
+                errors.append(f"{artifact_name} {field_name} references unknown cluster id {linked_id}")
+    return errors
+
+
+def intent_map_errors(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["intent-map.json must be a JSON object"]
+    errors = []
+    if payload.get("schema_version") != "intent-map/v1":
+        errors.append("intent-map.json schema_version must be intent-map/v1")
+    if not str(payload.get("bundle_id") or "").strip():
+        errors.append("intent-map.json bundle_id is missing")
+    if not isinstance(payload.get("behavioral_contracts"), list):
+        errors.append("intent-map.json behavioral_contracts must be a list")
+    return errors
+
+
+def intent_test_plan_errors(run_dir: Path, payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["intent-test-plan.json must be a JSON object"]
+    errors = []
+    if payload.get("schema_version") != "intent-test-plan/v1":
+        errors.append("intent-test-plan.json schema_version must be intent-test-plan/v1")
+    targets = payload.get("test_targets")
+    errors.extend(_unique_test_id_errors("intent-test-plan.json", "test_targets", targets))
+    if not isinstance(targets, list):
+        return errors
+    for index, target in enumerate(targets):
+        if not isinstance(target, dict):
+            continue
+        if not str(target.get("title") or "").strip():
+            errors.append(f"intent-test-plan.json test_targets[{index}].title is missing")
+        if str(target.get("expected_result_before_fix") or "").strip() not in {"fail", "pass", "unknown"}:
+            errors.append(f"intent-test-plan.json test_targets[{index}].expected_result_before_fix is invalid")
+        target_files = target.get("target_files")
+        if target_files is not None and not isinstance(target_files, list):
+            errors.append(f"intent-test-plan.json test_targets[{index}].target_files must be a list")
+    errors.extend(_linked_finding_errors(run_dir, "intent-test-plan.json", "test_targets", targets, required=True))
+    return errors
+
+
+def _candidate_paths_for_recorded_path(run_dir: Path, raw_path: str, validation_root: str = "") -> list[Path]:
+    path_text = raw_path.strip()
+    if not path_text:
+        return []
+    path = Path(path_text)
+    if path.is_absolute():
+        return [path]
+    candidates = [run_dir / path]
+    repo_root = _repo_root_for_run_dir(run_dir)
+    if repo_root is not None:
+        candidates.append(repo_root / path)
+    if validation_root:
+        candidates.append(Path(validation_root) / path)
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            unique.append(candidate)
+            seen.add(key)
+    return unique
+
+
+def _recorded_file_exists(run_dir: Path, raw_path: str, validation_root: str = "") -> bool:
+    for candidate in _candidate_paths_for_recorded_path(run_dir, raw_path, validation_root):
+        if candidate.is_file():
+            return True
+    return False
+
+
+def _intent_generated_test_exists(run_dir: Path, raw_path: str) -> bool:
+    validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+    validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+    return _recorded_file_exists(run_dir, raw_path, validation_root)
+
+
+def intent_test_source_errors(run_dir: Path, payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["intent-test-source.json must be a JSON object"]
+    errors = []
+    if payload.get("schema_version") != "intent-test-source/v1":
+        errors.append("intent-test-source.json schema_version must be intent-test-source/v1")
+    generated = payload.get("generated_tests")
+    errors.extend(_unique_test_id_errors("intent-test-source.json", "generated_tests", generated))
+    if not isinstance(generated, list):
+        return errors
+    for index, test in enumerate(generated):
+        if not isinstance(test, dict):
+            continue
+        test_path = str(test.get("path") or test.get("artifact_path") or test.get("artifactPath") or "").strip()
+        if not test_path:
+            errors.append(f"intent-test-source.json generated_tests[{index}].path is missing")
+        elif not _intent_generated_test_exists(run_dir, test_path):
+            errors.append(f"intent-test-source.json generated_tests[{index}].path does not exist: {test_path}")
+    errors.extend(_linked_finding_errors(run_dir, "intent-test-source.json", "generated_tests", generated, required=False))
+    return errors
+
+
+def intent_test_raw_run_errors(run_dir: Path, payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["intent-test-results.raw.json must be a JSON object"]
+    errors = []
+    if payload.get("schema_version") != "intent-test-run-results/v1":
+        errors.append("intent-test-results.raw.json schema_version must be intent-test-run-results/v1")
+    runs = payload.get("test_runs")
+    errors.extend(_unique_test_id_errors("intent-test-results.raw.json", "test_runs", runs))
+    if not isinstance(runs, list):
+        return errors
+    for index, run in enumerate(runs):
+        if not isinstance(run, dict):
+            continue
+        status = str(run.get("status") or "").strip()
+        if status not in INTENT_TEST_STATUSES:
+            errors.append(f"intent-test-results.raw.json test_runs[{index}].status is invalid")
+            continue
+        if status == "skipped":
+            continue
+        if not str(run.get("command") or "").strip():
+            errors.append(f"intent-test-results.raw.json test_runs[{index}].command is missing")
+        for field in ("stdout_path", "stderr_path"):
+            output_path = str(run.get(field) or "").strip()
+            if not output_path:
+                errors.append(f"intent-test-results.raw.json test_runs[{index}].{field} is missing")
+            elif not _recorded_file_exists(run_dir, output_path):
+                errors.append(f"intent-test-results.raw.json test_runs[{index}].{field} output artifact is missing")
+    return errors
+
+
+def intent_test_result_errors(payload: Any, run_dir: Path | None = None) -> list[str]:
     errors: list[str] = []
     if not isinstance(payload, dict):
         return ["intent-test-results.json must be a JSON object"]
@@ -2888,7 +3108,7 @@ def intent_test_result_errors(payload: Any) -> list[str]:
     if not isinstance(results, list):
         errors.append("intent-test-results.json test_results must be a list")
         return errors
-    allowed_statuses = {"passed", "failed", "skipped", "timeout", "error"}
+    seen_test_ids: set[str] = set()
     for index, result in enumerate(results):
         if not isinstance(result, dict):
             errors.append(f"intent-test-results.json test_results[{index}] must be an object")
@@ -2896,8 +3116,11 @@ def intent_test_result_errors(payload: Any) -> list[str]:
         test_id = str(result.get("test_id") or "").strip()
         if not test_id:
             errors.append(f"intent-test-results.json test_results[{index}].test_id is missing")
+        elif test_id in seen_test_ids:
+            errors.append(f"intent-test-results.json test_results[{index}].test_id is duplicated: {test_id}")
+        seen_test_ids.add(test_id)
         status = str(result.get("status") or "").strip()
-        if status not in allowed_statuses:
+        if status not in INTENT_TEST_STATUSES:
             errors.append(f"intent-test-results.json test_results[{index}].status is invalid")
         classification = str(result.get("classification") or "").strip()
         if classification not in INTENT_TEST_CLASSIFICATIONS:
@@ -2905,10 +3128,12 @@ def intent_test_result_errors(payload: Any) -> list[str]:
         confidence = result.get("confidence")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
             errors.append(f"intent-test-results.json test_results[{index}].confidence is outside 0..1")
-        for field in ("linked_finding_ids", "evidence", "artifacts"):
+        for field in ("evidence", "artifacts"):
             value = result.get(field)
             if value is not None and not isinstance(value, list):
                 errors.append(f"intent-test-results.json test_results[{index}].{field} must be a list")
+    if run_dir is not None:
+        errors.extend(_linked_finding_errors(run_dir, "intent-test-results.json", "test_results", results, required=False))
     return errors
 
 
@@ -3150,16 +3375,19 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
             warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
     else:
         payload = read_json(intent_results, {})
-        errors.extend(intent_test_result_errors(payload))
-    generated_tests = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
-    if isinstance(generated_tests, list):
-        for index, generated in enumerate(generated_tests):
-            if not isinstance(generated, dict):
-                errors.append(f"generated_tests[{index}] is not an object")
-                continue
-            refs = generated.get("artifact_refs") or generated.get("artifactRefs") or []
-            if not refs:
-                errors.append(f"generated_tests[{index}] missing artifact_refs")
+        errors.extend(intent_test_result_errors(payload, run_dir))
+    source_path = run_dir / "intent" / "intent-test-source.json"
+    if source_path.exists():
+        source_payload = read_json(source_path, {})
+        errors.extend(intent_test_source_errors(run_dir, source_payload))
+        generated_tests = source_payload.get("generated_tests", []) if isinstance(source_payload, dict) else []
+        if isinstance(generated_tests, list):
+            for index, generated in enumerate(generated_tests):
+                if not isinstance(generated, dict):
+                    continue
+                refs = generated.get("artifact_refs") or generated.get("artifactRefs") or []
+                if not refs:
+                    errors.append(f"generated_tests[{index}] missing artifact_refs")
     if artifact_dir is not None:
         validate_artifact_manifest_for_qa(run_dir, artifact_dir, errors)
     return {
@@ -3233,8 +3461,24 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
                 if isinstance(first, dict):
                     raise RuntimeError(f"reviewer JSON validation failed for {first.get('file')}: {first.get('error')}")
                 raise RuntimeError(f"reviewer JSON validation failed: {first}")
+        if rel == "intent/intent-map.json":
+            errors = intent_map_errors(payload)
+            if errors:
+                raise RuntimeError(errors[0])
+        if rel == "intent/intent-test-plan.json":
+            errors = intent_test_plan_errors(run_dir, payload)
+            if errors:
+                raise RuntimeError(errors[0])
+        if rel == "intent/intent-test-source.json":
+            errors = intent_test_source_errors(run_dir, payload)
+            if errors:
+                raise RuntimeError(errors[0])
+        if rel == "intent/intent-test-results.raw.json":
+            errors = intent_test_raw_run_errors(run_dir, payload)
+            if errors:
+                raise RuntimeError(errors[0])
         if rel == "intent/intent-test-results.json":
-            errors = intent_test_result_errors(payload)
+            errors = intent_test_result_errors(payload, run_dir)
             if errors:
                 raise RuntimeError(errors[0])
     for rel in PHASE_PATH_OUTPUTS.get(phase, ()):
