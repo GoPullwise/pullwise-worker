@@ -1408,6 +1408,8 @@ class ReviewWorkerV1:
                         pass
                     elif phase in SEMANTIC_PHASES:
                         self.run_semantic_phase(app_server, repo_dir, run_dir, job, phase)
+                    elif phase == "reviewer_json_validation":
+                        self.run_reviewer_json_validation_phase(app_server, repo_dir, run_dir, job)
                     elif phase in MECHANICAL_PHASES:
                         self.run_mechanical_phase(repo_dir, run_dir, job, phase, active=active, progress=progress)
                     if phase in {"reviewer_fanout", "intent_test_validation"}:
@@ -1678,6 +1680,46 @@ class ReviewWorkerV1:
             cancel_requested=self.poll_cancel_requested,
         )
         fallback_semantic_artifact(run_dir, job, phase)
+
+    def run_reviewer_json_validation_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
+        try:
+            validate_reviewer_outputs(run_dir)
+        except RuntimeError as validation_exc:
+            self.repair_reviewer_outputs(app_server, repo_dir, run_dir, job, validation_exc)
+            validate_reviewer_outputs(run_dir)
+
+    def repair_reviewer_outputs(
+        self,
+        app_server: JsonRpcAppServer | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        validation_error: object,
+    ) -> None:
+        append_jsonl(
+            run_dir / "worker.log.jsonl",
+            {
+                "event": "reviewer_json_output_repair",
+                "phase": "reviewer_json_validation",
+                "error": str(validation_error),
+                "time": iso_time(time.time()),
+            },
+        )
+        if app_server is None:
+            raise RuntimeError("Codex app-server is missing")
+        state = read_json(run_dir / "run-state.json")
+        thread_id = str(state.get("thread_id") or "")
+        if not thread_id:
+            raise RuntimeError("Codex thread is missing")
+        app_server.run_turn(
+            thread_id=thread_id,
+            repo_dir=repo_dir,
+            prompt=reviewer_json_repair_prompt(run_dir, validation_error),
+            effort=effort_for_phase(job, "reviewer_json_validation"),
+            read_only=False,
+            timeout_seconds=turn_timeout_for_job(job),
+            cancel_requested=self.poll_cancel_requested,
+        )
 
     def run_mechanical_phase(
         self,
@@ -2477,10 +2519,18 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
         if not isinstance(payload, dict):
             errors.append({"file": path.name, "error": "not an object"})
             continue
-        payload.setdefault("schema_version", "codex-reviewer-output/v1")
-        payload.setdefault("findings", [])
+        schema_version = str(payload.get("schema_version") or "").strip()
+        if schema_version != "codex-reviewer-output/v1":
+            errors.append({"file": path.name, "error": "schema_version must be codex-reviewer-output/v1"})
+            continue
+        if not isinstance(payload.get("findings"), list):
+            errors.append({"file": path.name, "error": "findings must be a list"})
+            continue
         write_json(verified_dir / path.name, payload)
     write_json(run_dir / "reviewer-json-validation.json", {"schema_version": "reviewer-json-validation/v1", "errors": errors})
+    if errors:
+        first = errors[0]
+        raise RuntimeError(f"reviewer JSON validation failed for {first.get('file')}: {first.get('error')}")
 
 
 def location_verification_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:

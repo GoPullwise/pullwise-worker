@@ -51,6 +51,7 @@ from pullwise_worker.review_worker_v1 import (
     upload_artifacts,
     validate_job_policy,
     validate_phase_outputs,
+    validate_reviewer_outputs,
 )
 
 
@@ -1929,6 +1930,36 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(intent["intent_tests_run"], 1)
         self.assertGreaterEqual(upload["artifacts_total"], 5)
         self.assertEqual(upload["artifacts_uploaded"], upload["artifacts_total"])
+
+    def test_validate_reviewer_outputs_rejects_invalid_json_before_verified_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "security.json").write_text(json.dumps({"findings": []}), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "schema_version"):
+                validate_reviewer_outputs(run_dir)
+
+            validation = json.loads((run_dir / "reviewer-json-validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(validation["schema_version"], "reviewer-json-validation/v1")
+            self.assertTrue(validation["errors"])
+            self.assertFalse((run_dir / "verified-reviewers" / "security.json").exists())
+
+    def test_validate_reviewer_outputs_copies_valid_outputs_to_verified_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            payload = {"schema_version": "codex-reviewer-output/v1", "findings": []}
+            (raw_dir / "security.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            validate_reviewer_outputs(run_dir)
+
+            validation = json.loads((run_dir / "reviewer-json-validation.json").read_text(encoding="utf-8"))
+            verified = json.loads((run_dir / "verified-reviewers" / "security.json").read_text(encoding="utf-8"))
+            self.assertEqual(validation["errors"], [])
+            self.assertEqual(verified, payload)
 
     def test_progress_phase_posts_v1_progress_updated_event_with_counters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
