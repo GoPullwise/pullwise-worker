@@ -1590,22 +1590,23 @@ class ReviewWorkerV1:
         )
 
     def run_semantic_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
-        if app_server is not None:
-            state = read_json(run_dir / "run-state.json")
-            thread_id = str(state.get("thread_id") or "")
-            if not thread_id:
-                raise RuntimeError("Codex thread is missing")
-            effort = effort_for_phase(job, phase)
-            prompt = phase_prompt(phase, run_dir)
-            app_server.run_turn(
-                thread_id=thread_id,
-                repo_dir=repo_dir,
-                prompt=prompt,
-                effort=effort,
-                read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
-                timeout_seconds=turn_timeout_for_job(job),
-                cancel_requested=self.poll_cancel_requested,
-            )
+        if app_server is None:
+            raise RuntimeError("Codex app-server is missing")
+        state = read_json(run_dir / "run-state.json")
+        thread_id = str(state.get("thread_id") or "")
+        if not thread_id:
+            raise RuntimeError("Codex thread is missing")
+        effort = effort_for_phase(job, phase)
+        prompt = phase_prompt(phase, run_dir)
+        app_server.run_turn(
+            thread_id=thread_id,
+            repo_dir=repo_dir,
+            prompt=prompt,
+            effort=effort,
+            read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
+            timeout_seconds=turn_timeout_for_job(job),
+            cancel_requested=self.poll_cancel_requested,
+        )
         fallback_semantic_artifact(run_dir, job, phase)
 
     def repair_semantic_phase_outputs(
@@ -1626,20 +1627,21 @@ class ReviewWorkerV1:
                 "time": iso_time(time.time()),
             },
         )
-        if app_server is not None:
-            state = read_json(run_dir / "run-state.json")
-            thread_id = str(state.get("thread_id") or "")
-            if not thread_id:
-                raise RuntimeError("Codex thread is missing")
-            app_server.run_turn(
-                thread_id=thread_id,
-                repo_dir=repo_dir,
-                prompt=phase_repair_prompt(phase, run_dir, validation_error),
-                effort=effort_for_phase(job, phase),
-                read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
-                timeout_seconds=turn_timeout_for_job(job),
-                cancel_requested=self.poll_cancel_requested,
-            )
+        if app_server is None:
+            raise RuntimeError("Codex app-server is missing")
+        state = read_json(run_dir / "run-state.json")
+        thread_id = str(state.get("thread_id") or "")
+        if not thread_id:
+            raise RuntimeError("Codex thread is missing")
+        app_server.run_turn(
+            thread_id=thread_id,
+            repo_dir=repo_dir,
+            prompt=phase_repair_prompt(phase, run_dir, validation_error),
+            effort=effort_for_phase(job, phase),
+            read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
+            timeout_seconds=turn_timeout_for_job(job),
+            cancel_requested=self.poll_cancel_requested,
+        )
         fallback_semantic_artifact(run_dir, job, phase)
 
     def run_mechanical_phase(

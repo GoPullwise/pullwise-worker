@@ -142,6 +142,9 @@ Review pipeline rules:
   that phase. Do not send generic `Phase: <name>` prompts for repo mapping,
   risk routing, reviewer fanout, clustering, intent mining/planning/writing,
   test failure analysis, validator disproof, or final report generation.
+- Semantic phases and semantic output repair require an initialized Codex
+  App Server and root thread. Do not satisfy a semantic phase by writing local
+  fallback artifacts when the app-server or thread is missing.
 - A phase may emit `phase_completed` only after its required output files or
   directories exist and local validation passes. Schema-bound phase outputs must
   be parseable JSON objects with the expected `schema_version`; hash-artifact

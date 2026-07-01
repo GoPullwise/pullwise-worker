@@ -1901,6 +1901,25 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("CUSTOM REPO MAP TEMPLATE", prompt)
         self.assertIn("Do not report bugs in this phase.", prompt)
 
+    def test_all_semantic_phases_have_specific_prompt_contracts(self) -> None:
+        self.assertEqual(set(SEMANTIC_PHASE_PROMPT_SPECS), set(SEMANTIC_PHASES))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            for phase in sorted(SEMANTIC_PHASES):
+                with self.subTest(phase=phase):
+                    spec = SEMANTIC_PHASE_PROMPT_SPECS[phase]
+                    self.assertTrue(spec.get("role"))
+                    self.assertTrue(spec.get("inputs"))
+                    self.assertTrue(spec.get("outputs"))
+                    self.assertTrue(spec.get("instructions"))
+                    prompt = phase_prompt(phase, run_dir)
+                    self.assertIn("Role:", prompt)
+                    self.assertIn("Inputs:", prompt)
+                    self.assertIn("Required outputs:", prompt)
+                    self.assertIn("Phase instructions:", prompt)
+
     def test_phase_prompt_names_reviewer_outputs_and_exact_intent_classifications(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1986,6 +2005,32 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             validate_phase_outputs(run_dir, "repo_map")
             validate_phase_outputs(run_dir, "risk_routing")
+
+    def test_run_semantic_phase_requires_codex_app_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+
+            with self.assertRaisesRegex(RuntimeError, "Codex app-server is missing"):
+                worker.run_semantic_phase(None, repo, run_dir, {"job_id": "job_1"}, "repo_map")
+
+            self.assertFalse((run_dir / "repo-map.json").exists())
+
+    def test_repair_semantic_phase_requires_codex_app_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+
+            with self.assertRaisesRegex(RuntimeError, "Codex app-server is missing"):
+                worker.repair_semantic_phase_outputs(None, repo, run_dir, {"job_id": "job_1"}, "repo_map", RuntimeError("bad schema"))
+
+            self.assertFalse((run_dir / "repo-map.json").exists())
 
     def test_semantic_phase_output_repair_turn_fixes_invalid_schema_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
