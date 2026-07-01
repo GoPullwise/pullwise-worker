@@ -139,6 +139,10 @@ Review pipeline rules:
   artifacts through `POST /v1/review-runs/{run_id}/artifacts`, and upload
   artifacts before submitting the terminal result envelope through
   `POST /v1/review-runs/{run_id}/result`.
+- Every posted progress event must include `protocol_version`, `run_id`,
+  `worker_id`, positive monotonic `sequence`, `timestamp`, supported
+  `event_type`, `phase`, `severity`, `message`, and `progress` with
+  `overall_percent`, `current_phase_percent`, and `status`.
 - Failed and cancelled jobs must still submit valid terminal envelopes when
   possible, including required `qa`, `worker_log`, and either `error_report` or
   partial `report.agent` artifacts.
