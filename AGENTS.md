@@ -152,6 +152,9 @@ Review pipeline rules:
   fallback must preserve raw project test runs using only the
   `intent-test-result/v1` classification enum, with `confidence = 0.0` and no
   positive finding confidence impact.
+- QA must fail completed runs when intent-test validation is enabled and
+  `intent-test-results.json` is missing unless an explicit skipped reason is
+  recorded in the intent validation, planning, source, or raw run artifacts.
 - Required completed artifacts are `report.md`, `report.agent.json`,
   `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`,
   `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
@@ -159,6 +162,8 @@ Review pipeline rules:
   `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
   `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,
   `storage`, `sha256`, and `size_bytes`.
+- Artifact IDs in one manifest must be unique because artifact upload
+  idempotency is keyed by `run_id + artifact_id`.
 - Post run progress through `POST /v1/review-runs/{run_id}/events`, upload
   artifacts through `POST /v1/review-runs/{run_id}/artifacts`, and upload
   artifacts before submitting the terminal result envelope through

@@ -597,6 +597,54 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(any("classification is invalid" in error for error in qa["errors"]))
         self.assertTrue(any("report.md sha256 mismatch" in error for error in qa["errors"]))
 
+    def test_qa_gate_rejects_duplicate_artifact_manifest_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            artifact_dir = Path(tmp_dir) / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-validation/v1",
+                        "enabled": True,
+                        "require_intent_evidence": True,
+                        "skip_reason": "no P0/P1 intent targets selected",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest_path = artifact_dir / "artifact-manifest.json"
+            manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            duplicate_id = manifest_payload["items"][0]["artifact_id"]
+            manifest_payload["items"][1]["artifact_id"] = duplicate_id
+            manifest_payload["items"][1]["storage"]["url"] = f"/v1/review-runs/run_1/artifacts/{duplicate_id}"
+            manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+            qa = qa_gate_payload(repo, run_dir, artifact_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertTrue(any("artifact_id is duplicated" in error for error in qa["errors"]))
+
     def test_qa_gate_rejects_intent_result_entries_missing_required_schema_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
@@ -619,6 +667,59 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(qa["status"], "fail")
         self.assertTrue(any("test_results[0].status is invalid" in error for error in qa["errors"]))
         self.assertTrue(any("test_results[0].confidence is outside 0..1" in error for error in qa["errors"]))
+
+    def test_qa_gate_requires_intent_results_when_validation_enabled_without_skip_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            validation_path = run_dir / "intent" / "intent-test-validation.json"
+            validation_path.parent.mkdir(parents=True)
+            validation_path.write_text(
+                json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True, "require_intent_evidence": True}),
+                encoding="utf-8",
+            )
+
+            missing = qa_gate_payload(repo, run_dir)
+            validation_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-validation/v1",
+                        "enabled": True,
+                        "require_intent_evidence": True,
+                        "skip_reason": "no P0/P1 targets selected",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            skipped = qa_gate_payload(repo, run_dir)
+            validation_path.write_text(
+                json.dumps({"schema_version": "intent-test-validation/v1", "enabled": False, "require_intent_evidence": True}),
+                encoding="utf-8",
+            )
+            disabled = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(missing["status"], "fail")
+        self.assertTrue(any("intent-test-results.json is missing" in error for error in missing["errors"]))
+        self.assertEqual(skipped["status"], "pass")
+        self.assertEqual(disabled["status"], "pass")
 
     def test_qa_gate_requires_validator_status_for_bug_supporting_intent_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -654,6 +755,23 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             }
             report = {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]}
             (run_dir / "report.agent.json").write_text(json.dumps(report), encoding="utf-8")
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-results.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-result/v1",
+                        "test_results": [
+                            {
+                                "test_id": "ITV-001",
+                                "status": "failed",
+                                "classification": "plausible_bug",
+                                "confidence": 0.4,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             missing_validator = qa_gate_payload(repo, run_dir)
             finding["validation_sources"]["validator_status"] = "confirmed"
@@ -683,6 +801,18 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "light_reviewed_files": 0,
                         "inventory_only_files": 0,
                         "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-validation/v1",
+                        "enabled": True,
+                        "require_intent_evidence": True,
+                        "skip_reason": "no P0/P1 intent targets selected",
                     }
                 ),
                 encoding="utf-8",

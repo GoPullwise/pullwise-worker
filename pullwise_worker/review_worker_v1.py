@@ -2778,6 +2778,37 @@ def intent_test_result_errors(payload: Any) -> list[str]:
     return errors
 
 
+def _intent_skip_reason_from_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("skip_reason", "skipped_reason", "skipReason", "skippedReason"):
+        reason = str(payload.get(key) or "").strip()
+        if reason:
+            return reason
+    return ""
+
+
+def intent_validation_missing_results_error(run_dir: Path) -> str:
+    config = read_json(run_dir / "intent" / "intent-test-validation.json", {})
+    if not isinstance(config, dict) or config.get("enabled") is False:
+        return ""
+    if config.get("require_intent_evidence") is False:
+        return ""
+    for payload in (
+        config,
+        read_json(run_dir / "intent" / "intent-test-plan.json", {}),
+        read_json(run_dir / "intent" / "intent-test-source.json", {}),
+    ):
+        if _intent_skip_reason_from_payload(payload):
+            return ""
+    raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
+    if isinstance(raw_runs, list):
+        for raw_run in raw_runs:
+            if _intent_skip_reason_from_payload(raw_run):
+                return ""
+    return "intent-test-results.json is missing while intent-test validation is enabled and no skipped reason exists"
+
+
 def artifact_manifest_items(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -2832,10 +2863,16 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
     missing_required = sorted(REQUIRED_COMPLETED_ARTIFACTS - required_kinds)
     if missing_required:
         errors.append("artifact-manifest.json missing required artifacts: " + ", ".join(missing_required))
+    seen_artifact_ids: set[str] = set()
     for index, item in enumerate(manifest):
         if not isinstance(item, dict):
             errors.append(f"artifact-manifest[{index}] is not an object")
             continue
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if artifact_id:
+            if artifact_id in seen_artifact_ids:
+                errors.append(f"artifact-manifest[{index}].artifact_id is duplicated: {artifact_id}")
+            seen_artifact_ids.add(artifact_id)
         for field in (
             "artifact_id",
             "kind",
@@ -2973,7 +3010,11 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
     validate_source_unmodified_for_qa(repo_dir, run_dir, errors)
     intent_results = run_dir / "intent" / "intent-test-results.json"
     if not intent_results.exists():
-        warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
+        missing_error = intent_validation_missing_results_error(run_dir)
+        if missing_error:
+            errors.append(missing_error)
+        else:
+            warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
     else:
         payload = read_json(intent_results, {})
         errors.extend(intent_test_result_errors(payload))
