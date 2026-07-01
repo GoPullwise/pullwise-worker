@@ -100,7 +100,7 @@ REQUIRED_PROMPT_FILES = (
     "05_reporter.md",
 )
 CODEX_ERROR_CODES = {
-    "UsageLimitExceeded": "CODEX_USAGE_LIMIT_EXCEEDED",
+    "UsageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
     "RateLimitReached": "CODEX_QUOTA_EXHAUSTED",
     "rate_limit_reached": "CODEX_QUOTA_EXHAUSTED",
     "workspace_owner_credits_depleted": "CODEX_QUOTA_EXHAUSTED",
