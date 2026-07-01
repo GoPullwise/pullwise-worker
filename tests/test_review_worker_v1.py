@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -428,6 +429,54 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(any("generated_tests[0] missing artifact_refs" in error for error in qa["errors"]))
         self.assertTrue(any("invalid classification" in error for error in qa["errors"]))
         self.assertTrue(any("report.md sha256 mismatch" in error for error in qa["errors"]))
+
+    def test_qa_gate_phase_materializes_final_qa_manifest_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root / "service")),
+                client=object(),
+            )
+
+            worker.run_mechanical_phase(
+                repo,
+                run_dir,
+                {"job_id": "job_1", "run_id": "run_1", "commit": "abc123", "attempt": 1},
+                "qa_gate",
+            )
+            artifact_dir = root / "service" / "workers" / "wk_1" / "artifacts" / "run_1"
+            qa = json.loads((run_dir / "qa.json").read_text(encoding="utf-8"))
+            manifest = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            qa_item = next(item for item in manifest if item["kind"] == "qa")
+            run_qa_bytes = (run_dir / "qa.json").read_bytes()
+            artifact_qa_bytes = (artifact_dir / "qa.json").read_bytes()
+            validate_phase_outputs(run_dir, "qa_gate")
+            validate_phase_outputs(run_dir, "hash_artifacts", artifact_dir)
+
+        self.assertEqual(qa["status"], "pass")
+        self.assertEqual(run_qa_bytes, artifact_qa_bytes)
+        self.assertEqual(qa_item["sha256"], hashlib.sha256(artifact_qa_bytes).hexdigest())
+        self.assertEqual(qa_item["size_bytes"], len(artifact_qa_bytes))
 
     def test_heartbeat_includes_progress_snapshot_when_busy(self) -> None:
         calls = []
