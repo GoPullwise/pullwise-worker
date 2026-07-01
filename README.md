@@ -81,10 +81,14 @@ Admin worker creation returns a one-time token plus an install command:
 ```bash
 read -rsp 'Pullwise worker token: ' PULLWISE_WORKER_TOKEN; echo
 export PULLWISE_WORKER_TOKEN
-curl -fsSL https://pullwise.example.com/install-worker.sh | bash -s -- --server https://pullwise.example.com --worker-id wk_x
+install_script="$(mktemp)"
+trap 'rm -f "$install_script"' EXIT
+curl -fsSL https://pullwise.example.com/install-worker.sh -o "$install_script"
+printf '%s  %s\n' '<sha256 from admin install command>' "$install_script" | sha256sum -c -
+bash "$install_script" --server https://pullwise.example.com --worker-id wk_x
 ```
 
-The installer is served by Pullwise Server at `/install-worker.sh`. It creates a worker-specific system user, writes a locked-down worker env file, installs the selected worker package, installs Codex when needed, installs a systemd unit and logrotate config, starts the worker, and runs `pullwise-worker doctor`. The worker package intentionally does not ship a second install script; server is the single installer source of truth.
+The installer is served by Pullwise Server at `/install-worker.sh`. It creates a worker-specific system user, writes a locked-down worker env file, installs the selected worker package, installs a systemd unit and logrotate config, starts the worker, and runs `pullwise-worker doctor`. Codex provider installs require a trusted, pinned Node.js runtime and Codex CLI to be preinstalled under the worker home or configured with scoped absolute paths. The worker package intentionally does not ship a second install script; server is the single installer source of truth.
 
 ## Release
 

@@ -3844,152 +3844,27 @@ class GraphVerifiedWorkerTest(unittest.TestCase):
 
         install.assert_not_called()
 
-    def test_install_nodesource_streams_key_without_pipe(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            source_dir = root / "etc" / "apt" / "sources.list.d"
-            source_dir.mkdir(parents=True)
-            real_path = Path
-            captured = {}
+    def test_install_dependencies_rejects_node_runtime_auto_install(self) -> None:
+        def available(requirement: str) -> bool:
+            return requirement not in {"node", "npm"}
 
-            def mapped_path(value: object) -> Path:
-                text = str(value)
-                if text == "/etc/apt/keyrings":
-                    return root / "etc" / "apt" / "keyrings"
-                if text == "/etc/apt/sources.list.d/nodesource.list":
-                    return source_dir / "nodesource.list"
-                return real_path(text)
-
-            def fake_run(command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
-                if command[0] == "curl":
-                    stdout_file = kwargs["stdout"]
-                    stdout_file.write(b"nodesource-key")
-                    stdout_file.flush()
-                    return worker_main.subprocess.CompletedProcess(command, 0)
-                if command[0] == "gpg":
-                    stdin_file = kwargs["stdin"]
-                    if "--show-keys" in command:
-                        captured["fingerprint_input"] = stdin_file.read()
-                        return worker_main.subprocess.CompletedProcess(
-                            command,
-                            0,
-                            stdout="fpr:::::::::FAKEFINGERPRINT:\n",
-                        )
-                    captured["gpg_input"] = stdin_file.read()
-                    real_path(command[command.index("-o") + 1]).write_bytes(b"dearmored")
-                    return worker_main.subprocess.CompletedProcess(command, 0)
-                if command[0] == "apt-get":
-                    return worker_main.subprocess.CompletedProcess(command, 0)
-                raise AssertionError(command)
-
-            with patch.object(worker_main, "Path", side_effect=mapped_path), patch.object(
-                worker_main.subprocess,
-                "run",
-                side_effect=fake_run,
-            ) as run, patch.dict(
-                worker_main.os.environ,
-                {"PULLWISE_NODESOURCE_KEY_FINGERPRINTS": "FAKEFINGERPRINT"},
-                clear=False,
-            ), patch.object(worker_main, "node20_available", return_value=True), patch.object(
-                worker_main,
-                "npm_available",
-                return_value=True,
-            ):
-                ok, detail = worker_main.install_nodesource_nodejs()
-
-        self.assertTrue(ok)
-        self.assertEqual(detail, "installed NodeSource Node.js 22.x")
-        self.assertEqual(captured["fingerprint_input"], b"nodesource-key")
-        self.assertEqual(captured["gpg_input"], b"nodesource-key")
-        curl_call = next(call for call in run.call_args_list if call.args[0][0] == "curl")
-        fingerprint_call = next(call for call in run.call_args_list if call.args[0][0] == "gpg" and "--show-keys" in call.args[0])
-        gpg_call = next(call for call in run.call_args_list if call.args[0][0] == "gpg" and "--dearmor" in call.args[0])
-        self.assertIsNot(curl_call.kwargs["stdout"], worker_main.subprocess.PIPE)
-        self.assertIn("stdin", fingerprint_call.kwargs)
-        self.assertIn("stdin", gpg_call.kwargs)
-        self.assertNotIn("input", fingerprint_call.kwargs)
-        self.assertNotIn("input", gpg_call.kwargs)
-
-    def test_install_nodesource_rejects_key_fingerprint_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            source_dir = root / "etc" / "apt" / "sources.list.d"
-            source_dir.mkdir(parents=True)
-            real_path = Path
-
-            def mapped_path(value: object) -> Path:
-                text = str(value)
-                if text == "/etc/apt/keyrings":
-                    return root / "etc" / "apt" / "keyrings"
-                if text == "/etc/apt/sources.list.d/nodesource.list":
-                    return source_dir / "nodesource.list"
-                return real_path(text)
-
-            def fake_run(command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
-                if command[0] == "curl":
-                    stdout_file = kwargs["stdout"]
-                    stdout_file.write(b"nodesource-key")
-                    stdout_file.flush()
-                    return worker_main.subprocess.CompletedProcess(command, 0)
-                if command[0] == "gpg" and "--show-keys" in command:
-                    return worker_main.subprocess.CompletedProcess(
-                        command,
-                        0,
-                        stdout="fpr:::::::::BADFINGERPRINT:\n",
-                    )
-                if command[0] == "apt-get":
-                    return worker_main.subprocess.CompletedProcess(command, 0)
-                raise AssertionError("install should stop before importing a mismatched key")
-
-            with patch.object(worker_main, "Path", side_effect=mapped_path), patch.object(
-                worker_main.subprocess,
-                "run",
-                side_effect=fake_run,
-            ), patch.dict(
-                worker_main.os.environ,
-                {"PULLWISE_NODESOURCE_KEY_FINGERPRINTS": "EXPECTEDFINGERPRINT"},
-                clear=False,
-            ):
-                ok, detail = worker_main.install_nodesource_nodejs()
+        with patch.object(worker_main, "dependency_available", side_effect=available), patch.object(
+            worker_main,
+            "run_apt_command",
+        ) as apt, patch.object(worker_main.subprocess, "run") as run:
+            ok, detail = worker_main.install_ubuntu_2204_dependencies(["node", "npm"], dry_run=True)
 
         self.assertFalse(ok)
-        self.assertIn("NodeSource key fingerprint mismatch", detail)
-    def test_install_nodesource_rejects_oversized_key_response(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            source_dir = root / "etc" / "apt" / "sources.list.d"
-            source_dir.mkdir(parents=True)
-            real_path = Path
+        self.assertIn("trusted, pinned Node.js runtime", detail)
+        apt.assert_not_called()
+        run.assert_not_called()
 
-            def mapped_path(value: object) -> Path:
-                text = str(value)
-                if text == "/etc/apt/keyrings":
-                    return root / "etc" / "apt" / "keyrings"
-                if text == "/etc/apt/sources.list.d/nodesource.list":
-                    return source_dir / "nodesource.list"
-                return real_path(text)
+    def test_worker_bootstrap_has_no_live_nodesource_installer(self) -> None:
+        source = Path(worker_main.__file__).with_name("_main_part_01_bootstrap.py").read_text(encoding="utf-8")
 
-            def fake_run(command: list[str], **kwargs: object) -> worker_main.subprocess.CompletedProcess:
-                if command[0] == "curl":
-                    stdout_file = kwargs["stdout"]
-                    stdout_file.write(b"x" * 2048)
-                    stdout_file.flush()
-                    return worker_main.subprocess.CompletedProcess(command, 0)
-                raise AssertionError("gpg should not run for oversized key")
-
-            with patch.object(worker_main, "Path", side_effect=mapped_path), patch.object(
-                worker_main.subprocess,
-                "run",
-                side_effect=fake_run,
-            ), patch.dict(
-                worker_main.os.environ,
-                {"PULLWISE_NODESOURCE_KEY_MAX_BYTES": "1024"},
-                clear=False,
-            ):
-                ok, detail = worker_main.install_nodesource_nodejs()
-
-        self.assertFalse(ok)
-        self.assertEqual(detail, "NodeSource key response too large")
+        self.assertNotIn("deb.nodesource.com", source)
+        self.assertNotIn("NodeSource", source)
+        self.assertNotIn("install_nodesource_nodejs", source)
 
     @unittest.skipIf(os.name == "nt", "production worker platform is Linux-only")
     def test_scan_summary_write_rejects_symlinked_log_file(self) -> None:

@@ -61,10 +61,6 @@ DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 WORKER_HTTP_TIMEOUT_SECONDS = 60
 WORKER_HTTP_RESPONSE_MAX_BYTES = 1024 * 1024
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
-NODESOURCE_GPG_KEY_URL = "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"
-NODESOURCE_GPG_KEY_FINGERPRINTS = (
-    "6F71F525282841EEDAF851B42F59B5F99B1BE0B4",
-)
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "medium"
@@ -414,114 +410,18 @@ def run_apt_command(command: list[str]) -> tuple[bool, str]:
         return False, f"{' '.join(command)} exited {completed.returncode}"
     return True, "ok"
 
-def normalized_gpg_fingerprint(value: object) -> str:
-    return re.sub(r"[^0-9A-F]", "", str(value or "").upper())
-
-def expected_nodesource_key_fingerprints() -> set[str]:
-    configured = os.environ.get("PULLWISE_NODESOURCE_KEY_FINGERPRINTS", "")
-    values = configured.split(",") if configured.strip() else list(NODESOURCE_GPG_KEY_FINGERPRINTS)
-    return {fingerprint for value in values if (fingerprint := normalized_gpg_fingerprint(value))}
-
-def nodesource_key_fingerprints(key_file: object) -> tuple[set[str] | None, str]:
-    try:
-        key_file.seek(0)
-        completed = subprocess.run(
-            ["gpg", "--show-keys", "--with-colons", "--fingerprint"],
-            stdin=key_file,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError as exc:
-        return None, str(exc)
-    if completed.returncode != 0:
-        return None, f"gpg NodeSource key fingerprint exited {completed.returncode}"
-    fingerprints = {
-        normalized_gpg_fingerprint(parts[9])
-        for line in str(completed.stdout or "").splitlines()
-        if line.startswith("fpr:") and len(parts := line.split(":")) > 9
-    }
-    if not fingerprints:
-        return None, "NodeSource key fingerprint not found"
-    return fingerprints, "ok"
-
-def verify_nodesource_key_fingerprint(key_file: object) -> tuple[bool, str]:
-    expected = expected_nodesource_key_fingerprints()
-    if not expected:
-        return False, "NodeSource key fingerprint allowlist is empty"
-    fingerprints, detail = nodesource_key_fingerprints(key_file)
-    if fingerprints is None:
-        return False, detail
-    if fingerprints.isdisjoint(expected):
-        found = ", ".join(sorted(fingerprints))
-        return False, f"NodeSource key fingerprint mismatch: {found}"
-    return True, "ok"
-
-def install_nodesource_nodejs(*, dry_run: bool = False) -> tuple[bool, str]:
-    if dry_run:
-        print("install NodeSource Node.js 22.x repository")
-        print("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs")
-        return True, "would install NodeSource Node.js 22.x"
-    keyring_dir = Path("/etc/apt/keyrings")
-    keyring_path = keyring_dir / "nodesource.gpg"
-    source_path = Path("/etc/apt/sources.list.d/nodesource.list")
-    try:
-        keyring_dir.mkdir(parents=True, exist_ok=True)
-        key_max_bytes = env_int(
-            "PULLWISE_NODESOURCE_KEY_MAX_BYTES",
-            1024 * 1024,
-            minimum=1024,
-            maximum=10 * 1024 * 1024,
-        )
-        with tempfile.TemporaryFile("w+b") as key_file:
-            curl = subprocess.run(
-                ["curl", "-fsSL", NODESOURCE_GPG_KEY_URL],
-                stdout=key_file,
-            )
-            if curl.returncode != 0:
-                return False, f"curl NodeSource key exited {curl.returncode}"
-            key_file.seek(0, os.SEEK_END)
-            if key_file.tell() > key_max_bytes:
-                return False, "NodeSource key response too large"
-            ok, detail = verify_nodesource_key_fingerprint(key_file)
-            if not ok:
-                return False, detail
-            key_file.seek(0)
-            gpg = subprocess.run(
-                ["gpg", "--dearmor", "--yes", "-o", str(keyring_path)],
-                stdin=key_file,
-            )
-            if gpg.returncode != 0:
-                return False, f"gpg NodeSource key exited {gpg.returncode}"
-        keyring_path.chmod(0o644)
-        source_path.write_text(
-            "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main\n",
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        return False, str(exc)
-    ok, detail = run_apt_command(["apt-get", "update"])
-    if not ok:
-        return False, detail
-    ok, detail = run_apt_command(["apt-get", "install", "-y", "--no-install-recommends", "nodejs"])
-    if not ok:
-        return False, detail
-    if not node20_available() or shutil.which("npm") is None:
-        return False, "Node.js 20+ and npm are still unavailable after NodeSource install"
-    return True, "installed NodeSource Node.js 22.x"
-
-
 def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool = False) -> tuple[bool, str]:
     missing = [requirement for requirement in requirements if not dependency_available(requirement)]
     if not missing:
         return True, "dependencies present"
     node_missing = any(requirement in {"node", "npm"} for requirement in missing)
     package_requirements = [requirement for requirement in missing if requirement not in {"node", "npm"}]
-    packages = dependency_packages(package_requirements)
     if node_missing:
-        for package in ("ca-certificates", "curl", "gnupg"):
-            if package not in packages:
-                packages.append(package)
+        return (
+            False,
+            "missing Node.js 20+ and npm; install a trusted, pinned Node.js runtime before enabling the Codex provider",
+        )
+    packages = dependency_packages(package_requirements)
     if not packages:
         return False, f"missing dependencies without package mapping: {', '.join(missing)}"
     if not ubuntu_2204_host():
@@ -531,8 +431,6 @@ def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool =
     if dry_run:
         print("apt-get update")
         print("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " + " ".join(packages))
-        if node_missing:
-            install_nodesource_nodejs(dry_run=True)
         return True, f"would install Ubuntu 22.04 packages: {', '.join(packages)}"
     if os.geteuid() != 0:
         return False, f"missing dependencies require root to install on Ubuntu 22.04: {', '.join(missing)}"
@@ -543,10 +441,6 @@ def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool =
         ["apt-get", "install", "-y", "--no-install-recommends", *packages],
     ):
         ok, detail = run_apt_command(command)
-        if not ok:
-            return False, detail
-    if node_missing:
-        ok, detail = install_nodesource_nodejs()
         if not ok:
             return False, detail
     still_missing = [requirement for requirement in requirements if not dependency_available(requirement)]
