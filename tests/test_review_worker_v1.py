@@ -956,12 +956,20 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         worker.heartbeat()
 
-        self.assertEqual(calls[0]["running_jobs"], 1)
+        self.assertEqual(calls[0]["protocol_version"], "review-worker-protocol/v1")
+        self.assertEqual(calls[0]["worker_id"], "wk_1")
+        self.assertEqual(calls[0]["status"], "leased")
+        self.assertEqual(calls[0]["active_run_id"], "run_1")
+        self.assertEqual(calls[0]["concurrency"]["active_jobs"], 1)
+        self.assertEqual(calls[0]["concurrency"]["available_job_slots"], 0)
+        self.assertFalse(calls[0]["concurrency"]["maintains_local_queue"])
+        self.assertEqual(calls[0]["codex_app_server"]["active_thread_id"], "thr_123")
         self.assertEqual(calls[0]["progress"]["current_phase"], "intent_test_running")
         self.assertEqual(calls[0]["progress"]["counters"]["reviewer_runs_total"], 3)
         self.assertEqual(calls[0]["progress"]["counters"]["reviewer_runs_completed"], 2)
         self.assertIn("active_unit", calls[0]["progress"])
-        self.assertEqual(calls[0]["active_thread_id"], "thr_123")
+        self.assertNotIn("running_jobs", calls[0])
+        self.assertNotIn("active_job_ids", calls[0])
 
     def test_pullwise_client_uses_v1_review_protocol_routes(self) -> None:
         calls = []
@@ -1048,6 +1056,52 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(payload["status"], "cancelling")
         self.assertEqual(payload["concurrency"]["active_jobs"], 1)
         self.assertEqual(payload["concurrency"]["available_job_slots"], 0)
+
+    def test_pullwise_client_accepts_direct_v1_heartbeat_payload(self) -> None:
+        calls = []
+
+        class Client(PullwiseClient):
+            def post(self, path: str, payload: dict, *, compress: bool = False) -> PullwiseResponse:
+                calls.append((path, payload, compress))
+                return PullwiseResponse(b"{\"ok\": true}")
+
+        client = Client(
+            SimpleNamespace(
+                worker_id="wk_1",
+                worker_token="secret",
+                server_url="https://api.pullwise.dev",
+                provider="codex",
+                provider_chain=["codex"],
+                result_upload_compress_min_bytes=1024,
+            )
+        )
+
+        client.heartbeat(
+            protocol_version="review-worker-protocol/v1",
+            worker_id="wk_1",
+            status="idle",
+            active_run_id=None,
+            concurrency={
+                "max_active_jobs": 1,
+                "active_jobs": 0,
+                "available_job_slots": 1,
+                "maintains_local_queue": False,
+                "local_queue_depth": 0,
+            },
+            codex_app_server={"status": "needs_attention", "transport": "stdio", "active_thread_id": None},
+            codex_ready=False,
+            ready_providers=[],
+            codex_quota={"ready": False, "reason": "quota exhausted"},
+        )
+
+        payload = calls[0][1]
+        self.assertEqual(calls[0][0], "/v1/workers/wk_1/heartbeat")
+        self.assertEqual(payload["protocol_version"], "review-worker-protocol/v1")
+        self.assertEqual(payload["status"], "idle")
+        self.assertEqual(payload["concurrency"]["available_job_slots"], 1)
+        self.assertFalse(payload["codex_ready"])
+        self.assertEqual(payload["codex_quota"]["reason"], "quota exhausted")
+        self.assertNotIn("running_jobs", payload)
 
     def test_worker_honors_v1_cancel_run_command_from_heartbeat(self) -> None:
         events = []
@@ -1279,6 +1333,40 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.run(once=True)
 
         self.assertEqual(calls, ["register", "heartbeat", "claim"])
+
+    def test_worker_does_not_claim_when_codex_quota_is_not_ready(self) -> None:
+        calls = []
+        heartbeat_payloads = []
+
+        class Client:
+            def register(self) -> dict:
+                calls.append("register")
+                return {}
+
+            def heartbeat(self, **payload: dict) -> dict:
+                calls.append("heartbeat")
+                heartbeat_payloads.append(payload)
+                return {}
+
+            def claim(self) -> None:
+                calls.append("claim")
+                return None
+
+        with tempfile.TemporaryDirectory() as root:
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root, poll_seconds=1), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {  # type: ignore[method-assign]
+                "ready": False,
+                "reason": "codex usage limit exhausted",
+            }
+
+            worker.run(once=True)
+
+        self.assertEqual(calls, ["register", "heartbeat"])
+        self.assertEqual(heartbeat_payloads[0]["status"], "idle")
+        self.assertFalse(heartbeat_payloads[0]["codex_ready"])
+        self.assertEqual(heartbeat_payloads[0]["codex_app_server"]["status"], "needs_attention")
+        self.assertEqual(heartbeat_payloads[0]["concurrency"]["active_jobs"], 0)
+        self.assertEqual(heartbeat_payloads[0]["concurrency"]["available_job_slots"], 1)
 
     def test_worker_run_rejects_non_linux_platform_before_registration(self) -> None:
         calls = []

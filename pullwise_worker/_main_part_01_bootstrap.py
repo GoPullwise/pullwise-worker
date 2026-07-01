@@ -1067,7 +1067,40 @@ class PullwiseClient:
         progress: dict | None = None,
         worker_state: str | None = None,
         active_thread_id: str | None = None,
+        **v1_payload: object,
     ) -> dict:
+        if (
+            "protocol_version" in v1_payload
+            or "status" in v1_payload
+            or "active_run_id" in v1_payload
+            or "concurrency" in v1_payload
+            or "codex_app_server" in v1_payload
+        ):
+            payload = dict(v1_payload)
+            payload["protocol_version"] = client_protocol_text(payload.get("protocol_version"), self.config, 80) or WORKER_REVIEW_PROTOCOL_VERSION
+            payload["worker_id"] = client_protocol_text(payload.get("worker_id"), self.config, 160) or self.config.worker_id
+            payload["hostname"] = client_protocol_text(payload.get("hostname"), self.config, 255) or socket.gethostname()
+            if last_error:
+                payload["last_error"] = client_protocol_text(last_error, self.config, 500)
+            if doctor_status:
+                payload["doctor_status"] = client_protocol_text(doctor_status, self.config, 80)
+            if codex_ready is not None:
+                payload["codex_ready"] = codex_ready
+            if ready_providers is not None:
+                payload["ready_providers"] = client_ready_providers(ready_providers)
+            if systemd_active is not None:
+                payload["systemd_active"] = systemd_active
+            if doctor_checked_at is not None:
+                payload["doctor_checked_at"] = doctor_checked_at
+            if isinstance(machine_metrics, dict):
+                payload["machine_metrics"] = machine_metrics
+            if isinstance(codex_quota, dict):
+                payload["codex_quota"] = codex_quota
+            if isinstance(progress, dict):
+                payload["progress"] = progress
+            response = self.post(f"/v1/workers/{url_path_segment(self.config.worker_id)}/heartbeat", payload)
+            return response.json()
+
         reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
         active_run_id = ""
         if isinstance(progress, dict):

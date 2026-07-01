@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - runtime is Linux only; import stays te
 PROTOCOL_VERSION = "review-worker-protocol/v1"
 WORKER_VERSION = "0.1.0"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
+ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 PIPELINE_PHASES = (
     ("prepare_workspace", 3),
     ("start_codex_app_server", 7),
@@ -1091,9 +1092,28 @@ class ReviewWorkerV1:
         quota_ready = bool((quota or {}).get("ready", True))
         self.state.provider_ready = quota_ready
         readiness_reason = quota_text((quota or {}).get("reason") or (quota or {}).get("status"), 160)
+        active_jobs = 1 if active else 0
+        worker_status = "idle"
+        if active is not None:
+            worker_status = active.state if active.state in ACTIVE_HEARTBEAT_STATUSES else "busy"
         heartbeat_payload = {
-            "running_jobs": 1 if active else 0,
-            "active_job_ids": [active.job_id] if active else [],
+            "protocol_version": PROTOCOL_VERSION,
+            "worker_id": str(self.config.worker_id),
+            "status": worker_status,
+            "active_run_id": active.run_id if active else None,
+            "hostname": socket.gethostname(),
+            "concurrency": {
+                "max_active_jobs": 1,
+                "active_jobs": active_jobs,
+                "available_job_slots": 0 if active else 1,
+                "maintains_local_queue": False,
+                "local_queue_depth": 0,
+            },
+            "codex_app_server": {
+                "status": "ready" if quota_ready else "needs_attention",
+                "transport": "stdio",
+                "active_thread_id": active.thread_id if active and active.thread_id else None,
+            },
             "last_error": readiness_reason if not quota_ready else None,
             "doctor_status": "ok" if quota_ready else "degraded",
             "codex_ready": quota_ready,
@@ -1102,15 +1122,7 @@ class ReviewWorkerV1:
         }
         if active is not None:
             heartbeat_payload["progress"] = active.progress_snapshot()
-            heartbeat_payload["worker_state"] = active.state
-            heartbeat_payload["active_thread_id"] = active.thread_id or None
-        try:
-            response = self.client.heartbeat(**heartbeat_payload)
-        except TypeError:
-            heartbeat_payload.pop("progress", None)
-            heartbeat_payload.pop("worker_state", None)
-            heartbeat_payload.pop("active_thread_id", None)
-            response = self.client.heartbeat(**heartbeat_payload)
+        response = self.client.heartbeat(**heartbeat_payload)
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
         if active and active.job_id in (cancelled or []):
             self.request_cancel(active, reason="server_cancelled")

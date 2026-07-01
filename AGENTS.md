@@ -80,6 +80,9 @@ Hard invariants:
   must report `active_jobs = 0` and `available_job_slots = 1`; active heartbeats
   must report `active_jobs = 1`, `available_job_slots = 0`, and a progress
   snapshot whose `run_id` matches `active_run_id`.
+- Any backwards-compatible heartbeat translation for old internal callers must
+  remain inside the HTTP client adapter; `ReviewWorkerV1` must construct and
+  send the fixed v1 heartbeat shape directly.
 - Each worker instance owns an isolated `WORKER_ROOT`, lock file, `CODEX_HOME`,
   `CODEX_SQLITE_HOME`, Codex auth/config/log/session/cache directories,
   workspace root, artifact root, and worker log.
@@ -302,6 +305,11 @@ Provider readiness is plan-aware and provider-specific.
 - `provider_ready` means at least one provider required by the loaded plan
   configs is ready.
 - `codex_ready` is the Codex login/readiness state required for accepting jobs.
+- A quota/readiness failure must set `provider_ready = false` locally so the
+  worker does not call lease, while the idle v1 heartbeat still keeps the
+  server-required idle concurrency shape (`active_jobs = 0`,
+  `available_job_slots = 1`) and carries the failure through `codex_ready`,
+  `codex_quota`, `doctor_status`, and `last_error`.
 - Only check providers required by the loaded plan configs.
 - Login/auth instructions printed by `doctor` must use the same instance-scoped
   command environment documented above.
