@@ -826,14 +826,14 @@ class WorkerConfig:
         )
         self.codex_timeout_seconds = max(60, int(getattr(args, "codex_timeout_seconds", None) or env_int("PULLWISE_CODEX_TIMEOUT_SECONDS", 3600)))
         self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
-        legacy_readiness_check_seconds = env_int(
+        readiness_check_seconds_fallback = env_int(
             "PULLWISE_READINESS_CHECK_SECONDS",
             DEFAULT_ACTIVE_READINESS_CHECK_SECONDS,
             minimum=10,
         )
         self.active_readiness_check_seconds = env_int(
             "PULLWISE_ACTIVE_READINESS_CHECK_SECONDS",
-            legacy_readiness_check_seconds,
+            readiness_check_seconds_fallback,
             minimum=10,
         )
         self.degraded_readiness_check_seconds = env_int(

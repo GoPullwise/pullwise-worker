@@ -15,9 +15,9 @@ The worker loop:
 1. sends `POST /worker/heartbeat`
 2. claims one queued job with `POST /worker/jobs/claim` when no job is active locally
 3. clones the repository using the short-lived clone token returned by the server
-4. runs Codex with the server-selected plan model and reasoning effort
-5. uploads progress and final result
-6. removes the checkout directory
+4. runs Codex through the worker-owned App Server with server-selected model policy
+5. uploads progress, artifacts, and the v1 result envelope
+6. clears the active job only after terminal result handling completes
 
 Required environment:
 
@@ -61,7 +61,7 @@ Each worker processes exactly one job at a time. Queuing is maintained on the se
 
 Provider model defaults are intentionally conservative. Codex passes `gpt-5.5` and `model_reasoning_effort=medium` by default so the worker does not inherit an unsupported Codex CLI default model. Review provider/model policy comes from the server-side subscription plan `agentConfig`; executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Repository file/byte limits are also read from the claimed job payload. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for migrated server policy.
 
-GraphVerified Codex work runs through one instance-scoped `codex app-server` per worker identity, with a bounded shared client reused across reviews until age/turn limits or auth-class failures force a recycle. A single worker still processes exactly one job at a time, but app-server turns inside that job can run concurrently when the server plan enables bounded settings such as `graphVerified.finderTurnParallel`. Do not add parallel `codex exec` CLI launches for one worker identity. If Codex reports an authentication, quota, or refresh-token failure, the worker degrades readiness and stops claiming jobs; it keeps rechecking on the degraded readiness interval and becomes active again when a later health check succeeds.
+Codex review work runs through one instance-scoped `codex app-server` per worker identity. A worker has one active job slot, never prefetches jobs, and drives one root Codex thread with sequential turns by default. Review output is the `review-worker-protocol/v1` result envelope plus `.codex-review/runs/<run_id>/` artifacts such as `report.md`, `report.agent.json`, `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`, `codex-events.jsonl`, and `worker.log.jsonl`. Core semantic phases use the server subscription plan reasoning effort; mechanical and non-core phases use the same model with medium reasoning effort. Do not add replaced graph-generation review flows, `codex exec` review flows, local job queues, or worker-side prefetch.
 
 Production local capability example:
 

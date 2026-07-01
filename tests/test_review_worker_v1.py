@@ -15,7 +15,7 @@ from pullwise_worker.review_worker_v1 import (
     decide_approval,
     default_agent_report,
     effort_for_phase,
-    legacy_result_payload,
+    result_payload,
     materialize_artifacts,
     materialize_terminal_artifacts,
     upload_artifacts,
@@ -213,7 +213,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertIsInstance(item.get("required"), bool)
             self.assertIsInstance(item.get("size_bytes"), int)
             self.assertEqual(item.get("storage", {}).get("type"), "server_artifact")
-    def test_legacy_result_payload_uses_stable_v1_envelope_without_graph_report(self) -> None:
+    def test_result_payload_uses_stable_v1_envelope_without_graph_report(self) -> None:
         active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk-1")
         envelope = {
             "protocol_version": "review-worker-protocol/v1",
@@ -223,10 +223,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             "artifact_manifest": [],
         }
 
-        payload = legacy_result_payload(active, envelope, "done")
+        payload = result_payload(active, envelope, "done")
 
         self.assertEqual(payload["reviewWorkerProtocol"], envelope)
-        self.assertNotIn("graphVerifiedReport", payload)
+        self.assertFalse(any(key.lower().startswith("graph") for key in payload))
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["attempt_id"], "wk-1")
 

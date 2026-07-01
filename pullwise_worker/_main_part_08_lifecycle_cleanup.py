@@ -3,9 +3,6 @@ from __future__ import annotations
 # Imported by main.py and re-exported from the aggregate module.
 
 from ._main_part_01_bootstrap import *  # noqa: F403
-from ._main_part_02_worker_checkout import *  # noqa: F403
-from ._main_part_03_preflight import *  # noqa: F403
-from ._main_part_04_graph_verified_review import *  # noqa: F403
 from ._main_part_07_readiness_doctor import *  # noqa: F403
 
 def service_action(

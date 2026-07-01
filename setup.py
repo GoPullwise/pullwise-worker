@@ -19,7 +19,7 @@ setup(
     version=package_version(),
     description="Pullwise pull-based scan worker",
     python_requires=">=3.10",
-    packages=find_packages(include=["pullwise_worker", "codereview", "codereview.*"]),
+    packages=find_packages(include=["pullwise_worker"]),
     entry_points={"console_scripts": ["pullwise-worker=pullwise_worker.main:main"]},
     include_package_data=True,
 )

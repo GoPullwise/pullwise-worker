@@ -567,7 +567,7 @@ class ReviewWorkerV1:
                 elif phase in MECHANICAL_PHASES:
                     self.run_mechanical_phase(repo_dir, run_dir, job, phase)
             envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
-            self.client.result(job_id, legacy_result_payload(active, envelope, "done"))
+            self.client.result(job_id, result_payload(active, envelope, "done"))
             terminal_state = "completed"
         except JobCancelled:
             artifact_dir = self.isolation.artifacts / run_id
@@ -576,7 +576,7 @@ class ReviewWorkerV1:
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            self.client.result(job_id, legacy_result_payload(active, envelope, "failed"))
+            self.client.result(job_id, result_payload(active, envelope, "failed"))
             terminal_state = "cancelled"
         except Exception as exc:
             artifact_dir = self.isolation.artifacts / run_id
@@ -585,7 +585,7 @@ class ReviewWorkerV1:
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            self.client.result(job_id, legacy_result_payload(active, envelope, "failed"))
+            self.client.result(job_id, result_payload(active, envelope, "failed"))
             terminal_state = "failed"
         finally:
             if app_server is not None:
@@ -929,7 +929,7 @@ def repository_payload(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def legacy_result_payload(active: ActiveJob, envelope: dict[str, Any], status: str) -> dict[str, Any]:
+def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str) -> dict[str, Any]:
     agent_report = {}
     for item in envelope.get("artifact_manifest") or []:
         if item.get("name") == "report.agent.json":

@@ -18,4 +18,4 @@ dependencies = []
 pullwise-worker = "pullwise_worker.main:main"
 
 [tool.setuptools.packages.find]
-include = ["pullwise_worker", "codereview", "codereview.*"]
+include = ["pullwise_worker"]

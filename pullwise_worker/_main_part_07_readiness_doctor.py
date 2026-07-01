@@ -3,14 +3,11 @@ from __future__ import annotations
 # Imported by main.py and re-exported from the aggregate module.
 
 from ._main_part_01_bootstrap import *  # noqa: F403
-from ._main_part_02_worker_checkout import *  # noqa: F403
-from ._main_part_03_preflight import *  # noqa: F403
-from ._main_part_04_graph_verified_review import *  # noqa: F403
 
 import posixpath
 
-from codereview.app_server_runner import run_codex_app_server_turn
-from codereview.config import AUXILIARY_CODEX_REASONING_EFFORT, CodexConfig
+from .review_worker_v1 import JsonRpcAppServer
+
 
 def result_checksum(payload: dict) -> str:
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -437,66 +434,40 @@ def codex_ready_check(config: WorkerConfig) -> tuple[bool, str]:
         return False, scope_detail
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        output_path = tmp_path / "codex-ready.json"
-        schema_path = tmp_path / "codex-ready.schema.json"
-        write_no_follow_text_file(
-            schema_path,
-            json.dumps(
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["ok"],
-                    "properties": {"ok": {"type": "boolean"}},
-                }
-            ),
-        )
         provider_env = provider_process_env(config)
-        ready_prompt = 'Return only JSON: {"ok": true}'
+        server = JsonRpcAppServer(config.codex_command, provider_env, tmp_path, tmp_path / "codex-events.jsonl")
         try:
-            result = run_codex_app_server_turn(
-                cd=tmp_path,
-                prompt=ready_prompt,
-                output_schema=schema_path,
-                output_file=output_path,
-                sandbox="read-only",
+            server.start()
+            thread_id = server.start_thread(tmp_path, config.codex_model)
+            if not thread_id:
+                return False, "codex app-server ready check did not create a thread"
+            server.run_turn(
+                thread_id=thread_id,
+                repo_dir=tmp_path,
+                prompt='Return only JSON: {"ok": true}',
+                effort="medium",
+                read_only=True,
                 timeout_seconds=config.codex_doctor_timeout_seconds,
-                config=CodexConfig(
-                    command=config.codex_command,
-                    model=config.codex_model,
-                    reasoning_effort=AUXILIARY_CODEX_REASONING_EFFORT,
-                    env=provider_env,
-                ),
-                env=provider_env,
             )
+            return True, "ready"
         except FileNotFoundError:
             return False, "codex not found"
-        except subprocess.TimeoutExpired:
+        except TimeoutError:
             return False, "codex app-server ready check timed out"
         except Exception as exc:
             detail = redact_secrets(str(exc), config)
             diagnostic = codex_readiness_issue_detail(detail, config)
-            return False, diagnostic or detail
-        output = redact_secrets((result.stderr or result.stdout).strip(), config)
-        detail = output.splitlines()[0] if output else f"exit {result.returncode}"
-        if result.returncode == 0:
-            try:
-                final_message = read_no_follow_text_file(output_path) if output_path.exists() else ""
-            except (OSError, UnicodeDecodeError):
-                final_message = ""
-            if not (codex_ready_probe_confirmed(final_message) or codex_ready_probe_confirmed(result.stdout)):
-                return False, "codex app-server ready check did not confirm model response"
-            return True, "ready"
-        diagnostic = codex_readiness_issue_detail(output or detail, config)
-        if diagnostic:
-            return False, diagnostic
-        lowered = output.lower()
-        if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
-            return False, codex_readiness_issue_detail(f"not authenticated: {output}", config) or "not logged in"
-        if codex_node_runtime_error(output):
-            node_ok, node_detail = node_version_check(env=provider_env)
-            if not node_ok:
-                return False, node_detail
-            return False, "Codex app-server failed to start; reinstall Codex CLI or verify Node.js 20+"
-        return False, detail
-
+            if diagnostic:
+                return False, diagnostic
+            if codex_node_runtime_error(detail):
+                node_ok, node_detail = node_version_check(env=provider_env)
+                if not node_ok:
+                    return False, node_detail
+                return False, "Codex app-server failed to start; reinstall Codex CLI or verify Node.js 20+"
+            lowered = detail.lower()
+            if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
+                return False, codex_readiness_issue_detail(f"not authenticated: {detail}", config) or "not logged in"
+            return False, detail or "codex app-server ready check failed"
+        finally:
+            server.close()
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]

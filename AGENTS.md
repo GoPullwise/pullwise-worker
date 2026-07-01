@@ -52,7 +52,8 @@ own `service_home` for Codex binaries, config, cache, and auth state.
 
 `../worker-design.md` is the source of truth for worker review behavior. The
 current worker is the `review-worker-protocol/v1` Codex full-repository review
-worker; do not reintroduce graph-generation review pipelines, `codex exec` review flows,`nlocal job queues, or worker-side prefetch compatibility.
+worker; do not reintroduce graph-generation review pipelines, `codex exec` review flows,
+local job queues, or worker-side prefetch compatibility.
 
 Hard invariants:
 
