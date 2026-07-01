@@ -1025,6 +1025,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(calls[-2][2])
         self.assertTrue(calls[-1][2])
 
+    def test_pullwise_client_has_no_legacy_review_progress_route(self) -> None:
+        bootstrap_source = (Path(__file__).resolve().parents[1] / "pullwise_worker" / "_main_part_01_bootstrap.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertFalse(hasattr(PullwiseClient, "progress"))
+        self.assertNotIn("/worker/jobs/", bootstrap_source)
+
     def test_pullwise_client_reports_cancelling_heartbeat_status(self) -> None:
         calls = []
 
@@ -1606,6 +1614,49 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(payload["attempt_id"], "wk_1-1")
             self.assertEqual(payload["run_id"], "run_1")
             self.assertIn("content_base64", payload)
+
+    def test_upload_artifacts_phase_posts_progress_per_uploaded_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            service_home = root / "service"
+            repo_dir = root / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            artifact_dir = service_home / "workers" / "wk_1" / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            uploads = []
+            events = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    uploads.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+                def event(self, run_id: str, payload: dict) -> dict:
+                    events.append((run_id, payload))
+                    return {"accepted": True}
+
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(service_home)), client=Client())
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+
+            worker.run_mechanical_phase(
+                repo_dir,
+                run_dir,
+                {"job_id": "job_1", "run_id": "run_1", "attempt": 1},
+                "upload_artifacts",
+                active=active,
+                progress=100,
+            )
+
+        upload_progress = [
+            event for _run_id, event in events if event["event_type"] == "progress_updated" and event["phase"] == "upload_artifacts"
+        ]
+        self.assertEqual(len(upload_progress), len(uploads))
+        self.assertGreater(len(upload_progress), 0)
+        self.assertEqual(upload_progress[-1]["data"]["artifacts_total"], len(uploads))
+        self.assertEqual(upload_progress[-1]["data"]["artifacts_uploaded"], len(uploads))
+        self.assertEqual(active.counters["artifacts_total"], len(uploads))
+        self.assertEqual(active.counters["artifacts_uploaded"], len(uploads))
 
     def test_upload_artifacts_rejects_duplicate_manifest_artifact_ids_before_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

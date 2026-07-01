@@ -1206,30 +1206,6 @@ class PullwiseClient:
         response = self.post(f"/v1/review-runs/{url_path_segment(run_id)}/events", payload)
         return response.json()
 
-    def progress(
-        self,
-        job_id: str,
-        phase: str,
-        progress: int,
-        message: str = "",
-        logs_summary: str = "",
-        *,
-        log_time: int | None = None,
-    ) -> None:
-        try:
-            safe_log_time = int(log_time if log_time is not None else time.time())
-        except (TypeError, ValueError):
-            safe_log_time = int(time.time())
-        payload = {
-            "phase": client_protocol_text(phase, self.config, 80),
-            "progress": progress,
-            "message": client_protocol_text(message, self.config, 500),
-            "started_at": safe_log_time,
-            "log_time": safe_log_time,
-            "logs_summary": client_protocol_text(logs_summary, self.config, 1000),
-        }
-        self.post(f"/worker/jobs/{url_path_segment(job_id)}/progress", payload)
-
     def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
         run_id = str(payload.get("run_id") or payload.get("runId") or f"run_{job_id}").strip()
         response = self.post(f"/v1/review-runs/{url_path_segment(run_id)}/artifacts", payload, compress=True)
