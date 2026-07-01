@@ -143,7 +143,10 @@ Review pipeline rules:
 - Intent-driven tests are allowed only for selected P0/P1 high-value candidate
   findings. Generated tests must live in the disposable validation workspace or
   `.codex-review/generated-tests/**`, must not install dependencies or use
-  network, and failing generated tests must be classified before they influence
+  network, and must execute with `cwd` inside the disposable validation repo.
+  The worker must record stdout/stderr under `intent/test-output/` and report
+  skipped/error/timeout cases as degraded intent-test evidence, not as direct
+  job failure. Failing generated tests must be classified before they influence
   confidence.
 - Required completed artifacts are `report.md`, `report.agent.json`,
   `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`,

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -41,7 +42,9 @@ from pullwise_worker.review_worker_v1 import (
     materialize_artifacts,
     materialize_terminal_artifacts,
     pack_bundles,
+    prepare_validation_workspace,
     qa_gate_payload,
+    run_intent_tests,
     upload_artifacts,
     validate_job_policy,
     validate_phase_outputs,
@@ -399,6 +402,91 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(bundle["tier"], "P0")
         self.assertIn("1 | def refresh_session():", bundle_text)
         self.assertIn("Intent test eligible: true", bundle_text)
+
+    def test_intent_tests_run_in_disposable_validation_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('source')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            prepare_validation_workspace(repo, run_dir)
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True, "max_tests_per_run": 2, "max_test_run_seconds_per_test": 5, "max_total_test_run_seconds": 10}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-plan.json").write_text(
+                json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-001"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-001",
+                                "command": [
+                                    sys.executable,
+                                    "-c",
+                                    "from pathlib import Path; Path('intent_marker.txt').write_text('validation')",
+                                ],
+                                "artifact_refs": ["art_intent_test_source"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = run_intent_tests(run_dir)
+            validation_repo = repo.parent / "validation-repo"
+            test_run = result["test_runs"][0]
+            marker_in_validation_repo = (validation_repo / "intent_marker.txt").is_file()
+            marker_in_source_repo = (repo / "intent_marker.txt").exists()
+            stdout_exists = Path(test_run["stdout_path"]).is_file()
+            stderr_exists = Path(test_run["stderr_path"]).is_file()
+
+        self.assertEqual(result["schema_version"], "intent-test-run-results/v1")
+        self.assertEqual(test_run["status"], "passed")
+        self.assertEqual(test_run["exit_code"], 0)
+        self.assertTrue(marker_in_validation_repo)
+        self.assertFalse(marker_in_source_repo)
+        self.assertTrue(stdout_exists)
+        self.assertTrue(stderr_exists)
+
+    def test_intent_tests_skip_cwd_that_escapes_validation_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            repo.mkdir()
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            prepare_validation_workspace(repo, run_dir)
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-escape",
+                                "cwd": "..",
+                                "command": [sys.executable, "-c", "raise SystemExit(0)"],
+                                "artifact_refs": ["art_intent_test_source"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = run_intent_tests(run_dir)
+
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertIn("escapes validation workspace", result["test_runs"][0]["skip_reason"])
 
     def test_qa_gate_rejects_invalid_main_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

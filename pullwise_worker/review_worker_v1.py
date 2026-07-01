@@ -2487,26 +2487,194 @@ def prepare_validation_workspace(repo_dir: Path, run_dir: Path) -> dict[str, Any
     return payload
 
 
+def _intent_test_id(value: dict[str, Any], fallback: str) -> str:
+    return str(value.get("test_id") or value.get("id") or value.get("target_id") or fallback).strip()
+
+
+def _intent_command(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        try:
+            return shlex.split(value)
+        except ValueError:
+            return []
+    return []
+
+
+def _intent_generated_command(generated: dict[str, Any], target: dict[str, Any]) -> list[str]:
+    for key in ("command", "test_command", "testCommand", "run_command", "runCommand"):
+        command = _intent_command(generated.get(key))
+        if command:
+            return command
+    for key in ("command", "test_command", "testCommand", "run_command", "runCommand"):
+        command = _intent_command(target.get(key))
+        if command:
+            return command
+    return []
+
+
+def _intent_test_cwd(validation_repo: Path, generated: dict[str, Any], target: dict[str, Any]) -> Path | None:
+    raw = str(generated.get("cwd") or target.get("cwd") or "").strip()
+    candidate = Path(raw) if raw else validation_repo
+    if not candidate.is_absolute():
+        candidate = validation_repo / candidate
+    candidate = candidate.resolve(strict=False)
+    try:
+        candidate.relative_to(validation_repo.resolve(strict=False))
+    except ValueError:
+        return None
+    return candidate
+
+
+def _intent_test_timeout(config: dict[str, Any], generated: dict[str, Any], target: dict[str, Any]) -> int:
+    for source in (generated, target, config):
+        for key in ("timeout_seconds", "timeoutSeconds", "max_test_run_seconds_per_test", "maxTestRunSecondsPerTest"):
+            value = source.get(key) if isinstance(source, dict) else None
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                return min(number, int(config.get("max_test_run_seconds_per_test") or number or 60))
+    return int(config.get("max_test_run_seconds_per_test") or 60)
+
+
+def _intent_output_path(run_dir: Path, test_id: str, suffix: str) -> Path:
+    safe = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in test_id).strip("._")
+    return run_dir / "intent" / "test-output" / f"{safe or 'intent-test'}.{suffix}.log"
+
+
+def _intent_test_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in list(env):
+        normalized = key.upper()
+        if normalized.endswith("_PROXY") or normalized in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}:
+            env.pop(key, None)
+    env["CI"] = "true"
+    env["PULLWISE_INTENT_TEST"] = "1"
+    return env
+
+
 def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
+    validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+    validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+    validation_repo = Path(validation_root) if validation_root else None
+    config = read_json(run_dir / "intent" / "intent-test-validation.json", {})
+    if isinstance(config, dict) and config.get("enabled") is False:
+        return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": []}
     plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
     targets = plan.get("test_targets") if isinstance(plan.get("test_targets"), list) else []
+    source = read_json(run_dir / "intent" / "intent-test-source.json", {})
+    generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
+    generated_by_id = {
+        _intent_test_id(generated, f"ITV-{index + 1:03d}"): generated
+        for index, generated in enumerate(generated_tests)
+        if isinstance(generated, dict)
+    }
+    target_by_id = {
+        _intent_test_id(target, f"ITV-{index + 1:03d}"): target
+        for index, target in enumerate(targets)
+        if isinstance(target, dict)
+    }
+    ordered_ids = []
+    for collection in (targets, generated_tests):
+        for index, item in enumerate(collection):
+            if not isinstance(item, dict):
+                continue
+            test_id = _intent_test_id(item, f"ITV-{index + 1:03d}")
+            if test_id and test_id not in ordered_ids:
+                ordered_ids.append(test_id)
+    max_tests = max(0, int((config if isinstance(config, dict) else {}).get("max_tests_per_run") or 20))
+    total_deadline = time.monotonic() + max(0, int((config if isinstance(config, dict) else {}).get("max_total_test_run_seconds") or 900))
     raw_results = []
-    for target in targets:
-        if not isinstance(target, dict):
+    for test_id in ordered_ids[:max_tests]:
+        generated = generated_by_id.get(test_id) if isinstance(generated_by_id.get(test_id), dict) else {}
+        target = target_by_id.get(test_id) if isinstance(target_by_id.get(test_id), dict) else {}
+        command = _intent_generated_command(generated, target)
+        base_result = {"schema_version": "project-test-run/v1", "test_id": test_id}
+        if not validation_repo:
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "validation workspace was not prepared"})
             continue
-        test_id = str(target.get("test_id") or f"ITV-{len(raw_results) + 1:03d}")
-        raw_results.append(
-            {
-                "schema_version": "project-test-run/v1",
-                "test_id": test_id,
-                "status": "skipped",
-                "exit_code": None,
-                "duration_ms": 0,
-                "timed_out": False,
-                "skip_reason": "no generated test command was produced",
-            }
-        )
+        if not command:
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "no generated test command was produced"})
+            continue
+        cwd = _intent_test_cwd(validation_repo, generated, target)
+        if cwd is None:
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "generated test cwd escapes validation workspace"})
+            continue
+        if not cwd.is_dir():
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "generated test cwd does not exist"})
+            continue
+        remaining_total = total_deadline - time.monotonic()
+        if remaining_total <= 0:
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "intent test total timeout budget exhausted"})
+            continue
+        timeout_seconds = min(_intent_test_timeout(config if isinstance(config, dict) else {}, generated, target), max(1, int(remaining_total)))
+        started = time.monotonic()
+        stdout_path = _intent_output_path(run_dir, test_id, "stdout")
+        stderr_path = _intent_output_path(run_dir, test_id, "stderr")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(cwd),
+                env=_intent_test_env(),
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            duration_ms = int((time.monotonic() - started) * 1000)
+            stdout_path.write_text(completed.stdout or "", encoding="utf-8")
+            stderr_path.write_text(completed.stderr or "", encoding="utf-8")
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "passed" if completed.returncode == 0 else "failed",
+                    "command": " ".join(shlex.quote(part) for part in command),
+                    "cwd": str(cwd),
+                    "exit_code": int(completed.returncode),
+                    "duration_ms": duration_ms,
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "timed_out": False,
+                }
+            )
+        except subprocess.TimeoutExpired as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            stdout_path.write_text(str(exc.stdout or ""), encoding="utf-8")
+            stderr_path.write_text(str(exc.stderr or ""), encoding="utf-8")
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "timeout",
+                    "command": " ".join(shlex.quote(part) for part in command),
+                    "cwd": str(cwd),
+                    "exit_code": None,
+                    "duration_ms": duration_ms,
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "timed_out": True,
+                }
+            )
+        except OSError as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            stderr_path.write_text(str(exc), encoding="utf-8")
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "error",
+                    "command": " ".join(shlex.quote(part) for part in command),
+                    "cwd": str(cwd),
+                    "exit_code": None,
+                    "duration_ms": duration_ms,
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "timed_out": False,
+                    "error": str(exc),
+                }
+            )
     return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": raw_results}
 
 
