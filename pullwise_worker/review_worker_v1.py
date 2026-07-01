@@ -182,6 +182,8 @@ INTENT_TEST_CLASSIFICATIONS = {
     "flaky_or_nondeterministic",
     "dependency_missing",
     "unclear_requirement",
+    "passed_no_bug_reproduced",
+    "skipped_not_runnable",
 }
 INTENT_TEST_STATUSES = {"passed", "failed", "skipped", "timeout", "error"}
 CODEX_ERROR_CODES = {
@@ -253,7 +255,7 @@ Rules:
 - Disproven findings do not appear in main findings.
 - Coverage and skipped scope must be reported.
 - Intent-driven tests may be generated only for selected P0/P1 candidate findings.
-- Test failures must be classified as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, or unclear_requirement.
+- Test failures must be classified as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, unclear_requirement, passed_no_bug_reproduced, or skipped_not_runnable.
 """
 
 
@@ -2122,7 +2124,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "inputs": ["intent/intent-test-results.raw.json", "generated tests", "linked findings"],
         "outputs": ["intent/intent-test-results.json"],
         "instructions": [
-            "Classify each generated test result as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, or unclear_requirement.",
+            "Classify each generated test result as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, unclear_requirement, passed_no_bug_reproduced, or skipped_not_runnable.",
             "A failing generated test is not automatically a bug.",
             "Write JSON only using intent-test-result/v1.",
         ],

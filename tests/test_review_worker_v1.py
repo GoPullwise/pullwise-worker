@@ -256,6 +256,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("intent/04_intent_miner.md", REQUIRED_PROMPT_FILES)
         self.assertIn("intent/07_intent_test_failure_analyzer.md", REQUIRED_PROMPT_FILES)
         self.assertIn("plausible_bug", INTENT_TEST_CLASSIFICATIONS)
+        self.assertIn("passed_no_bug_reproduced", INTENT_TEST_CLASSIFICATIONS)
+        self.assertIn("skipped_not_runnable", INTENT_TEST_CLASSIFICATIONS)
 
     def test_job_policy_requires_canonical_v1_policy_and_repository_limits(self) -> None:
         with self.assertRaisesRegex(ValueError, "model_profile.default_model"):
@@ -2103,6 +2105,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("codex-reviewer-output/v1", reviewer_prompt)
         self.assertIn("intent/intent-test-results.json", failure_prompt)
         self.assertIn("flaky_or_nondeterministic", failure_prompt)
+        self.assertIn("passed_no_bug_reproduced", failure_prompt)
+        self.assertIn("skipped_not_runnable", failure_prompt)
         self.assertNotIn("flaky_nondeterministic", failure_prompt)
 
     def test_validate_phase_outputs_rejects_missing_or_wrong_schema_outputs(self) -> None:
@@ -2151,6 +2155,35 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                                 "evidence": [],
                                 "artifacts": [],
                             }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            validate_phase_outputs(run_dir, "intent_test_failure_analysis")
+
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-result/v1",
+                        "test_results": [
+                            {
+                                "test_id": "ITV-001",
+                                "status": "passed",
+                                "classification": "passed_no_bug_reproduced",
+                                "confidence": 0.0,
+                                "evidence": [],
+                                "artifacts": [],
+                            },
+                            {
+                                "test_id": "ITV-002",
+                                "status": "skipped",
+                                "classification": "skipped_not_runnable",
+                                "confidence": 0.0,
+                                "evidence": [],
+                                "artifacts": [],
+                            },
                         ],
                     }
                 ),

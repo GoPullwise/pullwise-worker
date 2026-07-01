@@ -162,7 +162,11 @@ Review pipeline rules:
   generated, raw, and analyzed test has a unique `test_id`, plan/source/result
   `linked_finding_ids` reference IDs present in `clusters.json`, generated test
   files exist, non-skipped raw runs include a command plus existing stdout and
-  stderr log artifacts, and final classifications use only the allowed enum.
+  stderr log artifacts, and final classifications use only the allowed enum:
+  `confirmed_bug`, `plausible_bug`, `test_oracle_wrong`, `test_harness_error`,
+  `environment_error`, `flaky_or_nondeterministic`, `dependency_missing`,
+  `unclear_requirement`, `passed_no_bug_reproduced`, and
+  `skipped_not_runnable`.
   When `intent_test_validation.enabled` is false in the canonical job policy,
   the worker must skip the intent child phases without Codex turns or local test
   execution after writing the parent intent validation config artifact.
