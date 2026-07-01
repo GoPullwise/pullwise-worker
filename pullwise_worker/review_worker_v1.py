@@ -3666,9 +3666,7 @@ def upload_artifacts(
         except ValueError as exc:
             raise RuntimeError(f"artifact path escapes artifact directory before upload: {name}") from exc
         if not path.is_file():
-            if item.get("required") is True:
-                raise RuntimeError(f"required artifact is missing: {name}")
-            continue
+            raise RuntimeError(f"artifact listed in manifest is missing before upload: {name}")
         uploadable.append((item, path))
     total = len(uploadable)
     for uploaded, (item, path) in enumerate(uploadable, start=1):

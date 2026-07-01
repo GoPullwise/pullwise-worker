@@ -1544,6 +1544,29 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_upload_artifacts_rejects_missing_manifest_artifact_file_before_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            missing_item = next(item for item in manifest_payload["items"] if item["name"] == "worker.log.jsonl")
+            self.assertFalse(missing_item["required"])
+            (artifact_dir / missing_item["name"]).unlink()
+            calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+            with self.assertRaisesRegex(RuntimeError, "artifact listed in manifest is missing"):
+                upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+
+        self.assertEqual(calls, [])
+
     def test_upload_artifacts_rejects_manifest_path_escape_before_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -167,6 +167,9 @@ Review pipeline rules:
   keyed by `run_id + artifact_id`.
 - Artifact upload must reject manifest names that resolve outside the artifact
   directory before reading or posting any file.
+- Artifact upload must reject any manifest-listed artifact whose file is missing
+  before posting any artifact; optional manifest entries must not be silently
+  skipped once listed.
 - Artifact storage URLs must exactly reference the active artifact run directory:
   `/v1/review-runs/<run_id>/artifacts/<artifact_id>`.
 - `artifact-manifest.json` must use `artifact-manifest/v1` and its `run_id`
