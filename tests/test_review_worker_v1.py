@@ -594,8 +594,75 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(qa["status"], "fail")
         self.assertTrue(any("source file modified" in error for error in qa["errors"]))
         self.assertTrue(any("generated_tests[0] missing artifact_refs" in error for error in qa["errors"]))
-        self.assertTrue(any("invalid classification" in error for error in qa["errors"]))
+        self.assertTrue(any("classification is invalid" in error for error in qa["errors"]))
         self.assertTrue(any("report.md sha256 mismatch" in error for error in qa["errors"]))
+
+    def test_qa_gate_rejects_intent_result_entries_missing_required_schema_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "intent-test-results.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-result/v1",
+                        "test_results": [{"test_id": "ITV-001", "classification": "unclear_requirement"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertTrue(any("test_results[0].status is invalid" in error for error in qa["errors"]))
+        self.assertTrue(any("test_results[0].confidence is outside 0..1" in error for error in qa["errors"]))
+
+    def test_qa_gate_requires_validator_status_for_bug_supporting_intent_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "inventory.json").write_text(json.dumps(inventory(repo)), encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            finding = {
+                "title": "Intent-only signal",
+                "severity": "high",
+                "confidence": 0.7,
+                "locations": [{"path": "app.py", "start_line": 1, "end_line": 1}],
+                "evidence": ["generated test failed"],
+                "impact": "bad state",
+                "recommendation": "validate before reporting",
+                "validation_sources": {"intent_test": {"test_id": "ITV-001", "classification": "plausible_bug"}},
+            }
+            report = {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]}
+            (run_dir / "report.agent.json").write_text(json.dumps(report), encoding="utf-8")
+
+            missing_validator = qa_gate_payload(repo, run_dir)
+            finding["validation_sources"]["validator_status"] = "confirmed"
+            (run_dir / "report.agent.json").write_text(json.dumps(report), encoding="utf-8")
+            confirmed_validator = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(missing_validator["status"], "fail")
+        self.assertTrue(any("without validator_status" in error for error in missing_validator["errors"]))
+        self.assertEqual(confirmed_validator["status"], "pass")
 
     def test_qa_gate_phase_materializes_final_qa_manifest_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1354,6 +1421,45 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             (run_dir / "repo-map.json").write_text(json.dumps({"schema_version": "repo-map/v1", "areas": []}), encoding="utf-8")
             validate_phase_outputs(run_dir, "repo_map")
+
+    def test_validate_phase_outputs_rejects_malformed_intent_test_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            result_path = run_dir / "intent" / "intent-test-results.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-result/v1",
+                        "test_results": [{"test_id": "ITV-001", "classification": "unclear_requirement"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "test_results\\[0\\].status"):
+                validate_phase_outputs(run_dir, "intent_test_failure_analysis")
+
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-result/v1",
+                        "test_results": [
+                            {
+                                "test_id": "ITV-001",
+                                "status": "failed",
+                                "classification": "unclear_requirement",
+                                "confidence": 0.0,
+                                "evidence": [],
+                                "artifacts": [],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            validate_phase_outputs(run_dir, "intent_test_failure_analysis")
 
     def test_fallback_semantic_outputs_satisfy_phase_output_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

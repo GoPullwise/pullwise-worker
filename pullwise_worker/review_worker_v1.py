@@ -2769,7 +2769,7 @@ def intent_test_result_errors(payload: Any) -> list[str]:
         if classification not in INTENT_TEST_CLASSIFICATIONS:
             errors.append(f"intent-test-results.json test_results[{index}].classification is invalid")
         confidence = result.get("confidence")
-        if not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
             errors.append(f"intent-test-results.json test_results[{index}].confidence is outside 0..1")
         for field in ("linked_finding_ids", "evidence", "artifacts"):
             value = result.get(field)
@@ -2951,6 +2951,12 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
         confidence = finding.get("confidence")
         if not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
             errors.append(f"finding[{index}].confidence is outside 0..1")
+        validation_sources = finding.get("validation_sources") if isinstance(finding.get("validation_sources"), dict) else {}
+        intent_signal = validation_sources.get("intent_test") if isinstance(validation_sources.get("intent_test"), dict) else {}
+        validator_status = str(finding.get("validator_status") or validation_sources.get("validator_status") or "").strip()
+        intent_classification = str(intent_signal.get("classification") or "").strip()
+        if intent_classification in {"confirmed_bug", "plausible_bug"} and validator_status not in {"confirmed", "plausible", "validated"}:
+            errors.append(f"finding[{index}] uses bug-supporting intent test signal without validator_status")
     coverage = read_json(run_dir / "coverage.json", {})
     if isinstance(coverage, dict):
         total = _qa_int(coverage.get("source_like_files_total"))
