@@ -1,3 +1,4 @@
-from .simple_review import main, run_review
+from .pipeline.cli import main
+from .pipeline import run_review
 
 __all__ = ["main", "run_review"]
