@@ -69,6 +69,14 @@ SEMANTIC_PHASES = {
     "validator_disproof",
     "final_report_json",
 }
+INTENT_VALIDATION_CHILD_PHASES = {
+    "intent_mining",
+    "intent_test_planning",
+    "validation_workspace_prepare",
+    "intent_test_writing",
+    "intent_test_running",
+    "intent_test_failure_analysis",
+}
 CORE_EFFORT_PHASES = SEMANTIC_PHASES - {"bootstrap_helper_scripts"}
 MECHANICAL_PHASES = {phase for phase, _progress in PIPELINE_PHASES} - SEMANTIC_PHASES
 REQUIRED_COMPLETED_ARTIFACTS = {
@@ -1267,6 +1275,23 @@ class ReviewWorkerV1:
             data=data,
         )
 
+    def skip_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int, *, reason: str, data: dict[str, Any] | None = None) -> None:
+        payload = {"skip_reason": reason}
+        if data:
+            payload.update(data)
+        append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_skipped", "phase": phase, "progress": progress, "reason": reason, "time": iso_time(time.time())})
+        self.emit_event(
+            active,
+            run_dir,
+            "phase_completed",
+            phase,
+            status="skipped",
+            progress=progress,
+            current_phase_percent=100.0,
+            message=f"{phase.replace('_', ' ')} skipped.",
+            data=payload,
+        )
+
     def progress_phase(
         self,
         active: ActiveJob,
@@ -1342,6 +1367,16 @@ class ReviewWorkerV1:
                 if active.cancel_requested:
                     raise JobCancelled(active.cancel_reason or "cancel requested")
                 try:
+                    if phase in INTENT_VALIDATION_CHILD_PHASES and not intent_validation_config(job)["enabled"]:
+                        self.skip_phase(
+                            active,
+                            run_dir,
+                            phase,
+                            progress,
+                            reason="intent test validation disabled",
+                            data={"intent_test_validation_enabled": False},
+                        )
+                        continue
                     if phase == "prepare_workspace":
                         pass
                     elif phase == "start_codex_app_server":

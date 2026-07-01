@@ -153,6 +153,9 @@ Review pipeline rules:
   findings. Generated tests must live in the disposable validation workspace or
   `.codex-review/generated-tests/**`, must not install dependencies or use
   network, and must execute with `cwd` inside the disposable validation repo.
+  When `intent_test_validation.enabled` is false in the canonical job policy,
+  the worker must skip the intent child phases without Codex turns or local test
+  execution after writing the parent intent validation config artifact.
   The worker must record stdout/stderr under `intent/test-output/`, include
   those logs in artifact manifests with unique artifact ids, and report
   skipped/error/timeout cases as degraded intent-test evidence, not as direct

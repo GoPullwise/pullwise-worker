@@ -389,6 +389,81 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(fallback_policy["max_tests_per_run"], 20)
         self.assertEqual(fallback_policy["max_test_run_seconds_per_test"], 60)
 
+    def test_disabled_intent_validation_skips_child_phases_without_codex_turns(self) -> None:
+        events = []
+        semantic_calls = []
+        intent_child_phases = (
+            "intent_mining",
+            "intent_test_planning",
+            "validation_workspace_prepare",
+            "intent_test_writing",
+            "intent_test_running",
+            "intent_test_failure_analysis",
+        )
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, _run_id: str, event: dict) -> dict:
+                events.append(event)
+                return {}
+
+        class Worker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                artifact_dir = root / "artifacts" / run_id
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+            def run_semantic_phase(self, _app_server: object, _repo_dir: Path, _run_dir: Path, _job: dict, phase: str) -> None:
+                semantic_calls.append(phase)
+                raise AssertionError(f"semantic phase should have been skipped: {phase}")
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "model_profile": {
+                "default_model": "gpt-5.5",
+                "core_effort": "high",
+                "non_core_effort": "medium",
+            },
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                    "intent_test_validation": {"enabled": False},
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = Worker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            phases = (("intent_test_validation", 82),) + tuple((phase, 84 + index) for index, phase in enumerate(intent_child_phases))
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", phases):
+                worker.run_job(job)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation = json.loads((run_dir / "intent" / "intent-test-validation.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(validation["enabled"])
+        self.assertEqual(semantic_calls, [])
+        skipped = {event["phase"]: event for event in events if event["phase"] in intent_child_phases}
+        self.assertEqual(set(skipped), set(intent_child_phases))
+        for phase in intent_child_phases:
+            self.assertEqual(skipped[phase]["event_type"], "phase_completed")
+            self.assertEqual(skipped[phase]["progress"]["status"], "skipped")
+            self.assertEqual(skipped[phase]["data"]["skip_reason"], "intent test validation disabled")
+
     def test_prepare_workspace_bootstraps_design_review_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
