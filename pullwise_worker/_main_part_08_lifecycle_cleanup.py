@@ -400,12 +400,11 @@ def command_worker_has_active_jobs(worker_state: dict | None) -> bool:
     if not isinstance(worker_state, dict):
         return False
     try:
-        if int(worker_state.get("running_jobs") or worker_state.get("runningJobs") or 0) > 0:
+        if int(worker_state.get("running_jobs") or 0) > 0:
             return True
     except (TypeError, ValueError):
         pass
-    active_ids = worker_state.get("active_job_ids") if "active_job_ids" in worker_state else worker_state.get("activeJobIds")
-    return bool(client_active_job_ids(active_ids))
+    return False
 
 
 def pending_result_uploads_exist(config: WorkerConfig) -> bool:

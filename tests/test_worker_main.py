@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pullwise_worker.main as worker_main
+from pullwise_worker._main_part_08_lifecycle_cleanup import command_worker_has_active_jobs
 
 
 class WorkerMainContractsTest(unittest.TestCase):
@@ -57,6 +58,12 @@ class WorkerMainContractsTest(unittest.TestCase):
         self.assertIn('include = ["pullwise_worker"]', text)
         self.assertNotIn('"code' + 'review"', text)
         self.assertNotIn('"code' + 'review.*"', text)
+
+    def test_lifecycle_watcher_active_job_check_uses_server_running_jobs_only(self) -> None:
+        self.assertTrue(command_worker_has_active_jobs({"running_jobs": 1}))
+        self.assertFalse(command_worker_has_active_jobs({"running_jobs": 0}))
+        self.assertFalse(command_worker_has_active_jobs({"runningJobs": 1}))
+        self.assertFalse(command_worker_has_active_jobs({"active_job_ids": ["job_1"]}))
 
 
 if __name__ == "__main__":
