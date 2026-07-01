@@ -83,9 +83,9 @@ Hard invariants:
   must report `active_jobs = 0` and `available_job_slots = 1`; active heartbeats
   must report `active_jobs = 1`, `available_job_slots = 0`, and a progress
   snapshot whose `run_id` matches `active_run_id`.
-- Any backwards-compatible heartbeat translation for old internal callers must
-  remain inside the HTTP client adapter; `ReviewWorkerV1` must construct and
-  send the fixed v1 heartbeat shape directly.
+- The worker HTTP client must require the fixed v1 heartbeat shape directly.
+  Do not translate legacy `running_jobs`, `active_job_ids`, or partial heartbeat
+  inputs into v1 payloads.
 - Each worker instance owns an isolated `WORKER_ROOT`, lock file, `CODEX_HOME`,
   `CODEX_SQLITE_HOME`, Codex auth/config/log/session/cache directories,
   workspace root, artifact root, and worker log.

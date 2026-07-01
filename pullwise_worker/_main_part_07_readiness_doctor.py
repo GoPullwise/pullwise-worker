@@ -272,6 +272,22 @@ def run_doctor(config: WorkerConfig) -> bool:
     doctor_required_ok = first_failed_check(checks) is None
     try:
         PullwiseClient(config).heartbeat(
+            protocol_version=WORKER_REVIEW_PROTOCOL_VERSION,
+            worker_id=config.worker_id,
+            status="idle",
+            active_run_id=None,
+            concurrency={
+                "max_active_jobs": 1,
+                "active_jobs": 0,
+                "available_job_slots": 1,
+                "maintains_local_queue": False,
+                "local_queue_depth": 0,
+            },
+            codex_app_server={
+                "status": "ready" if codex_ready else "needs_attention",
+                "transport": "stdio",
+                "active_thread_id": None,
+            },
             last_error=None,
             doctor_status="ok" if doctor_required_ok else "degraded",
             codex_ready=codex_ready,

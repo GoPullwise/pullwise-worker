@@ -1099,7 +1099,21 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
 
         client.register()
-        client.heartbeat(running_jobs=1, active_job_ids=["job_1"], progress={"run_id": "run_job_1"}, active_thread_id="thr_123")
+        client.heartbeat(
+            protocol_version="review-worker-protocol/v1",
+            worker_id="wk_1",
+            status="busy",
+            active_run_id="run_job_1",
+            concurrency={
+                "max_active_jobs": 1,
+                "active_jobs": 1,
+                "available_job_slots": 0,
+                "maintains_local_queue": False,
+                "local_queue_depth": 0,
+            },
+            codex_app_server={"status": "ready", "transport": "stdio", "active_thread_id": "thr_123"},
+            progress={"run_id": "run_job_1"},
+        )
         self.assertEqual(client.claim()["run_id"], "run_job_1")
         client.event("run_job_1", {"run_id": "run_job_1", "event_type": "phase_started"})
         client.artifact("job_1", "art_report_human", {"run_id": "run_job_1", "artifact": {"artifact_id": "art_report_human"}})
@@ -1139,6 +1153,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertFalse(hasattr(PullwiseClient, "progress"))
         self.assertNotIn("/worker/jobs/", bootstrap_source)
+        self.assertNotIn("running_jobs", bootstrap_source)
+        self.assertNotIn("active_job_ids", bootstrap_source)
+        self.assertNotIn("client_active_job_ids", bootstrap_source)
 
     def test_pullwise_client_reports_cancelling_heartbeat_status(self) -> None:
         calls = []
@@ -1160,10 +1177,19 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
 
         client.heartbeat(
-            running_jobs=1,
-            active_job_ids=["job_1"],
+            protocol_version="review-worker-protocol/v1",
+            worker_id="wk_1",
+            status="cancelling",
+            active_run_id="run_1",
+            concurrency={
+                "max_active_jobs": 1,
+                "active_jobs": 1,
+                "available_job_slots": 0,
+                "maintains_local_queue": False,
+                "local_queue_depth": 0,
+            },
+            codex_app_server={"status": "ready", "transport": "stdio", "active_thread_id": "thr_123"},
             progress={"run_id": "run_1", "current_phase_status": "running"},
-            worker_state="cancelling",
         )
 
         payload = calls[0][1]

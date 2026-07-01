@@ -926,21 +926,6 @@ def client_protocol_text(value: object, config: WorkerConfig | None = None, max_
     return clean_protocol_text(redact_secrets(value, config), max_length)
 
 
-def client_active_job_ids(values: object) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    job_ids: list[str] = []
-    for value in values:
-        job_id = str(value or "").strip()
-        if len(job_id) > _MAX_JOB_ID_LENGTH:
-            continue
-        if not job_id or job_id in {".", ".."} or not _SAFE_JOB_ID_RE.match(job_id):
-            continue
-        if job_id not in job_ids:
-            job_ids.append(job_id)
-    return job_ids
-
-
 def client_ready_providers(values: object) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -1051,103 +1036,23 @@ class PullwiseClient:
         response = self.post("/v1/workers/register", worker_registration_payload(self.config))
         return response.json()
 
-    def heartbeat(
-        self,
-        *,
-        running_jobs: int = 0,
-        active_job_ids: list[str] | None = None,
-        last_error: str | None = None,
-        doctor_status: str | None = None,
-        codex_ready: bool | None = None,
-        ready_providers: list[str] | None = None,
-        systemd_active: bool | None = None,
-        doctor_checked_at: int | None = None,
-        machine_metrics: dict | None = None,
-        codex_quota: dict | None = None,
-        progress: dict | None = None,
-        worker_state: str | None = None,
-        active_thread_id: str | None = None,
-        **v1_payload: object,
-    ) -> dict:
-        if (
-            "protocol_version" in v1_payload
-            or "status" in v1_payload
-            or "active_run_id" in v1_payload
-            or "concurrency" in v1_payload
-            or "codex_app_server" in v1_payload
-        ):
-            payload = dict(v1_payload)
-            payload["protocol_version"] = client_protocol_text(payload.get("protocol_version"), self.config, 80) or WORKER_REVIEW_PROTOCOL_VERSION
-            payload["worker_id"] = client_protocol_text(payload.get("worker_id"), self.config, 160) or self.config.worker_id
-            payload["hostname"] = client_protocol_text(payload.get("hostname"), self.config, 255) or socket.gethostname()
-            if last_error:
-                payload["last_error"] = client_protocol_text(last_error, self.config, 500)
-            if doctor_status:
-                payload["doctor_status"] = client_protocol_text(doctor_status, self.config, 80)
-            if codex_ready is not None:
-                payload["codex_ready"] = codex_ready
-            if ready_providers is not None:
-                payload["ready_providers"] = client_ready_providers(ready_providers)
-            if systemd_active is not None:
-                payload["systemd_active"] = systemd_active
-            if doctor_checked_at is not None:
-                payload["doctor_checked_at"] = doctor_checked_at
-            if isinstance(machine_metrics, dict):
-                payload["machine_metrics"] = machine_metrics
-            if isinstance(codex_quota, dict):
-                payload["codex_quota"] = codex_quota
-            if isinstance(progress, dict):
-                payload["progress"] = progress
-            response = self.post(f"/v1/workers/{url_path_segment(self.config.worker_id)}/heartbeat", payload)
-            return response.json()
-
-        reported_running_jobs = 1 if int(running_jobs or 0) > 0 else 0
-        active_run_id = ""
-        if isinstance(progress, dict):
-            active_run_id = str(progress.get("run_id") or progress.get("runId") or "").strip()
-        codex_server_status = "ready" if codex_ready is not False else "needs_attention"
-        worker_state_status = client_protocol_text(worker_state, self.config, 80)
-        thread_id = client_protocol_text(active_thread_id, self.config, 160) or None
-        status = "idle"
-        if reported_running_jobs:
-            status = worker_state_status if worker_state_status in {"cancelling", "finishing", "failure_handling"} else "busy"
-        payload = {
-            "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
-            "worker_id": self.config.worker_id,
-            "status": status,
-            "active_run_id": active_run_id or None,
-            "hostname": socket.gethostname(),
-            "concurrency": {
-                "max_active_jobs": 1,
-                "active_jobs": reported_running_jobs,
-                "available_job_slots": 0 if reported_running_jobs else 1,
-                "maintains_local_queue": False,
-                "local_queue_depth": 0,
-            },
-            "codex_app_server": {
-                "status": codex_server_status,
-                "transport": "stdio",
-                "active_thread_id": thread_id,
-            },
-        }
-        if last_error:
-            payload["last_error"] = client_protocol_text(last_error, self.config, 500)
-        if doctor_status:
-            payload["doctor_status"] = client_protocol_text(doctor_status, self.config, 80)
-        if codex_ready is not None:
-            payload["codex_ready"] = codex_ready
-        if ready_providers is not None:
-            payload["ready_providers"] = client_ready_providers(ready_providers)
-        if systemd_active is not None:
-            payload["systemd_active"] = systemd_active
-        if doctor_checked_at is not None:
-            payload["doctor_checked_at"] = doctor_checked_at
-        if isinstance(machine_metrics, dict):
-            payload["machine_metrics"] = machine_metrics
-        if isinstance(codex_quota, dict):
-            payload["codex_quota"] = codex_quota
-        if isinstance(progress, dict):
-            payload["progress"] = progress
+    def heartbeat(self, **payload: object) -> dict:
+        required = {"protocol_version", "status", "active_run_id", "concurrency", "codex_app_server"}
+        missing = sorted(required - set(payload))
+        if missing:
+            raise PullwiseRequestError("heartbeat payload must use review-worker-protocol/v1: missing " + ", ".join(missing))
+        payload = dict(payload)
+        payload["protocol_version"] = client_protocol_text(payload.get("protocol_version"), self.config, 80) or WORKER_REVIEW_PROTOCOL_VERSION
+        if payload["protocol_version"] != WORKER_REVIEW_PROTOCOL_VERSION:
+            raise PullwiseRequestError("heartbeat payload protocol_version must be review-worker-protocol/v1")
+        payload["worker_id"] = client_protocol_text(payload.get("worker_id"), self.config, 160) or self.config.worker_id
+        payload["hostname"] = client_protocol_text(payload.get("hostname"), self.config, 255) or socket.gethostname()
+        if payload.get("last_error"):
+            payload["last_error"] = client_protocol_text(payload.get("last_error"), self.config, 500)
+        if payload.get("doctor_status"):
+            payload["doctor_status"] = client_protocol_text(payload.get("doctor_status"), self.config, 80)
+        if "ready_providers" in payload:
+            payload["ready_providers"] = client_ready_providers(payload.get("ready_providers"))
         response = self.post(f"/v1/workers/{url_path_segment(self.config.worker_id)}/heartbeat", payload)
         return response.json()
 
