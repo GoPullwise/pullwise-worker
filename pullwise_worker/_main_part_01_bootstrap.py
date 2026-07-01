@@ -6,7 +6,6 @@ import argparse
 import base64
 import concurrent.futures
 import copy
-import ctypes
 import gzip
 import hashlib
 import json
@@ -28,7 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from threading import Lock
 
 from . import __version__
@@ -46,7 +45,6 @@ _SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SAFE_WORKER_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 _MAX_JOB_ID_LENGTH = 128
 _FAILED_CHECKOUT_MARKER_SUFFIX = ".failed-retain"
-_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[/\\]")
 _MIN_READY_DISK_BYTES = 1024 * 1024 * 1024
 _DEFAULT_MAX_REPO_FILES = 2000
 _DEFAULT_MAX_REPO_BYTES = 50 * 1024 * 1024
@@ -346,49 +344,37 @@ def dependency_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 
-def _path_text_absolute_non_root(text: str, *, allow_windows: bool = True) -> bool:
-    if _service_path_entry_absolute_non_root(text, "posix"):
-        return True
-    return allow_windows and _service_path_entry_absolute_non_root(text, "windows")
+def _path_text_absolute_non_root(text: str) -> bool:
+    path = PurePosixPath(text)
+    return path.is_absolute() and text != path.anchor
 
 
 def safe_service_home_path(value: object) -> str:
     text = str(value or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
     if any(char in text for char in "\r\n\x00"):
         raise ValueError("PULLWISE_SERVICE_HOME must be single-line")
-    if not _path_text_absolute_non_root(text, allow_windows=os.name == "nt"):
+    if not _path_text_absolute_non_root(text):
         raise ValueError("PULLWISE_SERVICE_HOME must be an absolute non-root path")
-    return text.rstrip("/\\") or text
+    return text.rstrip("/") or text
 
 
-def _service_path_entry_absolute_non_root(part: str, flavour: str) -> bool:
-    if flavour == "windows":
-        if part.count(":") > 1 or (":" in part and not _WINDOWS_DRIVE_RE.match(part)):
-            return False
-        path = PureWindowsPath(part)
-        return path.is_absolute() and len(path.parts) > 1
+def _service_path_entry_absolute_non_root(part: str) -> bool:
     path = PurePosixPath(part)
     return path.is_absolute() and part != path.anchor
 
 
-def _split_service_path(text: str) -> tuple[list[str], str, str]:
-    if os.name == "nt":
-        if ";" in text:
-            return [part for part in text.split(";") if part], ";", "windows"
-        if _service_path_entry_absolute_non_root(text, "windows"):
-            return [text], ";", "windows"
-        return [part for part in text.split(":") if part], ":", "posix"
-    return [part for part in text.split(":") if part], ":", "posix"
+def _split_service_path(text: str) -> tuple[list[str], str]:
+    return [part for part in text.split(":") if part], ":"
 
 
 def safe_service_path(value: object) -> str:
     text = str(value or DEFAULT_SERVICE_PATH).strip() or DEFAULT_SERVICE_PATH
     if any(char in text for char in "\r\n\x00"):
         raise ValueError("PULLWISE_SERVICE_PATH must be single-line")
-    parts, separator, flavour = _split_service_path(text)
+    parts, separator = _split_service_path(text)
     if not parts:
         raise ValueError("PULLWISE_SERVICE_PATH must include at least one absolute path")
-    if any(not _service_path_entry_absolute_non_root(part, flavour) for part in parts):
+    if any(not _service_path_entry_absolute_non_root(part) for part in parts):
         raise ValueError("PULLWISE_SERVICE_PATH entries must be absolute non-root paths")
     return separator.join(dict.fromkeys(parts))
 
@@ -482,11 +468,6 @@ def provider_tool_path(config: WorkerConfig | None) -> str:
 def provider_home_path(service_home: str, *parts: str) -> str:
     home = safe_service_home_path(service_home)
     clean_parts = [part.strip("/\\") for part in parts if part]
-    if _service_path_entry_absolute_non_root(home, "windows"):
-        path = PureWindowsPath(home)
-        for part in clean_parts:
-            path /= part
-        return str(path)
     return "/".join([home.rstrip("/"), *clean_parts])
 
 
@@ -604,33 +585,6 @@ def linux_memory_bytes() -> tuple[int | None, int | None]:
     return total, available
 
 
-def windows_memory_bytes() -> tuple[int | None, int | None]:
-    if platform.system().lower() != "windows":
-        return None, None
-
-    class MemoryStatusEx(ctypes.Structure):
-        _fields_ = [
-            ("dwLength", ctypes.c_ulong),
-            ("dwMemoryLoad", ctypes.c_ulong),
-            ("ullTotalPhys", ctypes.c_ulonglong),
-            ("ullAvailPhys", ctypes.c_ulonglong),
-            ("ullTotalPageFile", ctypes.c_ulonglong),
-            ("ullAvailPageFile", ctypes.c_ulonglong),
-            ("ullTotalVirtual", ctypes.c_ulonglong),
-            ("ullAvailVirtual", ctypes.c_ulonglong),
-            ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
-        ]
-
-    status = MemoryStatusEx()
-    status.dwLength = ctypes.sizeof(MemoryStatusEx)
-    try:
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return None, None
-    except (AttributeError, OSError):
-        return None, None
-    return int(status.ullTotalPhys), int(status.ullAvailPhys)
-
-
 def sysconf_memory_bytes() -> tuple[int | None, int | None]:
     try:
         page_size = int(os.sysconf("SC_PAGE_SIZE"))
@@ -643,8 +597,6 @@ def sysconf_memory_bytes() -> tuple[int | None, int | None]:
 
 def worker_memory_payload() -> dict:
     total, available = linux_memory_bytes()
-    if total is None:
-        total, available = windows_memory_bytes()
     if total is None:
         total, available = sysconf_memory_bytes()
 
@@ -1002,11 +954,12 @@ def client_ready_providers(values: object) -> list[str]:
 
 
 def worker_registration_payload(config: WorkerConfig) -> dict:
+    if not sys.platform.startswith("linux"):
+        raise ValueError("pullwise-worker requires Linux")
     worker_id = str(config.worker_id)
     service_home = Path(str(getattr(config, "service_home", "") or DEFAULT_SERVICE_HOME))
     configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
     worker_root = Path(configured_root) if configured_root else service_home / "workers" / worker_id
-    codex_transport = ["stdio", "unix"] if os.name == "posix" else ["stdio"]
     return {
         "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
         "worker": {
@@ -1029,12 +982,12 @@ def worker_registration_payload(config: WorkerConfig) -> dict:
                 "workspace_root": str(worker_root / "workspaces"),
             },
             "platform": {
-                "os": "linux" if sys.platform.startswith("linux") else sys.platform,
+                "os": "linux",
                 "arch": platform.machine() or "unknown",
             },
             "capabilities": {
                 "codex_app_server": True,
-                "codex_app_server_transport": codex_transport,
+                "codex_app_server_transport": ["stdio", "unix"],
                 "full_repo_scan": True,
                 "logical_subagents": True,
                 "physical_parallel_subagents": False,

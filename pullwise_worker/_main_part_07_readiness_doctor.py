@@ -101,14 +101,6 @@ def provider_command_scope_check(command: str, config: WorkerConfig, label: str)
     if not raw:
         return False, f"{label} command missing"
     home_raw = str(config.service_home or "").strip()
-    if os.name == "nt" and raw.startswith("/") and home_raw.startswith("/"):
-        resolved_home = posixpath.normpath(home_raw)
-        resolved_command = posixpath.normpath(raw)
-        if not PurePosixPath(resolved_command).is_absolute():
-            return False, f"{label} command must be an absolute path inside worker home {config.service_home}: {raw}"
-        if resolved_command == resolved_home or resolved_command.startswith(f"{resolved_home}/"):
-            return True, resolved_command
-        return False, f"{label} command outside worker home {resolved_home}: {raw}"
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         return False, f"{label} command must be an absolute path inside worker home {config.service_home}: {raw}"

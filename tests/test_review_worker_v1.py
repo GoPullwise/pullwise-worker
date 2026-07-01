@@ -719,6 +719,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(payload["worker"]["capabilities"]["codex_app_server"])
         self.assertTrue(payload["worker"]["capabilities"]["progress_events"])
         self.assertEqual(payload["worker"]["platform"]["os"], "linux")
+        self.assertEqual(payload["worker"]["capabilities"]["codex_app_server_transport"], ["stdio", "unix"])
+        with patch("pullwise_worker._main_part_01_bootstrap.sys.platform", "darwin"):
+            with self.assertRaisesRegex(ValueError, "requires Linux"):
+                worker_registration_payload(SimpleNamespace(worker_id="wk_1", service_home="/var/lib/pullwise-worker"))
 
     def test_codex_error_mapper_returns_stable_protocol_codes(self) -> None:
         self.assertEqual(codex_error_code({"codexErrorInfo": "UsageLimitExceeded"}), "CODEX_QUOTA_EXHAUSTED")

@@ -807,12 +807,7 @@ def worker_env_target_paths(env_path: Path, backup_path: Path) -> tuple[Path, Pa
 
 def _systemd_path_text_absolute_non_root(text: str) -> bool:
     posix_path = PurePosixPath(text)
-    if posix_path.is_absolute() and text != posix_path.anchor:
-        return True
-    if os.name != "nt":
-        return False
-    windows_path = PureWindowsPath(text)
-    return windows_path.is_absolute() and len(windows_path.parts) > 1
+    return posix_path.is_absolute() and text != posix_path.anchor
 
 
 def systemd_unit_path_text(value: object, label: str) -> str:
