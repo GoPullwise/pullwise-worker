@@ -1378,7 +1378,7 @@ class ReviewWorkerV1:
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "failed"), artifact_dir, envelope):
+            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "cancelled"), artifact_dir, envelope):
                 terminal_state = "cancelled"
             else:
                 terminal_state = "result_submit_pending"

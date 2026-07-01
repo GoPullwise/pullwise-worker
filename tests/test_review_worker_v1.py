@@ -505,6 +505,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertLess(posted_event_types.index("run_cancel_requested"), posted_event_types.index("run_cancelled"))
         self.assertLess(log_events.index("run_cancel_requested"), log_events.index("run_cancelled"))
         self.assertEqual(results[0][0], "job_1")
+        self.assertEqual(results[0][1]["status"], "cancelled")
         self.assertEqual(results[0][1]["reviewWorkerProtocol"]["execution"]["status"], "cancelled")
 
     def test_worker_registers_before_heartbeat_and_lease(self) -> None:
