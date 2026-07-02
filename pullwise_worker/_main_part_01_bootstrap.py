@@ -395,6 +395,45 @@ def run_apt_command(command: list[str]) -> tuple[bool, str]:
         return False, f"{' '.join(command)} exited {completed.returncode}"
     return True, "ok"
 
+def repository_path_exists_without_following_symlink(path: Path) -> bool:
+    try:
+        Path(path).lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def _text_file_flags_no_follow(flags: int) -> int:
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _open_text_file_no_follow(path: Path, flags: int, file_mode: str, mode: int = 0o600):
+    target = Path(path)
+    if target.parent.is_symlink():
+        raise OSError(f"refusing to open file through symlinked directory: {target.parent}")
+    fd = os.open(target, _text_file_flags_no_follow(flags), mode)
+    try:
+        return os.fdopen(fd, file_mode, encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def write_no_follow_text_file(path: Path, text: str, mode: int = 0o600) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    with _open_text_file_no_follow(Path(path), flags, "w", mode) as handle:
+        handle.write(str(text))
+
+
+def read_no_follow_text_file(path: Path) -> str:
+    with _open_text_file_no_follow(Path(path), os.O_RDONLY, "r") as handle:
+        return handle.read()
+
+
 def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool = False) -> tuple[bool, str]:
     missing = [requirement for requirement in requirements if not dependency_available(requirement)]
     if not missing:
@@ -500,6 +539,8 @@ def codex_login_command(config: WorkerConfig) -> str:
 
 def default_provider_command(service_home: str, provider: str) -> str:
     home = safe_service_home_path(service_home)
+    if provider == "codex":
+        return f"{home.rstrip('/')}/.local/bin/codex"
     return f"{home.rstrip('/')}/.{provider}/bin/{provider}"
 
 

@@ -600,7 +600,7 @@ class JsonRpcAppServer:
             {
                 "cwd": str(repo_dir),
                 "approvalPolicy": "never",
-                "sandbox": "workspaceWrite",
+                "sandbox": "workspace-write",
                 "personality": "precise",
                 "serviceName": "codex_repo_review_worker",
                 "model": model or None,
@@ -619,13 +619,13 @@ class JsonRpcAppServer:
         timeout_seconds: int,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
-        sandbox = {"type": "readOnly", "networkAccess": False}
+        sandbox = {"type": "read-only", "networkAccess": False}
         if not read_only:
             writable_roots = [str(repo_dir / ".codex-review")]
             validation_repo = repo_dir.parent / "validation-repo"
             writable_roots.append(str(validation_repo))
             sandbox = {
-                "type": "workspaceWrite",
+                "type": "workspace-write",
                 "networkAccess": False,
                 "writableRoots": writable_roots,
             }

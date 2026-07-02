@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from pullwise_worker._main_part_01_bootstrap import PullwiseClient, PullwiseResponse, worker_registration_payload
-from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error
+from pullwise_worker._main_part_01_bootstrap import PullwiseClient, PullwiseResponse, WorkerConfig, worker_registration_payload
+from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error, writable_path_check
 from pullwise_worker.review_worker_v1 import (
     INTENT_TEST_CLASSIFICATIONS,
     PIPELINE_PHASES,
@@ -132,6 +132,59 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertIn(("turn/interrupt", {"threadId": "thread_1", "turnId": "turn_1"}), calls)
 
+    def test_codex_app_server_uses_current_sandbox_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            requests = []
+
+            class AppServer(JsonRpcAppServer):
+                def __init__(self) -> None:
+                    super().__init__("codex", {}, workspace, workspace / "events.jsonl")
+
+                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
+                    requests.append((method, params or {}))
+                    if method == "thread/start":
+                        return {"threadId": "thread_1"}
+                    if method == "turn/start":
+                        return {"turnId": ""}
+                    return {}
+
+            server = AppServer()
+            thread_id = server.start_thread(workspace, "gpt-5.5")
+            server.run_turn(
+                thread_id=thread_id,
+                repo_dir=workspace,
+                prompt="review",
+                effort="medium",
+                read_only=True,
+                timeout_seconds=2,
+            )
+            server.run_turn(
+                thread_id=thread_id,
+                repo_dir=workspace,
+                prompt="review",
+                effort="medium",
+                read_only=False,
+                timeout_seconds=2,
+            )
+
+        thread_start = requests[0][1]
+        read_only_turn = requests[1][1]
+        write_turn = requests[2][1]
+        self.assertEqual(thread_start["sandbox"], "workspace-write")
+        self.assertEqual(read_only_turn["sandboxPolicy"], {"type": "read-only", "networkAccess": False})
+        self.assertEqual(write_turn["sandboxPolicy"]["type"], "workspace-write")
+        self.assertNotIn("workspaceWrite", json.dumps(requests))
+        self.assertNotIn("readOnly", json.dumps(requests))
+
+    def test_writable_path_check_uses_available_no_follow_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs"
+
+            ok, detail = writable_path_check(path)
+
+        self.assertTrue(ok, detail)
+
     def test_codex_app_server_start_uses_stdio_and_initialize_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -176,6 +229,22 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             command = scoped_codex_command(SimpleNamespace(service_home=str(service_home)))
 
         self.assertEqual(command, str(service_home / ".local" / "bin" / "codex"))
+
+    def test_worker_config_default_codex_command_matches_installer_path(self) -> None:
+        service_home = "/var/lib/pullwise-worker/wk_test"
+        with patch.dict(
+            os.environ,
+            {
+                "PULLWISE_SERVER_URL": "http://127.0.0.1:18080",
+                "PULLWISE_WORKER_TOKEN": "pww_test",
+                "PULLWISE_WORKER_ID": "wk_test",
+                "PULLWISE_SERVICE_HOME": service_home,
+            },
+            clear=False,
+        ):
+            config = WorkerConfig(SimpleNamespace(), validate_server_url=False)
+
+        self.assertEqual(config.codex_command, f"{service_home}/.local/bin/codex")
 
     def test_subscription_plan_agent_config_validation_accepts_codex_config(self) -> None:
         plan_configs = {
