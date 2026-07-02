@@ -1661,6 +1661,7 @@ class ReviewWorkerV1:
                     self.fail_phase(active, run_dir, phase, phase_exc)
                     raise
             self.emit_event(active, run_dir, "run_completed", "cleanup_active_job", status="completed", progress=100, current_phase_percent=100, message="Run completed.")
+            upload_log_artifacts_best_effort(self.client, job_id, active.attempt_id, run_dir, artifact_dir)
         except JobCancelled:
             artifact_dir = artifact_dir or self.isolation.artifacts / run_id
             run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
@@ -3060,7 +3061,7 @@ def safe_artifact_suffix(name: str, *, fallback: str = "artifact") -> str:
     return "".join(char if char.isalnum() else "_" for char in name).strip("_") or fallback
 
 
-def _intent_test_env(validation_repo: Path) -> dict[str, str]:
+def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[str, str]:
     env: dict[str, str] = {}
     passthrough = {
         "PATH",
@@ -3082,11 +3083,11 @@ def _intent_test_env(validation_repo: Path) -> dict[str, str]:
     env.update(
         {
             "CI": "true",
-            "HOME": str(sandbox_home),
-            "USERPROFILE": str(sandbox_home),
-            "TMPDIR": str(sandbox_tmp),
-            "TMP": str(sandbox_tmp),
-            "TEMP": str(sandbox_tmp),
+            "HOME": "/tmp" if sandboxed else str(sandbox_home),
+            "USERPROFILE": "/tmp" if sandboxed else str(sandbox_home),
+            "TMPDIR": "/tmp" if sandboxed else str(sandbox_tmp),
+            "TMP": "/tmp" if sandboxed else str(sandbox_tmp),
+            "TEMP": "/tmp" if sandboxed else str(sandbox_tmp),
             "NO_PROXY": "*",
             "PULLWISE_INTENT_TEST": "1",
             "PULLWISE_INTENT_TEST_NETWORK_DISABLED": "1",
@@ -3095,33 +3096,61 @@ def _intent_test_env(validation_repo: Path) -> dict[str, str]:
     return env
 
 
-def _intent_test_preexec() -> Callable[[], None] | None:
+def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo: Path) -> tuple[list[str], str, str]:
     if not sys.platform.startswith("linux"):
-        return None
+        return command, str(cwd), ""
+    bwrap = shutil.which("bwrap") or shutil.which("bubblewrap")
+    if not bwrap:
+        return [], "", "intent test sandbox runner is unavailable: bubblewrap is not installed"
+    validation_root = validation_repo.resolve(strict=False)
+    cwd_resolved = cwd.resolve(strict=False)
+    try:
+        rel_cwd = cwd_resolved.relative_to(validation_root)
+    except ValueError:
+        return [], "", "generated test cwd escapes validation workspace"
+    sandbox_cwd = "/workspace" if rel_cwd == Path(".") else "/workspace/" + rel_cwd.as_posix()
+    argv = [
+        bwrap,
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--bind",
+        str(validation_root),
+        "/workspace",
+        "--tmpfs",
+        "/tmp",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--chdir",
+        sandbox_cwd,
+    ]
+    for host_path in ("/usr", "/bin", "/lib", "/lib64"):
+        if Path(host_path).exists():
+            argv.extend(["--ro-bind", host_path, host_path])
+    argv.extend(["--", *command])
+    return argv, sandbox_cwd, ""
 
-    def preexec() -> None:
-        try:
-            os.setsid()
-        except OSError:
-            pass
-        try:
-            import resource
 
-            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
-        except Exception:
-            pass
-        try:
-            import ctypes
-
-            clone_newnet = 0x40000000
-            libc = ctypes.CDLL(None, use_errno=True)
-            if libc.unshare(clone_newnet) != 0:
-                os._exit(126)
-        except Exception:
-            os._exit(126)
-
-    return preexec
+def _intent_sandbox_setup_failed(command: list[str], completed: subprocess.CompletedProcess[str]) -> bool:
+    executable = Path(command[0]).name.lower() if command else ""
+    if executable not in {"bwrap", "bubblewrap"}:
+        return False
+    stderr = str(completed.stderr or "").lower()
+    markers = (
+        "bwrap:",
+        "bubblewrap:",
+        "operation not permitted",
+        "permission denied",
+        "creating new namespace",
+        "unshare",
+        "namespace",
+    )
+    return completed.returncode != 0 and any(marker in stderr for marker in markers)
 
 def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
@@ -3186,29 +3215,43 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
         started = time.monotonic()
         stdout_path = _intent_output_path(run_dir, test_id, "stdout")
         stderr_path = _intent_output_path(run_dir, test_id, "stderr")
+        sandbox_command, sandbox_cwd, sandbox_skip_reason = _intent_test_sandbox_command(command, cwd, validation_repo)
+        if sandbox_skip_reason:
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": sandbox_skip_reason})
+            continue
         try:
-            run_kwargs: dict[str, Any] = {
-                "args": command,
-                "cwd": str(cwd),
-                "env": _intent_test_env(validation_repo),
-                "text": True,
-                "capture_output": True,
-                "timeout": timeout_seconds,
-                "check": False,
-            }
-            preexec_fn = _intent_test_preexec()
-            if preexec_fn is not None:
-                run_kwargs["preexec_fn"] = preexec_fn
-            completed = subprocess.run(**run_kwargs)
+            completed = subprocess.run(
+                sandbox_command,
+                cwd=str(cwd),
+                env=_intent_test_env(validation_repo, sandboxed=sys.platform.startswith("linux")),
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
             duration_ms = int((time.monotonic() - started) * 1000)
             stdout_path.write_text(completed.stdout or "", encoding="utf-8")
             stderr_path.write_text(completed.stderr or "", encoding="utf-8")
+            if _intent_sandbox_setup_failed(sandbox_command, completed):
+                raw_results.append(
+                    {
+                        **base_result,
+                        "status": "skipped",
+                        "exit_code": int(completed.returncode),
+                        "duration_ms": duration_ms,
+                        "timed_out": False,
+                        "skip_reason": "intent test sandbox runner failed to initialize",
+                        "stderr_path": str(stderr_path),
+                    }
+                )
+                continue
             raw_results.append(
                 {
                     **base_result,
                     "status": "passed" if completed.returncode == 0 else "failed",
                     "command": " ".join(shlex.quote(part) for part in command),
-                    "cwd": str(cwd),
+                    "sandbox_command": " ".join(shlex.quote(part) for part in sandbox_command),
+                    "cwd": sandbox_cwd or str(cwd),
                     "exit_code": int(completed.returncode),
                     "duration_ms": duration_ms,
                     "stdout_path": str(stdout_path),
@@ -3225,7 +3268,8 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
                     **base_result,
                     "status": "timeout",
                     "command": " ".join(shlex.quote(part) for part in command),
-                    "cwd": str(cwd),
+                    "sandbox_command": " ".join(shlex.quote(part) for part in sandbox_command),
+                    "cwd": sandbox_cwd or str(cwd),
                     "exit_code": None,
                     "duration_ms": duration_ms,
                     "stdout_path": str(stdout_path),
@@ -3242,7 +3286,8 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
                     **base_result,
                     "status": "error",
                     "command": " ".join(shlex.quote(part) for part in command),
-                    "cwd": str(cwd),
+                    "sandbox_command": " ".join(shlex.quote(part) for part in sandbox_command),
+                    "cwd": sandbox_cwd or str(cwd),
                     "exit_code": None,
                     "duration_ms": duration_ms,
                     "stdout_path": str(stdout_path),
@@ -4589,6 +4634,59 @@ def active_attempt_id(config: Any, job: dict[str, Any]) -> str:
         attempt = 1
     return f"{config.worker_id}-{attempt}"
 
+
+def upload_log_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, run_dir: Path, artifact_dir: Path) -> str:
+    try:
+        upload_log_artifacts(client, job_id, attempt_id, run_dir, artifact_dir)
+    except Exception as exc:
+        append_jsonl(run_dir / "worker.log.jsonl", {"event": "final_log_artifact_upload_failed", "error": str(exc), "time": iso_time(time.time())})
+        return str(exc)
+    return ""
+
+
+def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Path, artifact_dir: Path) -> None:
+    manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
+    if not isinstance(manifest_payload, dict):
+        raise RuntimeError("artifact manifest must be an object before final log upload")
+    refresh_log_artifacts(run_dir, artifact_dir, manifest_payload)
+    manifest = artifact_manifest_items(manifest_payload)
+    if not manifest:
+        raise RuntimeError("artifact manifest must contain artifact items before final log upload")
+    uploaded = 0
+    for item in manifest:
+        name = str(item.get("name") or "").strip()
+        if name not in LOG_ARTIFACT_NAMES:
+            continue
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if not artifact_id:
+            raise RuntimeError(f"log artifact manifest entry requires artifact_id: {name}")
+        path = artifact_dir / name
+        try:
+            path.resolve(strict=False).relative_to(artifact_dir.resolve(strict=False))
+        except ValueError as exc:
+            raise RuntimeError(f"log artifact path escapes artifact directory before upload: {name}") from exc
+        if not path.is_file():
+            raise RuntimeError(f"log artifact listed in manifest is missing before upload: {name}")
+        data = path.read_bytes()
+        if str(item.get("sha256") or "").lower() != hashlib.sha256(data).hexdigest():
+            raise RuntimeError(f"log artifact sha256 mismatch before upload: {name}")
+        if int(item.get("size_bytes") if item.get("size_bytes") is not None else -1) != len(data):
+            raise RuntimeError(f"log artifact size mismatch before upload: {name}")
+        client.artifact(
+            job_id,
+            artifact_id,
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "attempt_id": attempt_id,
+                "run_id": artifact_dir.name,
+                "artifact": item,
+                "content_base64": base64.b64encode(data).decode("ascii"),
+                "final_log_upload": True,
+            },
+        )
+        uploaded += 1
+    if uploaded == 0:
+        raise RuntimeError("artifact manifest contains no log artifacts before final log upload")
 
 def upload_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, artifact_dir: Path) -> str:
     try:

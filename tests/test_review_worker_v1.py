@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -51,6 +52,7 @@ from pullwise_worker.review_worker_v1 import (
     run_intent_tests,
     scoped_codex_command,
     upload_artifacts,
+    upload_log_artifacts,
     validate_job_policy,
     validate_phase_outputs,
     validate_reviewer_outputs,
@@ -873,6 +875,50 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertNotIn("HTTPS_PROXY", env)
         self.assertEqual(env["HOME"], str(validation_repo / ".intent-test-home"))
         self.assertEqual(env["PULLWISE_INTENT_TEST_NETWORK_DISABLED"], "1")
+    def test_intent_tests_skip_when_linux_sandbox_runner_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "validation-workspace.json").write_text(
+                json.dumps({"validation_repo_root": str(validation_repo)}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-plan.json").write_text(
+                json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-sandbox"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-sandbox",
+                                "command": [sys.executable, "-m", "unittest", "test_env_marker"],
+                                "artifact_refs": ["art_intent_test_source"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value=None,
+            ), patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_not_called()
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertIn("sandbox runner is unavailable", result["test_runs"][0]["skip_reason"])
     def test_intent_failure_analysis_fallback_classifies_raw_runs_conservatively(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -2008,6 +2054,37 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertIn("art_error_report", {artifact_id for _job_id, artifact_id, _payload in calls})
 
+    def test_upload_log_artifacts_refreshes_and_reuploads_final_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "progress.log.jsonl").write_text(
+                json.dumps({"event_type": "phase_completed", "phase": "upload_artifacts"}) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "worker.log.jsonl").write_text("", encoding="utf-8")
+            (run_dir / "codex-events.jsonl").write_text("", encoding="utf-8")
+            materialize_artifacts(run_dir, artifact_dir)
+            with (run_dir / "progress.log.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event_type": "run_completed", "phase": "cleanup_active_job"}) + "\n")
+            calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+            upload_log_artifacts(Client(), "job_1", "wk_1-1", run_dir, artifact_dir)
+
+            progress_upload = next(payload for _job_id, _artifact_id, payload in calls if payload["artifact"]["name"] == "progress.log.jsonl")
+            uploaded_progress = base64.b64decode(progress_upload["content_base64"]).decode("utf-8")
+
+        self.assertEqual(len(calls), 3)
+        self.assertIn("run_completed", uploaded_progress)
+        self.assertTrue(progress_upload["final_log_upload"])
+        self.assertEqual(progress_upload["artifact"]["size_bytes"], len(uploaded_progress.encode("utf-8")))
     def test_upload_artifacts_posts_manifest_entries_before_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
