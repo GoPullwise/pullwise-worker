@@ -602,7 +602,7 @@ class JsonRpcAppServer:
             {
                 "cwd": str(repo_dir),
                 "approvalPolicy": "never",
-                "sandbox": "workspaceWrite",
+                "sandbox": "workspace-write",
                 "serviceName": "codex_repo_review_worker",
                 "model": model or None,
             },

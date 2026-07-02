@@ -174,11 +174,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         thread_start = requests[0][1]
         read_only_turn = requests[1][1]
         write_turn = requests[2][1]
-        self.assertEqual(thread_start["sandbox"], "workspaceWrite")
+        self.assertEqual(thread_start["sandbox"], "workspace-write")
         self.assertNotIn("personality", thread_start)
         self.assertEqual(read_only_turn["sandboxPolicy"], {"type": "readOnly", "networkAccess": False})
         self.assertEqual(write_turn["sandboxPolicy"]["type"], "workspaceWrite")
-        self.assertNotIn('workspace-write', json.dumps(requests))
         self.assertNotIn('read-only', json.dumps(requests))
         self.assertNotIn('danger-full-access', json.dumps(requests))
         self.assertNotIn("precise", json.dumps(requests))
