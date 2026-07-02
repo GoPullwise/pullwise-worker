@@ -532,7 +532,7 @@ def scoped_codex_command(config: Any) -> str:
     service_home = Path(str(getattr(config, "service_home", "") or "/var/lib/pullwise-worker")).expanduser()
     command = str(getattr(config, "codex_command", "") or "").strip()
     if not command:
-        command = str(service_home / ".codex" / "bin" / "codex")
+        command = str(service_home / ".local" / "bin" / "codex")
     command_path = Path(command).expanduser()
     if not command_path.is_absolute():
         raise RuntimeError(f"Codex command must be an absolute path inside worker service_home: {command}")

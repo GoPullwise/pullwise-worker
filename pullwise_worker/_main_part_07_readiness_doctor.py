@@ -159,8 +159,6 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
     if "codex" in providers_to_check:
         home_ok, home_detail = worker_provider_home_isolation_check(config)
         checks.append(("worker_home_isolation", home_ok, home_detail))
-        node_ok, node_detail = node_version_check(env=provider_env) if home_ok else (False, "skipped until worker home isolation passes")
-        checks.append(("node", node_ok, node_detail))
         codex_scope_ok, codex_scope_detail = (
             provider_command_scope_check(config.codex_command, config, "Codex")
             if home_ok
@@ -180,7 +178,7 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
             codex_login_ok = True
             codex_login_detail = "busy: ready check deferred while codex is running"
         checks.append(("codex_ready", codex_login_ok, codex_login_detail))
-        if node_ok and codex_cli_ok and codex_login_ok:
+        if codex_cli_ok and codex_login_ok:
             ready_providers.append("codex")
     provider_ready = bool(ready_providers)
     provider_ready_detail = (
@@ -206,7 +204,7 @@ def worker_readiness_checks(config: WorkerConfig) -> tuple[list[tuple[str, bool,
 
 def first_failed_check(checks: list[tuple[str, bool, str]]) -> tuple[str, bool, str] | None:
     provider_ready = readiness_check_ok(checks, "provider_ready")
-    optional_provider_checks = {"node", "codex", "codex_ready"}
+    optional_provider_checks = {"codex", "codex_ready"}
     for check in checks:
         name, ok, _detail = check
         if ok:
@@ -257,9 +255,6 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 def run_doctor(config: WorkerConfig) -> bool:
     requirements = ["git"]
-    local_provider_chain = parse_provider_chain(",".join(config.provider_chain) if config.provider_chain else None, config.provider)
-    if "codex" in local_provider_chain:
-        requirements.extend(["node", "npm"])
     dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(requirements)
     checks, _provider_ready, ready_providers = worker_readiness_state(config)
     if not dependency_ok or dependency_detail != "dependencies present":
@@ -482,10 +477,7 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
             if diagnostic:
                 return False, diagnostic
             if codex_node_runtime_error(detail):
-                node_ok, node_detail = node_version_check(env=provider_env)
-                if not node_ok:
-                    return False, node_detail
-                return False, "Codex app-server failed to start; reinstall Codex CLI or verify Node.js 20+"
+                return False, "Codex app-server failed to start; reinstall the worker-scoped Codex CLI"
             lowered = detail.lower()
             if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
                 return False, codex_readiness_issue_detail(f"not authenticated: {detail}", config) or "not logged in"

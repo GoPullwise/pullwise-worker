@@ -34,7 +34,7 @@ Required environment:
 - `PULLWISE_CHECKOUT_ROOT` optional, defaults to the temp directory
 - `PULLWISE_WORKER_WORK_DIR` optional
 - `PULLWISE_LOG_DIR` optional, defaults to the temp directory
-- `PULLWISE_CODEX_COMMAND` optional, defaults to `/var/lib/pullwise-worker/.codex/bin/codex`
+- `PULLWISE_CODEX_COMMAND` optional, defaults to `/var/lib/pullwise-worker/.local/bin/codex`
 - `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_APP_SERVER_MAX_TURNS` optional, defaults to `8`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
@@ -49,7 +49,7 @@ Required environment:
 
 Each worker processes exactly one job at a time. Queuing is maintained on the server; after a job finishes, the worker returns to the server to claim the next job. Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old run logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
-Review model, reasoning effort, repository file/byte limits, intent-test limits, and worker review deadlines come from the claimed job payload. The payload must include canonical v1 `model_profile`, `review_request.policy`, `review_request.budget`, and `repositoryLimits`; `agentConfig` may be present as server metadata, but the worker must not use it to fill missing policy fields. Executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.codex/bin/codex`; global `codex` commands are rejected before subprocess launch. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for server-owned review policy.
+Review model, reasoning effort, repository file/byte limits, intent-test limits, and worker review deadlines come from the claimed job payload. The payload must include canonical v1 `model_profile`, `review_request.policy`, `review_request.budget`, and `repositoryLimits`; `agentConfig` may be present as server metadata, but the worker must not use it to fill missing policy fields. Executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/.local/bin/codex`; global `codex` commands are rejected before subprocess launch. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for server-owned review policy.
 
 Codex review work runs through one instance-scoped `codex app-server` per worker identity. A worker has one active job slot, never prefetches jobs, and drives one root Codex thread with sequential turns by default. Review transport uses the `review-worker-protocol/v1` register, lease, heartbeat, run event, artifact, and terminal result routes under `/v1/workers...` and `/v1/review-runs/{run_id}/...`; lifecycle command/log endpoints are separate operator plumbing, not the core review pipeline. Review output is the v1 result envelope plus `.codex-review/runs/<run_id>/` artifacts such as `report.md`, `report.agent.json`, `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`, `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
 
@@ -63,7 +63,7 @@ Production local capability example:
 
 ```bash
 PULLWISE_PROVIDER_CHAIN=codex
-PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/.codex/bin/codex
+PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/.local/bin/codex
 ```
 
 ## Deploy
@@ -82,7 +82,7 @@ printf '%s  %s\n' '<sha256 from admin install command>' "$install_script" | sha2
 bash "$install_script" --server https://pullwise.example.com --worker-id wk_x
 ```
 
-The installer is served by Pullwise Server at `/install-worker.sh`. It creates a worker-specific system user, writes a locked-down worker env file, installs the selected worker package, installs a systemd unit and logrotate config, starts the worker, and runs `pullwise-worker doctor`. Codex provider installs require a trusted, pinned Node.js runtime and Codex CLI to be preinstalled under the worker home or configured with scoped absolute paths. The worker package intentionally does not ship a second install script; server is the single installer source of truth.
+The installer is served by Pullwise Server at `/install-worker.sh`. It creates a worker-specific system user, writes a locked-down worker env file, installs the selected worker package, installs the worker-scoped Codex CLI with OpenAI's official standalone installer, installs a systemd unit and logrotate config, starts the worker, and runs `pullwise-worker doctor`. The default Codex release is `latest`; server worker creation can pin a specific Codex CLI release. The worker package intentionally does not ship a second install script; server is the single installer source of truth.
 
 ## Release
 
@@ -126,5 +126,5 @@ worker stays in the registry; an uninstalled worker is removed from admin lists.
 Codex must be authenticated for the service user before Codex scans can run:
 
 ```bash
-sudo -u pullwise-worker-wk_x env HOME=/var/lib/pullwise-worker/wk_x USERPROFILE=/var/lib/pullwise-worker/wk_x CODEX_HOME=/var/lib/pullwise-worker/wk_x/.codex XDG_CONFIG_HOME=/var/lib/pullwise-worker/wk_x/.config XDG_CACHE_HOME=/var/lib/pullwise-worker/wk_x/.cache XDG_DATA_HOME=/var/lib/pullwise-worker/wk_x/.local/share PATH=/var/lib/pullwise-worker/wk_x/.local/bin:/var/lib/pullwise-worker/wk_x/.codex/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -lc 'cd "$HOME" && exec /var/lib/pullwise-worker/wk_x/.codex/bin/codex login --device-auth'
+sudo -u pullwise-worker-wk_x env HOME=/var/lib/pullwise-worker/wk_x USERPROFILE=/var/lib/pullwise-worker/wk_x CODEX_HOME=/var/lib/pullwise-worker/wk_x/.codex XDG_CONFIG_HOME=/var/lib/pullwise-worker/wk_x/.config XDG_CACHE_HOME=/var/lib/pullwise-worker/wk_x/.cache XDG_DATA_HOME=/var/lib/pullwise-worker/wk_x/.local/share PATH=/var/lib/pullwise-worker/wk_x/.local/bin:/var/lib/pullwise-worker/wk_x/.codex/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -lc 'cd "$HOME" && exec /var/lib/pullwise-worker/wk_x/.local/bin/codex login --device-auth'
 ```

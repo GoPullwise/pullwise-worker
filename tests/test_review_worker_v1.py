@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pullwise_worker._main_part_01_bootstrap import PullwiseClient, PullwiseResponse, worker_registration_payload
+from pullwise_worker._main_part_07_readiness_doctor import run_doctor
 from pullwise_worker.review_worker_v1 import (
     INTENT_TEST_CLASSIFICATIONS,
     PIPELINE_PHASES,
@@ -174,7 +175,42 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             service_home = Path(tmp_dir) / "service"
             command = scoped_codex_command(SimpleNamespace(service_home=str(service_home)))
 
-        self.assertEqual(command, str(service_home / ".codex" / "bin" / "codex"))
+        self.assertEqual(command, str(service_home / ".local" / "bin" / "codex"))
+
+    def test_doctor_does_not_require_node_for_standalone_codex_cli(self) -> None:
+        config = SimpleNamespace(
+            provider="codex",
+            provider_chain=["codex"],
+            service_name="pullwise-worker-test",
+            worker_id="wk_1",
+        )
+        heartbeats = []
+
+        class Client:
+            def __init__(self, _config: object) -> None:
+                pass
+
+            def heartbeat(self, **payload: object) -> None:
+                heartbeats.append(payload)
+
+        checks = [("provider_ready", True, "codex"), ("codex_ready", True, "ready")]
+        with patch(
+            "pullwise_worker._main_part_07_readiness_doctor.install_ubuntu_2204_dependencies",
+            return_value=(True, "dependencies present"),
+        ) as dependencies, patch(
+            "pullwise_worker._main_part_07_readiness_doctor.worker_readiness_state",
+            return_value=(checks, True, ["codex"]),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.command_ok",
+            return_value=(True, "active"),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.PullwiseClient",
+            Client,
+        ):
+            self.assertTrue(run_doctor(config))
+
+        dependencies.assert_called_once_with(["git"])
+        self.assertEqual(heartbeats[0]["ready_providers"], ["codex"])
 
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

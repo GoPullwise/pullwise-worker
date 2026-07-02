@@ -67,7 +67,7 @@ DEFAULT_SERVICE_NAME = "pullwise-worker"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
 DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/.codex/bin/codex"
+DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/.local/bin/codex"
 DEFAULT_PROVIDER_AUTH_PATH = (
     f"{DEFAULT_SERVICE_HOME}/.local/bin:{DEFAULT_SERVICE_HOME}/.codex/bin:{DEFAULT_SERVICE_PATH}"
 )
