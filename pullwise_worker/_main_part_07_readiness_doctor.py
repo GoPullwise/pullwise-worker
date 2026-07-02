@@ -276,7 +276,7 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 
 def run_doctor(config: WorkerConfig) -> bool:
-    requirements = ["git"]
+    requirements = ["git", "bwrap"]
     dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(requirements)
     checks, _provider_ready, ready_providers = worker_readiness_state(config)
     if not dependency_ok or dependency_detail != "dependencies present":

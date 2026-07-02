@@ -181,6 +181,8 @@ _CODEX_READINESS_ISSUE_MESSAGES = {
 }
 _CODEX_READINESS_FAILURE_CACHEABLE_ISSUES = set(_CODEX_READINESS_ISSUE_MESSAGES)
 _UBUNTU_2204_DEPENDENCY_PACKAGES = {
+    "bwrap": ("bubblewrap",),
+    "bubblewrap": ("bubblewrap",),
     "git": ("git",),
     "python3": ("python3.10", "python3.10-venv"),
     "python3.10": ("python3.10", "python3.10-venv"),
@@ -342,6 +344,10 @@ def dependency_available(name: str) -> bool:
     if name == "npm":
         return npm_available()
     return shutil.which(name) is not None
+
+
+def intent_test_validation_available() -> bool:
+    return sys.platform.startswith("linux") and (shutil.which("bwrap") is not None or shutil.which("bubblewrap") is not None)
 
 
 def _path_text_absolute_non_root(text: str) -> bool:
@@ -1020,7 +1026,7 @@ def worker_registration_payload(config: WorkerConfig) -> dict:
                 "artifact_upload": True,
                 "progress_events": True,
                 "cancellation": True,
-                "intent_test_validation": True,
+                "intent_test_validation": intent_test_validation_available(),
                 "disposable_validation_workspace": True,
                 "max_active_jobs": 1,
             },
@@ -1136,7 +1142,7 @@ class PullwiseClient:
                     "isolated_codex_home": True,
                     "progress_events": True,
                     "cancellation": True,
-                    "intent_test_validation": True,
+                    "intent_test_validation": intent_test_validation_available(),
                 },
             },
         )
