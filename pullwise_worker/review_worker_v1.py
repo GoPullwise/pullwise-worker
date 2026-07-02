@@ -602,7 +602,7 @@ class JsonRpcAppServer:
             {
                 "cwd": str(repo_dir),
                 "approvalPolicy": "never",
-                "sandbox": "workspace-write",
+                "sandbox": "workspaceWrite",
                 "serviceName": "codex_repo_review_worker",
                 "model": model or None,
             },
@@ -620,13 +620,13 @@ class JsonRpcAppServer:
         timeout_seconds: int,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
-        sandbox = {"type": "read-only", "networkAccess": False}
+        sandbox = {"type": "readOnly", "networkAccess": False}
         if not read_only:
             writable_roots = [str(repo_dir / ".codex-review")]
             validation_repo = repo_dir.parent / "validation-repo"
             writable_roots.append(str(validation_repo))
             sandbox = {
-                "type": "workspace-write",
+                "type": "workspaceWrite",
                 "networkAccess": False,
                 "writableRoots": writable_roots,
             }
@@ -737,7 +737,7 @@ class JsonRpcAppServer:
                     self.rate_limit_callback(params)
             elif "id" in message and "method" in message:
                 method = str(message.get("method") or "")
-                if "approval" in method.lower():
+                if method in CODEX_APPROVAL_RESPONSE_METHODS:
                     self._send({"id": message.get("id"), "result": approval_response_for_request(message, self.cwd)})
                 else:
                     self._send({"id": message.get("id"), "error": {"code": -32601, "message": "unsupported server request"}})
@@ -1072,20 +1072,39 @@ DENIED_INTENT_EXECUTABLES = {
     "sh",
     "wget",
 }
+CODEX_APPROVAL_RESPONSE_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
+}
+LEGACY_CODEX_APPROVAL_RESPONSE_METHODS = {"execCommandApproval", "applyPatchApproval"}
 
 
 def approval_response_for_request(message: dict[str, Any], workspace: Path) -> dict[str, Any]:
-    decision, reason = decide_approval(message, workspace)
-    return {"decision": decision, "outcome": decision, "reason": reason}
+    decision, _reason = decide_approval(message, workspace)
+    if str(message.get("method") or "") in LEGACY_CODEX_APPROVAL_RESPONSE_METHODS:
+        legacy_decision = "approved_for_session" if decision in {"accept", "acceptForSession"} else "denied"
+        return {"decision": legacy_decision}
+    return {"decision": decision}
 
 
 def decide_approval(message: dict[str, Any], workspace: Path) -> tuple[str, str]:
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
     request = params.get("request") if isinstance(params.get("request"), dict) else params
     request_type = str(request.get("type") or request.get("kind") or message.get("method") or "").lower()
-    if "file" in request_type or request.get("paths") or request.get("path"):
-        paths = request.get("paths") if isinstance(request.get("paths"), list) else [request.get("path")]
-        if paths and all(path_is_under_allowed_write_root(workspace, path) for path in paths if path):
+    if "file" in request_type or request.get("paths") or request.get("path") or request.get("grantRoot") or request.get("fileChanges"):
+        paths: list[object] = []
+        if isinstance(request.get("paths"), list):
+            paths.extend(request.get("paths") or [])
+        elif request.get("path"):
+            paths.append(request.get("path"))
+        if request.get("grantRoot"):
+            paths.append(request.get("grantRoot"))
+        file_changes = request.get("fileChanges")
+        if isinstance(file_changes, dict):
+            paths.extend(file_changes.keys())
+        if paths and all(path_is_under_allowed_write_root(workspace, path) for path in paths):
             return "acceptForSession", "write is limited to .codex-review or disposable validation workspace"
         return "decline", "file changes outside approved review workspaces are not allowed"
     if "command" in request_type or request.get("command") or request.get("argv"):

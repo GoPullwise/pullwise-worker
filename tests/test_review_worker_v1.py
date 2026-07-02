@@ -23,6 +23,7 @@ from pullwise_worker.review_worker_v1 import (
     SEMANTIC_PHASES,
     SEMANTIC_PHASE_PROMPT_SPECS,
     ActiveJob,
+    approval_response_for_request,
     CodexQuotaMonitor,
     JobCancelled,
     JsonRpcAppServer,
@@ -173,12 +174,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         thread_start = requests[0][1]
         read_only_turn = requests[1][1]
         write_turn = requests[2][1]
-        self.assertEqual(thread_start["sandbox"], "workspace-write")
+        self.assertEqual(thread_start["sandbox"], "workspaceWrite")
         self.assertNotIn("personality", thread_start)
-        self.assertEqual(read_only_turn["sandboxPolicy"], {"type": "read-only", "networkAccess": False})
-        self.assertEqual(write_turn["sandboxPolicy"]["type"], "workspace-write")
-        self.assertNotIn("workspaceWrite", json.dumps(requests))
-        self.assertNotIn("readOnly", json.dumps(requests))
+        self.assertEqual(read_only_turn["sandboxPolicy"], {"type": "readOnly", "networkAccess": False})
+        self.assertEqual(write_turn["sandboxPolicy"]["type"], "workspaceWrite")
+        self.assertNotIn('workspace-write', json.dumps(requests))
+        self.assertNotIn('read-only', json.dumps(requests))
+        self.assertNotIn('danger-full-access', json.dumps(requests))
         self.assertNotIn("precise", json.dumps(requests))
 
     def test_writable_path_check_uses_available_no_follow_helpers(self) -> None:
@@ -373,6 +375,53 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(denied_install, "decline")
         self.assertEqual(allowed_validation_test, "acceptForSession")
         self.assertEqual(denied_cwd, "decline")
+
+    def test_codex_approval_responses_use_current_app_server_enums(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / ".codex-review" / "tools").mkdir(parents=True)
+
+            command_response = approval_response_for_request(
+                {
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"command": "python3 .codex-review/tools/scan.py", "cwd": str(workspace)},
+                },
+                workspace,
+            )
+            file_response = approval_response_for_request(
+                {"method": "item/fileChange/requestApproval", "params": {"grantRoot": str(workspace / ".codex-review")}},
+                workspace,
+            )
+            denied_response = approval_response_for_request(
+                {"method": "item/fileChange/requestApproval", "params": {"grantRoot": str(workspace / "src")}},
+                workspace,
+            )
+
+        self.assertEqual(command_response, {"decision": "acceptForSession"})
+        self.assertEqual(file_response, {"decision": "acceptForSession"})
+        self.assertEqual(denied_response, {"decision": "decline"})
+
+    def test_legacy_codex_approval_responses_use_legacy_review_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / ".codex-review" / "tools").mkdir(parents=True)
+
+            exec_response = approval_response_for_request(
+                {"method": "execCommandApproval", "params": {"command": ["python3", ".codex-review/tools/scan.py"], "cwd": str(workspace)}},
+                workspace,
+            )
+            patch_response = approval_response_for_request(
+                {"method": "applyPatchApproval", "params": {"fileChanges": {".codex-review/out.json": {"type": "add", "content": "{}"}}}},
+                workspace,
+            )
+            denied_response = approval_response_for_request(
+                {"method": "execCommandApproval", "params": {"command": ["npm", "install"], "cwd": str(workspace)}},
+                workspace,
+            )
+
+        self.assertEqual(exec_response, {"decision": "approved_for_session"})
+        self.assertEqual(patch_response, {"decision": "approved_for_session"})
+        self.assertEqual(denied_response, {"decision": "denied"})
 
     def test_pipeline_has_explicit_codex_auth_check_before_bootstrap(self) -> None:
         phases = [phase for phase, _progress in PIPELINE_PHASES]
