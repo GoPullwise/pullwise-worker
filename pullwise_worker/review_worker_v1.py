@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -275,6 +276,7 @@ PROGRESS_COUNTER_KEYS = (
     "artifacts_uploaded",
 )
 DEFAULT_PROVIDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+LOG_ARTIFACT_NAMES = {"codex-events.jsonl", "worker.log.jsonl", "progress.log.jsonl"}
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "LANG",
     "LC_ALL",
@@ -1535,13 +1537,17 @@ class ReviewWorkerV1:
         artifact_dir: Path | None = None
         started = time.time()
         try:
-            validate_job_policy(job)
+            job_policy = validate_job_policy(job)
+            scan_deadline_seconds = int(job_policy.get("review_worker", {}).get("scanDeadlineSeconds") or 0)
+            wall_deadline = started + scan_deadline_seconds if scan_deadline_seconds > 0 else None
             repo_dir, run_dir, artifact_dir = self.prepare_workspace(job, run_id)
             active.run_dir = run_dir
             events_path = artifact_dir / "codex-events.jsonl"
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_started", "job_id": job_id, "run_id": run_id, "time": iso_time(started)})
             self.emit_event(active, run_dir, "run_started", "prepare_workspace", status="running", progress=0, message="Run started.")
             for phase, progress in PIPELINE_PHASES:
+                if wall_deadline is not None and time.time() > wall_deadline:
+                    raise JobPartialCompleted("review wall-time deadline exceeded")
                 if active.cancel_requested:
                     raise JobCancelled(active.cancel_reason or "cancel requested")
                 self.start_phase(active, run_dir, phase, progress)
@@ -1768,8 +1774,21 @@ class ReviewWorkerV1:
         repo_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         source = str(job.get("checkout_dir") or job.get("checkoutDir") or "").strip()
+        limits = repository_limits_for_job(job)
+        scan_deadline_seconds = None
+        try:
+            scan_deadline_seconds = int(review_worker_policy_for_job(job).get("scanDeadlineSeconds") or 0)
+        except (TypeError, ValueError):
+            scan_deadline_seconds = None
+        copy_deadline = time.monotonic() + scan_deadline_seconds if scan_deadline_seconds and scan_deadline_seconds > 0 else None
         if source:
-            copy_tree(Path(source), repo_dir)
+            copy_tree(
+                Path(source),
+                repo_dir,
+                max_files=limits.get("maxFiles") if limits else None,
+                max_bytes=limits.get("maxBytes") if limits else None,
+                deadline_monotonic=copy_deadline,
+            )
         for path in (
             repo_dir / ".codex-review",
             run_dir,
@@ -2042,7 +2061,19 @@ class ReviewWorkerV1:
         progress: int = 0,
     ) -> None:
         if phase == "inventory_repository":
-            write_json(run_dir / "inventory.json", inventory(repo_dir))
+            policy = validate_job_policy(job)
+            limits = policy["repository_limits"] if isinstance(policy.get("repository_limits"), dict) else {}
+            scan_deadline_seconds = int(policy.get("review_worker", {}).get("scanDeadlineSeconds") or 0)
+            scan_deadline = time.monotonic() + scan_deadline_seconds if scan_deadline_seconds > 0 else None
+            write_json(
+                run_dir / "inventory.json",
+                inventory(
+                    repo_dir,
+                    max_files=int(limits.get("maxFiles")) if limits.get("maxFiles") is not None else None,
+                    max_bytes=int(limits.get("maxBytes")) if limits.get("maxBytes") is not None else None,
+                    deadline_monotonic=scan_deadline,
+                ),
+            )
         elif phase == "token_budget":
             write_json(run_dir / "token-budget.json", token_budget_payload(run_dir, job))
         elif phase == "intent_test_validation":
@@ -2096,6 +2127,7 @@ class ReviewWorkerV1:
                 active_attempt_id(self.config, job),
                 artifact_dir,
                 progress_callback=upload_progress,
+                source_run_dir=run_dir,
             )
         elif phase == "hash_artifacts":
             materialize_artifacts(run_dir, self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"))
@@ -2118,6 +2150,7 @@ class ReviewWorkerV1:
                 materialize_artifacts(run_dir, artifact_dir)
         else:
             materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
+        refresh_log_artifacts(run_dir, artifact_dir)
         manifest = artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))
         now = time.time()
         error_payload = failure_payload_for_error(error, status=status, phase=phase) if error else None
@@ -2242,6 +2275,20 @@ def _policy_int(source: dict[str, Any], *keys: str, default: int | None = None) 
     raise ValueError(f"claimed job policy is missing {keys[0]}")
 
 
+def repository_limits_for_job(job: dict[str, Any]) -> dict[str, int] | None:
+    limits = job.get("repositoryLimits") if isinstance(job.get("repositoryLimits"), dict) else None
+    if limits is None:
+        return None
+    try:
+        max_files = int(limits.get("maxFiles"))
+        max_bytes = int(limits.get("maxBytes"))
+    except (TypeError, ValueError):
+        raise ValueError("claimed job must include repositoryLimits.maxFiles and repositoryLimits.maxBytes") from None
+    if max_files <= 0 or max_bytes <= 0:
+        raise ValueError("repositoryLimits.maxFiles and repositoryLimits.maxBytes must be positive")
+    return {"maxFiles": max_files, "maxBytes": max_bytes}
+
+
 def _validate_restrictive_review_policy(policy: dict[str, Any]) -> None:
     if not policy:
         return
@@ -2305,14 +2352,9 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("claimed job must include review_request.budget.max_wall_time_seconds") from None
     if turn_timeout_seconds <= 0 or scan_deadline_seconds < 0:
         raise ValueError("review worker turn timeout must be positive and scan deadline must be non-negative")
-    limits = job.get("repositoryLimits") if isinstance(job.get("repositoryLimits"), dict) else {}
-    try:
-        max_files = int(limits.get("maxFiles"))
-        max_bytes = int(limits.get("maxBytes"))
-    except (TypeError, ValueError):
-        raise ValueError("claimed job must include repositoryLimits.maxFiles and repositoryLimits.maxBytes") from None
-    if max_files <= 0 or max_bytes <= 0:
-        raise ValueError("repositoryLimits.maxFiles and repositoryLimits.maxBytes must be positive")
+    limits = repository_limits_for_job(job)
+    if limits is None:
+        raise ValueError("claimed job must include repositoryLimits.maxFiles and repositoryLimits.maxBytes")
     return {
         "model": model,
         "reasoning_effort": effort,
@@ -2327,7 +2369,7 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
             "turnTimeoutSeconds": turn_timeout_seconds,
             "scanDeadlineSeconds": scan_deadline_seconds,
         },
-        "repository_limits": {"maxFiles": max_files, "maxBytes": max_bytes},
+        "repository_limits": limits,
         "intent_test_validation": intent_validation_policy_for_job(job),
     }
 
@@ -2607,13 +2649,31 @@ CONFIG_NAMES = {
 GENERATED_PARTS = {"node_modules", "dist", "build", "target", "vendor", "coverage", ".pytest_cache", "__pycache__"}
 
 
-def inventory(repo_dir: Path) -> dict[str, Any]:
+def inventory(
+    repo_dir: Path,
+    *,
+    max_files: int | None = None,
+    max_bytes: int | None = None,
+    deadline_monotonic: float | None = None,
+) -> dict[str, Any]:
     files = []
+    files_seen = 0
+    bytes_seen = 0
     for path in sorted(repo_dir.rglob("*")):
-        if not path.is_file() or ".git" in path.parts or ".codex-review" in path.parts:
+        if ".git" in path.parts or ".codex-review" in path.parts:
+            continue
+        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+            raise RuntimeError("repository scan deadline exceeded while inventorying checkout")
+        if not _is_regular_file_no_follow(path):
             continue
         rel = path.relative_to(repo_dir).as_posix()
-        stat = path.stat()
+        stat_result = path.stat(follow_symlinks=False)
+        files_seen += 1
+        bytes_seen += stat_result.st_size
+        if max_files is not None and files_seen > max_files:
+            raise RuntimeError("repositoryLimits.maxFiles exceeded while inventorying checkout")
+        if max_bytes is not None and bytes_seen > max_bytes:
+            raise RuntimeError("repositoryLimits.maxBytes exceeded while inventorying checkout")
         data = path.read_bytes()
         is_binary = b"\x00" in data[:4096]
         text = ""
@@ -2633,9 +2693,9 @@ def inventory(repo_dir: Path) -> dict[str, Any]:
             {
                 "path": rel,
                 "extension": extension,
-                "size_bytes": stat.st_size,
+                "size_bytes": stat_result.st_size,
                 "line_count": text.count("\n") + (1 if text and not text.endswith("\n") else 0),
-                "estimated_tokens": max(1, (stat.st_size + 3) // 4) if stat.st_size else 0,
+                "estimated_tokens": max(1, (stat_result.st_size + 3) // 4) if stat_result.st_size else 0,
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "is_binary": is_binary,
                 "is_source_like": is_source_like,
@@ -2648,13 +2708,16 @@ def inventory(repo_dir: Path) -> dict[str, Any]:
         )
     summary = {
         "total_files": len(files),
+        "files_total": len(files),
         "source_like_files": sum(1 for item in files if item["is_source_like"]),
+        "bytes_total": sum(int(item["size_bytes"]) for item in files),
         "estimated_source_tokens": sum(int(item["estimated_tokens"]) for item in files if item["is_source_like"]),
         "binary_files": sum(1 for item in files if item["is_binary"]),
         "generated_candidates": sum(1 for item in files if item["is_generated_candidate"]),
         "test_candidates": sum(1 for item in files if item["is_test_candidate"]),
         "config_candidates": sum(1 for item in files if item["is_config_candidate"]),
         "docs_candidates": sum(1 for item in files if item["is_docs_candidate"]),
+        "risk_reasons": sorted({hint for item in files for hint in item.get("risk_hints", [])})[:12],
     }
     return {
         "schema_version": "inventory/v1",
@@ -2677,7 +2740,6 @@ def git_commit(repo_dir: Path) -> str:
         except OSError:
             return "unknown"
     return text or "unknown"
-
 
 def token_budget_payload(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
     inv = read_json(run_dir / "inventory.json", {})
@@ -2842,7 +2904,11 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
     raw_dir.mkdir(parents=True, exist_ok=True)
     verified_dir.mkdir(parents=True, exist_ok=True)
     errors = []
-    for path in sorted(raw_dir.glob("*.json")):
+    valid_outputs = 0
+    raw_files = sorted(raw_dir.glob("*.json"))
+    if not raw_files:
+        errors.append({"file": "raw-reviewers", "error": "no reviewer JSON outputs were produced"})
+    for path in raw_files:
         payload = read_json(path, None)
         if not isinstance(payload, dict):
             errors.append({"file": path.name, "error": "not an object"})
@@ -2854,10 +2920,11 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
         if not isinstance(payload.get("findings"), list):
             errors.append({"file": path.name, "error": "findings must be a list"})
             continue
+        valid_outputs += 1
         write_json(verified_dir / path.name, payload)
     write_json(run_dir / "json-errors.json", {"schema_version": "reviewer-json-validation/v1", "errors": errors})
-    if errors:
-        first = errors[0]
+    if errors or valid_outputs == 0:
+        first = errors[0] if errors else {"file": "raw-reviewers", "error": "no valid reviewer JSON outputs were produced"}
         raise RuntimeError(f"reviewer JSON validation failed for {first.get('file')}: {first.get('error')}")
 
 
@@ -2993,16 +3060,68 @@ def safe_artifact_suffix(name: str, *, fallback: str = "artifact") -> str:
     return "".join(char if char.isalnum() else "_" for char in name).strip("_") or fallback
 
 
-def _intent_test_env() -> dict[str, str]:
-    env = dict(os.environ)
-    for key in list(env):
+def _intent_test_env(validation_repo: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    passthrough = {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+    }
+    for key, value in os.environ.items():
         normalized = key.upper()
-        if normalized.endswith("_PROXY") or normalized in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}:
-            env.pop(key, None)
-    env["CI"] = "true"
-    env["PULLWISE_INTENT_TEST"] = "1"
+        if normalized in passthrough or normalized.startswith("LC_"):
+            env[key] = value
+    sandbox_home = validation_repo / ".intent-test-home"
+    sandbox_tmp = sandbox_home / "tmp"
+    sandbox_tmp.mkdir(parents=True, exist_ok=True)
+    env.update(
+        {
+            "CI": "true",
+            "HOME": str(sandbox_home),
+            "USERPROFILE": str(sandbox_home),
+            "TMPDIR": str(sandbox_tmp),
+            "TMP": str(sandbox_tmp),
+            "TEMP": str(sandbox_tmp),
+            "NO_PROXY": "*",
+            "PULLWISE_INTENT_TEST": "1",
+            "PULLWISE_INTENT_TEST_NETWORK_DISABLED": "1",
+        }
+    )
     return env
 
+
+def _intent_test_preexec() -> Callable[[], None] | None:
+    if not sys.platform.startswith("linux"):
+        return None
+
+    def preexec() -> None:
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        try:
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+        except Exception:
+            pass
+        try:
+            import ctypes
+
+            clone_newnet = 0x40000000
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.unshare(clone_newnet) != 0:
+                os._exit(126)
+        except Exception:
+            os._exit(126)
+
+    return preexec
 
 def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
@@ -3068,15 +3187,19 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
         stdout_path = _intent_output_path(run_dir, test_id, "stdout")
         stderr_path = _intent_output_path(run_dir, test_id, "stderr")
         try:
-            completed = subprocess.run(
-                command,
-                cwd=str(cwd),
-                env=_intent_test_env(),
-                text=True,
-                capture_output=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+            run_kwargs: dict[str, Any] = {
+                "args": command,
+                "cwd": str(cwd),
+                "env": _intent_test_env(validation_repo),
+                "text": True,
+                "capture_output": True,
+                "timeout": timeout_seconds,
+                "check": False,
+            }
+            preexec_fn = _intent_test_preexec()
+            if preexec_fn is not None:
+                run_kwargs["preexec_fn"] = preexec_fn
+            completed = subprocess.run(**run_kwargs)
             duration_ms = int((time.monotonic() - started) * 1000)
             stdout_path.write_text(completed.stdout or "", encoding="utf-8")
             stderr_path.write_text(completed.stderr or "", encoding="utf-8")
@@ -3799,6 +3922,16 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
         path = phase_output_path(run_dir, artifact_dir, rel)
         if not path.exists():
             raise RuntimeError(f"required phase output is missing: {path.name}")
+        if phase == "reviewer_fanout" and path.name == "raw-reviewers":
+            raw_files = sorted(path.glob("*.json")) if path.is_dir() else []
+            if not raw_files:
+                raise RuntimeError("reviewer_fanout produced no raw reviewer JSON outputs")
+            for raw_file in raw_files:
+                payload = parse_required_json_output(raw_file)
+                if str(payload.get("schema_version") or "").strip() != "codex-reviewer-output/v1":
+                    raise RuntimeError(f"raw reviewer output {raw_file.name} must use schema_version codex-reviewer-output/v1")
+                if not isinstance(payload.get("findings"), list):
+                    raise RuntimeError(f"raw reviewer output {raw_file.name} findings must be a list")
         if path.is_file() and path.name == "artifact-manifest.json":
             try:
                 manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -4043,6 +4176,33 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
     write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
     write_json(run_dir / "artifact-manifest.json", manifest_payload)
 
+
+def _refresh_manifest_item(item: dict[str, Any], path: Path) -> None:
+    data = path.read_bytes() if path.exists() else b""
+    item["sha256"] = hashlib.sha256(data).hexdigest()
+    item["size_bytes"] = len(data)
+
+
+def refresh_log_artifacts(run_dir: Path, artifact_dir: Path, manifest_payload: dict[str, Any] | None = None) -> None:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    for name in LOG_ARTIFACT_NAMES:
+        src = run_dir / name
+        if not src.exists():
+            src.parent.mkdir(parents=True, exist_ok=True)
+            src.write_text("", encoding="utf-8")
+        shutil.copy2(src, artifact_dir / name)
+    payload = manifest_payload if isinstance(manifest_payload, dict) else read_json(artifact_dir / "artifact-manifest.json", {})
+    if not isinstance(payload, dict):
+        return
+    changed = False
+    for item in artifact_manifest_items(payload):
+        name = str(item.get("name") or "")
+        if name in LOG_ARTIFACT_NAMES:
+            _refresh_manifest_item(item, artifact_dir / name)
+            changed = True
+    if changed:
+        write_json(artifact_dir / "artifact-manifest.json", payload)
+        write_json(run_dir / "artifact-manifest.json", payload)
 
 def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -4332,17 +4492,56 @@ def failure_payload_for_error(error: object, *, status: str = "", phase: str = "
     }
 
 
-def copy_tree(source: Path, dest: Path) -> None:
-    for path in source.rglob("*"):
-        if ".git" in path.parts:
+def _is_regular_file_no_follow(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.stat(follow_symlinks=False).st_mode)
+    except OSError:
+        return False
+
+
+def copy_tree(
+    source: Path,
+    dest: Path,
+    *,
+    max_files: int | None = None,
+    max_bytes: int | None = None,
+    deadline_monotonic: float | None = None,
+) -> None:
+    try:
+        source_mode = source.stat(follow_symlinks=False).st_mode
+    except OSError as exc:
+        raise RuntimeError(f"repository source is not readable: {source}") from exc
+    if not stat.S_ISDIR(source_mode):
+        raise RuntimeError(f"repository source must be a real directory: {source}")
+
+    files_seen = 0
+    bytes_seen = 0
+    for root, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
+        root_path = Path(root)
+        if ".git" in root_path.parts:
+            dirnames[:] = []
             continue
-        rel = path.relative_to(source)
-        target = dest / rel
-        if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        elif path.is_file():
+        dirnames[:] = [name for name in dirnames if name != ".git" and not (root_path / name).is_symlink()]
+        rel_root = root_path.relative_to(source)
+        if rel_root != Path("."):
+            (dest / rel_root).mkdir(parents=True, exist_ok=True)
+        for filename in filenames:
+            if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+                raise RuntimeError("repository scan deadline exceeded while copying checkout")
+            path = root_path / filename
+            if not _is_regular_file_no_follow(path):
+                continue
+            rel = path.relative_to(source)
+            target = dest / rel
+            file_size = path.stat(follow_symlinks=False).st_size
+            files_seen += 1
+            bytes_seen += file_size
+            if max_files is not None and files_seen > max_files:
+                raise RuntimeError("repositoryLimits.maxFiles exceeded while copying checkout")
+            if max_bytes is not None and bytes_seen > max_bytes:
+                raise RuntimeError("repositoryLimits.maxBytes exceeded while copying checkout")
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target)
+            shutil.copy2(path, target, follow_symlinks=False)
 
 
 def ensure_json(directory: Path) -> None:
@@ -4406,6 +4605,7 @@ def upload_artifacts(
     artifact_dir: Path,
     *,
     progress_callback: Any | None = None,
+    source_run_dir: Path | None = None,
 ) -> None:
     manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
     manifest = artifact_manifest_items(manifest_payload)
@@ -4443,6 +4643,8 @@ def upload_artifacts(
     for uploaded, (item, path) in enumerate(uploadable, start=1):
         artifact_id = str(item.get("artifact_id") or "").strip()
         name = str(item.get("name") or "").strip()
+        if source_run_dir is not None and name in LOG_ARTIFACT_NAMES:
+            refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload)
         data = path.read_bytes()
         actual_sha = hashlib.sha256(data).hexdigest()
         if str(item.get("sha256") or "").lower() != actual_sha:

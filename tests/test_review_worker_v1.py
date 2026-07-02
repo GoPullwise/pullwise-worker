@@ -620,6 +620,42 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertTrue(all((review_root / "prompts" / name).is_file() for name in REQUIRED_PROMPT_FILES))
             self.assertTrue((run_dir / "intent" / "generated-tests").is_dir())
 
+    def test_prepare_workspace_skips_checkout_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source = root / "source"
+            source.mkdir()
+            outside = root / "outside-secret.txt"
+            outside.write_text("secret-from-outside\n", encoding="utf-8")
+            (source / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            try:
+                os.symlink(outside, source / "linked-secret.txt")
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is not available in this environment")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+
+            repo_dir, _run_dir, _artifact_dir = worker.prepare_workspace(
+                {"job_id": "job_1", "checkout_dir": str(source), "repositoryLimits": {"maxFiles": 10, "maxBytes": 4096}},
+                "run_1",
+            )
+
+            self.assertTrue((repo_dir / "app.py").is_file())
+            self.assertFalse((repo_dir / "linked-secret.txt").exists())
+
+    def test_prepare_workspace_enforces_repository_file_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source = root / "source"
+            source.mkdir()
+            (source / "one.py").write_text("1\n", encoding="utf-8")
+            (source / "two.py").write_text("2\n", encoding="utf-8")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+
+            with self.assertRaisesRegex(RuntimeError, "maxFiles"):
+                worker.prepare_workspace(
+                    {"job_id": "job_1", "checkout_dir": str(source), "repositoryLimits": {"maxFiles": 1, "maxBytes": 4096}},
+                    "run_1",
+                )
     def test_inventory_bundle_plan_and_packing_are_v1_2_shaped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -780,6 +816,63 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertRegex(result["test_runs"][0]["skip_reason"], "disallowed|not allowed|policy")
 
+    def test_intent_tests_run_with_sanitized_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "validation-workspace.json").write_text(
+                json.dumps({"validation_repo_root": str(validation_repo)}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-plan.json").write_text(
+                json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-env"}]}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-env",
+                                "command": [sys.executable, "-m", "unittest", "test_env_marker"],
+                                "artifact_refs": ["art_intent_test_source"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "PULLWISE_WORKER_TOKEN": "secret-token",
+                    "OPENAI_API_KEY": "sk-secret",
+                    "HTTPS_PROXY": "http://proxy.invalid",
+                },
+                clear=False,
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run:
+                result = run_intent_tests(run_dir)
+
+            env = run.call_args.kwargs["env"]
+
+        self.assertEqual(result["test_runs"][0]["status"], "passed")
+        self.assertNotIn("PULLWISE_WORKER_TOKEN", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertNotIn("HTTPS_PROXY", env)
+        self.assertEqual(env["HOME"], str(validation_repo / ".intent-test-home"))
+        self.assertEqual(env["PULLWISE_INTENT_TEST_NETWORK_DISABLED"], "1")
     def test_intent_failure_analysis_fallback_classifies_raw_runs_conservatively(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -2343,6 +2436,20 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "repo-map.json").write_text(json.dumps({"schema_version": "repo-map/v1", "areas": []}), encoding="utf-8")
             validate_phase_outputs(run_dir, "repo_map")
 
+    def test_validate_phase_outputs_rejects_empty_reviewer_fanout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+
+            with self.assertRaisesRegex(RuntimeError, "no raw reviewer JSON"):
+                validate_phase_outputs(run_dir, "reviewer_fanout")
+
+            (raw_dir / "security.json").write_text(
+                json.dumps({"schema_version": "codex-reviewer-output/v1", "findings": []}),
+                encoding="utf-8",
+            )
+            validate_phase_outputs(run_dir, "reviewer_fanout")
     def test_validate_phase_outputs_rejects_malformed_intent_test_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
