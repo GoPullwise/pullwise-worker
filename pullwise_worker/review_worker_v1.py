@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -274,6 +274,30 @@ PROGRESS_COUNTER_KEYS = (
     "artifacts_total",
     "artifacts_uploaded",
 )
+DEFAULT_PROVIDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PROVIDER_ENV_PASSTHROUGH_KEYS = (
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+PROTECTED_PROVIDER_ENV_KEYS = {
+    "HOME",
+    "USERPROFILE",
+    "CODEX_HOME",
+    "CODEX_SQLITE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+}
 
 
 def default_progress_counters() -> dict[str, int]:
@@ -420,10 +444,14 @@ class Isolation:
     def __init__(self, config: Any) -> None:
         self.worker_id = str(config.worker_id)
         service_home = Path(str(getattr(config, "service_home", "") or "/var/lib/codex-review"))
+        self.service_home = service_home
         configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
         self.worker_root = Path(configured_root) if configured_root else service_home / "workers" / self.worker_id
         self.codex_home = self.worker_root / "codex-home"
         self.codex_sqlite_home = self.worker_root / "codex-sqlite"
+        self.config_home = self.worker_root / ".config"
+        self.cache_home = self.worker_root / ".cache"
+        self.data_home = self.worker_root / ".local" / "share"
         self.runtime = self.worker_root / "runtime"
         self.workspaces = self.worker_root / "workspaces"
         self.artifacts = self.worker_root / "artifacts"
@@ -434,6 +462,9 @@ class Isolation:
             self.worker_root,
             self.codex_home,
             self.codex_sqlite_home,
+            self.config_home,
+            self.cache_home,
+            self.data_home,
             self.runtime,
             self.workspaces,
             self.artifacts,
@@ -451,16 +482,47 @@ class Isolation:
             agents.chmod(0o600)
 
     def env(self, config: Any) -> dict[str, str]:
-        env = os.environ.copy()
+        env = {
+            key: os.environ[key]
+            for key in PROVIDER_ENV_PASSTHROUGH_KEYS
+            if os.environ.get(key)
+        }
         extra = getattr(config, "codex_env", None)
+        extra_path = ""
         if isinstance(extra, dict):
-            env.update({str(k): str(v) for k, v in extra.items()})
+            for key, value in extra.items():
+                text_key = str(key)
+                upper_key = text_key.upper()
+                if upper_key in PROTECTED_PROVIDER_ENV_KEYS:
+                    continue
+                if upper_key == "PATH":
+                    extra_path = str(value)
+                    continue
+                env[text_key] = str(value)
+        base_path = (
+            extra_path
+            or str(getattr(config, "service_path", "") or "").strip()
+            or os.environ.get("PATH")
+            or DEFAULT_PROVIDER_PATH
+        )
+        path_parts = [
+            str(self.worker_root / ".local" / "bin"),
+            str(self.worker_root / ".codex" / "bin"),
+            str(self.codex_home / "bin"),
+            str(self.service_home / ".local" / "bin"),
+            str(self.service_home / ".codex" / "bin"),
+            base_path,
+        ]
         env.update(
             {
                 "HOME": str(self.worker_root),
                 "USERPROFILE": str(self.worker_root),
                 "CODEX_HOME": str(self.codex_home),
                 "CODEX_SQLITE_HOME": str(self.codex_sqlite_home),
+                "XDG_CONFIG_HOME": str(self.config_home),
+                "XDG_CACHE_HOME": str(self.cache_home),
+                "XDG_DATA_HOME": str(self.data_home),
+                "PATH": os.pathsep.join(dict.fromkeys(part for part in path_parts if part)),
             }
         )
         return env
@@ -996,6 +1058,19 @@ DENIED_COMMAND_TOKENS = {
     "rm",
     "wget",
 }
+DENIED_INTENT_EXECUTABLES = {
+    "bash",
+    "brew",
+    "cmd",
+    "curl",
+    "npx",
+    "pip",
+    "pip3",
+    "powershell",
+    "pwsh",
+    "sh",
+    "wget",
+}
 
 
 def approval_response_for_request(message: dict[str, Any], workspace: Path) -> dict[str, Any]:
@@ -1055,7 +1130,7 @@ def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None)
     argv = [str(part) for part in command] if isinstance(command, list) else shlex.split(str(command or ""))
     if not argv:
         return False
-    executable = Path(argv[0]).name
+    executable = normalized_executable_name(argv[0])
     lowered = {part.lower() for part in argv}
     if lowered.intersection(DENIED_COMMAND_TOKENS):
         return False
@@ -1082,6 +1157,85 @@ def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None)
     return executable in READ_ONLY_COMMANDS
 
 
+def normalized_executable_name(value: object) -> str:
+    name = Path(str(value or "")).name.lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: Path) -> tuple[bool, str]:
+    argv = [str(part) for part in command if str(part).strip()]
+    if not argv:
+        return False, "command is empty"
+    if not path_is_under(cwd, validation_repo):
+        return False, "cwd escapes validation workspace"
+    executable = normalized_executable_name(argv[0])
+    if executable in DENIED_INTENT_EXECUTABLES:
+        return False, f"{executable} is not allowed"
+    lowered = [part.lower() for part in argv]
+    shell_control = {"&&", "||", ";", "|"}
+    if any(part in shell_control for part in lowered):
+        return False, "shell control operators are not allowed"
+    denied = sorted(set(lowered).intersection(DENIED_COMMAND_TOKENS))
+    if denied:
+        return False, f"command contains denied token {denied[0]}"
+    if executable == "pytest":
+        return True, "pytest is allowed"
+    if executable in {"python", "python3", "py"}:
+        if len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] in {"pytest", "unittest"}:
+            return True, f"python -m {lowered[2]} is allowed"
+        if len(argv) >= 2 and not lowered[1].startswith("-"):
+            script_path = Path(argv[1])
+            if not script_path.is_absolute():
+                script_path = cwd / script_path
+            if path_is_under(script_path, validation_repo) and script_path.suffix == ".py":
+                script_name = script_path.name.lower()
+                if script_name.startswith("test") or "_test" in script_name:
+                    return True, "python test file is allowed"
+        return False, "python command must run pytest, unittest, or a test file"
+    if executable in {"npm", "pnpm", "yarn"}:
+        if any(part == "test" or part.startswith("test:") for part in lowered[1:]):
+            return True, f"{executable} test command is allowed"
+        return False, f"{executable} command must run a test script"
+    if executable == "go":
+        return (len(lowered) >= 2 and lowered[1] == "test", "go command must be go test")
+    if executable == "cargo":
+        return (len(lowered) >= 2 and lowered[1] == "test", "cargo command must be cargo test")
+    if executable == "mvn":
+        return ("test" in lowered[1:], "mvn command must run test")
+    if executable == "gradle":
+        return ("test" in lowered[1:] or any(part.endswith(":test") for part in lowered[1:]), "gradle command must run test")
+    if executable == "make":
+        return ("test" in lowered[1:], "make command must run test")
+    return False, f"{executable} is not an allowed generated test command"
+
+
+def result_status_from_envelope(envelope: dict[str, Any]) -> str:
+    execution = envelope.get("execution") if isinstance(envelope.get("execution"), dict) else {}
+    status = str(execution.get("status") or envelope.get("status") or "").strip().lower()
+    if status in {"completed", "done"}:
+        return "done"
+    if status in {"failed", "cancelled", "partial_completed"}:
+        return status
+    return "failed"
+
+
+def terminal_state_from_result_status(status: object) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "done":
+        return "completed"
+    if normalized in {"failed", "cancelled", "partial_completed"}:
+        return normalized
+    return "failed"
+
+
 class ReviewWorkerV1:
     def __init__(self, config: Any, client: Any | None = None) -> None:
         self.config = config
@@ -1100,7 +1254,11 @@ class ReviewWorkerV1:
             if hasattr(self.client, "register"):
                 self.client.register()
             self.state.state = "idle"
+            self.recover_pending_submissions()
             while True:
+                active = self.state.active_job
+                if active is not None and active.state == "finishing":
+                    self.retry_pending_submission_for_active(active)
                 self.heartbeat()
                 if self.state.can_lease():
                     job = self.client.claim()
@@ -1650,6 +1808,9 @@ class ReviewWorkerV1:
                 {
                     "run_id": active.run_id,
                     "job_id": active.job_id,
+                    "lease_id": active.lease_id,
+                    "attempt_id": active.attempt_id,
+                    "result_status": result_status_from_envelope(envelope),
                     "status": "result_submit_pending",
                     "created_at": iso_time(time.time()),
                     "retry_count": 0,
@@ -1660,6 +1821,107 @@ class ReviewWorkerV1:
             )
             return False
 
+
+    def pending_submission_files(self) -> list[Path]:
+        if not self.isolation.artifacts.exists():
+            return []
+        return sorted(
+            self.isolation.artifacts.glob("*/pending-submit.json"),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        )
+
+    def active_job_from_pending_submission(
+        self,
+        pending_path: Path,
+        pending: dict[str, Any],
+        envelope: dict[str, Any],
+    ) -> ActiveJob:
+        job_info = envelope.get("job") if isinstance(envelope.get("job"), dict) else {}
+        run_id = safe_id(pending.get("run_id") or job_info.get("run_id") or pending_path.parent.name, "run")
+        job_id = safe_id(pending.get("job_id") or job_info.get("job_id") or f"job_{run_id}", "job")
+        lease_id = safe_id(pending.get("lease_id") or job_info.get("lease_id") or f"lease_{job_id}", "lease")
+        attempt_id = str(pending.get("attempt_id") or f"{self.config.worker_id}-recovered")
+        active = ActiveJob(job_id=job_id, run_id=run_id, lease_id=lease_id, attempt_id=attempt_id)
+        active.state = "finishing"
+        active.current_phase = "submit_result_envelope"
+        active.current_phase_status = "retrying"
+        active.current_phase_percent = 100.0
+        active.overall_percent = 100.0
+        active.message = "Recovered pending result submission."
+        return active
+
+    def recover_pending_submissions(self) -> None:
+        if self.state.active_job is not None:
+            return
+        for pending_path in self.pending_submission_files():
+            pending = read_json(pending_path, {})
+            if not isinstance(pending, dict):
+                pending = {}
+            envelope_path = pending_path.parent / str(pending.get("result_envelope_path") or "result-envelope.json")
+            envelope = read_json(envelope_path, {})
+            if not isinstance(envelope, dict):
+                envelope = {}
+            active = self.active_job_from_pending_submission(pending_path, pending, envelope)
+            self.state.set_active(active)
+            if not self.retry_pending_submission(active, pending_path):
+                return
+
+    def retry_pending_submission_for_active(self, active: ActiveJob) -> bool:
+        pending_path = self.isolation.artifacts / active.run_id / "pending-submit.json"
+        if not pending_path.exists():
+            active.message = "Pending result submission metadata is missing."
+            return False
+        return self.retry_pending_submission(active, pending_path)
+
+    def retry_pending_submission(self, active: ActiveJob, pending_path: Path) -> bool:
+        pending = read_json(pending_path, {})
+        if not isinstance(pending, dict):
+            pending = {}
+        next_retry_after = pending.get("next_retry_after")
+        if isinstance(next_retry_after, (int, float)) and next_retry_after > time.time():
+            return False
+        envelope_path = pending_path.parent / str(pending.get("result_envelope_path") or "result-envelope.json")
+        envelope = read_json(envelope_path, {})
+        if not isinstance(envelope, dict) or not envelope:
+            pending["error"] = "result envelope is missing or invalid"
+            pending["retry_count"] = int(pending.get("retry_count") or 0) + 1
+            pending["next_retry_after"] = int(time.time() + 60)
+            write_json(pending_path, pending)
+            active.message = "Result submit pending: result envelope is missing or invalid"
+            return False
+        status = str(pending.get("result_status") or result_status_from_envelope(envelope))
+        payload = result_payload(active, envelope, status)
+        try:
+            self.client.result(active.job_id, payload)
+        except Exception as exc:
+            retry_count = int(pending.get("retry_count") or 0) + 1
+            pending.update(
+                {
+                    "run_id": active.run_id,
+                    "job_id": active.job_id,
+                    "lease_id": active.lease_id,
+                    "attempt_id": active.attempt_id,
+                    "result_status": status,
+                    "status": "result_submit_pending",
+                    "retry_count": retry_count,
+                    "next_retry_after": int(time.time() + min(300, 2 ** min(retry_count, 8))),
+                    "result_envelope_path": str(pending.get("result_envelope_path") or "result-envelope.json"),
+                    "error": str(exc),
+                }
+            )
+            write_json(pending_path, pending)
+            active.state = "finishing"
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "retrying"
+            active.message = f"Result submit pending: {exc}"
+            return False
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            pass
+        if self.state.active_job is active:
+            self.state.clear_active(terminal_state_from_result_status(status))
+        return True
     def run_codex_auth_check(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
         if app_server is None:
             raise RuntimeError("Codex app-server is missing")
@@ -1695,7 +1957,6 @@ class ReviewWorkerV1:
             timeout_seconds=turn_timeout_for_job(job),
             cancel_requested=self.poll_cancel_requested,
         )
-        fallback_semantic_artifact(run_dir, job, phase)
 
     def repair_semantic_phase_outputs(
         self,
@@ -1730,7 +1991,6 @@ class ReviewWorkerV1:
             timeout_seconds=turn_timeout_for_job(job),
             cancel_requested=self.poll_cancel_requested,
         )
-        fallback_semantic_artifact(run_dir, job, phase)
 
     def run_reviewer_json_validation_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
         try:
@@ -2795,6 +3055,10 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             continue
         if not cwd.is_dir():
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "generated test cwd does not exist"})
+            continue
+        allowed, policy_reason = intent_test_command_policy(command, cwd, validation_repo)
+        if not allowed:
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": f"generated test command is not allowed by worker policy: {policy_reason}"})
             continue
         remaining_total = total_deadline - time.monotonic()
         if remaining_total <= 0:

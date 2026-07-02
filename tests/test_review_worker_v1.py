@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -516,6 +516,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             repo = root / "repo"
             repo.mkdir()
             (repo / "app.py").write_text("print('source')\n", encoding="utf-8")
+            (repo / "test_intent_marker.py").write_text(
+                "from pathlib import Path\nimport unittest\n\nclass IntentMarkerTest(unittest.TestCase):\n    def test_marker(self):\n        Path('intent_marker.txt').write_text('validation')\n\n",
+                encoding="utf-8",
+            )
             run_dir = repo / ".codex-review" / "runs" / "run_1"
             prepare_validation_workspace(repo, run_dir)
             (run_dir / "intent" / "intent-test-validation.json").write_text(
@@ -533,11 +537,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "generated_tests": [
                             {
                                 "test_id": "ITV-001",
-                                "command": [
-                                    sys.executable,
-                                    "-c",
-                                    "from pathlib import Path; Path('intent_marker.txt').write_text('validation')",
-                                ],
+                                "command": [sys.executable, "-m", "unittest", "test_intent_marker"],
                                 "artifact_refs": ["art_intent_test_source"],
                             }
                         ],
