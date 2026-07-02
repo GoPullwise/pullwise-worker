@@ -3244,15 +3244,31 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             stdout_path.write_text(completed.stdout or "", encoding="utf-8")
             stderr_path.write_text(completed.stderr or "", encoding="utf-8")
             if _intent_sandbox_setup_failed(sandbox_command, completed):
+                completed = subprocess.run(
+                    command,
+                    cwd=str(cwd),
+                    env=_intent_test_env(validation_repo, sandboxed=False),
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+                duration_ms = int((time.monotonic() - started) * 1000)
+                stdout_path.write_text(completed.stdout or "", encoding="utf-8")
+                stderr_path.write_text(completed.stderr or "", encoding="utf-8")
                 raw_results.append(
                     {
                         **base_result,
-                        "status": "skipped",
+                        "status": "passed" if completed.returncode == 0 else "failed",
+                        "command": " ".join(shlex.quote(part) for part in command),
+                        "sandbox_command": " ".join(shlex.quote(part) for part in sandbox_command),
+                        "cwd": str(cwd),
                         "exit_code": int(completed.returncode),
                         "duration_ms": duration_ms,
                         "timed_out": False,
-                        "skip_reason": "intent test sandbox runner failed to initialize",
+                        "stdout_path": str(stdout_path),
                         "stderr_path": str(stderr_path),
+                        "sandbox_fallback_reason": "intent test sandbox runner failed to initialize",
                     }
                 )
                 continue
