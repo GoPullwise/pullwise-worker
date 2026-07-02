@@ -719,7 +719,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = run_intent_tests(run_dir)
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                result = run_intent_tests(run_dir)
             validation_repo = repo.parent / "validation-repo"
             test_run = result["test_runs"][0]
             marker_in_validation_repo = (validation_repo / "intent_marker.txt").is_file()

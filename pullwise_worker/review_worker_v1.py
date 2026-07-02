@@ -3140,7 +3140,7 @@ def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo:
         "--chdir",
         sandbox_cwd,
     ]
-    for host_path in ("/usr", "/bin", "/lib", "/lib64"):
+    for host_path in ("/usr", "/bin", "/lib", "/lib64", "/opt"):
         if Path(host_path).exists():
             argv.extend(["--ro-bind", host_path, host_path])
     argv.extend(["--", *command])
