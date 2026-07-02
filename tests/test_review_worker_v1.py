@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -1148,7 +1149,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
         )
 
-        client.register()
+        with patch("pullwise_worker._main_part_01_bootstrap.sys.platform", "linux"):
+            client.register()
         client.heartbeat(
             protocol_version="review-worker-protocol/v1",
             worker_id="wk_1",
@@ -1519,9 +1521,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root, poll_seconds=1), client=Client())
+            worker.lock.acquire = lambda: None  # type: ignore[method-assign]
+            worker.lock.release = lambda: None  # type: ignore[method-assign]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
 
-            worker.run(once=True)
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
+                worker.run(once=True)
 
         self.assertEqual(calls, ["register", "heartbeat", "claim"])
 
@@ -1545,12 +1550,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root, poll_seconds=1), client=Client())
+            worker.lock.acquire = lambda: None  # type: ignore[method-assign]
+            worker.lock.release = lambda: None  # type: ignore[method-assign]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {  # type: ignore[method-assign]
                 "ready": False,
                 "reason": "codex usage limit exhausted",
             }
 
-            worker.run(once=True)
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
+                worker.run(once=True)
 
         self.assertEqual(calls, ["register", "heartbeat"])
         self.assertEqual(heartbeat_payloads[0]["status"], "idle")
@@ -1576,7 +1584,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_worker_registration_payload_is_v1_one_slot_linux_metadata(self) -> None:
-        payload = worker_registration_payload(SimpleNamespace(worker_id="wk_1", service_home="/var/lib/pullwise-worker"))
+        with patch("pullwise_worker._main_part_01_bootstrap.sys.platform", "linux"):
+            payload = worker_registration_payload(SimpleNamespace(worker_id="wk_1", service_home="/var/lib/pullwise-worker"))
 
         self.assertEqual(payload["protocol_version"], "review-worker-protocol/v1")
         self.assertEqual(payload["worker"]["worker_id"], "wk_1")
@@ -2676,6 +2685,83 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(worker.state.active_job.job_id, "job_1")
         self.assertEqual(active.state, "finishing")
         self.assertEqual(pending["status"], "result_submit_pending")
+
+    def test_recover_pending_submission_retries_and_clears_active_job(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.results = []
+
+            def result(self, job_id: str, payload: dict) -> None:
+                self.results.append((job_id, payload))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            client = Client()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=client)
+            artifact_dir = worker.isolation.artifacts / "run_1"
+            artifact_dir.mkdir(parents=True)
+            envelope = {
+                "protocol_version": "review-worker-protocol/v1",
+                "job": {"run_id": "run_1", "job_id": "job_1", "lease_id": "lease_1"},
+                "execution": {"status": "completed", "duration_ms": 10},
+                "summary": {"top_findings": []},
+                "artifact_manifest": [],
+            }
+            (artifact_dir / "result-envelope.json").write_text(json.dumps(envelope), encoding="utf-8")
+            (artifact_dir / "pending-submit.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "run_1",
+                        "job_id": "job_1",
+                        "lease_id": "lease_1",
+                        "attempt_id": "wk_1-1",
+                        "status": "result_submit_pending",
+                        "result_status": "done",
+                        "result_envelope_path": "result-envelope.json",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            worker.recover_pending_submissions()
+
+            pending_exists = (artifact_dir / "pending-submit.json").exists()
+            active_job = worker.state.active_job
+            results = client.results
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "job_1")
+        self.assertEqual(results[0][1]["status"], "done")
+        self.assertEqual(results[0][1]["attempt_id"], "wk_1-1")
+        self.assertFalse(pending_exists)
+        self.assertIsNone(active_job)
+
+    def test_isolation_env_does_not_inherit_provider_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config = SimpleNamespace(
+                worker_id="wk_1",
+                service_home=str(root),
+                codex_env={"CUSTOM_FLAG": "1", "HOME": "/tmp/host", "PATH": "/opt/provider/bin"},
+            )
+            with patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "host-secret", "HOME": "/home/host", "PATH": "/usr/bin", "LANG": "C.UTF-8"},
+                clear=True,
+            ):
+                worker = ReviewWorkerV1(config)
+                env = worker.isolation.env(config)
+                worker_root = worker.isolation.worker_root
+
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertEqual(env["CUSTOM_FLAG"], "1")
+        self.assertEqual(env["LANG"], "C.UTF-8")
+        self.assertEqual(env["HOME"], str(worker_root))
+        self.assertEqual(env["USERPROFILE"], str(worker_root))
+        self.assertEqual(env["CODEX_HOME"], str(worker_root / "codex-home"))
+        self.assertEqual(env["XDG_CONFIG_HOME"], str(worker_root / ".config"))
+        self.assertEqual(env["PATH"].split(os.pathsep)[0], str(worker_root / ".local" / "bin"))
+        self.assertIn("/opt/provider/bin", env["PATH"])
     def test_result_payload_uses_stable_v1_envelope_without_derived_topology_payload(self) -> None:
         active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk-1")
         envelope = {
