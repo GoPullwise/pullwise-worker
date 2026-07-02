@@ -567,6 +567,9 @@ class JsonRpcAppServer:
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
         self.rate_limit_callback = rate_limit_callback
+        self.thread_sandbox_mode = "workspace-write"
+        self.read_only_sandbox_policy_type = "readOnly"
+        self.workspace_write_sandbox_policy_type = "workspaceWrite"
 
     def start(self) -> None:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -597,17 +600,34 @@ class JsonRpcAppServer:
         self.notify("initialized", {})
 
     def start_thread(self, repo_dir: Path, model: str) -> str:
-        result = self.request(
-            "thread/start",
-            {
-                "cwd": str(repo_dir),
-                "approvalPolicy": "never",
-                "sandbox": "workspace-write",
-                "serviceName": "codex_repo_review_worker",
-                "model": model or None,
-            },
-        )
-        return str(((result.get("thread") or {}).get("id")) or result.get("threadId") or "")
+        last_error: RuntimeError | None = None
+        for sandbox_mode in self._thread_sandbox_mode_candidates():
+            try:
+                result = self.request(
+                    "thread/start",
+                    {
+                        "cwd": str(repo_dir),
+                        "approvalPolicy": "never",
+                        "sandbox": sandbox_mode,
+                        "serviceName": "codex_repo_review_worker",
+                        "model": model or None,
+                    },
+                )
+            except RuntimeError as exc:
+                if not codex_enum_variant_error(exc):
+                    raise
+                last_error = exc
+                continue
+            self.thread_sandbox_mode = sandbox_mode
+            return str(((result.get("thread") or {}).get("id")) or result.get("threadId") or "")
+        if last_error is not None:
+            raise last_error
+        return ""
+
+    def _thread_sandbox_mode_candidates(self) -> tuple[str, ...]:
+        preferred = self.thread_sandbox_mode or "workspace-write"
+        fallback = "workspaceWrite" if preferred == "workspace-write" else "workspace-write"
+        return (preferred, fallback)
 
     def run_turn(
         self,
@@ -620,28 +640,32 @@ class JsonRpcAppServer:
         timeout_seconds: int,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
-        sandbox = {"type": "readOnly", "networkAccess": False}
-        if not read_only:
-            writable_roots = [str(repo_dir / ".codex-review")]
-            validation_repo = repo_dir.parent / "validation-repo"
-            writable_roots.append(str(validation_repo))
-            sandbox = {
-                "type": "workspaceWrite",
-                "networkAccess": False,
-                "writableRoots": writable_roots,
-            }
-        result = self.request(
-            "turn/start",
-            {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt}],
-                "cwd": str(repo_dir),
-                "approvalPolicy": "never",
-                "sandboxPolicy": sandbox,
-                "effort": effort,
-                "summary": "concise",
-            },
-        )
+        last_error: RuntimeError | None = None
+        result: dict[str, Any] = {}
+        for sandbox in self._sandbox_policy_candidates(repo_dir, read_only=read_only):
+            try:
+                result = self.request(
+                    "turn/start",
+                    {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": prompt}],
+                        "cwd": str(repo_dir),
+                        "approvalPolicy": "never",
+                        "sandboxPolicy": sandbox,
+                        "effort": effort,
+                        "summary": "concise",
+                    },
+                )
+            except RuntimeError as exc:
+                if not codex_enum_variant_error(exc):
+                    raise
+                last_error = exc
+                continue
+            self._remember_sandbox_policy_type(sandbox)
+            break
+        else:
+            if last_error is not None:
+                raise last_error
         turn_id = str(((result.get("turn") or {}).get("id")) or result.get("turnId") or "")
         if not turn_id:
             return
@@ -662,6 +686,36 @@ class JsonRpcAppServer:
         error = self._turn_errors.get(turn_id)
         if error:
             raise RuntimeError(error)
+
+    def _sandbox_policy_candidates(self, repo_dir: Path, *, read_only: bool) -> tuple[dict[str, Any], ...]:
+        preferred = self.read_only_sandbox_policy_type if read_only else self.workspace_write_sandbox_policy_type
+        if read_only:
+            fallback = "read-only" if preferred == "readOnly" else "readOnly"
+        else:
+            fallback = "workspace-write" if preferred == "workspaceWrite" else "workspaceWrite"
+        return (
+            self._sandbox_policy(repo_dir, read_only=read_only, policy_type=preferred),
+            self._sandbox_policy(repo_dir, read_only=read_only, policy_type=fallback),
+        )
+
+    def _sandbox_policy(self, repo_dir: Path, *, read_only: bool, policy_type: str) -> dict[str, Any]:
+        if read_only:
+            return {"type": policy_type, "networkAccess": False}
+        writable_roots = [str(repo_dir / ".codex-review")]
+        validation_repo = repo_dir.parent / "validation-repo"
+        writable_roots.append(str(validation_repo))
+        return {
+            "type": policy_type,
+            "networkAccess": False,
+            "writableRoots": writable_roots,
+        }
+
+    def _remember_sandbox_policy_type(self, sandbox: dict[str, Any]) -> None:
+        policy_type = str(sandbox.get("type") or "")
+        if policy_type in {"readOnly", "read-only"}:
+            self.read_only_sandbox_policy_type = policy_type
+        elif policy_type in {"workspaceWrite", "workspace-write"}:
+            self.workspace_write_sandbox_policy_type = policy_type
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
         try:
@@ -755,6 +809,10 @@ class JsonRpcAppServer:
             self.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
             self.process.stdin.flush()
 
+
+def codex_enum_variant_error(error: object) -> bool:
+    message = str(error or "").lower()
+    return "unknown variant" in message and "expected one of" in message
 
 def quota_float(value: object) -> float | None:
     if isinstance(value, bool) or value is None:

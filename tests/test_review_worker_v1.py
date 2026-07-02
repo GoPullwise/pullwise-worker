@@ -182,6 +182,72 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertNotIn('danger-full-access', json.dumps(requests))
         self.assertNotIn("precise", json.dumps(requests))
 
+    def test_codex_app_server_caches_supported_thread_sandbox_mode_after_variant_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            requests = []
+
+            class AppServer(JsonRpcAppServer):
+                def __init__(self) -> None:
+                    super().__init__("codex", {}, workspace, workspace / "events.jsonl")
+
+                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
+                    payload = params or {}
+                    requests.append((method, payload))
+                    if method == "thread/start" and payload.get("sandbox") == "workspace-write":
+                        raise RuntimeError("Invalid request: unknown variant `workspace-write`, expected one of `workspaceWrite`")
+                    if method == "thread/start":
+                        return {"threadId": "thread_1"}
+                    return {}
+
+            server = AppServer()
+            first_thread_id = server.start_thread(workspace, "gpt-5.5")
+            second_thread_id = server.start_thread(workspace, "gpt-5.5")
+
+        thread_sandboxes = [payload["sandbox"] for method, payload in requests if method == "thread/start"]
+        self.assertEqual(first_thread_id, "thread_1")
+        self.assertEqual(second_thread_id, "thread_1")
+        self.assertEqual(thread_sandboxes, ["workspace-write", "workspaceWrite", "workspaceWrite"])
+
+    def test_codex_app_server_caches_supported_turn_sandbox_policy_after_variant_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            requests = []
+
+            class AppServer(JsonRpcAppServer):
+                def __init__(self) -> None:
+                    super().__init__("codex", {}, workspace, workspace / "events.jsonl")
+
+                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
+                    payload = params or {}
+                    requests.append((method, payload))
+                    if method == "turn/start" and payload.get("sandboxPolicy", {}).get("type") == "readOnly":
+                        raise RuntimeError("Invalid request: unknown variant `readOnly`, expected one of `read-only`")
+                    if method == "turn/start":
+                        return {"turnId": ""}
+                    return {}
+
+            server = AppServer()
+            server.run_turn(
+                thread_id="thread_1",
+                repo_dir=workspace,
+                prompt="review",
+                effort="medium",
+                read_only=True,
+                timeout_seconds=2,
+            )
+            server.run_turn(
+                thread_id="thread_1",
+                repo_dir=workspace,
+                prompt="review",
+                effort="medium",
+                read_only=True,
+                timeout_seconds=2,
+            )
+
+        policy_types = [payload["sandboxPolicy"]["type"] for method, payload in requests if method == "turn/start"]
+        self.assertEqual(policy_types, ["readOnly", "read-only", "read-only"])
+
     def test_writable_path_check_uses_available_no_follow_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "logs"
