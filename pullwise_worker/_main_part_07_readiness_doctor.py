@@ -9,6 +9,28 @@ import posixpath
 from .review_worker_v1 import JsonRpcAppServer
 
 
+AGENT_CONFIG_TEXT_MAX_LENGTH = 128
+AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh"}
+
+
+def normalized_agent_config_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if not normalized or len(normalized) > AGENT_CONFIG_TEXT_MAX_LENGTH:
+        return ""
+    if any(char in normalized for char in "\r\n\x00"):
+        return ""
+    if any(char.isspace() for char in normalized):
+        return ""
+    return normalized
+
+
+def normalized_agent_reasoning_level(value: object) -> str:
+    level = normalized_agent_config_text(value).lower()
+    return level if level in AGENT_REASONING_LEVELS else ""
+
+
 def result_checksum(payload: dict) -> str:
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(data).hexdigest()

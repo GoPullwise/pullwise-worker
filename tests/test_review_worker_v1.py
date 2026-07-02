@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pullwise_worker._main_part_01_bootstrap import PullwiseClient, PullwiseResponse, worker_registration_payload
-from pullwise_worker._main_part_07_readiness_doctor import run_doctor
+from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error
 from pullwise_worker.review_worker_v1 import (
     INTENT_TEST_CLASSIFICATIONS,
     PIPELINE_PHASES,
@@ -176,6 +176,33 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             command = scoped_codex_command(SimpleNamespace(service_home=str(service_home)))
 
         self.assertEqual(command, str(service_home / ".local" / "bin" / "codex"))
+
+    def test_subscription_plan_agent_config_validation_accepts_codex_config(self) -> None:
+        plan_configs = {
+            plan: {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}}
+            for plan in ("free", "pro", "max")
+        }
+
+        self.assertEqual(subscription_plan_agent_configs_validation_error(plan_configs), "")
+
+    def test_subscription_plan_agent_config_validation_rejects_bad_codex_config(self) -> None:
+        missing_model = {
+            plan: {"provider": "codex", "codex": {"reasoningEffort": "medium"}}
+            for plan in ("free", "pro", "max")
+        }
+        bad_effort = {
+            plan: {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "extreme"}}
+            for plan in ("free", "pro", "max")
+        }
+
+        self.assertEqual(
+            subscription_plan_agent_configs_validation_error(missing_model),
+            "subscription plan agent configs invalid: free.codex.model is required",
+        )
+        self.assertEqual(
+            subscription_plan_agent_configs_validation_error(bad_effort),
+            "subscription plan agent configs invalid: free.codex.reasoningEffort is required",
+        )
 
     def test_doctor_does_not_require_node_for_standalone_codex_cli(self) -> None:
         config = SimpleNamespace(
