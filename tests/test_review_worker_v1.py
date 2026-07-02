@@ -309,7 +309,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         ):
             self.assertTrue(run_doctor(config))
 
-        dependencies.assert_called_once_with(["git"])
+        dependencies.assert_called_once_with(["git", "bwrap"])
         self.assertEqual(heartbeats[0]["ready_providers"], ["codex"])
 
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
@@ -861,7 +861,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     "HTTPS_PROXY": "http://proxy.invalid",
                 },
                 clear=False,
-            ), patch(
+            ), patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
                 "pullwise_worker.review_worker_v1.subprocess.run",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ) as run:
@@ -1857,7 +1857,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_worker_registration_payload_is_v1_one_slot_linux_metadata(self) -> None:
-        with patch("pullwise_worker._main_part_01_bootstrap.sys.platform", "linux"):
+        with patch("pullwise_worker._main_part_01_bootstrap.sys.platform", "linux"), patch(
+            "pullwise_worker._main_part_01_bootstrap.shutil.which",
+            side_effect=lambda name: "/usr/bin/bwrap" if name == "bwrap" else None,
+        ):
             payload = worker_registration_payload(SimpleNamespace(worker_id="wk_1", service_home="/var/lib/pullwise-worker"))
 
         self.assertEqual(payload["protocol_version"], "review-worker-protocol/v1")
@@ -1867,8 +1870,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse(payload["worker"]["concurrency"]["prefetch_jobs"])
         self.assertTrue(payload["worker"]["capabilities"]["codex_app_server"])
         self.assertTrue(payload["worker"]["capabilities"]["progress_events"])
+        self.assertTrue(payload["worker"]["capabilities"]["intent_test_validation"])
         self.assertEqual(payload["worker"]["platform"]["os"], "linux")
         self.assertEqual(payload["worker"]["capabilities"]["codex_app_server_transport"], ["stdio", "unix"])
+        with patch("pullwise_worker._main_part_01_bootstrap.sys.platform", "linux"), patch("pullwise_worker._main_part_01_bootstrap.shutil.which", return_value=None):
+            unavailable = worker_registration_payload(SimpleNamespace(worker_id="wk_1", service_home="/var/lib/pullwise-worker"))
+        self.assertFalse(unavailable["worker"]["capabilities"]["intent_test_validation"])
+
         with patch("pullwise_worker._main_part_01_bootstrap.sys.platform", "darwin"):
             with self.assertRaisesRegex(ValueError, "requires Linux"):
                 worker_registration_payload(SimpleNamespace(worker_id="wk_1", service_home="/var/lib/pullwise-worker"))
@@ -2085,6 +2093,130 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("run_completed", uploaded_progress)
         self.assertTrue(progress_upload["final_log_upload"])
         self.assertEqual(progress_upload["artifact"]["size_bytes"], len(uploaded_progress.encode("utf-8")))
+    def test_completed_run_uploads_final_logs_after_result_submit(self) -> None:
+        calls = []
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                calls.append(("heartbeat", None, None))
+                return {}
+
+            def event(self, _run_id: str, event: dict) -> dict:
+                calls.append(("event", event["event_type"], event))
+                return {}
+
+            def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                calls.append(("artifact", artifact_id, payload))
+                return {"accepted": True}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                calls.append(("result", payload["status"], payload))
+
+        class CompletedWorker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                write_completed_artifact_inputs(run_dir)
+                materialize_artifacts(run_dir, artifact_dir)
+                return repo_dir, run_dir, artifact_dir
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {"default_model": "gpt-5.5", "core_effort": "high", "non_core_effort": "medium"},
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = CompletedWorker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", (("submit_result_envelope", 100),)):
+                worker.run_job(job)
+
+        result_index = next(index for index, call in enumerate(calls) if call[0] == "result")
+        log_upload_indexes = [index for index, call in enumerate(calls) if call[0] == "artifact" and call[2]["artifact"]["kind"] in {"worker_log", "progress_log", "codex_event_log"}]
+        self.assertTrue(log_upload_indexes)
+        self.assertLess(result_index, min(log_upload_indexes))
+        progress_payload = next(call[2] for call in calls if call[0] == "artifact" and call[2]["artifact"]["kind"] == "progress_log")
+        uploaded_progress = base64.b64decode(progress_payload["content_base64"]).decode("utf-8")
+        self.assertIn("phase_completed", uploaded_progress)
+        self.assertIn("run_completed", uploaded_progress)
+    def test_completed_run_does_not_emit_completed_or_final_logs_when_result_submit_pending(self) -> None:
+        calls = []
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                calls.append(("heartbeat", None, None))
+                return {}
+
+            def event(self, _run_id: str, event: dict) -> dict:
+                calls.append(("event", event["event_type"], event))
+                return {}
+
+            def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                calls.append(("artifact", artifact_id, payload))
+                return {"accepted": True}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                calls.append(("result", payload["status"], payload))
+                raise RuntimeError("network down")
+
+        class PendingWorker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                write_completed_artifact_inputs(run_dir)
+                materialize_artifacts(run_dir, artifact_dir)
+                return repo_dir, run_dir, artifact_dir
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {"default_model": "gpt-5.5", "core_effort": "high", "non_core_effort": "medium"},
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = PendingWorker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", (("submit_result_envelope", 100),)):
+                worker.run_job(job)
+            progress_lines = (root / "repo" / ".codex-review" / "runs" / "run_1" / "progress.log.jsonl").read_text(encoding="utf-8")
+
+        self.assertIn(('result', 'done'), [(kind, value) for kind, value, _payload in calls])
+        self.assertNotIn("run_completed", progress_lines)
+        self.assertNotIn("run_completed", [value for kind, value, _payload in calls if kind == "event"])
+        self.assertFalse([call for call in calls if call[0] == "artifact"])
     def test_upload_artifacts_posts_manifest_entries_before_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

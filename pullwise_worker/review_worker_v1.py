@@ -1586,11 +1586,7 @@ class ReviewWorkerV1:
                     elif phase == "check_codex_auth":
                         self.run_codex_auth_check(app_server, repo_dir, run_dir, job)
                     elif phase == "submit_result_envelope":
-                        envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
-                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done"), artifact_dir, envelope):
-                            terminal_state = "result_submit_pending"
-                            return
-                        terminal_state = "completed"
+                        pass
                     elif phase == "cleanup_active_job":
                         pass
                     elif phase in SEMANTIC_PHASES:
@@ -1653,6 +1649,23 @@ class ReviewWorkerV1:
                             )
                             raise JobPartialCompleted(reason)
                     self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
+                    if phase == "submit_result_envelope":
+                        envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
+                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done"), artifact_dir, envelope):
+                            terminal_state = "result_submit_pending"
+                            return
+                        terminal_state = "completed"
+                        self.emit_event(
+                            active,
+                            run_dir,
+                            "run_completed",
+                            "submit_result_envelope",
+                            status="completed",
+                            progress=100,
+                            current_phase_percent=100,
+                            message="Run completed.",
+                        )
+                        upload_log_artifacts_best_effort(self.client, job_id, active.attempt_id, run_dir, artifact_dir)
                 except JobCancelled:
                     raise
                 except JobPartialCompleted:
@@ -1660,8 +1673,6 @@ class ReviewWorkerV1:
                 except Exception as phase_exc:
                     self.fail_phase(active, run_dir, phase, phase_exc)
                     raise
-            self.emit_event(active, run_dir, "run_completed", "cleanup_active_job", status="completed", progress=100, current_phase_percent=100, message="Run completed.")
-            upload_log_artifacts_best_effort(self.client, job_id, active.attempt_id, run_dir, artifact_dir)
         except JobCancelled:
             artifact_dir = artifact_dir or self.isolation.artifacts / run_id
             run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
