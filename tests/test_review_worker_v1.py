@@ -172,10 +172,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         read_only_turn = requests[1][1]
         write_turn = requests[2][1]
         self.assertEqual(thread_start["sandbox"], "workspace-write")
+        self.assertNotIn("personality", thread_start)
         self.assertEqual(read_only_turn["sandboxPolicy"], {"type": "read-only", "networkAccess": False})
         self.assertEqual(write_turn["sandboxPolicy"]["type"], "workspace-write")
         self.assertNotIn("workspaceWrite", json.dumps(requests))
         self.assertNotIn("readOnly", json.dumps(requests))
+        self.assertNotIn("precise", json.dumps(requests))
 
     def test_writable_path_check_uses_available_no_follow_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

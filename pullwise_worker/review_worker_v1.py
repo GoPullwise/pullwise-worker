@@ -601,7 +601,6 @@ class JsonRpcAppServer:
                 "cwd": str(repo_dir),
                 "approvalPolicy": "never",
                 "sandbox": "workspace-write",
-                "personality": "precise",
                 "serviceName": "codex_repo_review_worker",
                 "model": model or None,
             },
