@@ -595,6 +595,56 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertIn("escapes validation workspace", result["test_runs"][0]["skip_reason"])
 
+    def test_intent_tests_skip_disallowed_generated_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "validation-workspace.json").write_text(
+                json.dumps({"validation_repo_root": str(validation_repo)}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-validation.json").write_text(
+                json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-plan.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-plan/v1",
+                        "test_targets": [{"test_id": "ITV-install", "cwd": "."}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-install",
+                                "command": ["pip", "install", "unexpected-package"],
+                                "artifact_refs": ["art_intent_test_source"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_not_called()
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertRegex(result["test_runs"][0]["skip_reason"], "disallowed|not allowed|policy")
+
     def test_intent_failure_analysis_fallback_classifies_raw_runs_conservatively(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -2378,6 +2428,45 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 worker.run_semantic_phase(None, repo, run_dir, {"job_id": "job_1"}, "repo_map")
 
             self.assertFalse((run_dir / "repo-map.json").exists())
+
+    def test_run_semantic_phase_does_not_synthesize_missing_codex_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run-state.json").write_text(json.dumps({"thread_id": "thread_1"}), encoding="utf-8")
+
+            class AppServer:
+                def run_turn(self, **_kwargs: object) -> None:
+                    return None
+
+            job = {
+                "job_id": "job_1",
+                "model_profile": {
+                    "default_model": "gpt-5",
+                    "core_effort": "high",
+                    "non_core_effort": "medium",
+                },
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                    },
+                    "budget": {"max_wall_time_seconds": 14400},
+                },
+                "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+            }
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+
+            worker.run_semantic_phase(AppServer(), repo, run_dir, job, "repo_map")
+
+            self.assertFalse((run_dir / "repo-map.json").exists())
+            with self.assertRaisesRegex(RuntimeError, "repo-map"):
+                validate_phase_outputs(run_dir, "repo_map")
 
     def test_repair_semantic_phase_requires_codex_app_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
