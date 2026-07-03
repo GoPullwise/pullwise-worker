@@ -32,6 +32,7 @@ from pullwise_worker.review_worker_v1 import (
     artifact_manifest_items,
     codex_error_code,
     codex_quota_payload_from_rate_limits,
+    quota_refresh_error_is_exhaustion,
     decide_approval,
     default_agent_report,
     effort_for_phase,
@@ -2075,6 +2076,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(codex_error_code({"codexErrorInfo": "UsageLimitExceeded"}), "CODEX_QUOTA_EXHAUSTED")
         self.assertEqual(codex_error_code('{"codexErrorInfo":"ContextWindowExceeded"}'), "CODEX_CONTEXT_WINDOW_EXCEEDED")
         self.assertEqual(codex_error_code("unexpected"), "CODEX_UNKNOWN_ERROR")
+
+    def test_quota_probe_auth_error_is_not_exhaustion(self) -> None:
+        self.assertFalse(
+            quota_refresh_error_is_exhaustion("codex account authentication required to read rate limits")
+        )
+        self.assertTrue(quota_refresh_error_is_exhaustion("rate_limit_reached"))
 
 
     def test_codex_quota_payload_selects_main_codex_bucket(self) -> None:

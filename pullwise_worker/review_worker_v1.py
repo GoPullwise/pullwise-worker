@@ -1023,6 +1023,10 @@ def quota_refresh_error_is_exhaustion(error: object) -> bool:
         return False
     lowered = str(error or "").lower()
     fetch_failure_markers = (
+        "authentication required to read rate limits",
+        "account authentication required",
+        "auth required to read rate limits",
+        "unauthorized to read rate limits",
         "endpoint unavailable",
         "unavailable",
         "timed out",
