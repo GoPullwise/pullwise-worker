@@ -992,6 +992,7 @@ def worker_registration_payload(config: WorkerConfig) -> dict:
     service_home = Path(str(getattr(config, "service_home", "") or DEFAULT_SERVICE_HOME))
     configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
     worker_root = Path(configured_root) if configured_root else service_home / "workers" / worker_id
+    codex_home = service_home / ".codex"
     return {
         "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
         "worker": {
@@ -1010,7 +1011,7 @@ def worker_registration_payload(config: WorkerConfig) -> dict:
                 "isolated_app_server": True,
                 "isolated_workspace": True,
                 "isolated_auth": True,
-                "codex_home": str(worker_root / "codex-home"),
+                "codex_home": str(codex_home),
                 "workspace_root": str(worker_root / "workspaces"),
             },
             "platform": {

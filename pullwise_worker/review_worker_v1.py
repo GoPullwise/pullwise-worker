@@ -400,10 +400,11 @@ class WorkerState:
 
 
 class WorkerLock:
-    def __init__(self, worker_root: Path, worker_id: str) -> None:
+    def __init__(self, worker_root: Path, worker_id: str, codex_home: Path | None = None) -> None:
         self.worker_root = worker_root
         self.worker_id = worker_id
         self.path = worker_root / "lock" / "worker.lock"
+        self.codex_home = codex_home or worker_root / "codex-home"
         self._handle: Any = None
 
     def acquire(self) -> None:
@@ -425,7 +426,7 @@ class WorkerLock:
                     "pid": os.getpid(),
                     "hostname": socket.gethostname(),
                     "started_at": iso_time(time.time()),
-                    "codex_home": str(self.worker_root / "codex-home"),
+                    "codex_home": str(self.codex_home),
                 },
                 sort_keys=True,
             )
@@ -449,8 +450,8 @@ class Isolation:
         self.service_home = service_home
         configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
         self.worker_root = Path(configured_root) if configured_root else service_home / "workers" / self.worker_id
-        self.codex_home = self.worker_root / "codex-home"
-        self.codex_sqlite_home = self.worker_root / "codex-sqlite"
+        self.codex_home = service_home / ".codex"
+        self.codex_sqlite_home = service_home / ".codex-sqlite"
         self.config_home = self.worker_root / ".config"
         self.cache_home = self.worker_root / ".cache"
         self.data_home = self.worker_root / ".local" / "share"
@@ -1364,7 +1365,7 @@ class ReviewWorkerV1:
         self.isolation = Isolation(config)
         self.app_server: JsonRpcAppServer | None = None
         self.quota_monitor = CodexQuotaMonitor(config, self.isolation, self.ensure_app_server)
-        self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id))
+        self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id), self.isolation.codex_home)
 
     def default_app_server_events_path(self) -> Path:
         return self.isolation.logs / "codex-app-server-events.jsonl"
