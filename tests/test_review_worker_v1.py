@@ -3052,15 +3052,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             prompts.mkdir(parents=True)
             (prompts / "00_repo_mapper.md").write_text("CUSTOM REPO MAP TEMPLATE\n", encoding="utf-8")
 
-        prompt = phase_prompt("repo_map", run_dir)
+            prompt = phase_prompt("repo_map", run_dir)
 
-        self.assertIn("Role: Repo Mapper", prompt)
-        self.assertIn("Required outputs:", prompt)
-        self.assertIn(f"- Paths are relative to the run artifact directory: {run_dir}", prompt)
-        self.assertIn("- repo-map.json", prompt)
-        self.assertIn("--- 00_repo_mapper.md ---", prompt)
-        self.assertIn("CUSTOM REPO MAP TEMPLATE", prompt)
-        self.assertIn("Do not report bugs in this phase.", prompt)
+            self.assertIn("Role: Repo Mapper", prompt)
+            self.assertIn("Required outputs:", prompt)
+            self.assertIn(f"- Paths are relative to the run artifact directory: {run_dir}", prompt)
+            self.assertIn("- repo-map.json", prompt)
+            self.assertIn("--- 00_repo_mapper.md ---", prompt)
+            self.assertIn("CUSTOM REPO MAP TEMPLATE", prompt)
+            self.assertIn("Do not report bugs in this phase.", prompt)
 
     def test_all_semantic_phases_have_specific_prompt_contracts(self) -> None:
         self.assertEqual(set(SEMANTIC_PHASE_PROMPT_SPECS), set(SEMANTIC_PHASES))
