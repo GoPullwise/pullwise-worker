@@ -697,6 +697,10 @@ def default_worker_package() -> str:
 def service_user_doctor_command(config: WorkerConfig, bin_path: Path) -> list[str]:
     service_user = safe_worker_service_user(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER)
     service_home = str(getattr(config, "service_home", None) or DEFAULT_SERVICE_HOME).strip() or DEFAULT_SERVICE_HOME
+    worker_id = str(getattr(config, "worker_id", None) or "worker").strip() or "worker"
+    worker_root = str(getattr(config, "worker_root", None) or f"{service_home}/workers/{worker_id}").strip()
+    codex_home = str(getattr(config, "codex_home", None) or f"{worker_root}/codex-home").strip()
+    codex_sqlite_home = str(getattr(config, "codex_sqlite_home", None) or f"{worker_root}/codex-sqlite").strip()
     service_path = provider_tool_path(config)
     service_bin = str(bin_path).replace("\\", "/")
     doctor_command = f'cd "$HOME" && exec {shlex.quote(service_bin)} doctor'
@@ -706,13 +710,13 @@ def service_user_doctor_command(config: WorkerConfig, bin_path: Path) -> list[st
         service_user,
         "--",
         "env",
-        f"HOME={service_home}",
-        f"USERPROFILE={service_home}",
-        f"CODEX_HOME={service_home}/.codex",
-        f"CODEX_SQLITE_HOME={service_home}/.codex-sqlite",
-        f"XDG_CONFIG_HOME={service_home}/.config",
-        f"XDG_CACHE_HOME={service_home}/.cache",
-        f"XDG_DATA_HOME={service_home}/.local/share",
+        f"HOME={worker_root}",
+        f"USERPROFILE={worker_root}",
+        f"CODEX_HOME={codex_home}",
+        f"CODEX_SQLITE_HOME={codex_sqlite_home}",
+        f"XDG_CONFIG_HOME={worker_root}/.config",
+        f"XDG_CACHE_HOME={worker_root}/.cache",
+        f"XDG_DATA_HOME={worker_root}/.local/share",
         f"PATH={service_path}",
         "sh",
         "-lc",
@@ -736,13 +740,14 @@ load_worker_env() {{
 }}
 load_worker_env {env_file}
 SERVICE_HOME="${{PULLWISE_SERVICE_HOME:-/var/lib/pullwise-worker}}"
-export HOME="$SERVICE_HOME"
-export USERPROFILE="$SERVICE_HOME"
-export CODEX_HOME="$SERVICE_HOME/.codex"
-export CODEX_SQLITE_HOME="$SERVICE_HOME/.codex-sqlite"
-export XDG_CONFIG_HOME="$SERVICE_HOME/.config"
-export XDG_CACHE_HOME="$SERVICE_HOME/.cache"
-export XDG_DATA_HOME="$SERVICE_HOME/.local/share"
+WORKER_ROOT="${{PULLWISE_WORKER_ROOT:-$SERVICE_HOME/workers/${{PULLWISE_WORKER_ID:-worker}}}}"
+export HOME="$WORKER_ROOT"
+export USERPROFILE="$WORKER_ROOT"
+export CODEX_HOME="${{PULLWISE_CODEX_HOME:-$WORKER_ROOT/codex-home}}"
+export CODEX_SQLITE_HOME="${{PULLWISE_CODEX_SQLITE_HOME:-$WORKER_ROOT/codex-sqlite}}"
+export XDG_CONFIG_HOME="$WORKER_ROOT/.config"
+export XDG_CACHE_HOME="$WORKER_ROOT/.cache"
+export XDG_DATA_HOME="$WORKER_ROOT/.local/share"
 SERVICE_PATH="${{PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
 export PATH="$SERVICE_HOME/.local/bin:$SERVICE_HOME/.codex/bin:$SERVICE_PATH"
 PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-python3.10}}"

@@ -89,12 +89,13 @@ REVIEW_DECISION_EVENT_PROTOCOL_VERSION = "pullwise-review-decision/0.1"
 WORKER_REVIEW_PROTOCOL_VERSION = "review-worker-protocol/v1"
 REPOSITORY_TOO_LARGE_ERROR_CODE = "REPOSITORY_TOO_LARGE"
 CODEX_LOGIN_COMMAND = (
-    f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME} "
-    f"USERPROFILE={DEFAULT_SERVICE_HOME} "
-    f"CODEX_HOME={DEFAULT_SERVICE_HOME}/.codex "
-    f"XDG_CONFIG_HOME={DEFAULT_SERVICE_HOME}/.config "
-    f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/.cache "
-    f"XDG_DATA_HOME={DEFAULT_SERVICE_HOME}/.local/share "
+    f"sudo -u {DEFAULT_SERVICE_USER} env HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id> "
+    f"USERPROFILE={DEFAULT_SERVICE_HOME}/workers/<worker-id> "
+    f"CODEX_HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id>/codex-home "
+    f"CODEX_SQLITE_HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id>/codex-sqlite "
+    f"XDG_CONFIG_HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id>/.config "
+    f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id>/.cache "
+    f"XDG_DATA_HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id>/.local/share "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
     f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_CODEX_COMMAND} login --device-auth'"
 )
@@ -481,19 +482,21 @@ def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool =
 
 def service_user_command(config: WorkerConfig | None, command: list[str]) -> str:
     service_user = str(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
-    service_home = safe_service_home_path(getattr(config, "service_home", None))
+    worker_root = provider_worker_root_path(config)
+    codex_home = provider_codex_home_path(config)
+    codex_sqlite_home = provider_codex_sqlite_home_path(config)
     path = provider_tool_path(config)
     quoted_command = " ".join(shlex.quote(str(part)) for part in command if str(part))
     shell_command = f'cd "$HOME" && exec {quoted_command}'
     return (
         f"sudo -u {shlex.quote(service_user)} env "
-        f"HOME={shlex.quote(service_home)} "
-        f"USERPROFILE={shlex.quote(service_home)} "
-        f"CODEX_HOME={shlex.quote(provider_home_path(service_home, '.codex'))} "
-        f"CODEX_SQLITE_HOME={shlex.quote(provider_home_path(service_home, '.codex-sqlite'))} "
-        f"XDG_CONFIG_HOME={shlex.quote(provider_home_path(service_home, '.config'))} "
-        f"XDG_CACHE_HOME={shlex.quote(provider_home_path(service_home, '.cache'))} "
-        f"XDG_DATA_HOME={shlex.quote(provider_home_path(service_home, '.local', 'share'))} "
+        f"HOME={shlex.quote(worker_root)} "
+        f"USERPROFILE={shlex.quote(worker_root)} "
+        f"CODEX_HOME={shlex.quote(codex_home)} "
+        f"CODEX_SQLITE_HOME={shlex.quote(codex_sqlite_home)} "
+        f"XDG_CONFIG_HOME={shlex.quote(provider_home_path(worker_root, '.config'))} "
+        f"XDG_CACHE_HOME={shlex.quote(provider_home_path(worker_root, '.cache'))} "
+        f"XDG_DATA_HOME={shlex.quote(provider_home_path(worker_root, '.local', 'share'))} "
         f"PATH={shlex.quote(path)} "
         f"sh -lc {shlex.quote(shell_command)}"
     )
@@ -515,10 +518,34 @@ def provider_home_path(service_home: str, *parts: str) -> str:
     clean_parts = [part.strip("/\\") for part in parts if part]
     return "/".join([home.rstrip("/"), *clean_parts])
 
+def provider_worker_root_path(config: object | None) -> str:
+    service_home = safe_service_home_path(getattr(config, "service_home", None))
+    configured_root = str(getattr(config, "worker_root", "") or os.environ.get("PULLWISE_WORKER_ROOT", "")).strip()
+    if configured_root:
+        return safe_service_home_path(configured_root)
+    worker_id = str(getattr(config, "worker_id", "") or "").strip()
+    if worker_id:
+        return provider_home_path(service_home, "workers", safe_worker_id(worker_id))
+    return service_home
+
+
+def provider_codex_home_path(config: object | None) -> str:
+    configured = str(getattr(config, "codex_home", "") or os.environ.get("PULLWISE_CODEX_HOME", "")).strip()
+    if configured:
+        return safe_service_home_path(configured)
+    return provider_home_path(provider_worker_root_path(config), "codex-home")
+
+
+def provider_codex_sqlite_home_path(config: object | None) -> str:
+    configured = str(getattr(config, "codex_sqlite_home", "") or os.environ.get("PULLWISE_CODEX_SQLITE_HOME", "")).strip()
+    if configured:
+        return safe_service_home_path(configured)
+    return provider_home_path(provider_worker_root_path(config), "codex-sqlite")
 
 def provider_process_env(config: WorkerConfig) -> dict[str, str]:
-    service_home = safe_service_home_path(config.service_home)
-    codex_sqlite_home = provider_home_path(service_home, ".codex-sqlite")
+    worker_root = provider_worker_root_path(config)
+    codex_home = provider_codex_home_path(config)
+    codex_sqlite_home = provider_codex_sqlite_home_path(config)
     env = {
         key: os.environ[key]
         for key in PROVIDER_ENV_PASSTHROUGH_KEYS
@@ -526,13 +553,13 @@ def provider_process_env(config: WorkerConfig) -> dict[str, str]:
     }
     env.update(
         {
-            "HOME": service_home,
-            "USERPROFILE": service_home,
-            "CODEX_HOME": provider_home_path(service_home, ".codex"),
+            "HOME": worker_root,
+            "USERPROFILE": worker_root,
+            "CODEX_HOME": codex_home,
             "CODEX_SQLITE_HOME": codex_sqlite_home,
-            "XDG_CONFIG_HOME": provider_home_path(service_home, ".config"),
-            "XDG_CACHE_HOME": provider_home_path(service_home, ".cache"),
-            "XDG_DATA_HOME": provider_home_path(service_home, ".local", "share"),
+            "XDG_CONFIG_HOME": provider_home_path(worker_root, ".config"),
+            "XDG_CACHE_HOME": provider_home_path(worker_root, ".cache"),
+            "XDG_DATA_HOME": provider_home_path(worker_root, ".local", "share"),
             "PATH": provider_tool_path(config),
         }
     )
@@ -776,6 +803,10 @@ class WorkerConfig:
         self.log_dir = Path(log_dir) if log_dir else Path(tempfile.gettempdir()) / "pullwise-worker-logs"
         self.service_user = os.environ.get("PULLWISE_SERVICE_USER", DEFAULT_SERVICE_USER).strip() or DEFAULT_SERVICE_USER
         self.service_home = safe_service_home_path(os.environ.get("PULLWISE_SERVICE_HOME", DEFAULT_SERVICE_HOME))
+        configured_worker_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
+        self.worker_root = safe_service_home_path(configured_worker_root) if configured_worker_root else provider_home_path(self.service_home, "workers", self.worker_id)
+        self.codex_home = provider_codex_home_path(self)
+        self.codex_sqlite_home = provider_codex_sqlite_home_path(self)
         self.service_path = safe_service_path(os.environ.get("PULLWISE_SERVICE_PATH", DEFAULT_SERVICE_PATH))
         self.service_name = safe_worker_service_name(
             os.environ.get("PULLWISE_SERVICE_NAME", DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
@@ -989,10 +1020,9 @@ def worker_registration_payload(config: WorkerConfig) -> dict:
     if not sys.platform.startswith("linux"):
         raise ValueError("pullwise-worker requires Linux")
     worker_id = str(config.worker_id)
-    service_home = Path(str(getattr(config, "service_home", "") or DEFAULT_SERVICE_HOME))
-    configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
-    worker_root = Path(configured_root) if configured_root else service_home / "workers" / worker_id
-    codex_home = service_home / ".codex"
+    service_home = PurePosixPath(str(getattr(config, "service_home", "") or DEFAULT_SERVICE_HOME))
+    worker_root = PurePosixPath(str(getattr(config, "worker_root", "") or service_home / "workers" / worker_id))
+    codex_home = PurePosixPath(str(getattr(config, "codex_home", "") or worker_root / "codex-home"))
     return {
         "protocol_version": WORKER_REVIEW_PROTOCOL_VERSION,
         "worker": {

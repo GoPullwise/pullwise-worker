@@ -317,6 +317,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             config = WorkerConfig(SimpleNamespace(), validate_server_url=False)
 
         self.assertEqual(config.codex_command, f"{service_home}/.local/bin/codex")
+        self.assertEqual(config.worker_root, f"{service_home}/workers/wk_test")
+        self.assertEqual(config.codex_home, f"{service_home}/workers/wk_test/codex-home")
 
     def test_subscription_plan_agent_config_validation_accepts_codex_config(self) -> None:
         plan_configs = {
@@ -3434,8 +3436,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(env["LANG"], "C.UTF-8")
         self.assertEqual(env["HOME"], str(worker_root))
         self.assertEqual(env["USERPROFILE"], str(worker_root))
-        self.assertEqual(env["CODEX_HOME"], str(root / ".codex"))
-        self.assertEqual(env["CODEX_SQLITE_HOME"], str(root / ".codex-sqlite"))
+        self.assertEqual(env["CODEX_HOME"], str(worker_root / "codex-home"))
+        self.assertEqual(env["CODEX_SQLITE_HOME"], str(worker_root / "codex-sqlite"))
         self.assertEqual(env["XDG_CONFIG_HOME"], str(worker_root / ".config"))
         self.assertEqual(env["PATH"].split(os.pathsep)[0], str(worker_root / ".local" / "bin"))
         self.assertIn("/opt/provider/bin", env["PATH"])

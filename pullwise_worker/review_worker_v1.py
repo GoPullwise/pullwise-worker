@@ -450,8 +450,8 @@ class Isolation:
         self.service_home = service_home
         configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
         self.worker_root = Path(configured_root) if configured_root else service_home / "workers" / self.worker_id
-        self.codex_home = service_home / ".codex"
-        self.codex_sqlite_home = service_home / ".codex-sqlite"
+        self.codex_home = Path(str(getattr(config, "codex_home", "") or self.worker_root / "codex-home"))
+        self.codex_sqlite_home = Path(str(getattr(config, "codex_sqlite_home", "") or self.worker_root / "codex-sqlite"))
         self.config_home = self.worker_root / ".config"
         self.cache_home = self.worker_root / ".cache"
         self.data_home = self.worker_root / ".local" / "share"
