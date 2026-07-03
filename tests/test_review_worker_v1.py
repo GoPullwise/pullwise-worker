@@ -300,7 +300,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             service_home = Path(tmp_dir) / "service"
             command = scoped_codex_command(SimpleNamespace(service_home=str(service_home)))
 
-        self.assertEqual(command, str(service_home / ".local" / "bin" / "codex"))
+        self.assertEqual(command, str(service_home / "workers" / "worker" / ".local" / "bin" / "codex"))
 
     def test_worker_config_default_codex_command_matches_installer_path(self) -> None:
         service_home = "/var/lib/pullwise-worker/wk_test"
@@ -316,7 +316,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         ):
             config = WorkerConfig(SimpleNamespace(), validate_server_url=False)
 
-        self.assertEqual(config.codex_command, f"{service_home}/.local/bin/codex")
+        self.assertEqual(config.codex_command, f"{service_home}/workers/wk_test/.local/bin/codex")
         self.assertEqual(config.worker_root, f"{service_home}/workers/wk_test")
         self.assertEqual(config.codex_home, f"{service_home}/workers/wk_test/codex-home")
 
@@ -385,7 +385,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service_home = Path(tmp_dir) / "service"
-            with self.assertRaisesRegex(RuntimeError, "inside worker service_home"):
+            with self.assertRaisesRegex(RuntimeError, "inside worker_root"):
                 scoped_codex_command(SimpleNamespace(service_home=str(service_home), codex_command="/usr/bin/codex"))
             with self.assertRaisesRegex(RuntimeError, "absolute path"):
                 scoped_codex_command(SimpleNamespace(service_home=str(service_home), codex_command="codex"))
@@ -399,7 +399,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         popen.assert_not_called()
         self.assertEqual(snapshot["status"], "unavailable")
-        self.assertIn("inside worker service_home", snapshot["lastError"])
+        self.assertIn("inside worker_root", snapshot["lastError"])
 
     def test_approval_policy_allows_only_review_workspace_and_safe_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

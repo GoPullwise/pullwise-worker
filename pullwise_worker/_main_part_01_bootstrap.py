@@ -67,9 +67,9 @@ DEFAULT_SERVICE_NAME = "pullwise-worker"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
 DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/.local/bin/codex"
+DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/workers/<worker-id>/.local/bin/codex"
 DEFAULT_PROVIDER_AUTH_PATH = (
-    f"{DEFAULT_SERVICE_HOME}/.local/bin:{DEFAULT_SERVICE_HOME}/.codex/bin:{DEFAULT_SERVICE_PATH}"
+    f"{DEFAULT_SERVICE_HOME}/workers/<worker-id>/.local/bin:{DEFAULT_SERVICE_HOME}/workers/<worker-id>/.codex/bin:{DEFAULT_SERVICE_HOME}/workers/<worker-id>/codex-home/bin:{DEFAULT_SERVICE_PATH}"
 )
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "LANG",
@@ -504,10 +504,13 @@ def service_user_command(config: WorkerConfig | None, command: list[str]) -> str
 
 def provider_tool_path(config: WorkerConfig | None) -> str:
     service_home = safe_service_home_path(getattr(config, "service_home", None))
+    worker_root = provider_worker_root_path(config)
+    codex_home = provider_codex_home_path(config)
     service_path = safe_service_path(getattr(config, "service_path", None))
     path_parts = [
-        f"{service_home}/.local/bin",
-        f"{service_home}/.codex/bin",
+        f"{worker_root}/.local/bin",
+        f"{worker_root}/.codex/bin",
+        f"{codex_home}/bin",
         service_path,
     ]
     return os.pathsep.join(dict.fromkeys(part for part in path_parts if part))
@@ -846,7 +849,7 @@ class WorkerConfig:
             os.environ.get("PULLWISE_UNINSTALL_MARKER_FILE", f"/run/{self.service_name}/uninstall-requested").strip()
             or f"/run/{self.service_name}/uninstall-requested"
         )
-        default_codex_command = default_provider_command(self.service_home, "codex")
+        default_codex_command = default_provider_command(self.worker_root, "codex")
         self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or default_codex_command
         self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
         readiness_check_seconds_fallback = env_int(

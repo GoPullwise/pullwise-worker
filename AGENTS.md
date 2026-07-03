@@ -23,21 +23,21 @@ worker use global Codex binaries, global auth, root auth, or another
 worker instance's config.
 
 - Provider commands must resolve to absolute paths inside the current worker
-  `service_home`, for example:
-  - `$service_home/.local/bin/codex`
-  - `$service_home/.codex/bin/codex`
+  `worker_root`, for example:
+  - `$worker_root/.local/bin/codex`
+  - `$worker_root/.codex/bin/codex`
 - Review execution and Codex quota refresh must enforce this at runtime before
   starting the app-server; do not fall back to `codex` from `PATH` or any global
   Codex binary.
 - Provider subprocesses must run with instance-scoped environment values:
-  - `HOME=$service_home`
-  - `USERPROFILE=$service_home`
-  - `CODEX_HOME=$service_home/.codex`
-  - `XDG_CONFIG_HOME=$service_home/.config`
-  - `XDG_CACHE_HOME=$service_home/.cache`
-  - `XDG_DATA_HOME=$service_home/.local/share`
-  - `PATH` with this worker's `$service_home/.local/bin`,
-    `$service_home/.codex/bin` before the base service path
+  - `HOME=$worker_root`
+  - `USERPROFILE=$worker_root`
+  - `CODEX_HOME=$worker_root/codex-home`
+  - `XDG_CONFIG_HOME=$worker_root/.config`
+  - `XDG_CACHE_HOME=$worker_root/.cache`
+  - `XDG_DATA_HOME=$worker_root/.local/share`
+  - `PATH` with this worker's `$worker_root/.local/bin`,
+    `$worker_root/.codex/bin`, `$worker_root/codex-home/bin` before the base service path
 - Do not inherit global provider credentials such as root `HOME`,
   root `CODEX_HOME`, or global API-key based readiness when checking or running
   provider work.

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -512,8 +512,6 @@ class Isolation:
             str(self.worker_root / ".local" / "bin"),
             str(self.worker_root / ".codex" / "bin"),
             str(self.codex_home / "bin"),
-            str(self.service_home / ".local" / "bin"),
-            str(self.service_home / ".codex" / "bin"),
             base_path,
         ]
         env.update(
@@ -533,17 +531,22 @@ class Isolation:
 
 def scoped_codex_command(config: Any) -> str:
     service_home = Path(str(getattr(config, "service_home", "") or "/var/lib/pullwise-worker")).expanduser()
+    worker_root = Path(str(getattr(config, "worker_root", "") or service_home / "workers" / str(getattr(config, "worker_id", "worker") or "worker"))).expanduser()
     command = str(getattr(config, "codex_command", "") or "").strip()
     if not command:
-        command = str(service_home / ".local" / "bin" / "codex")
+        command = str(worker_root / ".local" / "bin" / "codex")
     command_path = Path(command).expanduser()
     if not command_path.is_absolute():
-        raise RuntimeError(f"Codex command must be an absolute path inside worker service_home: {command}")
-    try:
-        command_path.resolve(strict=False).relative_to(service_home.resolve(strict=False))
-    except ValueError as exc:
-        raise RuntimeError(f"Codex command must be inside worker service_home {service_home}: {command}") from exc
-    return str(command_path)
+        raise RuntimeError(f"Codex command must be an absolute path inside worker_root: {command}")
+    resolved_command = command_path.resolve(strict=False)
+    allowed_roots = [worker_root.resolve(strict=False), service_home.resolve(strict=False)]
+    for root in allowed_roots:
+        try:
+            resolved_command.relative_to(root)
+            return str(command_path)
+        except ValueError:
+            continue
+    raise RuntimeError(f"Codex command must be inside worker_root {worker_root}: {command}")
 
 
 class JsonRpcAppServer:
