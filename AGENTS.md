@@ -416,3 +416,12 @@ manual/local worker uninstall, and post-watcher-start install failures. Watcher
 self-removal is allowed only for an admin-initiated Delete instance lifecycle
 operation, and only after the watcher has first ensured the paired worker
 instance service and instance resources have been successfully uninstalled.
+## Debug Bundle Contract
+
+A debug bundle is not the audit bundle and must never silently fall back to the audit bundle.
+
+- A real debug bundle combines worker-side live evidence and server-side evidence for the same scan/job/run.
+- Worker-side evidence should include run-local logs, Codex app-server events, progress logs, run-state, phase outputs, terminal QA/error reports, and the worker artifact manifest. It must not include repository source files, raw API keys, unredacted environment dumps, or unrelated worker-instance state.
+- Server-side evidence should include only scoped records for the same scan/job/run: scan/job/attempt/run identifiers, phase/progress/error snapshots, review-run events, artifact metadata/storage references, retry state, quota state, and relevant timestamps. It must not include full database dumps, secrets, other users' data, or unrelated scans.
+- The UI must disable or omit debug bundle actions when no real debug_bundle artifact/server debug bundle endpoint exists. Do not substitute /scans/{scanId}/audit-bundle.zip as a debug zip URL.
+- Tests should protect this contract: missing debugBundleUrl must not produce an audit-bundle URL, and server/worker tests must verify failed runs still expose a real debug_bundle artifact or explicit absence.
