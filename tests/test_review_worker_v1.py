@@ -3052,10 +3052,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             prompts.mkdir(parents=True)
             (prompts / "00_repo_mapper.md").write_text("CUSTOM REPO MAP TEMPLATE\n", encoding="utf-8")
 
-            prompt = phase_prompt("repo_map", run_dir)
+        prompt = phase_prompt("repo_map", run_dir)
 
         self.assertIn("Role: Repo Mapper", prompt)
-        self.assertIn("Required outputs:\n- repo-map.json", prompt)
+        self.assertIn("Required outputs:", prompt)
+        self.assertIn(f"- Paths are relative to the run artifact directory: {run_dir}", prompt)
+        self.assertIn("- repo-map.json", prompt)
         self.assertIn("--- 00_repo_mapper.md ---", prompt)
         self.assertIn("CUSTOM REPO MAP TEMPLATE", prompt)
         self.assertIn("Do not report bugs in this phase.", prompt)
@@ -3363,9 +3365,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = repo / ".codex-review" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
             (run_dir / "run-state.json").write_text(json.dumps({"thread_id": "thread_1"}), encoding="utf-8")
+            calls = []
 
             class AppServer:
-                def run_turn(self, **_kwargs: object) -> None:
+                def run_turn(self, **kwargs: object) -> None:
+                    calls.append(kwargs)
                     return None
 
             job = {
@@ -3391,6 +3395,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             worker.run_semantic_phase(AppServer(), repo, run_dir, job, "repo_map")
 
+            self.assertFalse(calls[0]["read_only"])
             self.assertFalse((run_dir / "repo-map.json").exists())
             with self.assertRaisesRegex(RuntimeError, "repo-map"):
                 validate_phase_outputs(run_dir, "repo_map")
@@ -3449,9 +3454,45 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(calls[0]["thread_id"], "thread_1")
         self.assertEqual(calls[0]["effort"], "high")
-        self.assertTrue(calls[0]["read_only"])
+        self.assertFalse(calls[0]["read_only"])
         self.assertIn("Phase output repair: repo_map", calls[0]["prompt"])
         self.assertIn("Repair only the required output file", calls[0]["prompt"])
+
+    def test_semantic_phase_output_repair_falls_back_when_codex_omits_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run-state.json").write_text(json.dumps({"thread_id": "thread_1"}), encoding="utf-8")
+            calls = []
+
+            class AppServer:
+                def run_turn(self, **kwargs: object) -> None:
+                    calls.append(kwargs)
+
+            job = {
+                "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
+                "review_request": {
+                    "budget": {"max_wall_time_seconds": 14400},
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                    },
+                },
+                "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+            }
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+
+            with self.assertRaisesRegex(RuntimeError, "repo-map.json"):
+                validate_phase_outputs(run_dir, "repo_map")
+            worker.repair_semantic_phase_outputs(AppServer(), repo, run_dir, job, "repo_map", RuntimeError("missing output"))
+            validate_phase_outputs(run_dir, "repo_map")
+
+        self.assertEqual(len(calls), 1)
 
     def test_hash_artifact_phase_requires_v1_manifest_object_in_artifact_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

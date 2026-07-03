@@ -2229,7 +2229,7 @@ class ReviewWorkerV1:
             repo_dir=repo_dir,
             prompt=prompt,
             effort=effort,
-            read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
+            read_only=False,
             timeout_seconds=turn_timeout_for_job(job),
             cancel_requested=self.poll_cancel_requested,
         )
@@ -2263,10 +2263,11 @@ class ReviewWorkerV1:
             repo_dir=repo_dir,
             prompt=phase_repair_prompt(phase, run_dir, validation_error),
             effort=effort_for_phase(job, phase),
-            read_only=phase not in {"bootstrap_helper_scripts", "intent_test_writing", "final_report_json"},
+            read_only=False,
             timeout_seconds=turn_timeout_for_job(job),
             cancel_requested=self.poll_cancel_requested,
         )
+        fallback_semantic_artifact(run_dir, job, phase)
 
     def run_reviewer_json_validation_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
         try:
@@ -2849,6 +2850,7 @@ def phase_prompt(phase: str, run_dir: Path) -> str:
         lines.extend(f"- {item}" for item in inputs)
     if outputs:
         lines.append("Required outputs:")
+        lines.append(f"- Paths are relative to the run artifact directory: {run_dir}")
         lines.extend(f"- {item}" for item in outputs)
     if instructions:
         lines.append("Phase instructions:")
