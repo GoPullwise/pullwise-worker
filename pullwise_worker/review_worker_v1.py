@@ -3845,6 +3845,59 @@ def intent_map_errors(payload: Any) -> list[str]:
     return errors
 
 
+def _coerce_intent_contracts(value: Any) -> list[Any] | None:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, dict):
+        return None
+    for field in ("behavioral_contracts", "contracts", "items", "entries"):
+        nested = value.get(field)
+        if isinstance(nested, list):
+            return nested
+    if not value:
+        return []
+    if not all(isinstance(item, dict) for item in value.values()):
+        return None
+    contracts = []
+    for contract_id, contract in sorted(value.items()):
+        item = dict(contract)
+        item.setdefault("contract_id", str(contract_id))
+        contracts.append(item)
+    return contracts
+
+
+def repair_intent_map_artifact(path: Path) -> None:
+    if not path.is_file():
+        return
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        return
+    changed = False
+    if payload.get("schema_version") != "intent-map/v1":
+        payload["schema_version"] = "intent-map/v1"
+        changed = True
+    if not str(payload.get("bundle_id") or "").strip():
+        payload["bundle_id"] = "all"
+        changed = True
+    if not isinstance(payload.get("behavioral_contracts"), list):
+        contracts = _coerce_intent_contracts(payload.get("behavioral_contracts"))
+        if contracts is None:
+            contracts = _coerce_intent_contracts(payload)
+        if contracts is None:
+            contracts = []
+            unknowns = payload.get("unknowns")
+            if not isinstance(unknowns, list):
+                unknowns = []
+            message = "Intent contracts were omitted or malformed during semantic repair."
+            if message not in unknowns:
+                unknowns.append(message)
+            payload["unknowns"] = unknowns
+        payload["behavioral_contracts"] = contracts
+        changed = True
+    if changed:
+        write_json(path, payload)
+
+
 def intent_test_plan_errors(run_dir: Path, payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["intent-test-plan.json must be a JSON object"]
@@ -4478,8 +4531,12 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
     elif phase == "clustering_and_voting" and not (run_dir / "clusters.json").exists():
         write_json(run_dir / "clusters.json", {"schema_version": "cluster-output/v1", "clusters": [], "candidate_findings": []})
         write_json(run_dir / "validation-input.json", {"schema_version": "validation-input/v1", "candidates": []})
-    elif phase == "intent_mining" and not (run_dir / "intent" / "intent-map.json").exists():
-        write_json(run_dir / "intent" / "intent-map.json", {"schema_version": "intent-map/v1", "bundle_id": "all", "behavioral_contracts": [], "unknowns": ["No high-value intent targets were materialized."]})
+    elif phase == "intent_mining":
+        intent_map_path = run_dir / "intent" / "intent-map.json"
+        if intent_map_path.exists():
+            repair_intent_map_artifact(intent_map_path)
+        else:
+            write_json(intent_map_path, {"schema_version": "intent-map/v1", "bundle_id": "all", "behavioral_contracts": [], "unknowns": ["No high-value intent targets were materialized."]})
     elif phase == "intent_test_planning" and not (run_dir / "intent" / "intent-test-plan.json").exists():
         write_json(run_dir / "intent" / "intent-test-plan.json", {"schema_version": "intent-test-plan/v1", "test_targets": []})
     elif phase == "intent_test_writing" and not (run_dir / "intent" / "intent-test-source.json").exists():

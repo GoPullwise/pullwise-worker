@@ -3230,6 +3230,54 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
             validate_phase_outputs(run_dir, "intent_mining")
 
+    def test_fallback_semantic_artifact_repairs_object_intent_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            map_path = run_dir / "intent" / "intent-map.json"
+            map_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-map/v1",
+                        "behavioral_contracts": {
+                            "BC-001": {
+                                "title": "Admin routes require authenticated access",
+                                "evidence": ["docs/admin-auth.md"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "bundle_id"):
+                validate_phase_outputs(run_dir, "intent_mining")
+
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_mining")
+            validate_phase_outputs(run_dir, "intent_mining")
+            payload = json.loads(map_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["bundle_id"], "all")
+        self.assertEqual(payload["behavioral_contracts"][0]["contract_id"], "BC-001")
+        self.assertEqual(payload["behavioral_contracts"][0]["title"], "Admin routes require authenticated access")
+
+    def test_fallback_semantic_artifact_repairs_missing_intent_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            map_path = run_dir / "intent" / "intent-map.json"
+            map_path.write_text(json.dumps({"schema_version": "intent-map/v1", "bundle_id": "all"}), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "behavioral_contracts"):
+                validate_phase_outputs(run_dir, "intent_mining")
+
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_mining")
+            validate_phase_outputs(run_dir, "intent_mining")
+            payload = json.loads(map_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["behavioral_contracts"], [])
+        self.assertIn("omitted or malformed", payload["unknowns"][0])
+
     def test_validate_phase_outputs_rejects_duplicate_intent_plan_test_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
