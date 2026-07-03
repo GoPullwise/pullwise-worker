@@ -286,6 +286,13 @@ Repository checkout performance depends on the worker mirror cache.
   contains real repository files excluding `.git` and `.codex-review`. Empty
   checkouts must fail during `prepare_workspace`, not later during semantic
   phases such as `repo_map`.
+- After clone/copy and before starting the Codex App Server, the worker must
+  enforce the claimed job `repositoryLimits` against the materialized checkout.
+  Repository limit failures must not wait until `inventory_repository`; they
+  must submit `REPOSITORY_TOO_LARGE` with `preflight.repositoryStats`,
+  `preflight.repositoryLimits`, `repositoryLimitExceeded = true`, and concrete
+  `repositoryLimitReasons` so scan history, audit bundles, and quota handling
+  have evidence immediately.
 - Keep repository mirrors under `.pullwise-repo-cache` and protect that runtime
   directory from ordinary checkout cleanup.
 - Commit-specific jobs should use shallow fetch into the mirror plus a shared

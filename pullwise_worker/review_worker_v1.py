@@ -1983,6 +1983,8 @@ class ReviewWorkerV1:
             artifact_dir = artifact_dir or self.isolation.artifacts / run_id
             run_dir = run_dir or self.isolation.workspaces / run_id / "repo" / ".codex-review" / "runs" / run_id
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_failed", "error": str(exc), "time": iso_time(time.time())})
+            if isinstance(exc, RepositoryLimitExceeded):
+                write_json(run_dir / "preflight.json", exc.preflight)
             self.emit_event(active, run_dir, "run_failed", active.current_phase, status="failed", progress=active.overall_percent, message=str(exc))
             envelope = self.build_envelope(
                 job,
@@ -2036,6 +2038,13 @@ class ReviewWorkerV1:
             )
         else:
             clone_repository_checkout(job, repo_dir, deadline_monotonic=copy_deadline)
+        enforce_repository_limits(
+            repo_dir,
+            max_files=limits.get("maxFiles") if limits else None,
+            max_bytes=limits.get("maxBytes") if limits else None,
+            context="preparing checkout",
+            deadline_monotonic=copy_deadline,
+        )
         if repository_file_count(repo_dir) <= 0:
             raise RuntimeError("repository checkout produced no repository files")
         for path in (
@@ -2431,6 +2440,7 @@ class ReviewWorkerV1:
             "error": error_payload,
             "summary": summary_payload(run_dir, status),
             "quality_gate": read_json(run_dir / "qa.json", {"status": "fail", "errors": ["run did not reach qa gate"], "warnings": []}),
+            "preflight": read_json(run_dir / "preflight.json", {}),
             "artifact_manifest": manifest,
             "extensions": {"worker_internal": {"bundle_count": 1}},
         }
@@ -2442,6 +2452,57 @@ class JobCancelled(RuntimeError):
 
 class JobPartialCompleted(RuntimeError):
     pass
+
+
+class RepositoryLimitExceeded(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        files_seen: int,
+        bytes_seen: int,
+        max_files: int | None,
+        max_bytes: int | None,
+    ) -> None:
+        super().__init__(message)
+        self.preflight = repository_limit_preflight_payload(
+            files_seen=files_seen,
+            bytes_seen=bytes_seen,
+            max_files=max_files,
+            max_bytes=max_bytes,
+        )
+
+
+def repository_limit_preflight_payload(
+    *,
+    files_seen: int,
+    bytes_seen: int,
+    max_files: int | None,
+    max_bytes: int | None,
+) -> dict[str, Any]:
+    reasons = []
+    if max_files is not None and files_seen > max_files:
+        reasons.append("file_count")
+    if max_bytes is not None and bytes_seen > max_bytes:
+        reasons.append("total_bytes")
+    limits: dict[str, int] = {}
+    if max_files is not None:
+        limits["maxFiles"] = int(max_files)
+    if max_bytes is not None:
+        limits["maxBytes"] = int(max_bytes)
+    return {
+        "mode": "static",
+        "execution": "repository_limit_check",
+        "summary": "Repository checkout exceeds Pullwise worker repository limits.",
+        "repositoryStats": {
+            "fileCount": int(files_seen),
+            "totalBytes": int(bytes_seen),
+            "scanStoppedEarly": True,
+        },
+        "repositoryLimits": limits,
+        "repositoryLimitExceeded": True,
+        "repositoryLimitReasons": reasons,
+    }
 
 
 def safe_id(value: Any, prefix: str) -> str:
@@ -2898,6 +2959,44 @@ CONFIG_NAMES = {
 GENERATED_PARTS = {"node_modules", "dist", "build", "target", "vendor", "coverage", ".pytest_cache", "__pycache__"}
 
 
+def enforce_repository_limits(
+    repo_dir: Path,
+    *,
+    max_files: int | None = None,
+    max_bytes: int | None = None,
+    context: str = "preparing checkout",
+    deadline_monotonic: float | None = None,
+) -> None:
+    files_seen = 0
+    bytes_seen = 0
+    for path in sorted(repo_dir.rglob("*")):
+        if ".git" in path.parts or ".codex-review" in path.parts:
+            continue
+        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+            raise RuntimeError(f"repository scan deadline exceeded while {context}")
+        if not _is_regular_file_no_follow(path):
+            continue
+        stat_result = path.stat(follow_symlinks=False)
+        files_seen += 1
+        bytes_seen += stat_result.st_size
+        if max_files is not None and files_seen > max_files:
+            raise RepositoryLimitExceeded(
+                f"repositoryLimits.maxFiles exceeded while {context}",
+                files_seen=files_seen,
+                bytes_seen=bytes_seen,
+                max_files=max_files,
+                max_bytes=max_bytes,
+            )
+        if max_bytes is not None and bytes_seen > max_bytes:
+            raise RepositoryLimitExceeded(
+                f"repositoryLimits.maxBytes exceeded while {context}",
+                files_seen=files_seen,
+                bytes_seen=bytes_seen,
+                max_files=max_files,
+                max_bytes=max_bytes,
+            )
+
+
 def inventory(
     repo_dir: Path,
     *,
@@ -2920,9 +3019,21 @@ def inventory(
         files_seen += 1
         bytes_seen += stat_result.st_size
         if max_files is not None and files_seen > max_files:
-            raise RuntimeError("repositoryLimits.maxFiles exceeded while inventorying checkout")
+            raise RepositoryLimitExceeded(
+                "repositoryLimits.maxFiles exceeded while inventorying checkout",
+                files_seen=files_seen,
+                bytes_seen=bytes_seen,
+                max_files=max_files,
+                max_bytes=max_bytes,
+            )
         if max_bytes is not None and bytes_seen > max_bytes:
-            raise RuntimeError("repositoryLimits.maxBytes exceeded while inventorying checkout")
+            raise RepositoryLimitExceeded(
+                "repositoryLimits.maxBytes exceeded while inventorying checkout",
+                files_seen=files_seen,
+                bytes_seen=bytes_seen,
+                max_files=max_files,
+                max_bytes=max_bytes,
+            )
         data = path.read_bytes()
         is_binary = b"\x00" in data[:4096]
         text = ""
@@ -4782,6 +4893,7 @@ def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str) -> 
         "duration_ms": envelope["execution"].get("duration_ms", 0),
         "error": (envelope.get("error") or {}).get("message", ""),
         "error_code": (envelope.get("error") or {}).get("code", ""),
+        "preflight": envelope.get("preflight") or {},
     }
 
 
@@ -4831,7 +4943,10 @@ def failure_payload_for_error(error: object, *, status: str = "", phase: str = "
     action = "fail_job_retryable"
     retryable = True
 
-    if status_text == "cancelled" or "cancel" in lowered:
+    if isinstance(error, RepositoryLimitExceeded) or "repositorylimits.max" in lowered:
+        code = "REPOSITORY_TOO_LARGE"
+        category, action, retryable = "repository_limit_exceeded", "fail_job_terminal", False
+    elif status_text == "cancelled" or "cancel" in lowered:
         category, action, retryable = "job_cancelled", "cancel_job", False
     elif status_text == "partial_completed":
         category, action, retryable = "qa_failure", "partial_result", False
@@ -4920,9 +5035,21 @@ def copy_tree(
             files_seen += 1
             bytes_seen += file_size
             if max_files is not None and files_seen > max_files:
-                raise RuntimeError("repositoryLimits.maxFiles exceeded while copying checkout")
+                raise RepositoryLimitExceeded(
+                    "repositoryLimits.maxFiles exceeded while copying checkout",
+                    files_seen=files_seen,
+                    bytes_seen=bytes_seen,
+                    max_files=max_files,
+                    max_bytes=max_bytes,
+                )
             if max_bytes is not None and bytes_seen > max_bytes:
-                raise RuntimeError("repositoryLimits.maxBytes exceeded while copying checkout")
+                raise RepositoryLimitExceeded(
+                    "repositoryLimits.maxBytes exceeded while copying checkout",
+                    files_seen=files_seen,
+                    bytes_seen=bytes_seen,
+                    max_files=max_files,
+                    max_bytes=max_bytes,
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target, follow_symlinks=False)
 

@@ -844,6 +844,69 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     "run_1",
                 )
 
+    def test_run_job_rejects_cloned_checkout_over_repository_limit_before_app_server(self) -> None:
+        results = []
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, _run_id: str, _event: dict) -> dict:
+                return {}
+
+            def artifact(self, _job_id: str, _artifact_id: str, _payload: dict) -> dict:
+                return {}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                results.append(payload)
+
+        class Worker(ReviewWorkerV1):
+            def ensure_app_server(self, events_path: Path | None = None) -> JsonRpcAppServer:
+                raise AssertionError("app server should not start after repository limit precheck fails")
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "repository": {"clone_url": "https://github.com/acme/api.git"},
+            "branch": "main",
+            "commit": "pending",
+            "model_profile": {"default_model": "gpt-5.5", "core_effort": "high", "non_core_effort": "medium"},
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 100, "maxBytes": 2 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = Worker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+
+            def fake_run(args: list[str], **_kwargs: object) -> SimpleNamespace:
+                if "checkout" in args:
+                    repo_dir = Path(args[args.index("-C") + 1])
+                    (repo_dir / "big.bin").write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("pullwise_worker.review_worker_v1.subprocess.run", side_effect=fake_run):
+                worker.run_job(job)
+
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertEqual(results[0]["error_code"], "REPOSITORY_TOO_LARGE")
+        self.assertTrue(results[0]["preflight"]["repositoryLimitExceeded"])
+        self.assertEqual(results[0]["preflight"]["repositoryLimitReasons"], ["total_bytes"])
+        self.assertEqual(results[0]["preflight"]["repositoryLimits"], {"maxFiles": 100, "maxBytes": 2 * 1024 * 1024})
+        self.assertEqual(results[0]["preflight"]["repositoryStats"]["totalBytes"], 2 * 1024 * 1024 + 1)
+
     def test_prepare_workspace_clones_claimed_repository_when_checkout_dir_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
