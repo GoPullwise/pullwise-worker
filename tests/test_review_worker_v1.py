@@ -1822,6 +1822,23 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(calls[-2][2])
         self.assertTrue(calls[-1][2])
 
+    def test_pullwise_client_uses_worker_identity_headers(self) -> None:
+        client = PullwiseClient(
+            SimpleNamespace(
+                worker_id="wk_1",
+                worker_token="secret",
+                server_url="https://api.pullwise.dev",
+                provider="codex",
+                provider_chain=["codex"],
+                result_upload_compress_min_bytes=1024,
+            )
+        )
+
+        self.assertEqual(client.headers["User-Agent"], "Pullwise-Worker/0.9.22")
+        self.assertEqual(client.headers["X-Pullwise-Worker-Id"], "wk_1")
+        self.assertEqual(client.headers["X-Pullwise-Worker-Version"], "0.9.22")
+        self.assertEqual(client.headers["Accept"], "application/json")
+
     def test_pullwise_client_has_no_legacy_review_progress_route(self) -> None:
         bootstrap_source = (Path(__file__).resolve().parents[1] / "pullwise_worker" / "_main_part_01_bootstrap.py").read_text(
             encoding="utf-8"

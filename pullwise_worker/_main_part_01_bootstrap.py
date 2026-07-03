@@ -58,6 +58,7 @@ _PROC_MEMINFO_PATH = "/proc/meminfo"
 DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS = 10
 WORKER_HTTP_TIMEOUT_SECONDS = 60
 WORKER_HTTP_RESPONSE_MAX_BYTES = 1024 * 1024
+PULLWISE_WORKER_USER_AGENT = f"Pullwise-Worker/{__version__}"
 DEFAULT_WORKER_PACKAGE_BASE_URL = "https://github.com/GoPullwise/pullwise-worker/releases/download"
 SUPPORTED_REVIEW_PROVIDERS = {"codex"}
 DEFAULT_ACTIVE_READINESS_CHECK_SECONDS = 60
@@ -1076,6 +1077,9 @@ class PullwiseClient:
             "Authorization": f"Bearer {config.worker_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": PULLWISE_WORKER_USER_AGENT,
+            "X-Pullwise-Worker-Id": config.worker_id,
+            "X-Pullwise-Worker-Version": __version__,
         }
 
     def post(self, path: str, payload: dict, *, compress: bool = False) -> PullwiseResponse:
