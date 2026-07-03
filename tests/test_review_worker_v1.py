@@ -107,6 +107,37 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         state.clear_active("completed")
         self.assertTrue(state.can_lease())
 
+    def test_progress_events_and_heartbeats_include_worker_reported_steps(self) -> None:
+        events = []
+
+        class Client:
+            def event(self, _run_id: str, event: dict) -> dict:
+                events.append(event)
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=tmp_dir), client=Client())
+
+            event = worker.emit_event(
+                active,
+                run_dir,
+                "progress_updated",
+                "repo_map",
+                progress=33,
+                current_phase_percent=40,
+                message="Mapping repository",
+            )
+            snapshot = active.progress_snapshot()
+
+        self.assertEqual(len(event["progress"]["steps"]), len(PIPELINE_PHASES))
+        self.assertEqual(len(snapshot["steps"]), len(PIPELINE_PHASES))
+        repo_step = next(step for step in event["progress"]["steps"] if step["id"] == "repo_map")
+        self.assertEqual(repo_step["status"], "running")
+        self.assertEqual(repo_step["percent"], 40)
+        self.assertEqual(events[0]["progress"]["steps"], event["progress"]["steps"])
+
     def test_codex_turn_interrupts_when_cancel_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -382,6 +413,42 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         dependencies.assert_called_once_with(["git", "bwrap"])
         self.assertEqual(heartbeats[0]["ready_providers"], ["codex"])
+
+    def test_doctor_preflight_can_skip_systemd_active_requirement(self) -> None:
+        config = SimpleNamespace(
+            provider="codex",
+            provider_chain=["codex"],
+            service_name="pullwise-worker-test",
+            worker_id="wk_1",
+            doctor_require_systemd_active=False,
+        )
+        heartbeats = []
+
+        class Client:
+            def __init__(self, config: object) -> None:
+                self.config = config
+
+            def heartbeat(self, **payload: object) -> None:
+                heartbeats.append(payload)
+
+        checks = [("provider_ready", True, "codex"), ("codex_ready", True, "ready")]
+        with patch(
+            "pullwise_worker._main_part_07_readiness_doctor.install_ubuntu_2204_dependencies",
+            return_value=(True, "dependencies present"),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.worker_readiness_state",
+            return_value=(checks, True, ["codex"]),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.command_ok",
+            return_value=(False, "inactive"),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.PullwiseClient",
+            Client,
+        ):
+            self.assertTrue(run_doctor(config))
+
+        self.assertFalse(heartbeats[0]["systemd_active"])
+        self.assertEqual(heartbeats[0]["doctor_status"], "ok")
 
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -210,11 +210,18 @@ Review pipeline rules:
 - Every posted progress event must include `protocol_version`, `run_id`,
   `worker_id`, positive monotonic `sequence`, `timestamp`, supported
   `event_type`, `phase`, `severity`, `message`, and `progress` with
-  `overall_percent`, `current_phase_percent`, and `status`.
+  `overall_percent`, `current_phase_percent`, `status`, and the worker-owned
+  ordered `steps` snapshot for the full flow this worker is executing.
 - Active heartbeat `progress` snapshots must include the v1 counter set
   (`source_like_files_*`, `bundles_*`, `reviewer_runs_*`,
   `intent_tests_*`, `validator_candidates_*`, and `artifacts_*`) plus
   `active_unit`, even when counters are zero.
+- The worker is the source of truth for jobscan detail flow shape. Keep phase
+  definitions, ordering, labels, and step counts on the worker side, report them
+  through progress events and heartbeat snapshots, and do not rely on web or
+  server code to recreate this worker's pipeline. Future workers may report a
+  different flow; their reported steps must remain internally consistent with
+  their own events.
 - Long-running phases must post `progress_updated` events, not only
   `phase_started`/`phase_completed`. `reviewer_fanout` progress data must
   include `reviewer_runs_total` and `reviewer_runs_completed`;
@@ -384,3 +391,21 @@ worker process, watcher process, systemd unit, service user, env file, config
 directory, `service_home`, `log_dir`, runtime directory, uninstall marker, or
 provider state. Instance-specific names and paths must be derived from the safe
 worker id.
+
+The watcher is the worker-host role that monitors and controls its paired worker
+instance. Treat watcher reliability as a lifecycle boundary: the watcher service
+must be enabled and started before the worker service, and its systemd unit must
+be ordered before the paired worker unit. The watcher may stop and remove the
+worker service and instance-owned resources during lifecycle cleanup.
+
+Watcher ownership is strictly one-to-one with a worker instance. Different
+worker instances on the same host must have different watcher ids, service
+names, runtime directories, env/config paths, and lifecycle markers; they must
+never share a watcher service.
+
+Once a watcher service has successfully started, do not stop, disable, remove,
+or uninstall it from any non-delete path, including update, restart, cleanup,
+manual/local worker uninstall, and post-watcher-start install failures. Watcher
+self-removal is allowed only for an admin-initiated Delete instance lifecycle
+operation, and only after the watcher has first ensured the paired worker
+instance service and instance resources have been successfully uninstalled.

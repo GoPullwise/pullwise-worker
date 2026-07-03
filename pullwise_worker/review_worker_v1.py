@@ -311,6 +311,25 @@ def default_progress_counters() -> dict[str, int]:
     return {key: 0 for key in PROGRESS_COUNTER_KEYS}
 
 
+def progress_step_label(phase: str) -> str:
+    return str(phase or "").replace("_", " ").strip().capitalize()
+
+
+def default_progress_steps() -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for index, (phase, target_progress) in enumerate(PIPELINE_PHASES, start=1):
+        steps.append(
+            {
+                "id": phase,
+                "index": index,
+                "label": progress_step_label(phase),
+                "description": "",
+                "target_percent": target_progress,
+            }
+        )
+    return steps
+
+
 @dataclass
 class ActiveJob:
     job_id: str
@@ -332,6 +351,7 @@ class ActiveJob:
     thread_id: str = ""
     counters: dict[str, int] = field(default_factory=default_progress_counters)
     active_unit: dict[str, Any] = field(default_factory=dict)
+    flow_steps: list[dict[str, Any]] = field(default_factory=default_progress_steps)
 
     def heartbeat_payload(self) -> dict[str, Any]:
         return {
@@ -353,6 +373,7 @@ class ActiveJob:
             "current_phase_status": self.current_phase_status,
             "current_phase_percent": self.current_phase_percent,
             "message": self.message,
+            "steps": self.progress_steps(),
             "counters": dict(self.counters),
             "active_unit": dict(self.active_unit),
             "last_event_sequence": self.last_event_sequence,
@@ -372,6 +393,34 @@ class ActiveJob:
         active_unit = data.get("active_unit")
         if isinstance(active_unit, dict):
             self.active_unit = dict(active_unit)
+
+    def progress_steps(self) -> list[dict[str, Any]]:
+        phase_index = next(
+            (index for index, step in enumerate(self.flow_steps) if step.get("id") == self.current_phase),
+            -1,
+        )
+        steps: list[dict[str, Any]] = []
+        for index, step in enumerate(self.flow_steps):
+            status = "pending"
+            percent = 0.0
+            if phase_index >= 0 and index < phase_index:
+                status = "completed"
+                percent = 100.0
+            elif index == phase_index:
+                status = self.current_phase_status or "running"
+                percent = self.current_phase_percent
+            steps.append(
+                {
+                    "id": str(step.get("id") or ""),
+                    "index": int(step.get("index") or index + 1),
+                    "label": str(step.get("label") or progress_step_label(str(step.get("id") or ""))),
+                    "description": str(step.get("description") or ""),
+                    "target_percent": step.get("target_percent"),
+                    "status": status,
+                    "percent": round(float(percent), 2),
+                }
+            )
+        return steps
 
 
 class WorkerState:
@@ -1552,6 +1601,7 @@ class ReviewWorkerV1:
                 "overall_percent": active.overall_percent,
                 "current_phase_percent": active.current_phase_percent,
                 "status": status,
+                "steps": active.progress_steps(),
             },
             "data": data or {},
         }

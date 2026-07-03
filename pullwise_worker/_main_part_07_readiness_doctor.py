@@ -282,7 +282,11 @@ def run_doctor(config: WorkerConfig) -> bool:
     if not dependency_ok or dependency_detail != "dependencies present":
         checks.insert(0, ("dependency_install", dependency_ok, dependency_detail))
     codex_ready = readiness_check_ok(checks, "codex_ready")
-    systemd_ok, systemd_detail = command_ok(["systemctl", "is-active", config.service_name])
+    systemd_active, systemd_detail = command_ok(["systemctl", "is-active", config.service_name])
+    require_systemd_active = bool(getattr(config, "doctor_require_systemd_active", True))
+    systemd_ok = systemd_active if require_systemd_active else True
+    if not require_systemd_active:
+        systemd_detail = f"install preflight; service active check skipped ({systemd_detail})"
     checks.append(("systemd", systemd_ok, systemd_detail))
     heartbeat_ok = True
     heartbeat_detail = "ok"
@@ -309,7 +313,7 @@ def run_doctor(config: WorkerConfig) -> bool:
             doctor_status="ok" if doctor_required_ok else "degraded",
             codex_ready=codex_ready,
             ready_providers=ready_providers,
-            systemd_active=systemd_ok,
+            systemd_active=systemd_active,
             doctor_checked_at=int(time.time()),
         )
     except Exception as exc:

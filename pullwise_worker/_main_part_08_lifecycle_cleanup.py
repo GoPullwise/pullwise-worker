@@ -396,6 +396,19 @@ def execute_watcher_lifecycle_command(action: str, config: WorkerConfig) -> int:
     return 2
 
 
+def lifecycle_command_parts(command: dict) -> tuple[str, str] | None:
+    if not isinstance(command, dict):
+        return None
+    command_id = client_protocol_text(command.get("id"), max_length=128)
+    action = str(command.get("command") or command.get("action") or "").strip().lower()
+    if not command_id or action not in {"stop", "uninstall"}:
+        return None
+    try:
+        url_path_segment(command_id)
+    except PullwiseRequestError:
+        return None
+    return command_id, action
+
 def command_worker_has_active_jobs(worker_state: dict | None) -> bool:
     if not isinstance(worker_state, dict):
         return False
@@ -407,17 +420,24 @@ def command_worker_has_active_jobs(worker_state: dict | None) -> bool:
     return False
 
 
+def worker_artifact_root(config: WorkerConfig) -> Path:
+    worker_root = str(getattr(config, "worker_root", "") or "").strip()
+    if worker_root:
+        return Path(worker_root) / "artifacts"
+    return Path(config.work_dir) / "artifacts"
+
+
 def pending_result_uploads_exist(config: WorkerConfig) -> bool:
     try:
-        pending_dir = result_upload_dir(Path(config.work_dir))
+        artifact_root = worker_artifact_root(config)
     except Exception:
         return True
-    if pending_dir.is_symlink():
+    if artifact_root.is_symlink():
         return True
-    if not pending_dir.is_dir():
+    if not artifact_root.is_dir():
         return False
     try:
-        for path in pending_dir.glob("*.json"):
+        for path in artifact_root.glob("*/pending-submit.json"):
             if path.is_symlink() or path.is_file():
                 return True
     except OSError:
@@ -465,7 +485,15 @@ class WorkerLifecycleWatcher:
         except PullwiseRequestError as exc:
             self.last_error = f"command ack failed: {redact_secrets(str(exc), self.config)}"[:500]
             return False
-        code = execute_watcher_lifecycle_command(action, self.config)
+        try:
+            code = execute_watcher_lifecycle_command(action, self.config)
+        except Exception as exc:
+            error = f"{action} command raised {type(exc).__name__}: {redact_secrets(str(exc), self.config)}"[:500]
+            try:
+                self.client.command_status(command_id, "failed", error=error)
+            except PullwiseRequestError as status_exc:
+                self.last_error = f"command status failed: {redact_secrets(str(status_exc), self.config)}"[:500]
+            return False
         if code == 0:
             try:
                 self.client.command_status(command_id, "succeeded")
@@ -571,6 +599,7 @@ def finalize_worker_uninstall(config: WorkerConfig, *, dry_run: bool = False) ->
         remove_wrapper=True,
         remove_logrotate=True,
         remove_service_user=True,
+        remove_watcher=True,
         stop_service=False,
         dry_run=dry_run,
     )
@@ -837,6 +866,7 @@ def watcher_service_unit(config: WorkerConfig, *, env_path: Path | None = None, 
 Description=Pullwise Worker Watcher {worker_name}
 After=network-online.target
 Wants=network-online.target
+Before={worker_name}.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -1028,6 +1058,7 @@ def uninstall_worker(
     remove_wrapper: bool = True,
     remove_logrotate: bool = True,
     remove_service_user: bool = True,
+    remove_watcher: bool = False,
     stop_service: bool = True,
     dry_run: bool = False,
 ) -> int:
@@ -1053,15 +1084,14 @@ def uninstall_worker(
     if stop_service:
         commands.append(["systemctl", "stop", service_name])
     commands.append(["systemctl", "disable", service_name])
-    if (
-        watcher_enabled
-        and
-        watcher_service_name
+    should_remove_watcher = (
+        remove_watcher
+        and watcher_enabled
+        and watcher_service_name
         and watcher_service_name != service_name
         and not path_is_root(watcher_service_file)
         and (dry_run or watcher_service_file.exists())
-    ):
-        commands.append(["systemctl", "disable", watcher_service_name])
+    )
     for command in commands:
         if dry_run:
             print(" ".join(command))
@@ -1075,8 +1105,6 @@ def uninstall_worker(
             print(f"remove {wrapper}")
         if remove_logrotate:
             print(f"remove {logrotate}")
-        if watcher_enabled and watcher_service_name and watcher_service_name != service_name:
-            print(f"remove {watcher_service_file}")
         if remove_service_home:
             print(f"remove {service_home}")
         if remove_config and safe_worker_instance_config_target(config_dir, config):
@@ -1085,6 +1113,9 @@ def uninstall_worker(
             print(f"remove {log_dir}")
         if remove_service_user and removable_service_user(config.service_user):
             print(f"userdel {config.service_user}")
+        if should_remove_watcher:
+            print(f"systemctl disable {watcher_service_name}")
+            print(f"remove {watcher_service_file}")
         print("systemctl daemon-reload")
     else:
         safe_unlink(service_file, service_name=service_name)
@@ -1092,8 +1123,6 @@ def uninstall_worker(
             safe_worker_file_unlink(wrapper, Path("/usr/local/bin"), service_name)
         if remove_logrotate:
             safe_worker_file_unlink(logrotate, Path("/etc/logrotate.d"), service_name)
-        if watcher_enabled and watcher_service_name and watcher_service_name != service_name and watcher_service_file.exists():
-            safe_unlink(watcher_service_file, service_name=watcher_service_name)
         if remove_service_home and safe_remote_service_home_target(service_home, Path(config.work_dir)):
             safe_worker_instance_rmtree(service_home)
         if remove_config and safe_worker_instance_config_target(config_dir, config):
@@ -1104,6 +1133,11 @@ def uninstall_worker(
             completed = subprocess.run(["userdel", config.service_user])
             if completed.returncode != 0:
                 return completed.returncode
+        if should_remove_watcher:
+            completed = subprocess.run(["systemctl", "disable", watcher_service_name])
+            if completed.returncode != 0:
+                return completed.returncode
+            safe_unlink(watcher_service_file, service_name=watcher_service_name)
         completed = subprocess.run(["systemctl", "daemon-reload"])
         if completed.returncode != 0:
             return completed.returncode

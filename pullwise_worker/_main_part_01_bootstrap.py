@@ -814,6 +814,7 @@ class WorkerConfig:
         self.service_name = safe_worker_service_name(
             os.environ.get("PULLWISE_SERVICE_NAME", DEFAULT_SERVICE_NAME).strip() or DEFAULT_SERVICE_NAME
         )
+        self.doctor_require_systemd_active = env_bool("PULLWISE_DOCTOR_REQUIRE_SYSTEMD_ACTIVE", True)
         self.service_file = (
             os.environ.get("PULLWISE_SERVICE_FILE", f"/etc/systemd/system/{self.service_name}.service").strip()
             or f"/etc/systemd/system/{self.service_name}.service"
