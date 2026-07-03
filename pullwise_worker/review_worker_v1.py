@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -572,7 +572,8 @@ class JsonRpcAppServer:
         self.workspace_write_sandbox_policy_type = "workspaceWrite"
 
     def start(self) -> None:
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.is_running():
+            return        self.events_path.parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
             [self.command, "app-server", "--listen", "stdio://"],
             cwd=str(self.cwd),
@@ -598,6 +599,13 @@ class JsonRpcAppServer:
             },
         )
         self.notify("initialized", {})
+
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def set_events_path(self, events_path: Path) -> None:
+        self.events_path = events_path
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
 
     def start_thread(self, repo_dir: Path, model: str) -> str:
         last_error: RuntimeError | None = None
@@ -1010,9 +1018,15 @@ def codex_quota_threshold_percent(config: Any) -> float:
 
 
 class CodexQuotaMonitor:
-    def __init__(self, config: Any, isolation: Isolation) -> None:
+    def __init__(
+        self,
+        config: Any,
+        isolation: Isolation,
+        app_server_provider: Callable[[], JsonRpcAppServer] | None = None,
+    ) -> None:
         self.config = config
         self.isolation = isolation
+        self.app_server_provider = app_server_provider
         self.snapshot: dict[str, Any] | None = None
         self.rate_limits_response: dict[str, Any] = {}
         self.next_check_at = 0
@@ -1031,16 +1045,21 @@ class CodexQuotaMonitor:
         interval = codex_quota_check_seconds(self.config)
         next_check_at = checked_at + interval
         server: JsonRpcAppServer | None = None
+        close_server = False
         try:
-            self.isolation.runtime.mkdir(parents=True, exist_ok=True)
-            self.isolation.logs.mkdir(parents=True, exist_ok=True)
-            server = JsonRpcAppServer(
-                scoped_codex_command(self.config),
-                self.isolation.env(self.config),
-                self.isolation.runtime,
-                self.isolation.logs / "codex-quota-events.jsonl",
-            )
-            server.start()
+            if self.app_server_provider is not None:
+                server = self.app_server_provider()
+            else:
+                self.isolation.runtime.mkdir(parents=True, exist_ok=True)
+                self.isolation.logs.mkdir(parents=True, exist_ok=True)
+                server = JsonRpcAppServer(
+                    scoped_codex_command(self.config),
+                    self.isolation.env(self.config),
+                    self.isolation.runtime,
+                    self.isolation.logs / "codex-quota-events.jsonl",
+                )
+                close_server = True
+                server.start()
             response = server.request("account/rateLimits/read", {}, timeout_seconds=15)
             self.rate_limits_response = response
             self.snapshot = codex_quota_payload_from_rate_limits(
@@ -1064,7 +1083,7 @@ class CodexQuotaMonitor:
                     "lastError": quota_text(exc, 500),
                 }
         finally:
-            if server is not None:
+            if close_server and server is not None:
                 server.close()
         self.next_check_at = int((self.snapshot or {}).get("nextCheckAt") or next_check_at)
         return self.snapshot or {}
@@ -4866,3 +4885,5 @@ def upload_artifacts(
         )
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
+
+
