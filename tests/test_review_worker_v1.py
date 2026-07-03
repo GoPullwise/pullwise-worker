@@ -1912,12 +1912,87 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.lock.acquire = lambda: None  # type: ignore[method-assign]
             worker.lock.release = lambda: None  # type: ignore[method-assign]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            class AppServer:
+                def is_running(self) -> bool:
+                    return True
+
+                def close(self) -> None:
+                    return None
+
+            worker.app_server = AppServer()  # type: ignore[assignment]
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 worker.run(once=True)
 
         self.assertEqual(calls, ["register", "heartbeat", "claim"])
 
+    def test_heartbeat_keeps_ready_when_quota_probe_is_unavailable_but_app_server_runs(self) -> None:
+        heartbeat_payloads = []
+
+        class Client:
+            def heartbeat(self, **payload: dict) -> dict:
+                heartbeat_payloads.append(payload)
+                return {}
+
+        class AppServer:
+            def is_running(self) -> bool:
+                return True
+
+            def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
+                raise RuntimeError("rate limit endpoint unavailable")
+
+            def set_events_path(self, _events_path: Path) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as root:
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root), client=Client())
+            worker.ensure_app_server = lambda events_path=None: AppServer()  # type: ignore[method-assign, return-value]
+            worker.app_server = worker.ensure_app_server()
+
+            worker.heartbeat()
+
+        self.assertEqual(heartbeat_payloads[0]["codex_app_server"]["status"], "ready")
+        self.assertTrue(heartbeat_payloads[0]["codex_ready"])
+        self.assertEqual(heartbeat_payloads[0]["doctor_status"], "ok")
+        self.assertEqual(heartbeat_payloads[0]["ready_providers"], ["codex"])
+        self.assertEqual(heartbeat_payloads[0]["codex_quota"]["status"], "unavailable")
+        self.assertEqual(heartbeat_payloads[0]["codex_quota"]["reason"], "codex_quota_unavailable")
+
+    def test_worker_closes_app_server_when_control_plane_stops_accepting_heartbeat(self) -> None:
+        events = []
+
+        class Client:
+            def register(self) -> dict:
+                return {}
+
+            def heartbeat(self, **_payload: dict) -> dict:
+                raise RuntimeError("worker disabled")
+
+            def claim(self) -> None:
+                return None
+
+        class AppServer:
+            def is_running(self) -> bool:
+                return True
+
+            def close(self) -> None:
+                events.append("closed")
+
+        with tempfile.TemporaryDirectory() as root:
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root, poll_seconds=1), client=Client())
+            worker.lock.acquire = lambda: None  # type: ignore[method-assign]
+            worker.lock.release = lambda: None  # type: ignore[method-assign]
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            worker.app_server = AppServer()  # type: ignore[assignment]
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
+                with self.assertRaisesRegex(RuntimeError, "worker disabled"):
+                    worker.run(once=True)
+
+        self.assertEqual(events, ["closed"])
     def test_worker_does_not_claim_when_codex_quota_is_not_ready(self) -> None:
         calls = []
         heartbeat_payloads = []
@@ -2075,6 +2150,35 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(monitor.snapshot["status"], "exhausted")
         self.assertEqual(monitor.snapshot["reason"], "codex_quota_exhausted")
+
+    def test_codex_quota_refresh_reuses_worker_app_server_without_closing_it(self) -> None:
+        calls = []
+
+        class AppServer:
+            def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
+                calls.append((method, params or {}, timeout_seconds))
+                return {
+                    "rateLimits": {
+                        "limitId": "codex",
+                        "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 123},
+                        "rateLimitReachedType": None,
+                    }
+                }
+
+            def close(self) -> None:
+                calls.append(("close", {}, 0))
+
+        server = AppServer()
+        monitor = CodexQuotaMonitor(
+            SimpleNamespace(codex_quota_check_seconds=60, codex_quota_min_remaining_percent=20),
+            SimpleNamespace(),
+            lambda: server,  # type: ignore[arg-type]
+        )
+
+        snapshot = monitor.refresh(current_time=100)
+
+        self.assertEqual(snapshot["status"], "ok")
+        self.assertEqual(calls, [("account/rateLimits/read", {}, 15)])
 
     def test_core_semantic_phases_use_plan_effort_and_other_phases_use_medium(self) -> None:
         job = {

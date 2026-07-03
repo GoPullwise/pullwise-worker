@@ -573,7 +573,8 @@ class JsonRpcAppServer:
 
     def start(self) -> None:
         if self.is_running():
-            return        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+            return
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
             [self.command, "app-server", "--listen", "stdio://"],
             cwd=str(self.cwd),
@@ -1017,6 +1018,24 @@ def codex_quota_threshold_percent(config: Any) -> float:
     return max(0.0, min(100.0, raw))
 
 
+def quota_refresh_error_is_exhaustion(error: object) -> bool:
+    if codex_error_code(error) != "CODEX_QUOTA_EXHAUSTED":
+        return False
+    lowered = str(error or "").lower()
+    fetch_failure_markers = (
+        "endpoint unavailable",
+        "unavailable",
+        "timed out",
+        "timeout",
+        "connection",
+        "method not found",
+        "unknown method",
+        "not found",
+        "failed to read",
+    )
+    return not any(marker in lowered for marker in fetch_failure_markers)
+
+
 class CodexQuotaMonitor:
     def __init__(
         self,
@@ -1069,7 +1088,7 @@ class CodexQuotaMonitor:
                 next_check_at=next_check_at,
             )
         except Exception as exc:
-            if codex_error_code(str(exc)) == "CODEX_QUOTA_EXHAUSTED":
+            if quota_refresh_error_is_exhaustion(exc):
                 self.mark_exhausted(str(exc), checked_at=checked_at)
             else:
                 self.snapshot = {
@@ -1339,8 +1358,38 @@ class ReviewWorkerV1:
         self.client = client
         self.state = WorkerState()
         self.isolation = Isolation(config)
-        self.quota_monitor = CodexQuotaMonitor(config, self.isolation)
+        self.app_server: JsonRpcAppServer | None = None
+        self.quota_monitor = CodexQuotaMonitor(config, self.isolation, self.ensure_app_server)
         self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id))
+
+    def default_app_server_events_path(self) -> Path:
+        return self.isolation.logs / "codex-app-server-events.jsonl"
+
+    def ensure_app_server(self, events_path: Path | None = None) -> JsonRpcAppServer:
+        self.isolation.runtime.mkdir(parents=True, exist_ok=True)
+        self.isolation.logs.mkdir(parents=True, exist_ok=True)
+        target_events_path = events_path or self.default_app_server_events_path()
+        if self.app_server is not None and not self.app_server.is_running():
+            self.app_server.close()
+            self.app_server = None
+        if self.app_server is None:
+            self.app_server = JsonRpcAppServer(
+                scoped_codex_command(self.config),
+                self.isolation.env(self.config),
+                self.isolation.runtime,
+                target_events_path,
+                rate_limit_callback=self.quota_monitor.apply_rate_limit_update,
+            )
+            self.app_server.start()
+        else:
+            self.app_server.set_events_path(target_events_path)
+        return self.app_server
+
+    def close_app_server(self) -> None:
+        if self.app_server is None:
+            return
+        self.app_server.close()
+        self.app_server = None
 
     def run(self, *, once: bool = False) -> None:
         if not sys.platform.startswith("linux"):
@@ -1365,14 +1414,27 @@ class ReviewWorkerV1:
                     return
                 time.sleep(max(1, int(getattr(self.config, "poll_seconds", 5) or 5)))
         finally:
+            self.close_app_server()
             self.lock.release()
 
     def heartbeat(self) -> dict[str, Any]:
         active = self.state.active_job
+        app_server_error = ""
+        if active is None or self.app_server is None or not self.app_server.is_running():
+            try:
+                self.ensure_app_server()
+            except Exception as exc:
+                app_server_error = quota_text(exc, 500)
         quota = self.quota_monitor.snapshot_if_due(active=active is not None)
         quota_ready = bool((quota or {}).get("ready", True))
-        self.state.provider_ready = quota_ready
+        app_server_ready = self.app_server is not None and self.app_server.is_running()
+        provider_ready = app_server_ready and quota_ready
+        self.state.provider_ready = provider_ready
         readiness_reason = quota_text((quota or {}).get("reason") or (quota or {}).get("status"), 160)
+        if app_server_error:
+            readiness_reason = f"codex_app_server_unavailable: {app_server_error}"
+        elif not app_server_ready:
+            readiness_reason = readiness_reason or "codex_app_server_not_running"
         active_jobs = 1 if active else 0
         worker_status = "idle"
         if active is not None:
@@ -1391,14 +1453,14 @@ class ReviewWorkerV1:
                 "local_queue_depth": 0,
             },
             "codex_app_server": {
-                "status": "ready" if quota_ready else "needs_attention",
+                "status": "ready" if app_server_ready else "needs_attention",
                 "transport": "stdio",
                 "active_thread_id": active.thread_id if active and active.thread_id else None,
             },
-            "last_error": readiness_reason if not quota_ready else None,
-            "doctor_status": "ok" if quota_ready else "degraded",
-            "codex_ready": quota_ready,
-            "ready_providers": ["codex"] if quota_ready else [],
+            "last_error": readiness_reason if not provider_ready else None,
+            "doctor_status": "ok" if provider_ready else "degraded",
+            "codex_ready": provider_ready,
+            "ready_providers": ["codex"] if provider_ready else [],
             "codex_quota": quota,
         }
         if active is not None:
@@ -1663,14 +1725,7 @@ class ReviewWorkerV1:
                     if phase == "prepare_workspace":
                         pass
                     elif phase == "start_codex_app_server":
-                        app_server = JsonRpcAppServer(
-                            scoped_codex_command(self.config),
-                            self.isolation.env(self.config),
-                            repo_dir,
-                            events_path,
-                            rate_limit_callback=self.quota_monitor.apply_rate_limit_update,
-                        )
-                        app_server.start()
+                        app_server = self.ensure_app_server(events_path)
                     elif phase == "initialize_codex_connection":
                         thread_id = app_server.start_thread(repo_dir, model_for_job(job)) if app_server else ""
                         active.thread_id = thread_id
@@ -1867,7 +1922,7 @@ class ReviewWorkerV1:
                 return
         finally:
             if app_server is not None:
-                app_server.close()
+                app_server.set_events_path(self.default_app_server_events_path())
             if terminal_state in TERMINAL_STATES:
                 self.state.clear_active(terminal_state)
             self.heartbeat()
@@ -4885,5 +4940,3 @@ def upload_artifacts(
         )
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
-
-
