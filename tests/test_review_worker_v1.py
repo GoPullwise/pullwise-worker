@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -775,6 +776,62 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     {"job_id": "job_1", "checkout_dir": str(source), "repositoryLimits": {"maxFiles": 1, "maxBytes": 4096}},
                     "run_1",
                 )
+
+    def test_prepare_workspace_clones_claimed_repository_when_checkout_dir_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            calls: list[list[str]] = []
+            envs: list[dict[str, str]] = []
+
+            def fake_run(args: list[str], **kwargs: object) -> SimpleNamespace:
+                calls.append(args)
+                env = kwargs.get("env") if isinstance(kwargs.get("env"), dict) else {}
+                envs.append(dict(env))
+                self.assertNotIn("secret-token", " ".join(args))
+                if "checkout" in args:
+                    repo_dir = Path(args[args.index("-C") + 1])
+                    (repo_dir / "app.py").write_text("print('ok')\n", encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("pullwise_worker.review_worker_v1.subprocess.run", side_effect=fake_run):
+                repo_dir, run_dir, _artifact_dir = worker.prepare_workspace(
+                    {
+                        "job_id": "job_1",
+                        "repository": {"clone_url": "https://github.com/acme/api.git"},
+                        "branch": "main",
+                        "commit": "pending",
+                        "clone_token": {"token": "secret-token"},
+                        "repositoryLimits": {"maxFiles": 10, "maxBytes": 4096},
+                    },
+                    "run_1",
+                )
+
+            self.assertTrue((repo_dir / "app.py").is_file())
+            self.assertTrue((run_dir / "bundles").is_dir())
+            self.assertTrue(any(call[:2] == ["git", "init"] for call in calls))
+            self.assertTrue(any(call[:6] == ["git", "-C", str(repo_dir), "fetch", "--depth", "1"] for call in calls))
+            self.assertTrue(any(env.get("PULLWISE_GIT_TOKEN") == "secret-token" for env in envs))
+            self.assertFalse((repo_dir.parent / "git-askpass.sh").exists())
+
+    def test_prepare_workspace_rejects_empty_checkout_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source = root / "source"
+            source.mkdir()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+
+            with self.assertRaisesRegex(RuntimeError, "no repository files"):
+                worker.prepare_workspace({"job_id": "job_1", "checkout_dir": str(source)}, "run_1")
+
+    def test_prepare_workspace_requires_checkout_source_or_clone_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+
+            with self.assertRaisesRegex(RuntimeError, "checkout_dir or repository.clone_url"):
+                worker.prepare_workspace({"job_id": "job_1"}, "run_1")
+
     def test_inventory_bundle_plan_and_packing_are_v1_2_shaped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1520,6 +1577,52 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertNotIn("running_jobs", calls[0])
         self.assertNotIn("active_job_ids", calls[0])
 
+    def test_heartbeat_includes_cached_worker_machine_metrics(self) -> None:
+        calls = []
+
+        class Client:
+            def heartbeat(self, **payload: dict) -> dict:
+                calls.append(payload)
+                return {}
+
+        class AppServer:
+            def is_running(self) -> bool:
+                return True
+
+            def close(self) -> None:
+                return None
+
+        metrics = {
+            "ok": True,
+            "collectedAt": 1781200000,
+            "worker": {"hostname": "worker-host"},
+            "memory": {"usedPercent": 62.5},
+            "storage": {"usedPercent": 40.0},
+        }
+
+        with tempfile.TemporaryDirectory() as root:
+            work_dir = str(Path(root) / "checkouts")
+            worker = ReviewWorkerV1(
+                SimpleNamespace(
+                    worker_id="wk_1",
+                    service_home=root,
+                    work_dir=work_dir,
+                    machine_metrics_interval_seconds=60,
+                ),
+                client=Client(),
+            )
+            worker.app_server = AppServer()  # type: ignore[assignment]
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+
+            with patch("pullwise_worker.review_worker_v1.worker_machine_metrics_payload", return_value=metrics) as collect:
+                worker.heartbeat()
+                worker.heartbeat()
+
+        self.assertEqual(calls[0]["machine_metrics"], metrics)
+        self.assertEqual(calls[1]["machine_metrics"], metrics)
+        collect.assert_called_once()
+        self.assertEqual(collect.call_args.kwargs["storage_path"], work_dir)
+
     def test_pullwise_client_uses_v1_review_protocol_routes(self) -> None:
         calls = []
 
@@ -2241,6 +2344,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             kinds = {item["kind"] for item in manifest if item.get("required")}
             output_items = [item for item in manifest if item["kind"] == "intent_test_output"]
             reviewer_items = [item for item in manifest if item["kind"] in {"raw_reviewer_output", "verified_reviewer_output"}]
+            debug_item = next(item for item in manifest if item["kind"] == "debug_bundle")
             self.assertEqual(manifest_payload["schema_version"], "artifact-manifest/v1")
             self.assertEqual(manifest_payload["items"], manifest)
             self.assertTrue(REQUIRED_COMPLETED_ARTIFACTS.issubset(kinds))
@@ -2252,6 +2356,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual({item["kind"] for item in reviewer_items}, {"raw_reviewer_output", "verified_reviewer_output"})
             self.assertEqual({item["name"] for item in reviewer_items}, {"raw-reviewer-security.json", "verified-reviewer-security.json"})
             self.assertEqual(len({item["artifact_id"] for item in reviewer_items}), 2)
+            self.assertEqual(debug_item["artifact_id"], "art_debug_bundle")
+            self.assertEqual(debug_item["name"], "debug-bundle.zip")
+            with zipfile.ZipFile(artifact_dir / "debug-bundle.zip", "r") as archive:
+                self.assertIn("debug-summary.json", archive.namelist())
+                self.assertIn("run/worker.log.jsonl", archive.namelist())
+                self.assertIn("artifacts/report.md", archive.namelist())
             self.assertEqual(manifest_payload, run_manifest)
             for item in manifest:
                 self.assertIn("sha256", item)

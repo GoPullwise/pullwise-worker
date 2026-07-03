@@ -12,9 +12,12 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from ._main_part_01_bootstrap import worker_machine_metrics_payload
 
 try:
     import fcntl
@@ -277,6 +280,8 @@ PROGRESS_COUNTER_KEYS = (
 )
 DEFAULT_PROVIDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 LOG_ARTIFACT_NAMES = {"codex-events.jsonl", "worker.log.jsonl", "progress.log.jsonl"}
+DEBUG_BUNDLE_NAME = "debug-bundle.zip"
+DEBUG_BUNDLE_ARTIFACT_ID = "art_debug_bundle"
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "LANG",
     "LC_ALL",
@@ -1369,6 +1374,8 @@ class ReviewWorkerV1:
         self.app_server: JsonRpcAppServer | None = None
         self.quota_monitor = CodexQuotaMonitor(config, self.isolation, self.ensure_app_server)
         self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id), self.isolation.codex_home)
+        self._machine_metrics_payload: dict[str, Any] | None = None
+        self._machine_metrics_collected_at = 0.0
 
     def default_app_server_events_path(self) -> Path:
         return self.isolation.logs / "codex-app-server-events.jsonl"
@@ -1398,6 +1405,20 @@ class ReviewWorkerV1:
             return
         self.app_server.close()
         self.app_server = None
+
+    def machine_metrics_payload(self) -> dict[str, Any] | None:
+        interval_seconds = max(1, int(getattr(self.config, "machine_metrics_interval_seconds", 10) or 10))
+        current_time = time.time()
+        if self._machine_metrics_payload is not None and current_time - self._machine_metrics_collected_at < interval_seconds:
+            return self._machine_metrics_payload
+        storage_path = str(getattr(self.config, "work_dir", None) or self.isolation.workspaces)
+        try:
+            payload = worker_machine_metrics_payload(storage_path=storage_path, timestamp=int(current_time))
+        except Exception:
+            return self._machine_metrics_payload
+        self._machine_metrics_payload = payload
+        self._machine_metrics_collected_at = current_time
+        return payload
 
     def run(self, *, once: bool = False) -> None:
         if not sys.platform.startswith("linux"):
@@ -1471,6 +1492,9 @@ class ReviewWorkerV1:
             "ready_providers": ["codex"] if provider_ready else [],
             "codex_quota": quota,
         }
+        machine_metrics = self.machine_metrics_payload()
+        if machine_metrics is not None:
+            heartbeat_payload["machine_metrics"] = machine_metrics
         if active is not None:
             heartbeat_payload["progress"] = active.progress_snapshot()
         response = self.client.heartbeat(**heartbeat_payload)
@@ -1960,6 +1984,10 @@ class ReviewWorkerV1:
                 max_bytes=limits.get("maxBytes") if limits else None,
                 deadline_monotonic=copy_deadline,
             )
+        else:
+            clone_repository_checkout(job, repo_dir, deadline_monotonic=copy_deadline)
+        if repository_file_count(repo_dir) <= 0:
+            raise RuntimeError("repository checkout produced no repository files")
         for path in (
             repo_dir / ".codex-review",
             run_dir,
@@ -4403,6 +4431,7 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
         artifact_item(artifact_dir / "codex-events.jsonl", "codex_event_log", "application/jsonl", "codex-events", False),
         artifact_item(artifact_dir / "progress.log.jsonl", "progress_log", "application/jsonl", "progress-log", False),
     ]
+    manifest = append_debug_bundle_artifact(manifest, run_dir, artifact_dir, status=status, error=error)
     manifest_payload = artifact_manifest_payload(artifact_dir.name, manifest)
     write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
     write_json(run_dir / "artifact-manifest.json", manifest_payload)
@@ -4412,6 +4441,74 @@ def _refresh_manifest_item(item: dict[str, Any], path: Path) -> None:
     data = path.read_bytes() if path.exists() else b""
     item["sha256"] = hashlib.sha256(data).hexdigest()
     item["size_bytes"] = len(data)
+
+
+
+def _debug_bundle_files(directory: Path, prefix: str) -> list[tuple[Path, str]]:
+    if not directory.is_dir():
+        return []
+    files: list[tuple[Path, str]] = []
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.is_symlink() or path.name == DEBUG_BUNDLE_NAME:
+            continue
+        try:
+            rel = path.relative_to(directory).as_posix()
+        except ValueError:
+            continue
+        files.append((path, f"{prefix}/{rel}"))
+    return files
+
+
+def write_debug_bundle(run_dir: Path, artifact_dir: Path, *, status: str = "", error: str = "") -> Path:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = artifact_dir / DEBUG_BUNDLE_NAME
+    summary = {
+        "schema_version": "pullwise-debug-bundle/v1",
+        "created_at": iso_time(time.time()),
+        "run_id": artifact_dir.name,
+        "status": status,
+        "error": error,
+        "included_roots": ["run", "artifacts"],
+        "notes": [
+            "This bundle is uploaded by the worker for live-environment debugging.",
+            "Repository source files are not included; run artifacts, phase outputs, and logs are included.",
+        ],
+    }
+    with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("debug-summary.json", json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        seen: set[str] = {"debug-summary.json"}
+        for source, arcname in [*_debug_bundle_files(run_dir, "run"), *_debug_bundle_files(artifact_dir, "artifacts")]:
+            if arcname in seen:
+                continue
+            seen.add(arcname)
+            archive.write(source, arcname)
+    return bundle_path
+
+
+def append_debug_bundle_artifact(
+    manifest: list[dict[str, Any]],
+    run_dir: Path,
+    artifact_dir: Path,
+    *,
+    status: str = "",
+    error: str = "",
+) -> list[dict[str, Any]]:
+    manifest = [item for item in manifest if item.get("artifact_id") != DEBUG_BUNDLE_ARTIFACT_ID]
+    interim_payload = artifact_manifest_payload(artifact_dir.name, manifest)
+    write_json(artifact_dir / "artifact-manifest.json", interim_payload)
+    write_json(run_dir / "artifact-manifest.json", interim_payload)
+    bundle_path = write_debug_bundle(run_dir, artifact_dir, status=status, error=error)
+    manifest.append(
+        artifact_item(
+            bundle_path,
+            "debug_bundle",
+            "application/zip",
+            "pullwise-debug-bundle",
+            False,
+            artifact_id=DEBUG_BUNDLE_ARTIFACT_ID,
+        )
+    )
+    return manifest
 
 
 def refresh_log_artifacts(run_dir: Path, artifact_dir: Path, manifest_payload: dict[str, Any] | None = None) -> None:
@@ -4430,6 +4527,10 @@ def refresh_log_artifacts(run_dir: Path, artifact_dir: Path, manifest_payload: d
         name = str(item.get("name") or "")
         if name in LOG_ARTIFACT_NAMES:
             _refresh_manifest_item(item, artifact_dir / name)
+            changed = True
+        if item.get("artifact_id") == DEBUG_BUNDLE_ARTIFACT_ID:
+            write_debug_bundle(run_dir, artifact_dir)
+            _refresh_manifest_item(item, artifact_dir / DEBUG_BUNDLE_NAME)
             changed = True
     if changed:
         write_json(artifact_dir / "artifact-manifest.json", payload)
@@ -4519,6 +4620,7 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
                 artifact_id=_intent_output_artifact_id(src.name),
             )
         )
+    manifest = append_debug_bundle_artifact(manifest, run_dir, artifact_dir, status="completed")
     manifest_payload = artifact_manifest_payload(artifact_dir.name, manifest)
     write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
     write_json(run_dir / "artifact-manifest.json", manifest_payload)
@@ -4773,6 +4875,116 @@ def copy_tree(
                 raise RuntimeError("repositoryLimits.maxBytes exceeded while copying checkout")
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target, follow_symlinks=False)
+
+
+def repository_file_count(repo_dir: Path) -> int:
+    files_seen = 0
+    for root, dirnames, filenames in os.walk(repo_dir, topdown=True, followlinks=False):
+        root_path = Path(root)
+        if ".git" in root_path.parts or ".codex-review" in root_path.parts:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in {".git", ".codex-review"} and not (root_path / name).is_symlink()
+        ]
+        for filename in filenames:
+            if _is_regular_file_no_follow(root_path / filename):
+                files_seen += 1
+    return files_seen
+
+
+def job_clone_url(job: dict[str, Any]) -> str:
+    repository = job.get("repository") if isinstance(job.get("repository"), dict) else {}
+    for value in (
+        job.get("clone_url"),
+        job.get("cloneUrl"),
+        repository.get("clone_url"),
+        repository.get("cloneUrl"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    raise RuntimeError("claimed job must include checkout_dir or repository.clone_url")
+
+
+def job_clone_token(job: dict[str, Any]) -> str:
+    token_payload = job.get("clone_token") or job.get("cloneToken")
+    if isinstance(token_payload, dict):
+        return str(token_payload.get("token") or "").strip()
+    return str(token_payload or "").strip()
+
+
+def git_command_timeout(deadline_monotonic: float | None) -> int | None:
+    if deadline_monotonic is None:
+        return None
+    remaining = int(deadline_monotonic - time.monotonic())
+    return max(1, remaining)
+
+
+def run_git(args: list[str], *, env: dict[str, str], deadline_monotonic: float | None = None) -> None:
+    try:
+        subprocess.run(
+            args,
+            check=True,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            timeout=git_command_timeout(deadline_monotonic),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("repository scan deadline exceeded while cloning checkout") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        detail = f": {stderr[-500:]}" if stderr else ""
+        raise RuntimeError(f"repository checkout git command failed{detail}") from exc
+
+
+def write_git_askpass(parent: Path) -> Path:
+    path = parent / "git-askpass.sh"
+    script = (
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  *Username*) printf '%s\\n' 'x-access-token' ;;\n"
+        "  *Password*) printf '%s\\n' \"$PULLWISE_GIT_TOKEN\" ;;\n"
+        "  *) printf '\\n' ;;\n"
+        "esac\n"
+    )
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o700)
+    return path
+
+
+def clone_repository_checkout(job: dict[str, Any], repo_dir: Path, *, deadline_monotonic: float | None = None) -> None:
+    clone_url = job_clone_url(job)
+    branch = str(job.get("branch") or "main").strip() or "main"
+    commit = str(job.get("commit") or "").strip()
+    commit = "" if commit.lower() == "pending" else commit
+    token = job_clone_token(job)
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    askpass_path: Path | None = None
+    if token:
+        askpass_path = write_git_askpass(repo_dir.parent)
+        env["GIT_ASKPASS"] = str(askpass_path)
+        env["PULLWISE_GIT_TOKEN"] = token
+    try:
+        run_git(["git", "init", str(repo_dir)], env=env, deadline_monotonic=deadline_monotonic)
+        run_git(["git", "-C", str(repo_dir), "remote", "add", "origin", clone_url], env=env, deadline_monotonic=deadline_monotonic)
+        ref = commit or branch
+        run_git(["git", "-C", str(repo_dir), "fetch", "--depth", "1", "--no-tags", "origin", ref], env=env, deadline_monotonic=deadline_monotonic)
+        run_git(["git", "-C", str(repo_dir), "checkout", "--detach", "FETCH_HEAD"], env=env, deadline_monotonic=deadline_monotonic)
+        run_git(["git", "-C", str(repo_dir), "remote", "remove", "origin"], env=env, deadline_monotonic=deadline_monotonic)
+    finally:
+        env.pop("PULLWISE_GIT_TOKEN", None)
+        if askpass_path is not None:
+            try:
+                askpass_path.unlink()
+            except OSError:
+                pass
 
 
 def ensure_json(directory: Path) -> None:

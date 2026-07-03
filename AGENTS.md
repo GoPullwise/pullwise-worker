@@ -266,6 +266,19 @@ cleanup IO.
 
 Repository checkout performance depends on the worker mirror cache.
 
+- Server/worker responsibility is fixed: the server owns job/scan state,
+  repository access validation, short-lived clone token issuance, and lease
+  payload fields (`clone_url`, branch, commit, `clone_token`, and
+  `repositoryLimits`); the worker owns materializing that repository inside its
+  isolated workspace before inventory or review phases run.
+- A claimed v1 job may provide an already materialized `checkout_dir` only for
+  tests or trusted local integration paths. Production workers must be able to
+  clone from the server-provided `clone_url` and short-lived `clone_token` when
+  no `checkout_dir` is present.
+- After copy or clone, the worker must verify that the repository workspace
+  contains real repository files excluding `.git` and `.codex-review`. Empty
+  checkouts must fail during `prepare_workspace`, not later during semantic
+  phases such as `repo_map`.
 - Keep repository mirrors under `.pullwise-repo-cache` and protect that runtime
   directory from ordinary checkout cleanup.
 - Commit-specific jobs should use shallow fetch into the mirror plus a shared
