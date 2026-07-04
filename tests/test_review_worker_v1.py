@@ -2552,7 +2552,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
 
-        self.assertIn("art_error_report", {artifact_id for _job_id, artifact_id, _payload in calls})
+        uploaded_ids = [artifact_id for _job_id, artifact_id, _payload in calls]
+        self.assertEqual(uploaded_ids[0], "art_debug_bundle")
+        self.assertIn("art_error_report", set(uploaded_ids))
 
     def test_upload_log_artifacts_refreshes_and_reuploads_final_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

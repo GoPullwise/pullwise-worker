@@ -5340,6 +5340,8 @@ def upload_artifacts(
     source_run_dir: Path | None = None,
 ) -> None:
     manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
+    if source_run_dir is not None and isinstance(manifest_payload, dict):
+        refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload)
     manifest = artifact_manifest_items(manifest_payload)
     if not isinstance(manifest_payload, dict) or not manifest:
         raise RuntimeError("artifact manifest must contain artifact items before upload")
@@ -5371,12 +5373,11 @@ def upload_artifacts(
         if not path.is_file():
             raise RuntimeError(f"artifact listed in manifest is missing before upload: {name}")
         uploadable.append((item, path))
+    uploadable.sort(key=lambda pair: 0 if pair[0].get("artifact_id") == DEBUG_BUNDLE_ARTIFACT_ID else 1)
     total = len(uploadable)
     for uploaded, (item, path) in enumerate(uploadable, start=1):
         artifact_id = str(item.get("artifact_id") or "").strip()
         name = str(item.get("name") or "").strip()
-        if source_run_dir is not None and name in LOG_ARTIFACT_NAMES:
-            refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload)
         data = path.read_bytes()
         actual_sha = hashlib.sha256(data).hexdigest()
         if str(item.get("sha256") or "").lower() != actual_sha:
