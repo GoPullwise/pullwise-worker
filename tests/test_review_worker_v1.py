@@ -12,7 +12,14 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from pullwise_worker._main_part_01_bootstrap import PullwiseClient, PullwiseResponse, WorkerConfig, worker_registration_payload
+from pullwise_worker import __version__
+from pullwise_worker._main_part_01_bootstrap import (
+    PULLWISE_WORKER_USER_AGENT,
+    PullwiseClient,
+    PullwiseResponse,
+    WorkerConfig,
+    worker_registration_payload,
+)
 from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error, writable_path_check
 from pullwise_worker.review_worker_v1 import (
     INTENT_TEST_CLASSIFICATIONS,
@@ -1834,9 +1841,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(client.headers["User-Agent"], "Pullwise-Worker/0.9.22")
+        self.assertEqual(client.headers["User-Agent"], PULLWISE_WORKER_USER_AGENT)
         self.assertEqual(client.headers["X-Pullwise-Worker-Id"], "wk_1")
-        self.assertEqual(client.headers["X-Pullwise-Worker-Version"], "0.9.22")
+        self.assertEqual(client.headers["X-Pullwise-Worker-Version"], __version__)
         self.assertEqual(client.headers["Accept"], "application/json")
 
     def test_pullwise_client_has_no_legacy_review_progress_route(self) -> None:
