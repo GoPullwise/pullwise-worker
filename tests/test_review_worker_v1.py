@@ -2513,9 +2513,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(debug_item["artifact_id"], "art_debug_bundle")
             self.assertEqual(debug_item["name"], "debug-bundle.zip")
             with zipfile.ZipFile(artifact_dir / "debug-bundle.zip", "r") as archive:
-                self.assertIn("debug-summary.json", archive.namelist())
-                self.assertIn("run/worker.log.jsonl", archive.namelist())
-                self.assertIn("artifacts/report.md", archive.namelist())
+                names = set(archive.namelist())
+                self.assertIn("debug-summary.json", names)
+                self.assertIn("run/worker.log.jsonl", names)
+                self.assertIn("artifacts/report.md", names)
+                self.assertNotIn("audit.json", names)
+                self.assertFalse(any(name.endswith("audit-bundle.zip") for name in names))
             self.assertEqual(manifest_payload, run_manifest)
             for item in manifest:
                 self.assertIn("sha256", item)
