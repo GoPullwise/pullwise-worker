@@ -506,8 +506,20 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "npm test -- itv.test.js", "cwd": str(workspace.parent / "validation-repo")}},
                 workspace,
             )
+            allowed_git_status, _reason = decide_approval(
+                {"method": "approval/request", "params": {"type": "commandExecution", "command": "git status --short", "cwd": str(workspace)}},
+                workspace,
+            )
             denied_cwd, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "git status", "cwd": ".."}},
+                workspace,
+            )
+            denied_git_clean, _reason = decide_approval(
+                {"method": "approval/request", "params": {"type": "commandExecution", "command": "git clean -fdx", "cwd": str(workspace)}},
+                workspace,
+            )
+            denied_sed_in_place, _reason = decide_approval(
+                {"method": "approval/request", "params": {"type": "commandExecution", "command": "sed -i s/a/b/ src/app.py", "cwd": str(workspace)}},
                 workspace,
             )
 
@@ -517,7 +529,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(allowed_command, "acceptForSession")
         self.assertEqual(denied_install, "decline")
         self.assertEqual(allowed_validation_test, "acceptForSession")
+        self.assertEqual(allowed_git_status, "acceptForSession")
         self.assertEqual(denied_cwd, "decline")
+        self.assertEqual(denied_git_clean, "decline")
+        self.assertEqual(denied_sed_in_place, "decline")
 
     def test_codex_approval_responses_use_current_app_server_enums(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -996,6 +1011,60 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("Intent test eligible: true", bundle_text)
         reviewed = sum(coverage[key] for key in ("deep_reviewed_files", "standard_reviewed_files", "light_reviewed_files", "inventory_only_files"))
         self.assertEqual(reviewed + coverage["skipped_files"], coverage["source_like_files_total"])
+
+    def test_bundle_plan_uses_semantic_risk_routing_tiers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "inventory.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "inventory/v1",
+                        "files": [
+                            {
+                                "path": "scripts/migrate.py",
+                                "is_source_like": True,
+                                "is_binary": False,
+                                "is_generated_candidate": False,
+                                "risk_hints": [],
+                                "estimated_tokens": 10,
+                            },
+                            {
+                                "path": "src/low.py",
+                                "is_source_like": True,
+                                "is_binary": False,
+                                "is_generated_candidate": False,
+                                "risk_hints": [],
+                                "estimated_tokens": 10,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "risk-routing.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "risk-routing/v1",
+                        "default_depth": "P2",
+                        "routes": [
+                            {"path": "scripts/migrate.py", "tier": "P0", "reasons": ["semantic high risk"]},
+                            {"path": "src/low.py", "tier": "P3", "reasons": ["semantic inventory only"]},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = bundle_plan_payload(run_dir)
+            coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
+
+        p0_bundle = next(item for item in plan["bundles"] if item["tier"] == "P0")
+        bundled_paths = [path for bundle in plan["bundles"] for path in bundle["paths"]]
+        self.assertIn("scripts/migrate.py", p0_bundle["paths"])
+        self.assertNotIn("src/low.py", bundled_paths)
+        self.assertEqual(coverage["deep_reviewed_files"], 1)
+        self.assertEqual(coverage["inventory_only_files"], 1)
 
     def test_intent_tests_run_in_disposable_validation_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -1203,7 +1204,8 @@ class CodexQuotaMonitor:
         self.next_check_at = next_check_at
         return self.snapshot
 
-READ_ONLY_COMMANDS = {"git", "find", "wc", "cat", "sed", "awk", "grep", "rg"}
+READ_ONLY_COMMANDS = {"find", "wc", "cat", "grep", "rg"}
+GIT_READ_ONLY_SUBCOMMANDS = {"status", "diff", "log", "show", "ls-files", "rev-parse", "grep"}
 PROJECT_TEST_COMMANDS = {"npm", "pnpm", "yarn", "pytest", "python", "python3", "go", "cargo", "mvn", "gradle", "make"}
 DENIED_COMMAND_TOKENS = {
     "brew",
@@ -1215,6 +1217,7 @@ DENIED_COMMAND_TOKENS = {
     "push",
     "reset",
     "rm",
+    "clean",
     "wget",
 }
 DENIED_INTENT_EXECUTABLES = {
@@ -1332,7 +1335,39 @@ def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None)
         if any(token in lowered_text for token in (" install", " add ", " publish", " curl", " wget")):
             return False
         return any(token in lowered for token in {"test", "pytest", "go", "cargo", "mvn", "gradle", "make"}) or executable in {"pytest", "make"}
+    if executable == "git":
+        return git_command_is_read_only(argv, workspace, cwd)
+    if executable == "find":
+        return find_command_is_read_only(argv)
     return executable in READ_ONLY_COMMANDS
+
+
+def git_command_is_read_only(argv: list[str], workspace: Path, cwd: Path) -> bool:
+    index = 1
+    while index < len(argv):
+        part = argv[index]
+        if part in {"-C", "--git-dir", "--work-tree"}:
+            if index + 1 >= len(argv):
+                return False
+            candidate = Path(argv[index + 1])
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            if not (path_is_under(candidate, workspace) or path_is_under_validation_workspace(workspace, candidate)):
+                return False
+            index += 2
+            continue
+        if part == "--no-pager" or part.startswith("--no-") or part in {"--paginate", "-p"}:
+            index += 1
+            continue
+        if part.startswith("-"):
+            return False
+        return part.lower() in GIT_READ_ONLY_SUBCOMMANDS
+    return False
+
+
+def find_command_is_read_only(argv: list[str]) -> bool:
+    mutating_actions = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+    return not any(str(part).lower() in mutating_actions for part in argv[1:])
 
 
 def normalized_executable_name(value: object) -> str:
@@ -3149,9 +3184,102 @@ def intent_validation_config(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def file_tier(item: dict[str, Any]) -> str:
+REVIEW_FILE_TIERS = {"P0", "P1", "P2", "P3", "SKIP"}
+REVIEW_TIER_ALIASES = {
+    "DEEP": "P0",
+    "HIGH": "P0",
+    "STANDARD": "P1",
+    "MEDIUM": "P1",
+    "LIGHT": "P2",
+    "LOW": "P2",
+    "INVENTORY": "P3",
+    "INVENTORY_ONLY": "P3",
+    "NONE": "SKIP",
+    "SKIPPED": "SKIP",
+}
+
+
+def canonical_review_file_tier(value: object) -> str:
+    tier = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if tier in REVIEW_FILE_TIERS:
+        return tier
+    return REVIEW_TIER_ALIASES.get(tier, "")
+
+
+def risk_route_tier(route: dict[str, Any]) -> str:
+    for key in ("tier", "depth", "review_depth", "reviewDepth", "priority", "classification"):
+        tier = canonical_review_file_tier(route.get(key))
+        if tier:
+            return tier
+    return ""
+
+
+def route_patterns(route: dict[str, Any]) -> list[str]:
+    patterns: list[str] = []
+    for key in ("path", "file", "glob", "pattern", "prefix", "directory"):
+        value = route.get(key)
+        if isinstance(value, str) and value.strip():
+            patterns.append(value.strip())
+    for key in ("paths", "files", "globs", "patterns", "prefixes", "directories"):
+        value = route.get(key)
+        if isinstance(value, list):
+            patterns.extend(str(item).strip() for item in value if str(item).strip())
+    return patterns
+
+
+def route_matches_path(pattern: str, path: str) -> bool:
+    normalized_pattern = pattern.strip().lstrip("./")
+    normalized_path = path.strip().lstrip("./")
+    if not normalized_pattern:
+        return False
+    if normalized_pattern == normalized_path:
+        return True
+    if normalized_pattern.endswith("/"):
+        return normalized_path.startswith(normalized_pattern)
+    if any(char in normalized_pattern for char in "*?[]"):
+        return fnmatch.fnmatch(normalized_path, normalized_pattern)
+    return normalized_path.startswith(f"{normalized_pattern}/")
+
+
+def semantic_file_tier(item: dict[str, Any], routing: dict[str, Any]) -> str:
+    routes = routing.get("routes") if isinstance(routing.get("routes"), list) else []
+    path = str(item.get("path") or "")
+    best_tier = ""
+    best_specificity = -1
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        tier = risk_route_tier(route)
+        if not tier:
+            continue
+        for pattern in route_patterns(route):
+            if route_matches_path(pattern, path) and len(pattern) > best_specificity:
+                best_tier = tier
+                best_specificity = len(pattern)
+    if best_tier:
+        return best_tier
+    return ""
+
+
+def risk_routing_default_tier(routing: dict[str, Any]) -> str:
+    for key in ("default_depth", "defaultDepth", "default_tier", "defaultTier", "default"):
+        tier = canonical_review_file_tier(routing.get(key))
+        if tier:
+            return tier
+    return ""
+
+
+def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None) -> str:
+    if isinstance(routing, dict) and routing:
+        semantic_tier = semantic_file_tier(item, routing)
+        if semantic_tier:
+            return semantic_tier
     if item.get("is_binary") or item.get("is_generated_candidate"):
         return "SKIP"
+    if isinstance(routing, dict) and routing:
+        default_tier = risk_routing_default_tier(routing)
+        if default_tier:
+            return default_tier
     if item.get("risk_hints"):
         return "P0"
     path = str(item.get("path") or "").lower()
@@ -3165,10 +3293,12 @@ def file_tier(item: dict[str, Any]) -> str:
 def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     inv = read_json(run_dir / "inventory.json", {})
     files = inv.get("files") if isinstance(inv.get("files"), list) else []
+    routing = read_json(run_dir / "risk-routing.json", {})
+    routing = routing if isinstance(routing, dict) and routing.get("schema_version") == "risk-routing/v1" else {}
     grouped: dict[str, list[dict[str, Any]]] = {"P0": [], "P1": [], "P2": [], "P3": [], "SKIP": []}
     for item in files:
         if isinstance(item, dict):
-            grouped[file_tier(item)].append(item)
+            grouped[file_tier(item, routing)].append(item)
     source_like_by_tier = {
         tier: [item for item in items if isinstance(item, dict) and item.get("is_source_like")]
         for tier, items in grouped.items()
@@ -3201,6 +3331,8 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
         "intent_tests_supporting_findings": 0,
         "skipped_scope": [item.get("path") for item in source_like_by_tier["SKIP"][:100]],
     }
+    if source_like_by_tier["SKIP"]:
+        coverage["skipped_reasons"] = {"semantic_or_inventory_skip": coverage["skipped_scope"]}
     write_json(run_dir / "coverage.json", coverage)
     return {"schema_version": "bundle-plan/v1", "run_id": run_dir.name, "bundles": bundles}
 
@@ -5234,18 +5366,60 @@ def progress_final_payload(run_dir: Path, run_id: str, status: str) -> dict[str,
         overall_percent = 100.0
     overall_percent = max(0.0, min(100.0, round(overall_percent, 2)))
     current_phase = str(snapshot.get("current_phase") or "").strip()
-    if not current_phase:
-        current_phase = "submit_result_envelope" if status == "completed" else "failure_handling"
+    if status == "completed":
+        current_phase = "cleanup_active_job"
+    elif not current_phase:
+        current_phase = "failure_handling"
     message = str(snapshot.get("message") or "").strip()
-    if not message:
+    if status == "completed":
+        message = "Run completed and active job cleaned up."
+    elif not message:
         message = "Run completed and result accepted by server." if status == "completed" else f"Run ended with status {status}."
-    return {
+    payload = {
         "run_id": run_id,
         "overall_percent": overall_percent,
         "current_phase": current_phase,
         "status": status,
         "message": message,
     }
+    if status == "completed":
+        snapshot_steps = snapshot.get("steps") if isinstance(snapshot.get("steps"), list) else []
+        steps = snapshot_steps or default_progress_steps()
+        completed_steps = []
+        seen_cleanup = False
+        for index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("id") or "").strip()
+            if not step_id:
+                continue
+            seen_cleanup = seen_cleanup or step_id == "cleanup_active_job"
+            completed_steps.append(
+                {
+                    "id": step_id,
+                    "index": int(step.get("index") or index),
+                    "label": str(step.get("label") or progress_step_label(step_id)),
+                    "description": str(step.get("description") or ""),
+                    "target_percent": step.get("target_percent"),
+                    "status": "completed",
+                    "percent": 100.0,
+                }
+            )
+        if not seen_cleanup:
+            cleanup_index = len(completed_steps) + 1
+            completed_steps.append(
+                {
+                    "id": "cleanup_active_job",
+                    "index": cleanup_index,
+                    "label": progress_step_label("cleanup_active_job"),
+                    "description": "",
+                    "target_percent": 100,
+                    "status": "completed",
+                    "percent": 100.0,
+                }
+            )
+        payload["steps"] = completed_steps
+    return payload
 
 
 def count_findings(findings: list[Any], severity: str) -> int:
