@@ -3293,6 +3293,65 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(payload["behavioral_contracts"], [])
         self.assertIn("omitted or malformed", payload["unknowns"][0])
 
+    def test_fallback_semantic_artifact_repairs_split_intent_test_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "clusters.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "cluster-output/v1",
+                        "clusters": [
+                            {
+                                "cluster_id": "cluster-SEC-001",
+                                "candidate_findings": [{"id": "SEC-001"}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan_path = run_dir / "intent" / "intent-test-plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-plan/v1",
+                        "test_targets": [
+                            {
+                                "id": "target-SEC-001",
+                                "test_id": "intent-test-001",
+                                "finding_ids": ["SEC-001"],
+                                "priority": "high",
+                            }
+                        ],
+                        "tests": [
+                            {
+                                "id": "intent-test-001",
+                                "finding_id": "SEC-001",
+                                "goal": "Demonstrate proxy request-size enforcement rejects oversized streamed bodies.",
+                                "files_under_test": ["worker.js", "worker.test.js"],
+                                "runnable_command": "npm test -- worker.test.js",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "title is missing"):
+                validate_phase_outputs(run_dir, "intent_test_planning")
+
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_test_planning")
+            validate_phase_outputs(run_dir, "intent_test_planning")
+            payload = json.loads(plan_path.read_text(encoding="utf-8"))
+            target = payload["test_targets"][0]
+
+        self.assertEqual(target["title"], "Demonstrate proxy request-size enforcement rejects oversized streamed bodies.")
+        self.assertEqual(target["expected_result_before_fix"], "unknown")
+        self.assertEqual(target["linked_finding_ids"], ["cluster-SEC-001"])
+        self.assertEqual(target["target_files"], ["worker.js", "worker.test.js"])
+        self.assertEqual(target["command"], "npm test -- worker.test.js")
+
     def test_validate_phase_outputs_rejects_duplicate_intent_plan_test_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"

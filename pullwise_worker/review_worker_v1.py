@@ -3903,6 +3903,196 @@ def repair_intent_map_artifact(path: Path) -> None:
         write_json(path, payload)
 
 
+def _coerce_intent_test_targets(value: Any) -> list[Any] | None:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, dict):
+        return None
+    for field in ("test_targets", "targets", "tests", "items", "entries"):
+        nested = value.get(field)
+        if isinstance(nested, list):
+            return nested
+    if not value:
+        return []
+    if not all(isinstance(item, dict) for item in value.values()):
+        return None
+    targets = []
+    for target_id, target in sorted(value.items()):
+        item = dict(target)
+        item.setdefault("test_id", str(target_id))
+        targets.append(item)
+    return targets
+
+
+def _intent_test_plan_supporting_tests(
+    payload: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    raw_tests = payload.get("tests")
+    if not isinstance(raw_tests, list):
+        return {}, []
+    tests = [item for item in raw_tests if isinstance(item, dict)]
+    by_id: dict[str, dict[str, Any]] = {}
+    for index, test in enumerate(tests):
+        for key in ("test_id", "id", "target_id", "targetId"):
+            test_id = str(test.get(key) or "").strip()
+            if test_id and test_id not in by_id:
+                by_id[test_id] = test
+        fallback_id = f"ITV-{index + 1:03d}"
+        by_id.setdefault(fallback_id, test)
+    return by_id, tests
+
+
+def _intent_plan_cluster_aliases(run_dir: Path) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+
+    def visit(value: Any, inherited_cluster_id: str = "") -> None:
+        if not isinstance(value, dict):
+            return
+        cluster_id = str(value.get("cluster_id") or inherited_cluster_id or "").strip()
+        if cluster_id:
+            aliases.setdefault(cluster_id, cluster_id)
+            for field in ("id", "finding_id", "local_id"):
+                alias = str(value.get(field) or "").strip()
+                if alias:
+                    aliases.setdefault(alias, cluster_id)
+        next_cluster_id = cluster_id or inherited_cluster_id
+        for field in (
+            "clusters",
+            "candidate_findings",
+            "findings",
+            "items",
+            "candidates",
+            "source_findings",
+            "merged_findings",
+        ):
+            children = value.get(field)
+            if isinstance(children, list):
+                for child in children:
+                    visit(child, next_cluster_id)
+
+    for path in (run_dir / "clusters.json", run_dir / "validation-input.json"):
+        visit(read_json(path, {}))
+    return aliases
+
+
+def _intent_plan_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _intent_plan_first_string(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _intent_plan_linked_ids(
+    target: dict[str, Any],
+    supporting_test: dict[str, Any],
+    aliases: dict[str, str],
+) -> list[str]:
+    raw_ids: list[str] = []
+    for source in (target, supporting_test):
+        for field in ("linked_finding_ids", "finding_ids", "related_finding_ids", "cluster_ids"):
+            raw_ids.extend(_intent_plan_string_list(source.get(field)))
+        for field in ("linked_finding_id", "finding_id", "cluster_id"):
+            raw_ids.extend(_intent_plan_string_list(source.get(field)))
+    linked_ids: list[str] = []
+    for raw_id in raw_ids:
+        linked_id = aliases.get(raw_id, raw_id)
+        if linked_id and linked_id not in linked_ids:
+            linked_ids.append(linked_id)
+    return linked_ids
+
+
+def repair_intent_test_plan_artifact(path: Path, run_dir: Path) -> None:
+    if not path.is_file():
+        return
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        return
+    changed = False
+    if payload.get("schema_version") != "intent-test-plan/v1":
+        payload["schema_version"] = "intent-test-plan/v1"
+        changed = True
+    targets = _coerce_intent_test_targets(payload.get("test_targets"))
+    if targets is None:
+        targets = _coerce_intent_test_targets(payload)
+    if targets is None:
+        targets = []
+    if targets is not payload.get("test_targets"):
+        payload["test_targets"] = targets
+        changed = True
+    supporting_by_id, supporting_tests = _intent_test_plan_supporting_tests(payload)
+    aliases = _intent_plan_cluster_aliases(run_dir)
+    repaired_targets: list[Any] = []
+    for index, raw_target in enumerate(targets):
+        if not isinstance(raw_target, dict):
+            repaired_targets.append(raw_target)
+            continue
+        target = dict(raw_target)
+        test_id = _intent_test_id(target, f"ITV-{index + 1:03d}")
+        supporting_test = (
+            supporting_by_id.get(test_id)
+            or supporting_by_id.get(str(target.get("id") or "").strip())
+            or (supporting_tests[index] if index < len(supporting_tests) else {})
+        )
+        if not isinstance(supporting_test, dict):
+            supporting_test = {}
+        if not str(target.get("test_id") or "").strip() and test_id:
+            target["test_id"] = test_id
+        if not str(target.get("title") or "").strip():
+            target["title"] = _intent_plan_first_string(
+                supporting_test.get("title"),
+                supporting_test.get("goal"),
+                target.get("goal"),
+                supporting_test.get("strategy"),
+                target.get("description"),
+                f"Intent test {test_id}",
+            )
+        expected = str(
+            target.get("expected_result_before_fix")
+            or supporting_test.get("expected_result_before_fix")
+            or supporting_test.get("expectedResultBeforeFix")
+            or ""
+        ).strip()
+        if expected not in {"fail", "pass", "unknown"}:
+            expected = "unknown"
+        target["expected_result_before_fix"] = expected
+        if "linked_finding_ids" not in target or not isinstance(target.get("linked_finding_ids"), list):
+            target["linked_finding_ids"] = _intent_plan_linked_ids(target, supporting_test, aliases)
+        if "target_files" in target and not isinstance(target.get("target_files"), list):
+            target["target_files"] = _intent_plan_string_list(target.get("target_files"))
+        elif "target_files" not in target:
+            files = []
+            for source in (target, supporting_test):
+                for field in ("target_files", "files_under_test", "files", "paths"):
+                    files.extend(_intent_plan_string_list(source.get(field)))
+            if files:
+                target["target_files"] = list(dict.fromkeys(files))
+        if not str(target.get("command") or "").strip():
+            command = _intent_plan_first_string(
+                supporting_test.get("command"),
+                supporting_test.get("test_command"),
+                supporting_test.get("run_command"),
+                supporting_test.get("runnable_command"),
+            )
+            if command:
+                target["command"] = command
+        if target != raw_target:
+            changed = True
+        repaired_targets.append(target)
+    if repaired_targets != targets:
+        payload["test_targets"] = repaired_targets
+        changed = True
+    if changed:
+        write_json(path, payload)
+
+
 def intent_test_plan_errors(run_dir: Path, payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["intent-test-plan.json must be a JSON object"]
@@ -4546,8 +4736,12 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
             repair_intent_map_artifact(intent_map_path)
         else:
             write_json(intent_map_path, {"schema_version": "intent-map/v1", "bundle_id": "all", "behavioral_contracts": [], "unknowns": ["No high-value intent targets were materialized."]})
-    elif phase == "intent_test_planning" and not (run_dir / "intent" / "intent-test-plan.json").exists():
-        write_json(run_dir / "intent" / "intent-test-plan.json", {"schema_version": "intent-test-plan/v1", "test_targets": []})
+    elif phase == "intent_test_planning":
+        intent_plan_path = run_dir / "intent" / "intent-test-plan.json"
+        if intent_plan_path.exists():
+            repair_intent_test_plan_artifact(intent_plan_path, run_dir)
+        else:
+            write_json(intent_plan_path, {"schema_version": "intent-test-plan/v1", "test_targets": []})
     elif phase == "intent_test_writing" and not (run_dir / "intent" / "intent-test-source.json").exists():
         write_json(run_dir / "intent" / "intent-test-source.json", {"schema_version": "intent-test-source/v1", "generated_tests": []})
     elif phase == "intent_test_failure_analysis" and not (run_dir / "intent" / "intent-test-results.json").exists():
