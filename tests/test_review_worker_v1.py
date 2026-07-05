@@ -53,6 +53,7 @@ from pullwise_worker.review_worker_v1 import (
     phase_completion_data,
     phase_progress_data,
     phase_prompt,
+    progress_final_payload,
     inventory,
     materialize_artifacts,
     materialize_terminal_artifacts,
@@ -66,6 +67,7 @@ from pullwise_worker.review_worker_v1 import (
     validate_job_policy,
     validate_phase_outputs,
     validate_reviewer_outputs,
+    write_json,
 )
 
 
@@ -4001,6 +4003,23 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse(any(key.lower().startswith("graph") for key in payload))
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["attempt_id"], "wk-1")
+
+    def test_completed_progress_final_marks_cleanup_step_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk-1")
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "completed"
+            active.current_phase_percent = 100.0
+            active.overall_percent = 100.0
+            write_json(run_dir / "progress.json", active.progress_snapshot())
+
+            payload = progress_final_payload(run_dir, "run_1", "completed")
+
+        cleanup_step = next(step for step in payload["steps"] if step["id"] == "cleanup_active_job")
+        self.assertEqual(payload["current_phase"], "cleanup_active_job")
+        self.assertEqual(cleanup_step["status"], "completed")
+        self.assertEqual(cleanup_step["percent"], 100.0)
 
     def test_default_agent_report_is_full_repo_schema(self) -> None:
         report = default_agent_report({"job_id": "job_1", "commit": "abc"})
