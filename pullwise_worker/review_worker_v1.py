@@ -1956,6 +1956,7 @@ class ReviewWorkerV1:
                 active.current_phase,
                 status="partial_completed",
                 progress=active.overall_percent,
+                current_phase_percent=active.current_phase_percent,
                 message="Run produced a partial result.",
                 data={"reason": reason},
             )
@@ -3168,6 +3169,10 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     for item in files:
         if isinstance(item, dict):
             grouped[file_tier(item)].append(item)
+    source_like_by_tier = {
+        tier: [item for item in items if isinstance(item, dict) and item.get("is_source_like")]
+        for tier, items in grouped.items()
+    }
     bundles = []
     for tier in ("P0", "P1", "P2"):
         tier_files = grouped[tier]
@@ -3186,15 +3191,15 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     coverage = {
         "schema_version": "coverage/v1",
         "source_like_files_total": sum(1 for item in files if isinstance(item, dict) and item.get("is_source_like")),
-        "deep_reviewed_files": len(grouped["P0"]),
-        "standard_reviewed_files": len(grouped["P1"]),
-        "light_reviewed_files": len(grouped["P2"]),
-        "inventory_only_files": len(grouped["P3"]),
-        "skipped_files": len(grouped["SKIP"]),
+        "deep_reviewed_files": len(source_like_by_tier["P0"]),
+        "standard_reviewed_files": len(source_like_by_tier["P1"]),
+        "light_reviewed_files": len(source_like_by_tier["P2"]),
+        "inventory_only_files": len(source_like_by_tier["P3"]),
+        "skipped_files": len(source_like_by_tier["SKIP"]),
         "intent_tests_planned": 0,
         "intent_tests_run": 0,
         "intent_tests_supporting_findings": 0,
-        "skipped_scope": [item.get("path") for item in grouped["SKIP"][:100]],
+        "skipped_scope": [item.get("path") for item in source_like_by_tier["SKIP"][:100]],
     }
     write_json(run_dir / "coverage.json", coverage)
     return {"schema_version": "bundle-plan/v1", "run_id": run_dir.name, "bundles": bundles}
@@ -4246,8 +4251,8 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
                 errors.append(f"finding[{index}].locations has invalid entry")
                 continue
             rel = str(location.get("path") or "")
-            start = _qa_int(location.get("start_line") or location.get("line"))
-            end = _qa_int(location.get("end_line") or start)
+            start = _qa_int(location.get("start_line") or location.get("line_start") or location.get("line"))
+            end = _qa_int(location.get("end_line") or location.get("line_end") or start)
             try:
                 location_path = (repo_dir / rel).resolve(strict=False)
                 location_path.relative_to(repo_dir.resolve(strict=False))
@@ -4366,6 +4371,10 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
         payload = parse_required_json_output(path)
         if expected_schema and str(payload.get("schema_version") or "").strip() != expected_schema:
             raise RuntimeError(f"required phase output {path.name} must use schema_version {expected_schema}")
+        if rel == "report.agent.json":
+            errors = agent_report_contract_errors(payload)
+            if errors:
+                raise RuntimeError(errors[0])
         if rel == "json-errors.json":
             errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
             if errors:
@@ -4545,8 +4554,10 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
         write_json(run_dir / "intent" / "intent-test-results.json", fallback_intent_test_results(run_dir))
     elif phase == "validator_disproof" and not (run_dir / "validated-findings.json").exists():
         write_json(run_dir / "validated-findings.json", {"schema_version": "validation-output/v1", "validated_findings": [], "disproven_findings": []})
-    elif phase == "final_report_json" and not (run_dir / "report.agent.json").exists():
-        write_json(run_dir / "report.agent.json", agent_report_payload(run_dir, job))
+    elif phase == "final_report_json":
+        if not (run_dir / "report.agent.json").exists():
+            write_json(run_dir / "report.agent.json", agent_report_payload(run_dir, job))
+        repair_agent_report_artifact(run_dir, job)
 
 
 def default_agent_report(job: dict[str, Any]) -> dict[str, Any]:
@@ -4564,6 +4575,129 @@ def default_agent_report(job: dict[str, Any]) -> dict[str, Any]:
         "next_agent_tasks": [],
         "raw_artifact_refs": [],
     }
+
+
+def agent_report_contract_errors(report: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return ["report.agent.json must be an object"]
+    if report.get("schema_id") != "codex-full-repo-review":
+        errors.append("report.agent.json must use schema_id codex-full-repo-review")
+    findings = report.get("findings")
+    if findings is not None and not isinstance(findings, list):
+        errors.append("report.agent.json findings must be a list")
+    if isinstance(findings, list):
+        for index, finding in enumerate(findings):
+            if not isinstance(finding, dict):
+                errors.append(f"finding[{index}] must be an object")
+                continue
+            locations = finding.get("locations")
+            if locations is None and isinstance(finding.get("location"), dict):
+                locations = [finding.get("location")]
+            if locations is not None and not isinstance(locations, list):
+                errors.append(f"finding[{index}].locations must be a list")
+    return errors
+
+
+def agent_report_location(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    path = str(value.get("path") or value.get("file") or value.get("filename") or "").strip()
+    start = _qa_int(
+        value.get("start_line")
+        or value.get("line_start")
+        or value.get("line")
+        or value.get("line_number")
+        or value.get("lineNumber")
+    )
+    end = _qa_int(
+        value.get("end_line")
+        or value.get("line_end")
+        or value.get("endLine")
+        or value.get("lineEnd")
+        or start
+    )
+    if end <= 0:
+        end = start
+    if not path and start <= 0:
+        return None
+    location = dict(value)
+    location["path"] = path
+    if start > 0:
+        location["start_line"] = start
+    if end > 0:
+        location["end_line"] = end
+    return location
+
+
+def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_locations = finding.get("locations")
+    if not isinstance(raw_locations, list):
+        raw_locations = []
+    if not raw_locations and isinstance(finding.get("location"), dict):
+        raw_locations = [finding["location"]]
+    if not raw_locations and isinstance(finding.get("affectedLocations"), list):
+        raw_locations = finding["affectedLocations"]
+    locations = []
+    for raw_location in raw_locations:
+        location = agent_report_location(raw_location)
+        if location is not None:
+            locations.append(location)
+    return locations
+
+
+def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
+    if not isinstance(finding, dict):
+        return None
+    normalized = dict(finding)
+    normalized["locations"] = agent_report_locations(finding)
+    if "evidence" not in normalized:
+        normalized["evidence"] = []
+    return normalized
+
+
+def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
+    path = run_dir / "report.agent.json"
+    raw = read_json(path, {}) if path.exists() else {}
+    report = default_agent_report(job)
+    if isinstance(raw, dict):
+        report.update(raw)
+    report["schema_id"] = "codex-full-repo-review"
+    report["schema_version"] = "v1"
+    report["run_id"] = str(report.get("run_id") or default_agent_report(job)["run_id"])
+    report["commit_sha"] = str(report.get("commit_sha") or job.get("commit") or "pending")
+    summary = report.get("summary")
+    if not isinstance(summary, dict):
+        summary = {"overall_risk": "unknown", "result_status": "complete"}
+    summary.setdefault("overall_risk", "unknown")
+    summary.setdefault("result_status", "complete")
+    report["summary"] = summary
+    coverage = read_json(run_dir / "coverage.json", {})
+    if isinstance(coverage, dict):
+        report["coverage"] = coverage
+    intent = read_json(
+        run_dir / "intent" / "intent-test-results.json",
+        {"schema_version": "intent-test-result/v1", "test_results": []},
+    )
+    if isinstance(intent, dict):
+        report["intent_test_validation"] = intent
+    raw_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    findings = []
+    next_tasks = report.get("next_agent_tasks") if isinstance(report.get("next_agent_tasks"), list) else []
+    for raw_finding in raw_findings:
+        finding = normalized_agent_report_finding(raw_finding)
+        if finding is None:
+            continue
+        findings.append(finding)
+        task = str(finding.get("next_agent_task") or "").strip()
+        if task:
+            next_tasks.append(task)
+    report["findings"] = findings
+    for key in ("appendix_findings", "disproven_findings", "next_agent_tasks", "raw_artifact_refs"):
+        if not isinstance(report.get(key), list):
+            report[key] = []
+    report["next_agent_tasks"] = list(dict.fromkeys(str(item) for item in next_tasks if str(item).strip()))
+    write_json(path, report)
 
 
 def agent_report_payload(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:

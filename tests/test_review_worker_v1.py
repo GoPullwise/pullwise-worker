@@ -987,12 +987,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             bundle = next(item for item in plan["bundles"] if "src/auth/session.py" in item["paths"])
             bundle_text = (run_dir / "bundles" / f"{bundle['bundle_id']}.md").read_text(encoding="utf-8")
+            coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
 
         self.assertEqual(inv["schema_version"], "inventory/v1")
         self.assertTrue(any(item["path"] == "src/auth/session.py" and "auth" in item["risk_hints"] for item in inv["files"]))
         self.assertEqual(bundle["tier"], "P0")
         self.assertIn("1 | def refresh_session():", bundle_text)
         self.assertIn("Intent test eligible: true", bundle_text)
+        reviewed = sum(coverage[key] for key in ("deep_reviewed_files", "standard_reviewed_files", "light_reviewed_files", "inventory_only_files"))
+        self.assertEqual(reviewed + coverage["skipped_files"], coverage["source_like_files_total"])
 
     def test_intent_tests_run_in_disposable_validation_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3421,6 +3424,61 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             validate_phase_outputs(run_dir, "repo_map")
             validate_phase_outputs(run_dir, "risk_routing")
+
+    def test_final_report_fallback_repairs_model_output_to_full_repo_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "intent" / "intent-test-results.json").write_text(
+                json.dumps({"schema_version": "intent-test-result/v1", "test_results": []}),
+                encoding="utf-8",
+            )
+            (run_dir / "report.agent.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "v1",
+                        "findings": [
+                            {
+                                "title": "Bad output",
+                                "severity": "high",
+                                "confidence": 0.9,
+                                "locations": [{"path": "app.py", "line_start": 3, "line_end": 4}],
+                                "evidence": [],
+                                "impact": "Impact.",
+                                "recommendation": "Fix it.",
+                                "next_agent_task": "Patch the issue.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "codex-full-repo-review"):
+                validate_phase_outputs(run_dir, "final_report_json")
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1", "commit": "abc"}, "final_report_json")
+            validate_phase_outputs(run_dir, "final_report_json")
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(report["schema_id"], "codex-full-repo-review")
+        self.assertEqual(report["commit_sha"], "abc")
+        self.assertEqual(report["findings"][0]["locations"][0]["start_line"], 3)
+        self.assertEqual(report["findings"][0]["locations"][0]["end_line"], 4)
+        self.assertEqual(report["next_agent_tasks"], ["Patch the issue."])
 
     def test_run_semantic_phase_requires_codex_app_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
