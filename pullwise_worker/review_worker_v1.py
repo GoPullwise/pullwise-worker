@@ -1919,7 +1919,7 @@ class ReviewWorkerV1:
                     self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
                     if phase == "submit_result_envelope":
                         envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
-                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done"), artifact_dir, envelope):
+                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
                             terminal_state = "result_submit_pending"
                             return
                         terminal_state = "completed"
@@ -1972,7 +1972,7 @@ class ReviewWorkerV1:
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "cancelled"), artifact_dir, envelope):
+            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "cancelled", run_dir), artifact_dir, envelope):
                 terminal_state = "cancelled"
             else:
                 terminal_state = "result_submit_pending"
@@ -2008,7 +2008,7 @@ class ReviewWorkerV1:
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "partial_completed"), artifact_dir, envelope):
+            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "partial_completed", run_dir), artifact_dir, envelope):
                 terminal_state = "partial_completed"
             else:
                 terminal_state = "result_submit_pending"
@@ -2035,7 +2035,7 @@ class ReviewWorkerV1:
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "failed"), artifact_dir, envelope):
+            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "failed", run_dir), artifact_dir, envelope):
                 terminal_state = "failed"
             else:
                 terminal_state = "result_submit_pending"
@@ -2202,7 +2202,7 @@ class ReviewWorkerV1:
             active.message = "Result submit pending: result envelope is missing or invalid"
             return False
         status = str(pending.get("result_status") or result_status_from_envelope(envelope))
-        payload = result_payload(active, envelope, status)
+        payload = result_payload(active, envelope, status, pending_path.parent)
         try:
             self.client.result(active.job_id, payload)
         except Exception as exc:
@@ -5647,7 +5647,19 @@ def repository_payload(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str) -> dict[str, Any]:
+def result_human_report(source_dir: Path | None) -> dict[str, str]:
+    if source_dir is None:
+        return {"summaryMarkdown": "# Codex Full Repository Review Report\n"}
+    report_path = source_dir / "report.md"
+    try:
+        markdown = report_path.read_text(encoding="utf-8")
+    except OSError:
+        markdown = ""
+    markdown = markdown.strip()
+    return {"summaryMarkdown": markdown or "# Codex Full Repository Review Report\n"}
+
+
+def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str, source_dir: Path | None = None) -> dict[str, Any]:
     agent_report = {}
     for item in envelope.get("artifact_manifest") or []:
         if item.get("name") == "report.agent.json":
@@ -5658,7 +5670,7 @@ def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str) -> 
         "result_checksum": hashlib.sha256(json.dumps(envelope, sort_keys=True).encode("utf-8")).hexdigest(),
         "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
         "reviewWorkerProtocol": envelope,
-        "humanReport": {"summaryMarkdown": "# Codex Full Repository Review Report\n"},
+        "humanReport": result_human_report(source_dir),
         "agentReport": agent_report,
         "readingGuide": {"forAgentDeep": "reviewWorkerProtocol.artifact_manifest"},
         "duration_ms": envelope["execution"].get("duration_ms", 0),
