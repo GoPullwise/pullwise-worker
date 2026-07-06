@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from io import BytesIO
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +23,7 @@ from pullwise_worker._main_part_01_bootstrap import (
 )
 from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error, writable_path_check
 from pullwise_worker.review_worker_v1 import (
+    DEBUG_BUNDLE_ARTIFACT_ID,
     INTENT_TEST_CLASSIFICATIONS,
     PIPELINE_PHASES,
     REQUIRED_COMPLETED_ARTIFACTS,
@@ -41,6 +43,7 @@ from pullwise_worker.review_worker_v1 import (
     codex_error_code,
     codex_quota_payload_from_rate_limits,
     quota_refresh_error_is_exhaustion,
+    refresh_coverage_intent_counters,
     decide_approval,
     default_agent_report,
     effort_for_phase,
@@ -411,9 +414,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         checks = [("provider_ready", True, "codex"), ("codex_ready", True, "ready")]
         with patch(
-            "pullwise_worker._main_part_07_readiness_doctor.install_ubuntu_2204_dependencies",
-            return_value=(True, "dependencies present"),
-        ) as dependencies, patch(
+            "pullwise_worker._main_part_07_readiness_doctor.dependency_available",
+            return_value=True,
+        ) as dependency_available, patch(
             "pullwise_worker._main_part_07_readiness_doctor.worker_readiness_state",
             return_value=(checks, True, ["codex"]),
         ), patch(
@@ -425,7 +428,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         ):
             self.assertTrue(run_doctor(config))
 
-        dependencies.assert_called_once_with(["git", "bwrap"])
+        self.assertEqual(dependency_available.call_count, 2)
         self.assertEqual(heartbeats[0]["ready_providers"], ["codex"])
 
     def test_doctor_preflight_can_skip_systemd_active_requirement(self) -> None:
@@ -447,8 +450,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         checks = [("provider_ready", True, "codex"), ("codex_ready", True, "ready")]
         with patch(
-            "pullwise_worker._main_part_07_readiness_doctor.install_ubuntu_2204_dependencies",
-            return_value=(True, "dependencies present"),
+            "pullwise_worker._main_part_07_readiness_doctor.dependency_available",
+            return_value=True,
         ), patch(
             "pullwise_worker._main_part_07_readiness_doctor.worker_readiness_state",
             return_value=(checks, True, ["codex"]),
@@ -464,6 +467,39 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse(heartbeats[0]["systemd_active"])
         self.assertEqual(heartbeats[0]["doctor_status"], "ok")
 
+    def test_doctor_reports_missing_dependency_without_installing(self) -> None:
+        config = SimpleNamespace(
+            provider="codex",
+            provider_chain=["codex"],
+            service_name="pullwise-worker-test",
+            worker_id="wk_1",
+        )
+        heartbeats = []
+
+        class Client:
+            def __init__(self, _config: object) -> None:
+                pass
+
+            def heartbeat(self, **payload: object) -> None:
+                heartbeats.append(payload)
+
+        checks = [("provider_ready", True, "codex"), ("codex_ready", True, "ready")]
+        with patch(
+            "pullwise_worker._main_part_07_readiness_doctor.dependency_available",
+            side_effect=lambda requirement: requirement == "git",
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.worker_readiness_state",
+            return_value=(checks, True, ["codex"]),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.command_ok",
+            return_value=(True, "active"),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.PullwiseClient",
+            Client,
+        ):
+            self.assertFalse(run_doctor(config))
+
+        self.assertEqual(heartbeats[0]["doctor_status"], "degraded")
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service_home = Path(tmp_dir) / "service"
@@ -4761,5 +4797,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
 
 

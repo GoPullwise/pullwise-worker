@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 # Imported by main.py and re-exported from the aggregate module.
 
@@ -277,10 +277,10 @@ def disk_space_check(path: Path) -> tuple[bool, str]:
 
 def run_doctor(config: WorkerConfig) -> bool:
     requirements = ["git", "bwrap"]
-    dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(requirements)
+    missing_dependencies = [requirement for requirement in requirements if not dependency_available(requirement)]
     checks, _provider_ready, ready_providers = worker_readiness_state(config)
-    if not dependency_ok or dependency_detail != "dependencies present":
-        checks.insert(0, ("dependency_install", dependency_ok, dependency_detail))
+    if missing_dependencies:
+        checks.insert(0, ("dependencies", False, "missing dependencies: " + ", ".join(missing_dependencies)))
     codex_ready = readiness_check_ok(checks, "codex_ready")
     systemd_active, systemd_detail = command_ok(["systemctl", "is-active", config.service_name])
     require_systemd_active = bool(getattr(config, "doctor_require_systemd_active", True))
@@ -511,3 +511,4 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
         finally:
             server.close()
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
+
