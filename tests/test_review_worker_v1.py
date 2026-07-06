@@ -4110,6 +4110,29 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["attempt_id"], "wk-1")
 
+    def test_result_payload_uses_materialized_markdown_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            (run_dir / "report.md").write_text(
+                "# Codex Full Repository Review Report\n\n## Summary\n\n- Confirmed findings: 2\n",
+                encoding="utf-8",
+            )
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk-1")
+            envelope = {
+                "protocol_version": "review-worker-protocol/v1",
+                "job": {"run_id": "run_1"},
+                "execution": {"status": "completed", "duration_ms": 10},
+                "summary": {"top_findings": []},
+                "artifact_manifest": [],
+            }
+
+            payload = result_payload(active, envelope, "done", run_dir)
+
+        markdown = payload["humanReport"]["summaryMarkdown"]
+        self.assertIn("## Summary", markdown)
+        self.assertIn("Confirmed findings: 2", markdown)
+
     def test_completed_progress_final_marks_cleanup_step_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run_1"
