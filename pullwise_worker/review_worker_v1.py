@@ -4,6 +4,7 @@ import base64
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -5142,6 +5143,8 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
     start = _qa_int(
         value.get("start_line")
         or value.get("line_start")
+        or value.get("startLine")
+        or value.get("lineStart")
         or value.get("line")
         or value.get("line_number")
         or value.get("lineNumber")
@@ -5166,6 +5169,30 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
     return location
 
 
+def agent_report_finding_location(finding: dict[str, Any]) -> dict[str, Any] | None:
+    return agent_report_location(
+        {
+            "path": finding.get("path") or finding.get("file") or finding.get("filename"),
+            "start_line": (
+                finding.get("start_line")
+                or finding.get("line_start")
+                or finding.get("startLine")
+                or finding.get("lineStart")
+                or finding.get("line")
+                or finding.get("line_number")
+                or finding.get("lineNumber")
+            ),
+            "end_line": (
+                finding.get("end_line")
+                or finding.get("line_end")
+                or finding.get("endLine")
+                or finding.get("lineEnd")
+                or finding.get("line")
+            ),
+        }
+    )
+
+
 def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     raw_locations = finding.get("locations")
     if not isinstance(raw_locations, list):
@@ -5174,6 +5201,12 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
         raw_locations = [finding["location"]]
     if not raw_locations and isinstance(finding.get("affectedLocations"), list):
         raw_locations = finding["affectedLocations"]
+    if not raw_locations:
+        finding_location = agent_report_finding_location(finding)
+        if finding_location is not None:
+            raw_locations = [finding_location]
+    if not raw_locations and isinstance(finding.get("evidence"), list):
+        raw_locations = [item for item in finding["evidence"] if isinstance(item, dict)]
     locations = []
     for raw_location in raw_locations:
         location = agent_report_location(raw_location)
@@ -5182,11 +5215,53 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     return locations
 
 
+def agent_report_confidence(value: object) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        confidence = float(value)
+        if not math.isfinite(confidence):
+            return 0.0
+        if 0 <= confidence <= 1:
+            return confidence
+        if 1 < confidence <= 100:
+            return confidence / 100
+        return 0.0
+    text = str(value or "").strip().lower()
+    if not text:
+        return 0.0
+    named = {
+        "very high": 0.95,
+        "high": 0.9,
+        "medium": 0.6,
+        "moderate": 0.6,
+        "low": 0.3,
+        "very low": 0.1,
+        "none": 0.0,
+        "unknown": 0.0,
+    }
+    if text in named:
+        return named[text]
+    numeric = text.removesuffix("%").strip()
+    try:
+        confidence = float(numeric)
+    except ValueError:
+        return 0.0
+    if text.endswith("%"):
+        confidence = confidence / 100
+    if 0 <= confidence <= 1:
+        return confidence
+    if 1 < confidence <= 100:
+        return confidence / 100
+    return 0.0
+
+
 def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
     if not isinstance(finding, dict):
         return None
     normalized = dict(finding)
     normalized["locations"] = agent_report_locations(finding)
+    normalized["confidence"] = agent_report_confidence(finding.get("confidence"))
     if "evidence" not in normalized:
         normalized["evidence"] = []
     return normalized

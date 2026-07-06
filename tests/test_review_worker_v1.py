@@ -60,6 +60,7 @@ from pullwise_worker.review_worker_v1 import (
     pack_bundles,
     prepare_validation_workspace,
     qa_gate_payload,
+    repair_agent_report_artifact,
     run_intent_tests,
     scoped_codex_command,
     upload_artifacts,
@@ -4149,6 +4150,66 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(payload["current_phase"], "cleanup_active_job")
         self.assertEqual(cleanup_step["status"], "completed")
         self.assertEqual(cleanup_step["percent"], 100.0)
+
+    def test_agent_report_repair_normalizes_top_level_locations_and_confidence_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            repo.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (repo / "src.py").write_text("print('hello')\n", encoding="utf-8")
+            (run_dir / "report.md").write_text("# Report\n", encoding="utf-8")
+            (run_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "coverage/v1",
+                        "source_like_files_total": 1,
+                        "deep_reviewed_files": 1,
+                        "standard_reviewed_files": 0,
+                        "light_reviewed_files": 0,
+                        "inventory_only_files": 0,
+                        "skipped_files": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "token-budget.json").write_text(
+                json.dumps({"schema_version": "token-budget/v1"}), encoding="utf-8"
+            )
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [
+                        {
+                            "id": "f_1",
+                            "title": "Bug",
+                            "severity": "high",
+                            "confidence": "high",
+                            "path": "src.py",
+                            "line_start": 1,
+                            "line_end": 1,
+                            "evidence": ["source line demonstrates the bug"],
+                            "impact": "Breaks behavior",
+                            "recommendation": "Fix it",
+                        }
+                    ],
+                },
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1", "commit": "abc"})
+            repaired = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(repaired["findings"][0]["confidence"], 0.9)
+        self.assertEqual(
+            repaired["findings"][0]["locations"],
+            [{"path": "src.py", "start_line": 1, "end_line": 1}],
+        )
+        self.assertEqual(qa["status"], "pass")
+        self.assertEqual(qa["errors"], [])
 
     def test_default_agent_report_is_full_repo_schema(self) -> None:
         report = default_agent_report({"job_id": "job_1", "commit": "abc"})
