@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import fnmatch
@@ -3468,10 +3468,10 @@ def route_matches_path(pattern: str, path: str) -> bool:
     return normalized_path.startswith(f"{normalized_pattern}/")
 
 
-def semantic_file_tier(item: dict[str, Any], routing: dict[str, Any]) -> str:
+def semantic_file_route(item: dict[str, Any], routing: dict[str, Any]) -> dict[str, Any] | None:
     routes = routing.get("routes") if isinstance(routing.get("routes"), list) else []
     path = str(item.get("path") or "")
-    best_tier = ""
+    best_route: dict[str, Any] | None = None
     best_specificity = -1
     for route in routes:
         if not isinstance(route, dict):
@@ -3481,11 +3481,14 @@ def semantic_file_tier(item: dict[str, Any], routing: dict[str, Any]) -> str:
             continue
         for pattern in route_patterns(route):
             if route_matches_path(pattern, path) and len(pattern) > best_specificity:
-                best_tier = tier
+                best_route = route
                 best_specificity = len(pattern)
-    if best_tier:
-        return best_tier
-    return ""
+    return best_route
+
+
+def semantic_file_tier(item: dict[str, Any], routing: dict[str, Any]) -> str:
+    route = semantic_file_route(item, routing)
+    return risk_route_tier(route) if isinstance(route, dict) else ""
 
 
 def risk_routing_default_tier(routing: dict[str, Any]) -> str:
@@ -3496,13 +3499,20 @@ def risk_routing_default_tier(routing: dict[str, Any]) -> str:
     return ""
 
 
-def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None) -> str:
-    if isinstance(routing, dict) and routing:
-        semantic_tier = semantic_file_tier(item, routing)
-        if semantic_tier:
-            return semantic_tier
-    if item.get("is_binary") or item.get("is_generated_candidate"):
-        return "SKIP"
+def is_hard_skip_item(item: dict[str, Any]) -> bool:
+    if item.get("is_binary") or item.get("is_hard_generated_candidate") or item.get("is_generated_candidate"):
+        return True
+    path = str(item.get("path") or "").replace("\\", "/").lower().lstrip("./")
+    parts = set(part for part in path.split("/") if part)
+    if parts.intersection({"node_modules", "dist", "build", "vendor", ".venv", "__pycache__", ".cache"}):
+        return True
+    name = Path(path).name
+    if name.endswith(".min.js") or name in {"package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "go.sum", "cargo.lock"}:
+        return True
+    return False
+
+
+def generic_file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None) -> str:
     if isinstance(routing, dict) and routing:
         default_tier = risk_routing_default_tier(routing)
         if default_tier:
@@ -3517,22 +3527,121 @@ def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None) -> st
     return "P3"
 
 
+def profile_fallback_route_for_item(item: dict[str, Any], profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(profile, dict) or profile.get("schema_version") != "repo-profile/v1":
+        return None
+    path = str(item.get("path") or "").replace("\\", "/").lower().lstrip("./")
+    adapters = set(str(adapter) for adapter in profile.get("adapter_ids", []) if isinstance(adapter, str))
+    primary_languages = set(str(language) for language in profile.get("primary_languages", []) if isinstance(language, str))
+    reasons: list[str] = []
+    tier = ""
+    if "python-backend" in adapters or "python" in primary_languages:
+        if any(part in path for part in ("auth", "session", "permission", "tenant", "webhook", "migration", "migrations")):
+            tier = "P0"
+            if "auth" in path or "session" in path or "permission" in path:
+                reasons.append("python_backend_auth_path")
+            if "webhook" in path:
+                reasons.append("python_backend_webhook_path")
+            if "migration" in path:
+                reasons.append("python_backend_migration_path")
+    if "frontend" in adapters or "node" in adapters:
+        if any(part in path for part in ("/api/", "api/", "route.ts", "route.js", "server-action", "middleware", ".env")):
+            tier = "P1" if tier != "P0" else tier
+            reasons.append("frontend_server_boundary_path")
+    if not tier:
+        return None
+    return {"path": str(item.get("path") or ""), "tier": tier, "source": "profile_fallback", "reasons": sorted(set(reasons)) or ["profile_fallback_path"]}
+
+
+def profile_fallback_file_tier(item: dict[str, Any], profile: dict[str, Any] | None) -> str:
+    route = profile_fallback_route_for_item(item, profile)
+    return str(route.get("tier") or "") if isinstance(route, dict) else ""
+
+
+def _semantic_effective_route(item: dict[str, Any], routing: dict[str, Any]) -> dict[str, Any] | None:
+    route = semantic_file_route(item, routing)
+    if not isinstance(route, dict):
+        return None
+    tier = risk_route_tier(route)
+    if not tier:
+        return None
+    reasons = route.get("reasons") if isinstance(route.get("reasons"), list) else []
+    return {
+        "path": str(item.get("path") or ""),
+        "tier": tier,
+        "source": "semantic",
+        "reasons": [str(reason) for reason in reasons if str(reason).strip()] or ["semantic_routing"],
+    }
+
+
+def effective_routing(semantic_routing: dict[str, Any] | None, profile: dict[str, Any] | None, inventory_payload: dict[str, Any] | None) -> dict[str, Any]:
+    routing = semantic_routing if isinstance(semantic_routing, dict) and semantic_routing.get("schema_version") == "risk-routing/v1" else {}
+    inv = inventory_payload if isinstance(inventory_payload, dict) else {}
+    files = inv.get("files") if isinstance(inv.get("files"), list) else []
+    routes: list[dict[str, Any]] = []
+    sources = {"semantic_routes": 0, "profile_fallback_routes": 0, "hard_skip_routes": 0}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        if is_hard_skip_item(item):
+            routes.append({"path": path, "tier": "SKIP", "source": "hard_skip", "reasons": ["hard_skip_generated_vendor_cache_or_lock"]})
+            sources["hard_skip_routes"] += 1
+            continue
+        semantic_route = _semantic_effective_route(item, routing)
+        if semantic_route:
+            routes.append(semantic_route)
+            sources["semantic_routes"] += 1
+            continue
+        fallback_route = profile_fallback_route_for_item(item, profile)
+        if fallback_route:
+            routes.append(fallback_route)
+            sources["profile_fallback_routes"] += 1
+            continue
+        routes.append({"path": path, "tier": generic_file_tier(item, routing), "source": "generic", "reasons": ["generic_default"]})
+    return {"schema_version": "effective-risk-routing/v1", "run_id": "", "sources": sources, "routes": routes}
+
+
+def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None, profile: dict[str, Any] | None = None) -> str:
+    if is_hard_skip_item(item):
+        return "SKIP"
+    if isinstance(routing, dict) and routing:
+        semantic_tier = semantic_file_tier(item, routing)
+        if semantic_tier:
+            return semantic_tier
+    fallback_tier = profile_fallback_file_tier(item, profile)
+    if fallback_tier:
+        return fallback_tier
+    return generic_file_tier(item, routing)
+
+
 def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     inv = read_json(run_dir / "inventory.json", {})
     files = inv.get("files") if isinstance(inv.get("files"), list) else []
-    routing = read_json(run_dir / "risk-routing.json", {})
-    routing = routing if isinstance(routing, dict) and routing.get("schema_version") == "risk-routing/v1" else {}
+    semantic_routing = read_json(run_dir / "risk-routing.json", {})
+    semantic_routing = semantic_routing if isinstance(semantic_routing, dict) and semantic_routing.get("schema_version") == "risk-routing/v1" else {}
+    profile = read_json(run_dir / "repo-profile.json", {})
+    profile = profile if isinstance(profile, dict) and profile.get("schema_version") == "repo-profile/v1" else {}
+    routing = effective_routing(semantic_routing, profile, inv)
+    routing["run_id"] = run_dir.name
+    write_json(run_dir / "effective-risk-routing.json", routing)
+    route_source_by_path = {
+        str(route.get("path") or ""): str(route.get("source") or "")
+        for route in routing.get("routes", [])
+        if isinstance(route, dict)
+    }
     grouped: dict[str, list[dict[str, Any]]] = {"P0": [], "P1": [], "P2": [], "P3": [], "SKIP": []}
     for item in files:
         if isinstance(item, dict):
-            grouped[file_tier(item, routing)].append(item)
+            item["_routing_source"] = route_source_by_path.get(str(item.get("path") or ""), "")
+            grouped[file_tier(item, routing, profile)].append(item)
     source_like_by_tier = {
         tier: [item for item in items if isinstance(item, dict) and item.get("is_source_like")]
         for tier, items in grouped.items()
     }
     bundles = []
     for tier in ("P0", "P1", "P2"):
-        tier_files = grouped[tier]
+        tier_files = sorted(grouped[tier], key=lambda item: (_bundle_component_key(str(item.get("path") or "")), str(item.get("path") or "")))
         chunk: list[dict[str, Any]] = []
         token_count = 0
         for item in tier_files:
@@ -3561,8 +3670,45 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     if source_like_by_tier["SKIP"]:
         coverage["skipped_reasons"] = {"semantic_or_inventory_skip": coverage["skipped_scope"]}
     write_json(run_dir / "coverage.json", coverage)
-    return {"schema_version": "bundle-plan/v1", "run_id": run_dir.name, "bundles": bundles}
+    return {"schema_version": "bundle-plan/v1", "run_id": run_dir.name, "routing_sources": routing.get("sources", {}), "bundles": bundles}
 
+
+def _bundle_component_key(path: str) -> str:
+    normalized = path.replace("\\", "/").lstrip("./")
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) >= 2 and parts[0] in {"app", "src", "server", "lib"}:
+        return f"{parts[0]}/{parts[1]}"
+    if len(parts) >= 2 and parts[0] in {"test", "tests", "__tests__"}:
+        return f"app/{parts[1]}"
+    if len(parts) >= 2:
+        return "/".join(parts[:2])
+    return normalized
+
+
+def _bundle_metadata(files: list[dict[str, Any]]) -> dict[str, Any]:
+    paths = [str(item.get("path") or "") for item in files if item.get("path")]
+    component_keys = sorted({_bundle_component_key(path) for path in paths if _bundle_component_key(path)})
+    related_tests = sorted(
+        path
+        for path in paths
+        if path.startswith(("test/", "tests/", "__tests__/")) or "/tests/" in f"/{path}" or Path(path).name.startswith("test_") or ".test." in Path(path).name
+    )
+    grouping_reasons: list[str] = []
+    if len(paths) > 1 and len(component_keys) == 1:
+        grouping_reasons.append("path_affinity")
+    if related_tests:
+        grouping_reasons.append("test_affinity")
+    metadata: dict[str, Any] = {}
+    if len(component_keys) == 1:
+        metadata["component_key"] = component_keys[0]
+    if grouping_reasons:
+        metadata["grouping_reasons"] = grouping_reasons
+    if related_tests:
+        metadata["related_tests"] = related_tests
+    routing_sources = sorted({str(item.get("_routing_source") or "") for item in files if str(item.get("_routing_source") or "")})
+    if routing_sources:
+        metadata["routing_sources"] = routing_sources
+    return metadata
 
 def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated_tokens: int) -> dict[str, Any]:
     reviewers = {
@@ -3570,7 +3716,7 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
         "P1": ["correctness", "test_gap"],
         "P2": ["correctness_lite"],
     }[tier]
-    return {
+    payload = {
         "bundle_id": f"{tier.lower()}-bundle-{index:03d}",
         "tier": tier,
         "title": f"{tier} review bundle {index}",
@@ -3581,6 +3727,8 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
         "intent_test_eligible": tier in {"P0", "P1"},
         "risk_reasons": sorted({hint for item in files for hint in item.get("risk_hints", [])})[:12],
     }
+    payload.update(_bundle_metadata(files))
+    return payload
 
 
 def pack_bundles(repo_dir: Path, run_dir: Path) -> None:

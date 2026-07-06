@@ -44,6 +44,7 @@ from pullwise_worker.review_worker_v1 import (
     decide_approval,
     default_agent_report,
     effort_for_phase,
+    effective_routing,
     fallback_semantic_artifact,
     model_for_job,
     review_worker_policy_for_job,
@@ -1162,6 +1163,136 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertNotIn("src/low.py", bundled_paths)
         self.assertEqual(coverage["deep_reviewed_files"], 1)
         self.assertEqual(coverage["inventory_only_files"], 1)
+
+    def test_bundle_plan_groups_component_and_related_tests_when_under_token_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            files = [
+                {"path": "app/users/routes.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 100},
+                {"path": "app/users/service.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 100},
+                {"path": "app/users/repository.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 100},
+                {"path": "tests/users/test_routes.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "is_test_candidate": True, "risk_hints": [], "estimated_tokens": 100},
+                {"path": "app/billing/webhook.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": ["webhook"], "estimated_tokens": 100},
+            ]
+            (run_dir / "inventory.json").write_text(json.dumps({"schema_version": "inventory/v1", "files": files}), encoding="utf-8")
+            (run_dir / "risk-routing.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "risk-routing/v1",
+                        "routes": [
+                            {"path": "app/users/", "tier": "P1", "reasons": ["users component"]},
+                            {"path": "tests/users/", "tier": "P1", "reasons": ["users tests"]},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = bundle_plan_payload(run_dir)
+
+        users_bundle = next(bundle for bundle in plan["bundles"] if "app/users/routes.py" in bundle["paths"])
+        self.assertEqual(users_bundle["tier"], "P1")
+        self.assertIn("app/users/service.py", users_bundle["paths"])
+        self.assertIn("app/users/repository.py", users_bundle["paths"])
+        self.assertIn("tests/users/test_routes.py", users_bundle["paths"])
+        self.assertEqual(users_bundle["component_key"], "app/users")
+        self.assertIn("path_affinity", users_bundle["grouping_reasons"])
+        self.assertIn("test_affinity", users_bundle["grouping_reasons"])
+        self.assertEqual(users_bundle["related_tests"], ["tests/users/test_routes.py"])
+        self.assertIn("routing_sources", users_bundle)
+        self.assertEqual(plan["schema_version"], "bundle-plan/v1")
+
+    def test_bundle_plan_splits_group_when_token_cap_is_exceeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            files = [
+                {"path": "app/large/routes.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 40000},
+                {"path": "app/large/service.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 40000},
+            ]
+            (run_dir / "inventory.json").write_text(json.dumps({"schema_version": "inventory/v1", "files": files}), encoding="utf-8")
+            (run_dir / "risk-routing.json").write_text(json.dumps({"schema_version": "risk-routing/v1", "routes": [{"path": "app/large/", "tier": "P1"}]}), encoding="utf-8")
+
+            plan = bundle_plan_payload(run_dir)
+
+        large_bundles = [bundle for bundle in plan["bundles"] if any(path.startswith("app/large/") for path in bundle["paths"])]
+        self.assertEqual(len(large_bundles), 2)
+        self.assertTrue(all(bundle["estimated_tokens"] <= 60000 for bundle in large_bundles))
+        self.assertEqual(sorted(path for bundle in large_bundles for path in bundle["paths"]), ["app/large/routes.py", "app/large/service.py"])
+
+    def test_effective_routing_preserves_semantic_routes_and_explains_fallbacks(self) -> None:
+        inv = {
+            "schema_version": "inventory/v1",
+            "files": [
+                {"path": "app/auth/session.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 10},
+                {"path": "app/users/service.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 10},
+                {"path": "dist/app.min.js", "is_source_like": True, "is_binary": False, "is_generated_candidate": True, "risk_hints": [], "estimated_tokens": 10},
+            ],
+        }
+        semantic = {
+            "schema_version": "risk-routing/v1",
+            "routes": [
+                {"path": "app/users/service.py", "tier": "P2", "reasons": ["semantic exact"]},
+                {"path": "dist/", "tier": "P0", "reasons": ["semantic broad"]},
+            ],
+        }
+        profile = {"schema_version": "repo-profile/v1", "adapter_ids": ["python", "python-backend"]}
+
+        effective = effective_routing(semantic, profile, inv)
+        routes = {item["path"]: item for item in effective["routes"]}
+
+        self.assertEqual(routes["app/users/service.py"]["tier"], "P2")
+        self.assertEqual(routes["app/users/service.py"]["source"], "semantic")
+        self.assertEqual(routes["app/auth/session.py"]["tier"], "P0")
+        self.assertEqual(routes["app/auth/session.py"]["source"], "profile_fallback")
+        self.assertIn("python_backend_auth_path", routes["app/auth/session.py"]["reasons"])
+        self.assertEqual(routes["dist/app.min.js"]["tier"], "SKIP")
+        self.assertEqual(routes["dist/app.min.js"]["source"], "hard_skip")
+        self.assertGreaterEqual(effective["sources"]["semantic_routes"], 1)
+        self.assertGreaterEqual(effective["sources"]["profile_fallback_routes"], 1)
+        self.assertGreaterEqual(effective["sources"]["hard_skip_routes"], 1)
+
+    def test_bundle_plan_uses_effective_routing_without_overwriting_semantic_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            inventory_payload = {
+                "schema_version": "inventory/v1",
+                "files": [
+                    {"path": "app/auth/session.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 10},
+                    {"path": "app/users/service.py", "is_source_like": True, "is_binary": False, "is_generated_candidate": False, "risk_hints": [], "estimated_tokens": 10},
+                    {"path": "dist/app.min.js", "is_source_like": True, "is_binary": False, "is_generated_candidate": True, "risk_hints": [], "estimated_tokens": 10},
+                ],
+            }
+            semantic_payload = {
+                "schema_version": "risk-routing/v1",
+                "routes": [
+                    {"path": "app/users/service.py", "tier": "P2", "reasons": ["semantic exact"]},
+                    {"path": "dist/", "tier": "P0", "reasons": ["semantic broad"]},
+                ],
+            }
+            profile_payload = {"schema_version": "repo-profile/v1", "adapter_ids": ["python", "python-backend"]}
+            (run_dir / "inventory.json").write_text(json.dumps(inventory_payload), encoding="utf-8")
+            (run_dir / "risk-routing.json").write_text(json.dumps(semantic_payload, sort_keys=True), encoding="utf-8")
+            (run_dir / "repo-profile.json").write_text(json.dumps(profile_payload), encoding="utf-8")
+            original_semantic = (run_dir / "risk-routing.json").read_text(encoding="utf-8")
+
+            plan = bundle_plan_payload(run_dir)
+            coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
+            effective_payload = json.loads((run_dir / "effective-risk-routing.json").read_text(encoding="utf-8"))
+            semantic_after = (run_dir / "risk-routing.json").read_text(encoding="utf-8")
+
+        bundled_paths = [path for bundle in plan["bundles"] for path in bundle["paths"]]
+        p0_bundle = next(bundle for bundle in plan["bundles"] if bundle["tier"] == "P0")
+        self.assertIn("app/auth/session.py", p0_bundle["paths"])
+        self.assertIn("app/users/service.py", bundled_paths)
+        self.assertNotIn("dist/app.min.js", bundled_paths)
+        self.assertEqual(coverage["skipped_files"], 1)
+        self.assertEqual(semantic_after, original_semantic)
+        self.assertEqual(effective_payload["schema_version"], "effective-risk-routing/v1")
+        self.assertIn("routing_sources", plan)
+        self.assertGreaterEqual(plan["routing_sources"]["profile_fallback_routes"], 1)
 
     def test_intent_tests_run_in_disposable_validation_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
