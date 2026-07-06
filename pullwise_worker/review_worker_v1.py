@@ -3865,6 +3865,208 @@ def fallback_intent_test_results(run_dir: Path) -> dict[str, Any]:
     return {"schema_version": "intent-test-result/v1", "test_results": test_results}
 
 
+def _string_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for item in value:
+        text = str(item or "").strip() if isinstance(item, str) else ""
+        if text:
+            items.append(text)
+    return items
+
+
+def _path_key(value: object) -> str:
+    return str(value or "").strip().replace("\\", "/").lstrip("./")
+
+
+def _intent_source_path_from_entry(entry: dict[str, Any]) -> str:
+    for key in ("path", "artifact_path", "artifactPath", "file", "test_file", "testFile"):
+        text = str(entry.get(key) or "").strip()
+        if text:
+            return text
+    created = entry.get("created_files") or entry.get("createdFiles") or entry.get("files_to_create") or entry.get("filesToCreate")
+    if isinstance(created, list):
+        for item in created:
+            if isinstance(item, dict):
+                text = str(item.get("path") or item.get("file") or "").strip()
+            else:
+                text = str(item or "").strip() if isinstance(item, str) else ""
+            if text:
+                return text
+    return ""
+
+
+def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    tests = payload.get("tests") if isinstance(payload.get("tests"), list) else []
+    tests_by_path: dict[str, dict[str, Any]] = {}
+    for test in tests:
+        if not isinstance(test, dict):
+            continue
+        test_path = _intent_source_path_from_entry(test)
+        if test_path:
+            tests_by_path[_path_key(test_path)] = test
+    generated = payload.get("generated_tests")
+    if not isinstance(generated, list):
+        generated = tests if tests else payload.get("created_files") or payload.get("createdFiles") or []
+    repaired: list[dict[str, Any]] = []
+    for index, item in enumerate(generated if isinstance(generated, list) else []):
+        if isinstance(item, dict):
+            entry = dict(item)
+            test_path = _intent_source_path_from_entry(entry)
+        elif isinstance(item, str) and item.strip():
+            test_path = item.strip()
+            entry = {"path": test_path}
+        else:
+            continue
+        supporting = tests_by_path.get(_path_key(test_path), {})
+        if supporting:
+            for key in (
+                "command",
+                "test_command",
+                "testCommand",
+                "run_command",
+                "runCommand",
+                "cwd",
+                "linked_finding_ids",
+                "target_finding_ids",
+                "intent_contract_ids",
+                "behavioral_contract_ids",
+            ):
+                if key not in entry and key in supporting:
+                    entry[key] = supporting[key]
+        test_id = _intent_test_id(entry, _intent_test_id(supporting, f"ITV-{index + 1:03d}"))
+        entry["test_id"] = test_id
+        if test_path:
+            entry["path"] = test_path
+        if not _string_items(entry.get("artifact_refs") or entry.get("artifactRefs")):
+            entry["artifact_refs"] = ["art_intent_test_source"]
+        repaired.append(entry)
+    payload["schema_version"] = "intent-test-source/v1"
+    payload["generated_tests"] = repaired
+    write_json(path, payload)
+
+
+def _raw_intent_runs_by_id(run_dir: Path) -> dict[str, dict[str, Any]]:
+    raw = read_json(run_dir / "intent" / "intent-test-results.raw.json", {})
+    raw_runs = raw.get("test_runs") if isinstance(raw, dict) and isinstance(raw.get("test_runs"), list) else []
+    runs: dict[str, dict[str, Any]] = {}
+    for index, raw_run in enumerate(raw_runs):
+        if not isinstance(raw_run, dict):
+            continue
+        test_id = str(raw_run.get("test_id") or raw_run.get("id") or f"ITV-{index + 1:03d}").strip()
+        if test_id:
+            runs[test_id] = raw_run
+    return runs
+
+
+def _intent_status_from_result(result: dict[str, Any], raw_result: dict[str, Any]) -> str:
+    for value in (result.get("status"), result.get("raw_status"), raw_result.get("status")):
+        status = str(value or "").strip()
+        if status in INTENT_TEST_STATUSES:
+            return status
+    outcome = str(result.get("outcome") or result.get("classification") or "").strip()
+    if outcome.startswith("passed"):
+        return "passed"
+    if outcome.startswith("skipped"):
+        return "skipped"
+    if outcome in {"timeout", "timed_out"}:
+        return "timeout"
+    if outcome in {"error", "environment_error", "dependency_missing", "test_harness_error"}:
+        return "error"
+    if outcome in {"confirmed_bug", "plausible_bug", "test_oracle_wrong", "unclear_requirement"}:
+        return "failed"
+    return "error"
+
+
+def _intent_classification_from_result(result: dict[str, Any], status: str, raw_result: dict[str, Any]) -> str:
+    for value in (result.get("classification"), result.get("outcome")):
+        classification = str(value or "").strip()
+        if classification in INTENT_TEST_CLASSIFICATIONS:
+            return classification
+    raw_status = str(raw_result.get("status") or "").strip()
+    if status == "passed":
+        return "passed_no_bug_reproduced"
+    if status == "skipped":
+        return "skipped_not_runnable" if str(result.get("outcome") or "").strip() == "skipped_not_runnable" else "test_harness_error"
+    if status in {"timeout", "error"} or raw_status in {"skipped", "timeout", "error"}:
+        return "test_harness_error"
+    return "unclear_requirement"
+
+
+def _intent_result_evidence(result: dict[str, Any], raw_result: dict[str, Any]) -> list[str]:
+    evidence = result.get("evidence")
+    if isinstance(evidence, list):
+        items = [str(item).strip() for item in evidence if str(item).strip()]
+        if items:
+            return items
+    items = []
+    for key in ("evidence_summary", "classification_basis", "observed_output", "notes", "note", "skip_reason", "error"):
+        text = str(result.get(key) or raw_result.get(key) or "").strip()
+        if text:
+            items.append(text)
+    if not items:
+        items.append("Analyzer output was repaired into the worker intent-test-result schema.")
+    return items
+
+
+def _intent_result_artifacts(result: dict[str, Any], raw_result: dict[str, Any]) -> list[str]:
+    for key in ("artifacts", "artifact_refs", "artifactRefs"):
+        refs = _string_items(result.get(key))
+        if refs:
+            return refs
+    refs = []
+    for key in ("stdout_path", "stderr_path"):
+        output_path = str(raw_result.get(key) or "").strip()
+        if output_path:
+            refs.append(_intent_output_artifact_id(Path(output_path).name))
+    return refs
+
+
+def repair_intent_test_results_artifact(path: Path, run_dir: Path) -> None:
+    payload = read_json(path, {})
+    raw_by_id = _raw_intent_runs_by_id(run_dir)
+    if not isinstance(payload, dict):
+        write_json(path, fallback_intent_test_results(run_dir))
+        return
+    results = payload.get("test_results")
+    if not isinstance(results, list):
+        results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    repaired: list[dict[str, Any]] = []
+    for index, item in enumerate(results):
+        if not isinstance(item, dict):
+            continue
+        result = dict(item)
+        test_id = str(result.get("test_id") or result.get("id") or f"ITV-{index + 1:03d}").strip()
+        raw_result = raw_by_id.get(test_id, {})
+        status = _intent_status_from_result(result, raw_result)
+        classification = _intent_classification_from_result(result, status, raw_result)
+        confidence = result.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
+            confidence = 0.0
+        artifacts = _intent_result_artifacts(result, raw_result)
+        result.update(
+            {
+                "test_id": test_id,
+                "status": status,
+                "classification": classification,
+                "confidence": float(confidence),
+                "evidence": _intent_result_evidence(result, raw_result),
+                "artifacts": artifacts,
+                "artifact_refs": artifacts,
+            }
+        )
+        repaired.append(result)
+    if not repaired and raw_by_id:
+        write_json(path, fallback_intent_test_results(run_dir))
+        return
+    payload["schema_version"] = "intent-test-result/v1"
+    payload["test_results"] = repaired
+    write_json(path, payload)
+
 def _qa_int(value: object, default: int = 0) -> int:
     try:
         return int(value)
@@ -4874,10 +5076,18 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
             repair_intent_test_plan_artifact(intent_plan_path, run_dir)
         else:
             write_json(intent_plan_path, {"schema_version": "intent-test-plan/v1", "test_targets": []})
-    elif phase == "intent_test_writing" and not (run_dir / "intent" / "intent-test-source.json").exists():
-        write_json(run_dir / "intent" / "intent-test-source.json", {"schema_version": "intent-test-source/v1", "generated_tests": []})
-    elif phase == "intent_test_failure_analysis" and not (run_dir / "intent" / "intent-test-results.json").exists():
-        write_json(run_dir / "intent" / "intent-test-results.json", fallback_intent_test_results(run_dir))
+    elif phase == "intent_test_writing":
+        intent_source_path = run_dir / "intent" / "intent-test-source.json"
+        if intent_source_path.exists():
+            repair_intent_test_source_artifact(intent_source_path, run_dir)
+        else:
+            write_json(intent_source_path, {"schema_version": "intent-test-source/v1", "generated_tests": []})
+    elif phase == "intent_test_failure_analysis":
+        intent_results_path = run_dir / "intent" / "intent-test-results.json"
+        if intent_results_path.exists():
+            repair_intent_test_results_artifact(intent_results_path, run_dir)
+        else:
+            write_json(intent_results_path, fallback_intent_test_results(run_dir))
     elif phase == "validator_disproof" and not (run_dir / "validated-findings.json").exists():
         write_json(run_dir / "validated-findings.json", {"schema_version": "validation-output/v1", "validated_findings": [], "disproven_findings": []})
     elif phase == "final_report_json":

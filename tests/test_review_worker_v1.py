@@ -3232,6 +3232,112 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             validate_phase_outputs(run_dir, "reviewer_fanout")
+
+    def test_fallback_semantic_artifact_repairs_string_generated_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            generated_dir = run_dir / "intent" / "generated-tests"
+            generated_dir.mkdir(parents=True)
+            first_path = "intent/generated-tests/intent-agent-fix-api-base.test.jsx"
+            second_path = "intent/generated-tests/intent-review-artifact-url.test.jsx"
+            (run_dir / first_path).write_text("test('first', () => {})\n", encoding="utf-8")
+            (run_dir / second_path).write_text("test('second', () => {})\n", encoding="utf-8")
+            source_path = run_dir / "intent" / "intent-test-source.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [first_path, second_path],
+                        "tests": [
+                            {
+                                "test_id": "ITP-001",
+                                "path": first_path,
+                                "command": ["npm", "test", "--", first_path],
+                                "target_finding_ids": ["COR-P0-002-01"],
+                            },
+                            {
+                                "test_id": "ITP-002",
+                                "path": second_path,
+                                "command": ["npm", "test", "--", second_path],
+                                "target_finding_ids": ["SEC-P0-002-01"],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "generated_tests\\[0\\] must be an object"):
+                validate_phase_outputs(run_dir, "intent_test_writing")
+
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_test_writing")
+            validate_phase_outputs(run_dir, "intent_test_writing")
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["generated_tests"][0]["test_id"], "ITP-001")
+        self.assertEqual(payload["generated_tests"][0]["path"], first_path)
+        self.assertEqual(payload["generated_tests"][0]["artifact_refs"], ["art_intent_test_source"])
+        self.assertEqual(payload["generated_tests"][1]["command"], ["npm", "test", "--", second_path])
+
+    def test_fallback_semantic_artifact_repairs_outcome_style_intent_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "intent").mkdir(parents=True)
+            raw_path = run_dir / "intent" / "intent-test-results.raw.json"
+            raw_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-run-results/v1",
+                        "run_id": "run_1",
+                        "test_runs": [
+                            {
+                                "schema_version": "project-test-run/v1",
+                                "test_id": "intent-test-001",
+                                "status": "skipped",
+                                "exit_code": None,
+                                "duration_ms": 0,
+                                "timed_out": False,
+                                "skip_reason": "generated test command is not allowed by worker policy",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result_path = run_dir / "intent" / "intent-test-results.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-result/v1",
+                        "run_id": "run_1",
+                        "test_results": [
+                            {
+                                "test_id": "intent-test-001",
+                                "outcome": "skipped_not_runnable",
+                                "raw_status": "skipped",
+                                "classification_basis": "Worker policy blocked the generated command before execution.",
+                                "observed_output": "generated test command is not allowed by worker policy",
+                                "notes": "The test did not run.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "test_results\\[0\\].status"):
+                validate_phase_outputs(run_dir, "intent_test_failure_analysis")
+
+            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_test_failure_analysis")
+            validate_phase_outputs(run_dir, "intent_test_failure_analysis")
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            result = payload["test_results"][0]
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["classification"], "skipped_not_runnable")
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertIn("Worker policy blocked", result["evidence"][0])
+
     def test_validate_phase_outputs_rejects_malformed_intent_test_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"

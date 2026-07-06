@@ -178,6 +178,16 @@ Review pipeline rules:
   fallback must preserve raw project test runs using only the
   `intent-test-result/v1` classification enum, with `confidence = 0.0` and no
   positive finding confidence impact.
+- Intent artifact repair must handle existing malformed Codex outputs, not only
+  missing files. Keep the strict validators strict, but normalize common model
+  shape variants at the repair/fallback boundary before retrying validation; for
+  example, `generated_tests` may arrive as a string path list that must become
+  object entries with `test_id`, `path`, and `artifact_refs`, and analyzed
+  results may arrive with `outcome`/`raw_status` instead of canonical
+  `status`/`classification`/`confidence`/`evidence` fields. Skipped, blocked,
+  timeout, or environment-limited intent tests are degraded evidence and must
+  not fail the whole repository scan after they can be represented in
+  `intent-test-result/v1`.
 - QA must fail completed runs when intent-test validation is enabled and
   `intent-test-results.json` is missing unless an explicit skipped reason is
   recorded in the intent validation, planning, source, or raw run artifacts.
