@@ -3607,6 +3607,71 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertGreaterEqual(upload["artifacts_total"], 5)
         self.assertEqual(upload["artifacts_uploaded"], upload["artifacts_total"])
 
+    def test_reviewer_fanout_counts_grouped_outputs_covering_all_bundles_as_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            (run_dir / "bundle-plan.json").write_text(
+                json.dumps(
+                    {
+                        "bundles": [
+                            {"bundle_id": "p0-bundle-001"},
+                            {"bundle_id": "p0-bundle-002"},
+                            {"bundle_id": "p1-bundle-003"},
+                            {"bundle_id": "p1-bundle-004"},
+                            {"bundle_id": "p2-bundle-005"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            outputs = {
+                "security.json": ["p0-bundle-001", "p0-bundle-002"],
+                "correctness.json": ["p0-bundle-001", "p0-bundle-002", "p1-bundle-003", "p1-bundle-004"],
+                "test-gap.json": ["p0-bundle-001", "p0-bundle-002", "p1-bundle-003", "p1-bundle-004"],
+                "correctness-lite.json": ["p2-bundle-005"],
+            }
+            for name, reviewed_bundles in outputs.items():
+                (raw_dir / name).write_text(json.dumps({"reviewed_bundles": reviewed_bundles}), encoding="utf-8")
+
+            reviewer = phase_progress_data(run_dir, "reviewer_fanout")
+
+        self.assertEqual(reviewer["reviewer_runs_total"], 4)
+        self.assertEqual(reviewer["reviewer_runs_completed"], 4)
+
+    def test_reviewer_fanout_counts_multiple_reviewer_outputs_per_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            (run_dir / "bundle-plan.json").write_text(
+                json.dumps(
+                    {
+                        "bundles": [
+                            {"bundle_id": "p0-bundle-001"},
+                            {"bundle_id": "p1-bundle-002"},
+                            {"bundle_id": "p2-bundle-003"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            for name in (
+                "p0-bundle-001.security.json",
+                "p0-bundle-001.correctness.json",
+                "p0-bundle-001.test-gap.json",
+                "p1-bundle-002.correctness.json",
+                "p1-bundle-002.test-gap.json",
+                "p2-bundle-003.correctness-lite.json",
+            ):
+                (raw_dir / name).write_text("{}", encoding="utf-8")
+
+            reviewer = phase_progress_data(run_dir, "reviewer_fanout")
+
+        self.assertEqual(reviewer["reviewer_runs_total"], 6)
+        self.assertEqual(reviewer["reviewer_runs_completed"], 6)
+
     def test_validate_reviewer_outputs_rejects_invalid_json_before_verified_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
