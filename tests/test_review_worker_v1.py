@@ -55,6 +55,7 @@ from pullwise_worker.review_worker_v1 import (
     phase_prompt,
     progress_final_payload,
     inventory,
+    minimal_repo_profile_payload,
     materialize_artifacts,
     materialize_terminal_artifacts,
     pack_bundles,
@@ -1014,6 +1015,99 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("Intent test eligible: true", bundle_text)
         reviewed = sum(coverage[key] for key in ("deep_reviewed_files", "standard_reviewed_files", "light_reviewed_files", "inventory_only_files"))
         self.assertEqual(reviewed + coverage["skipped_files"], coverage["source_like_files_total"])
+
+    def test_minimal_repo_profile_detects_python_repo_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            (repo / "app").mkdir()
+            (repo / "tests").mkdir()
+            (repo / "pyproject.toml").write_text('[project]\nname = "demo"\n[tool.pytest.ini_options]\n', encoding="utf-8")
+            (repo / "requirements.txt").write_text("fastapi\nsqlalchemy\npytest\n", encoding="utf-8")
+            (repo / "app" / "main.py").write_text("from fastapi import FastAPI\n", encoding="utf-8")
+            (repo / "tests" / "test_main.py").write_text("def test_main():\n    assert True\n", encoding="utf-8")
+
+            profile = minimal_repo_profile_payload(inventory(repo), repo)
+
+        self.assertEqual(profile["schema_version"], "repo-profile/v1")
+        self.assertIn("python", profile["primary_languages"])
+        self.assertIn("python-backend", profile["adapter_ids"])
+        self.assertIn("pytest", profile["test_frameworks"])
+        self.assertIn("pip", profile["package_managers"])
+        self.assertIn("fastapi", profile["framework_signals"])
+        self.assertIn("pyproject.toml", profile["manifest_files"])
+
+    def test_minimal_repo_profile_detects_node_go_and_generic_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            node_repo = Path(tmp_dir) / "node"
+            node_repo.mkdir()
+            (node_repo / "package.json").write_text(
+                json.dumps({"scripts": {"test": "vitest"}, "dependencies": {"next": "latest"}}),
+                encoding="utf-8",
+            )
+            (node_repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+            (node_repo / "pages").mkdir()
+            (node_repo / "pages" / "api.ts").write_text("export default function handler() {}\n", encoding="utf-8")
+
+            go_repo = Path(tmp_dir) / "go"
+            go_repo.mkdir()
+            (go_repo / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
+            (go_repo / "go.sum").write_text("example sum\n", encoding="utf-8")
+            (go_repo / "cmd").mkdir()
+            (go_repo / "cmd" / "main.go").write_text("package main\n", encoding="utf-8")
+            (go_repo / "main_test.go").write_text("package main\n", encoding="utf-8")
+
+            generic_repo = Path(tmp_dir) / "generic"
+            generic_repo.mkdir()
+            (generic_repo / "notes.unknown").write_text("plain\n", encoding="utf-8")
+
+            node_profile = minimal_repo_profile_payload(inventory(node_repo), node_repo)
+            go_profile = minimal_repo_profile_payload(inventory(go_repo), go_repo)
+            generic_profile = minimal_repo_profile_payload(inventory(generic_repo), generic_repo)
+
+        self.assertIn("typescript", node_profile["primary_languages"])
+        self.assertIn("nextjs", node_profile["framework_signals"])
+        self.assertIn("pnpm", node_profile["package_managers"])
+        self.assertIn("frontend", node_profile["adapter_ids"])
+        self.assertIn("go", go_profile["primary_languages"])
+        self.assertIn("go", go_profile["package_managers"])
+        self.assertIn("go-test", go_profile["test_frameworks"])
+        self.assertEqual(generic_profile["adapter_ids"], ["generic"])
+        self.assertLess(generic_profile["confidence"], 0.5)
+
+    def test_inventory_repository_writes_profile_best_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            (repo / "src").mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (repo / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            job = {
+                "job_id": "job_1",
+                "run_id": "run_1",
+                "model_profile": {"default_model": "gpt-5", "core_effort": "medium", "non_core_effort": "medium"},
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 60,
+                    },
+                    "budget": {"max_wall_time_seconds": 0},
+                },
+                "repositoryLimits": {"maxFiles": 100, "maxBytes": 1000000},
+            }
+
+            with patch("pullwise_worker.review_worker_v1.minimal_repo_profile_payload", side_effect=RuntimeError("bad profile")):
+                worker.run_mechanical_phase(repo, run_dir, job, "inventory_repository")
+
+            log_text = (run_dir / "worker.log.jsonl").read_text(encoding="utf-8")
+
+            self.assertTrue((run_dir / "inventory.json").is_file())
+            self.assertFalse((run_dir / "repo-profile.json").exists())
+            self.assertIn("repo_profile_skipped", log_text)
 
     def test_bundle_plan_uses_semantic_risk_routing_tiers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4270,3 +4364,5 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

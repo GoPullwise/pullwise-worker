@@ -120,6 +120,23 @@ Codex execution rules:
   downloads, network access, branch changes, commit, push, and access to other
   worker directories.
 
+## Adaptive Repository Scan Rules
+
+`../auto-adjust-plan.md` defines the current adaptive scan upgrade. Keep these rules in force for worker changes in this area:
+
+- Keep the full-repository pipeline fixed. Do not change `PIPELINE_PHASES`, create repo-type-specific pipelines, let adapters skip core phases, or let adapters decide terminal status, QA gates, upload/result envelopes, or final finding confidence.
+- `repo-profile.json` is an optional, mechanical, best-effort side artifact produced from inventory/file-tree evidence only. It must not call Codex, depend on semantic artifacts, fail `inventory_repository`, enter `PHASE_JSON_OUTPUTS`, or enter `REQUIRED_COMPLETED_ARTIFACT_FILES`.
+- Repo profile generation and helper scripts must use the Python standard library only and remain Python 3.10 compatible. Do not add `tomli`, `PyYAML`, dependency-audit parsing, package installs, or external scan services.
+- If profile generation fails, keep `inventory.json`, log `repo_profile_skipped` to `worker.log.jsonl`, and continue the phase.
+- Treat adapters as strategy providers only. They may provide signals, fallback risk rules, skip patterns, grouping hints, prompt emphasis, and intent-test preferences; they must not become a scheduler or artifact-contract owner.
+- Risk tier priority is `hard skip/generated/binary > semantic explicit route > profile fallback > generic default`. Broad semantic routes must not promote generated, vendor, cache, minified, binary, or lock-file source into review bundles.
+- Do not overwrite `risk-routing.json` with deterministic fallback routes. Put merged/explanatory downstream routing in optional run-local artifacts such as `effective-risk-routing.json` when implemented.
+- Keep `bundle-plan.json` at `bundle-plan/v1` and `coverage.json` at `coverage/v1`. Conservative grouping may use path/name/entrypoint/test affinity only; do not build dependency graphs or call graphs for grouping.
+- Keep reviewer ids limited to `security`, `correctness`, `test_gap`, and `correctness_lite` unless a future migration updates fanout, validation, clustering, reporting, QA, and backward compatibility together.
+- Adaptive prompt context may be appended only when `repo-profile.json` is valid. It must not request extra required artifacts, change required outputs, or introduce reviewer ids.
+- Intent command policy remains the first gate and must not be loosened. Runnable preflight may only skip unsafe/not-runnable commands with explicit reasons; it must not permit installs, `npx`, network calls, provider initialization, external scanners, or dependency setup.
+- A generated intent-test failure is evidence only. It must not automatically classify a finding as `confirmed_bug` or increase confidence before the allowed failure-analysis classification step.
+- Worker-side adaptation may tilt internal emphasis within server-owned job policy, but must not invent or raise repository limits, wall-time limits, token budgets, model policy, or reasoning effort.
 Review pipeline rules:
 
 - Full repository scan only; this is not a diff or PR review.

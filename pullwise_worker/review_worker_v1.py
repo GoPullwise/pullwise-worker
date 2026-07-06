@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import fnmatch
@@ -2363,15 +2363,20 @@ class ReviewWorkerV1:
             limits = policy["repository_limits"] if isinstance(policy.get("repository_limits"), dict) else {}
             scan_deadline_seconds = int(policy.get("review_worker", {}).get("scanDeadlineSeconds") or 0)
             scan_deadline = time.monotonic() + scan_deadline_seconds if scan_deadline_seconds > 0 else None
-            write_json(
-                run_dir / "inventory.json",
-                inventory(
-                    repo_dir,
-                    max_files=int(limits.get("maxFiles")) if limits.get("maxFiles") is not None else None,
-                    max_bytes=int(limits.get("maxBytes")) if limits.get("maxBytes") is not None else None,
-                    deadline_monotonic=scan_deadline,
-                ),
+            inv = inventory(
+                repo_dir,
+                max_files=int(limits.get("maxFiles")) if limits.get("maxFiles") is not None else None,
+                max_bytes=int(limits.get("maxBytes")) if limits.get("maxBytes") is not None else None,
+                deadline_monotonic=scan_deadline,
             )
+            write_json(run_dir / "inventory.json", inv)
+            try:
+                write_json(run_dir / "repo-profile.json", minimal_repo_profile_payload(inv, repo_dir))
+            except Exception as exc:
+                append_jsonl(
+                    run_dir / "worker.log.jsonl",
+                    {"event": "repo_profile_skipped", "reason": str(exc), "time": iso_time(time.time())},
+                )
         elif phase == "token_budget":
             write_json(run_dir / "token-budget.json", token_budget_payload(run_dir, job))
         elif phase == "intent_test_validation":
@@ -3127,6 +3132,225 @@ def inventory(
         "files": files,
     }
 
+
+LANGUAGE_EXTENSIONS = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".php": "php",
+    ".rb": "ruby",
+    ".cs": "csharp",
+    ".c": "c_cpp",
+    ".cc": "c_cpp",
+    ".cpp": "c_cpp",
+    ".h": "c_cpp",
+    ".hpp": "c_cpp",
+    ".swift": "swift",
+    ".sql": "sql",
+    ".sh": "shell",
+}
+
+PROFILE_MANIFEST_NAMES = {
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "setup.py",
+    "go.mod",
+    "Cargo.toml",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "poetry.lock",
+    "go.sum",
+    "Cargo.lock",
+}
+
+
+def _profile_text(repo_dir: Path, rel: str, *, max_chars: int = 200000) -> str:
+    try:
+        return (repo_dir / rel).read_text(encoding="utf-8", errors="replace")[:max_chars]
+    except OSError:
+        return ""
+
+
+def _add_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+def _profile_package_json(repo_dir: Path) -> tuple[list[str], list[str], list[str]]:
+    package_managers: list[str] = []
+    frameworks: list[str] = []
+    tests: list[str] = []
+    path = repo_dir / "package.json"
+    if not path.is_file():
+        return package_managers, frameworks, tests
+    _add_unique(package_managers, "npm")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return package_managers, frameworks, tests
+    if not isinstance(payload, dict):
+        return package_managers, frameworks, tests
+    deps: dict[str, Any] = {}
+    for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            deps.update(value)
+    dep_names = {str(name).lower() for name in deps}
+    scripts = payload.get("scripts") if isinstance(payload.get("scripts"), dict) else {}
+    if "next" in dep_names:
+        _add_unique(frameworks, "nextjs")
+    if "vite" in dep_names or (repo_dir / "vite.config.ts").is_file() or (repo_dir / "vite.config.js").is_file():
+        _add_unique(frameworks, "vite")
+    if "react" in dep_names:
+        _add_unique(frameworks, "react")
+    if "express" in dep_names:
+        _add_unique(frameworks, "express")
+    if "jest" in dep_names or any("jest" in str(value).lower() for value in scripts.values()):
+        _add_unique(tests, "jest")
+    if "vitest" in dep_names or any("vitest" in str(value).lower() for value in scripts.values()):
+        _add_unique(tests, "vitest")
+    if any(str(key) == "test" or str(key).startswith("test:") for key in scripts):
+        _add_unique(tests, "npm-test")
+    return package_managers, frameworks, tests
+
+
+def minimal_repo_profile_payload(inv: dict[str, Any], repo_dir: Path) -> dict[str, Any]:
+    files = inv.get("files") if isinstance(inv, dict) and isinstance(inv.get("files"), list) else []
+    language_counts: dict[str, dict[str, int]] = {}
+    manifest_files: list[str] = []
+    package_managers: list[str] = []
+    framework_signals: list[str] = []
+    test_frameworks: list[str] = []
+    entrypoint_candidates: list[str] = []
+    warnings: list[str] = []
+
+    paths = [str(item.get("path") or "") for item in files if isinstance(item, dict) and str(item.get("path") or "")]
+    path_set = set(paths)
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        extension = str(item.get("extension") or Path(path).suffix).lower()
+        language = LANGUAGE_EXTENSIONS.get(extension)
+        if language:
+            counts = language_counts.setdefault(language, {"files": 0, "estimated_tokens": 0})
+            counts["files"] += 1
+            counts["estimated_tokens"] += int(item.get("estimated_tokens") or 0)
+        name = Path(path).name
+        if name in PROFILE_MANIFEST_NAMES or name.endswith((".yaml", ".yml")):
+            _add_unique(manifest_files, path)
+        lowered = path.lower()
+        if name in {"main.py", "app.py", "worker.py", "manage.py"} or lowered.endswith("/main.go") or lowered.startswith("cmd/"):
+            _add_unique(entrypoint_candidates, path)
+        if item.get("is_test_candidate"):
+            if extension == ".py":
+                _add_unique(test_frameworks, "pytest" if name.startswith("test_") or "/tests/" in f"/{lowered}" else "unittest")
+            if extension == ".go" and name.endswith("_test.go"):
+                _add_unique(test_frameworks, "go-test")
+
+    package_managers_from_json, frameworks_from_json, tests_from_json = _profile_package_json(repo_dir)
+    for value in package_managers_from_json:
+        _add_unique(package_managers, value)
+    for value in frameworks_from_json:
+        _add_unique(framework_signals, value)
+    for value in tests_from_json:
+        _add_unique(test_frameworks, value)
+
+    if "package-lock.json" in path_set:
+        _add_unique(package_managers, "npm")
+    if "pnpm-lock.yaml" in path_set:
+        _add_unique(package_managers, "pnpm")
+    if "yarn.lock" in path_set:
+        _add_unique(package_managers, "yarn")
+    if "pyproject.toml" in path_set or any(Path(path).name.startswith("requirements") and path.endswith(".txt") for path in paths):
+        _add_unique(package_managers, "pip")
+    if "poetry.lock" in path_set:
+        _add_unique(package_managers, "poetry")
+    if "go.mod" in path_set or "go.sum" in path_set:
+        _add_unique(package_managers, "go")
+    if "Cargo.toml" in path_set or "Cargo.lock" in path_set:
+        _add_unique(package_managers, "cargo")
+
+    pyproject = _profile_text(repo_dir, "pyproject.toml").lower()
+    requirements_text = "\n".join(_profile_text(repo_dir, path).lower() for path in paths if Path(path).name.startswith("requirements") and path.endswith(".txt"))
+    python_text = f"{pyproject}\n{requirements_text}"
+    if "pytest" in python_text:
+        _add_unique(test_frameworks, "pytest")
+    if "fastapi" in python_text:
+        _add_unique(framework_signals, "fastapi")
+    if "django" in python_text:
+        _add_unique(framework_signals, "django")
+    if "flask" in python_text:
+        _add_unique(framework_signals, "flask")
+    if "sqlalchemy" in python_text:
+        _add_unique(framework_signals, "sqlalchemy")
+
+    for config_name, signal in (("next.config.js", "nextjs"), ("next.config.mjs", "nextjs"), ("next.config.ts", "nextjs"), ("vite.config.js", "vite"), ("vite.config.ts", "vite")):
+        if config_name in path_set:
+            _add_unique(framework_signals, signal)
+
+    adapter_ids: list[str] = []
+    if "python" in language_counts:
+        _add_unique(adapter_ids, "python")
+        if any(signal in framework_signals for signal in ("fastapi", "django", "flask", "sqlalchemy")) or any("app/" in path or "server/" in path for path in paths):
+            _add_unique(adapter_ids, "python-backend")
+    if any(language in language_counts for language in ("typescript", "javascript")):
+        _add_unique(adapter_ids, "node")
+        if any(signal in framework_signals for signal in ("nextjs", "vite", "react")) or any(path.startswith(("pages/", "app/", "src/")) for path in paths):
+            _add_unique(adapter_ids, "frontend")
+    if "go" in language_counts:
+        _add_unique(adapter_ids, "go")
+    if not adapter_ids:
+        adapter_ids = ["generic"]
+
+    primary_languages = [
+        language
+        for language, _counts in sorted(
+            language_counts.items(), key=lambda item: (-int(item[1].get("estimated_tokens") or 0), item[0])
+        )[:3]
+    ]
+    if not primary_languages:
+        primary_languages = ["generic"]
+        warnings.append("no recognized source language extensions")
+
+    confidence = 0.25
+    if language_counts:
+        confidence += 0.25
+    if framework_signals:
+        confidence += 0.15
+    if package_managers:
+        confidence += 0.15
+    if test_frameworks:
+        confidence += 0.10
+    if adapter_ids != ["generic"]:
+        confidence += 0.10
+
+    return {
+        "schema_version": "repo-profile/v1",
+        "source": "mechanical_inventory",
+        "profile_status": "generated",
+        "primary_languages": primary_languages,
+        "language_counts": language_counts,
+        "framework_signals": sorted(framework_signals),
+        "package_managers": sorted(package_managers),
+        "test_frameworks": sorted(test_frameworks),
+        "manifest_files": sorted(manifest_files),
+        "entrypoint_candidates": sorted(entrypoint_candidates),
+        "hard_skip_patterns": ["**/node_modules/**", "**/dist/**", "**/build/**", "**/vendor/**", "**/.venv/**", "**/__pycache__/**", "**/*.min.js", "**/*lock*"],
+        "soft_skip_patterns": ["**/fixtures/**", "**/snapshots/**", "**/*.stories.*", "**/examples/**"],
+        "adapter_ids": adapter_ids,
+        "confidence": round(min(confidence, 0.95), 2),
+        "warnings": warnings,
+    }
 
 def git_commit(repo_dir: Path) -> str:
     head = repo_dir / ".git" / "HEAD"
@@ -6206,3 +6430,5 @@ def upload_artifacts(
         )
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
+
+
