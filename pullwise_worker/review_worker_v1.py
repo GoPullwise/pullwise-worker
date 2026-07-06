@@ -1384,6 +1384,100 @@ def path_is_under(path: Path, root: Path) -> bool:
     return True
 
 
+def package_json_has_test_script(package_json_path: Path, command: list[str] | None = None) -> bool:
+    try:
+        payload = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    scripts = payload.get("scripts") if isinstance(payload, dict) and isinstance(payload.get("scripts"), dict) else {}
+    if not scripts:
+        return False
+    if command is None:
+        return "test" in scripts or any(str(key).startswith("test:") for key in scripts)
+    lowered = [str(part).lower() for part in command]
+    if len(lowered) >= 2 and lowered[1] == "test":
+        return "test" in scripts
+    if "run" in lowered:
+        run_index = lowered.index("run")
+        if len(lowered) > run_index + 1:
+            script_name = str(command[run_index + 1])
+            return script_name in scripts and (script_name == "test" or script_name.startswith("test:"))
+    for part in command[1:]:
+        script_name = str(part)
+        if script_name in scripts and (script_name == "test" or script_name.startswith("test:")):
+            return True
+    return False
+
+
+def _command_executable_available(command: list[str]) -> tuple[bool, str]:
+    if not command:
+        return False, "command is empty"
+    executable = str(command[0])
+    executable_name = normalized_executable_name(executable)
+    path = Path(executable)
+    if path.is_absolute() and path.exists():
+        return True, ""
+    if shutil.which(executable) is not None:
+        return True, ""
+    return False, f"dependency_missing: {executable_name} executable is not available"
+
+
+def _node_package_json_for_cwd(cwd: Path, validation_repo: Path) -> Path:
+    current = cwd.resolve(strict=False)
+    root = validation_repo.resolve(strict=False)
+    while path_is_under(current, root):
+        candidate = current / "package.json"
+        if candidate.is_file():
+            return candidate
+        if current == root:
+            break
+        current = current.parent
+    return validation_repo / "package.json"
+
+
+def intent_command_is_runnable_for_repo(command: list[str], cwd: Path, validation_repo: Path, profile: dict[str, Any] | None) -> tuple[bool, str]:
+    argv = [str(part) for part in command if str(part).strip()]
+    if not argv:
+        return False, "skipped_not_runnable: command is empty"
+    executable = normalized_executable_name(argv[0])
+    lowered = [part.lower() for part in argv]
+    if executable in {"npm", "pnpm", "yarn"}:
+        package_json = _node_package_json_for_cwd(cwd, validation_repo)
+        if not package_json.is_file():
+            return False, "skipped_not_runnable: package.json is missing"
+        if not package_json_has_test_script(package_json, argv):
+            return False, "skipped_not_runnable: package.json has no test script"
+    if executable in {"terraform", "helm", "kubectl"}:
+        return False, "skipped_not_runnable: external provider or cluster initialization is not allowed"
+    available, reason = _command_executable_available(argv)
+    if not available:
+        return False, reason
+    if executable in {"python", "python3", "py"} and len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] == "pytest":
+        try:
+            import importlib.util
+
+            if importlib.util.find_spec("pytest") is None:
+                return False, "dependency_missing: pytest is not available"
+        except (ImportError, ValueError):
+            return False, "dependency_missing: pytest is not available"
+    if executable == "pytest":
+        try:
+            import importlib.util
+
+            if importlib.util.find_spec("pytest") is None:
+                return False, "dependency_missing: pytest is not available"
+        except (ImportError, ValueError):
+            return False, "dependency_missing: pytest is not available"
+    return True, "runnable"
+
+
+def _intent_preflight_classification(reason: str) -> str:
+    if reason.startswith("dependency_missing:"):
+        return "dependency_missing"
+    if reason.startswith("environment_error:"):
+        return "environment_error"
+    return "skipped_not_runnable"
+
 def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: Path) -> tuple[bool, str]:
     argv = [str(part) for part in command if str(part).strip()]
     if not argv:
@@ -2872,6 +2966,61 @@ def prompt_template_text(run_dir: Path, name: str) -> str:
         return prompt_template_for_name(name).strip()
 
 
+def _profile_list(profile: dict[str, Any], key: str) -> list[str]:
+    value = profile.get(key)
+    if not isinstance(value, list):
+        return []
+    return sorted(str(item).strip() for item in value if str(item).strip())
+
+
+def _adaptive_prompt_context(run_dir: Path) -> list[str]:
+    profile = read_json(run_dir / "repo-profile.json", {})
+    if not isinstance(profile, dict) or profile.get("schema_version") != "repo-profile/v1":
+        return []
+    languages = _profile_list(profile, "primary_languages")
+    frameworks = _profile_list(profile, "framework_signals")
+    tests = _profile_list(profile, "test_frameworks")
+    adapters = set(_profile_list(profile, "adapter_ids"))
+    surfaces: list[str] = []
+    emphasis: list[str] = []
+    if "python-backend" in adapters or "python" in languages:
+        surfaces.append("auth, migrations, webhooks, DB transactions")
+        emphasis.extend(
+            [
+                "Verify auth decorators and permission boundaries",
+                "Check tenant isolation and SQL query boundaries",
+                "Check background job idempotency",
+            ]
+        )
+    if "frontend" in adapters or any(signal in frameworks for signal in ("nextjs", "vite", "react")):
+        surfaces.append("API routes, server actions, auth middleware, SSR data fetching, env handling")
+        emphasis.extend(
+            [
+                "Check SSR/server action trust boundaries",
+                "Check auth-gated UI versus server authorization mismatch",
+                "Check env leakage into client bundles",
+                "Check unsafe client-side trust assumptions",
+            ]
+        )
+    if "infra" in adapters or any(language in languages for language in ("terraform", "yaml")):
+        surfaces.append("deployment/config safety, secrets, external provider boundaries")
+        emphasis.append("Check external provider and deployment blast radius")
+    if not languages and not frameworks and not tests and not surfaces and not emphasis:
+        return []
+    lines = ["Adaptive repository context:"]
+    if languages:
+        lines.append(f"- Primary languages: {', '.join(languages)}")
+    if frameworks:
+        lines.append(f"- Framework signals: {', '.join(frameworks)}")
+    if tests:
+        lines.append(f"- Test frameworks: {', '.join(tests)}")
+    if surfaces:
+        lines.append(f"- High-risk surfaces: {'; '.join(surfaces)}")
+    if emphasis:
+        lines.append("- Review emphasis:")
+        lines.extend(f"  - {item}" for item in dict.fromkeys(emphasis))
+    return lines
+
 def phase_prompt(phase: str, run_dir: Path) -> str:
     spec = SEMANTIC_PHASE_PROMPT_SPECS.get(phase, {})
     role = str(spec.get("role") or phase.replace("_", " ").title())
@@ -2899,6 +3048,9 @@ def phase_prompt(phase: str, run_dir: Path) -> str:
     if instructions:
         lines.append("Phase instructions:")
         lines.extend(f"- {item}" for item in instructions)
+    adaptive_context = _adaptive_prompt_context(run_dir)
+    if adaptive_context:
+        lines.extend(adaptive_context)
     if prompt_files:
         lines.append("Prompt templates:")
         for name in prompt_files:
@@ -4031,6 +4183,8 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
     validation_repo = Path(validation_root) if validation_root else None
     config = read_json(run_dir / "intent" / "intent-test-validation.json", {})
+    profile = read_json(run_dir / "repo-profile.json", {})
+    profile = profile if isinstance(profile, dict) and profile.get("schema_version") == "repo-profile/v1" else {}
     if isinstance(config, dict) and config.get("enabled") is False:
         return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": []}
     plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
@@ -4079,6 +4233,10 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
         allowed, policy_reason = intent_test_command_policy(command, cwd, validation_repo)
         if not allowed:
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": f"generated test command is not allowed by worker policy: {policy_reason}"})
+            continue
+        runnable, runnable_reason = intent_command_is_runnable_for_repo(command, cwd, validation_repo, profile)
+        if not runnable:
+            raw_results.append({**base_result, "status": "skipped", "classification": _intent_preflight_classification(runnable_reason), "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": runnable_reason.split(": ", 1)[-1]})
             continue
         remaining_total = total_deadline - time.monotonic()
         if remaining_total <= 0:

@@ -57,6 +57,7 @@ from pullwise_worker.review_worker_v1 import (
     progress_final_payload,
     inventory,
     minimal_repo_profile_payload,
+    package_json_has_test_script,
     materialize_artifacts,
     materialize_terminal_artifacts,
     pack_bundles,
@@ -1430,6 +1431,113 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertRegex(result["test_runs"][0]["skip_reason"], "disallowed|not allowed|policy")
 
+    def test_package_json_has_test_script_detects_test_and_test_namespace_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            package_json = root / "package.json"
+            package_json.write_text(json.dumps({"scripts": {"test": "vitest", "test:unit": "vitest run unit"}}), encoding="utf-8")
+            no_test_json = root / "package-no-test.json"
+            no_test_json.write_text(json.dumps({"scripts": {"build": "vite build"}}), encoding="utf-8")
+
+            self.assertTrue(package_json_has_test_script(package_json, ["npm", "test"]))
+            self.assertTrue(package_json_has_test_script(package_json, ["npm", "run", "test:unit"]))
+            self.assertFalse(package_json_has_test_script(no_test_json, ["npm", "test"]))
+
+    def test_intent_tests_skip_npm_test_when_package_json_has_no_test_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (validation_repo / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"}}), encoding="utf-8")
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "validation-workspace.json").write_text(json.dumps({"validation_repo_root": str(validation_repo)}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-validation.json").write_text(json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-node"}]}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps({"schema_version": "intent-test-source/v1", "generated_tests": [{"test_id": "ITV-node", "command": ["npm", "test"], "artifact_refs": ["art_intent_test_source"]}]}),
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_not_called()
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertEqual(result["test_runs"][0]["classification"], "skipped_not_runnable")
+        self.assertIn("package.json has no test script", result["test_runs"][0]["skip_reason"])
+
+    def test_intent_tests_run_npm_test_when_package_json_has_test_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (validation_repo / "package.json").write_text(json.dumps({"scripts": {"test": "node test.js"}}), encoding="utf-8")
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "validation-workspace.json").write_text(json.dumps({"validation_repo_root": str(validation_repo)}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-validation.json").write_text(json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-node"}]}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps({"schema_version": "intent-test-source/v1", "generated_tests": [{"test_id": "ITV-node", "command": ["npm", "test"], "artifact_refs": ["art_intent_test_source"]}]}),
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch("pullwise_worker.review_worker_v1.shutil.which", return_value="npm"), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_called_once()
+        self.assertEqual(result["test_runs"][0]["status"], "passed")
+        self.assertEqual(result["test_runs"][0]["exit_code"], 0)
+
+    def test_intent_tests_keep_npx_denied_by_command_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "validation-workspace.json").write_text(json.dumps({"validation_repo_root": str(validation_repo)}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-validation.json").write_text(json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-npx"}]}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps({"schema_version": "intent-test-source/v1", "generated_tests": [{"test_id": "ITV-npx", "command": ["npx", "vitest"], "artifact_refs": ["art_intent_test_source"]}]}),
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_not_called()
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertIn("not allowed by worker policy", result["test_runs"][0]["skip_reason"])
+
+    def test_intent_tests_skip_with_dependency_missing_when_test_executable_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (validation_repo / "package.json").write_text(json.dumps({"scripts": {"test": "vitest"}}), encoding="utf-8")
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "validation-workspace.json").write_text(json.dumps({"validation_repo_root": str(validation_repo)}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-validation.json").write_text(json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-node"}]}), encoding="utf-8")
+            (run_dir / "intent" / "intent-test-source.json").write_text(
+                json.dumps({"schema_version": "intent-test-source/v1", "generated_tests": [{"test_id": "ITV-node", "command": ["npm", "test"], "artifact_refs": ["art_intent_test_source"]}]}),
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.shutil.which", return_value=None), patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_not_called()
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertEqual(result["test_runs"][0]["classification"], "dependency_missing")
+        self.assertIn("npm executable is not available", result["test_runs"][0]["skip_reason"])
     def test_intent_tests_run_with_sanitized_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3371,6 +3479,51 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(progress_snapshot["counters"]["reviewer_runs_total"], 2)
         self.assertEqual(progress_snapshot["counters"]["reviewer_runs_completed"], 1)
 
+    def test_phase_prompt_appends_adaptive_context_from_valid_repo_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            (run_dir / "repo-profile.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "repo-profile/v1",
+                        "primary_languages": ["python", "typescript"],
+                        "framework_signals": ["fastapi", "sqlalchemy", "nextjs"],
+                        "test_frameworks": ["pytest", "npm-test"],
+                        "adapter_ids": ["python-backend", "frontend", "infra"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            prompt = phase_prompt("reviewer_fanout", run_dir)
+
+        self.assertIn("Adaptive repository context:", prompt)
+        self.assertIn("Primary languages: python, typescript", prompt)
+        self.assertIn("Framework signals: fastapi, nextjs, sqlalchemy", prompt)
+        self.assertIn("Test frameworks: npm-test, pytest", prompt)
+        self.assertIn("High-risk surfaces: auth, migrations, webhooks, DB transactions", prompt)
+        self.assertIn("API routes, server actions, auth middleware, SSR data fetching, env handling", prompt)
+        self.assertIn("deployment/config safety", prompt)
+        self.assertIn("Verify auth decorators and permission boundaries", prompt)
+        self.assertIn("Check SSR/server action trust boundaries", prompt)
+        self.assertIn("Check env leakage into client bundles", prompt)
+        self.assertIn("Check external provider and deployment blast radius", prompt)
+        self.assertNotIn("reviewers/performance.md", prompt)
+        self.assertNotIn("repo-profile.json", prompt.split("Required outputs:", 1)[1].split("Phase instructions:", 1)[0])
+
+    def test_phase_prompt_omits_adaptive_context_when_profile_missing_or_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            missing_prompt = phase_prompt("repo_map", run_dir)
+            (run_dir / "repo-profile.json").write_text(json.dumps({"schema_version": "wrong"}), encoding="utf-8")
+            invalid_prompt = phase_prompt("repo_map", run_dir)
+
+        self.assertNotIn("Adaptive repository context:", missing_prompt)
+        self.assertNotIn("Adaptive repository context:", invalid_prompt)
+        self.assertIn("Required outputs:", missing_prompt)
+        self.assertIn("- repo-map.json", invalid_prompt)
     def test_phase_prompt_uses_phase_specific_contract_and_prompt_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
