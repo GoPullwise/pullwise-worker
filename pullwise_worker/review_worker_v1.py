@@ -5869,31 +5869,216 @@ def agent_report_payload(run_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _markdown_text(value: object, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    return " ".join(text.split())
+
+
+def _markdown_location(location: object) -> str:
+    if not isinstance(location, dict):
+        return ""
+    path = _markdown_text(location.get("path") or location.get("file") or location.get("filename"))
+    start = _qa_int(location.get("start_line") or location.get("line_start") or location.get("line"))
+    end = _qa_int(location.get("end_line") or location.get("line_end") or start)
+    if not path:
+        return ""
+    if start > 0 and end > 0 and end != start:
+        return f"`{path}:{start}-{end}`"
+    if start > 0:
+        return f"`{path}:{start}`"
+    return f"`{path}`"
+
+
+def _markdown_counts(items: list[Any], key: str) -> str:
+    counts: dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        label = _markdown_text(item.get(key), "unknown").lower()
+        counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return "none"
+    return ", ".join(f"{label} {count}" for label, count in sorted(counts.items()))
+
+
+def _confidence_label(value: object) -> str:
+    confidence = agent_report_confidence(value)
+    if confidence <= 0:
+        return "unknown"
+    return f"{round(confidence * 100)}%"
+
+
+def _coverage_summary(coverage: object) -> str:
+    if not isinstance(coverage, dict) or not coverage:
+        return "not recorded"
+    total = _qa_int(coverage.get("source_like_files_total") or coverage.get("source_files_total"))
+    deep = _qa_int(coverage.get("deep_reviewed_files"))
+    standard = _qa_int(coverage.get("standard_reviewed_files"))
+    light = _qa_int(coverage.get("light_reviewed_files"))
+    skipped = _qa_int(coverage.get("skipped_files"))
+    parts = []
+    if total > 0:
+        parts.append(f"{total} source-like files")
+    reviewed_parts = []
+    if deep > 0:
+        reviewed_parts.append(f"{deep} deep")
+    if standard > 0:
+        reviewed_parts.append(f"{standard} standard")
+    if light > 0:
+        reviewed_parts.append(f"{light} light")
+    if reviewed_parts:
+        parts.append("reviewed " + ", ".join(reviewed_parts))
+    if skipped > 0:
+        parts.append(f"{skipped} skipped")
+    return "; ".join(parts) if parts else "recorded without file counts"
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     intent = report.get("intent_test_validation") if isinstance(report.get("intent_test_validation"), dict) else {}
     tests = intent.get("test_results") if isinstance(intent.get("test_results"), list) else []
-    return "\n".join(
+    lines = [
+        "# Codex Full Repository Review Report",
+        "",
+        "## Summary",
+        "",
+        "- Mode: full repository scan",
+        f"- Commit: {_markdown_text(report.get('commit_sha'), 'pending')}",
+        f"- Result status: {_markdown_text(summary.get('result_status'), 'unknown')}",
+        f"- Overall risk: {_markdown_text(summary.get('overall_risk'), 'unknown')}",
+        f"- Confirmed findings: {len(findings)} ({_markdown_counts(findings, 'severity')})",
+        f"- Intent tests run: {len(tests)} ({_markdown_counts(tests, 'status')})",
+        f"- Coverage: {_coverage_summary(report.get('coverage'))}",
+        "",
+    ]
+    if findings:
+        highest = _markdown_text(findings[0].get("severity") if isinstance(findings[0], dict) else "", "unknown")
+        lines.extend(
+            [
+                f"This review completed with {len(findings)} confirmed finding(s). The highest-priority finding in the report is {highest}. Each finding below includes the observed impact, supporting evidence, and the recommended next fix or validation step.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "This review completed without confirmed findings in the validated report. That means the worker did not confirm an actionable issue from this run; it is not a proof that the repository has no defects.",
+                "",
+            ]
+        )
+
+    lines.extend(["## Top Findings", ""])
+    if not findings:
+        lines.extend(["No confirmed findings.", ""])
+    else:
+        for index, finding in enumerate(findings[:10], start=1):
+            if not isinstance(finding, dict):
+                continue
+            title = _markdown_text(finding.get("title"), "Untitled finding")
+            severity = _markdown_text(finding.get("severity"), "unknown")
+            lines.extend([f"### {index}. [{severity}] {title}", ""])
+            finding_id = _markdown_text(finding.get("id") or finding.get("cluster_id"))
+            category = _markdown_text(finding.get("category"))
+            if finding_id:
+                lines.append(f"- ID: `{finding_id}`")
+            if category:
+                lines.append(f"- Category: {category}")
+            lines.append(f"- Confidence: {_confidence_label(finding.get('confidence'))}")
+            locations = finding.get("locations") if isinstance(finding.get("locations"), list) else []
+            location_text = ", ".join(item for item in (_markdown_location(location) for location in locations[:3]) if item)
+            if location_text:
+                lines.append(f"- Location: {location_text}")
+            impact = _markdown_text(finding.get("impact"))
+            recommendation = _markdown_text(finding.get("recommendation"))
+            next_task = _markdown_text(finding.get("next_agent_task"))
+            if impact:
+                lines.append(f"- Impact: {impact}")
+            if recommendation:
+                lines.append(f"- Recommendation: {recommendation}")
+            if next_task:
+                lines.append(f"- Next agent task: {next_task}")
+            evidence = finding.get("evidence") if isinstance(finding.get("evidence"), list) else []
+            if evidence:
+                lines.append("- Evidence:")
+                for evidence_item in evidence[:3]:
+                    if isinstance(evidence_item, dict):
+                        evidence_location = _markdown_location(evidence_item)
+                        detail = _markdown_text(evidence_item.get("detail") or evidence_item.get("summary"))
+                        if evidence_location and detail:
+                            lines.append(f"  - {evidence_location}: {detail}")
+                        elif evidence_location:
+                            lines.append(f"  - {evidence_location}")
+                        elif detail:
+                            lines.append(f"  - {detail}")
+                    else:
+                        detail = _markdown_text(evidence_item)
+                        if detail:
+                            lines.append(f"  - {detail}")
+            lines.append("")
+        if len(findings) > 10:
+            lines.extend([f"Showing 10 of {len(findings)} confirmed findings. See `report.agent.json` for the full machine-readable list.", ""])
+
+    lines.extend(["## Intent Test Validation Summary", ""])
+    if not tests:
+        lines.extend(["No intent tests were run or recorded for this review.", ""])
+    else:
+        lines.extend(
+            [
+                f"- Status counts: {_markdown_counts(tests, 'status')}",
+                f"- Classification counts: {_markdown_counts(tests, 'classification')}",
+                "",
+            ]
+        )
+        for test in tests[:10]:
+            if not isinstance(test, dict):
+                continue
+            test_id = _markdown_text(test.get("test_id") or test.get("id"), "unnamed-test")
+            status = _markdown_text(test.get("status"), "unknown")
+            classification = _markdown_text(test.get("classification"))
+            confidence_impact = _markdown_text(test.get("finding_confidence_impact"))
+            parts = [f"status {status}"]
+            if classification:
+                parts.append(f"classification {classification}")
+            if confidence_impact:
+                parts.append(f"finding impact {confidence_impact}")
+            skip_reason = _markdown_text(test.get("skip_reason"))
+            if skip_reason:
+                parts.append(f"skip reason {skip_reason}")
+            lines.append(f"- `{test_id}`: " + "; ".join(parts))
+        if len(tests) > 10:
+            lines.append(f"- Showing 10 of {len(tests)} intent test results. See `intent-test-results.json` for the full list.")
+        lines.append("")
+
+    tasks = report.get("next_agent_tasks") if isinstance(report.get("next_agent_tasks"), list) else []
+    task_texts = [_markdown_text(task) for task in tasks]
+    if not task_texts:
+        task_texts = [_markdown_text(finding.get("next_agent_task")) for finding in findings if isinstance(finding, dict)]
+    task_texts = list(dict.fromkeys(task for task in task_texts if task))
+    lines.extend(["## Recommended Follow-up", ""])
+    if task_texts:
+        for task in task_texts[:10]:
+            lines.append(f"- {task}")
+        if len(task_texts) > 10:
+            lines.append(f"- See `report.agent.json` for {len(task_texts) - 10} additional follow-up task(s).")
+    elif findings:
+        lines.append("Use the recommendations in the confirmed findings above to plan the next fix pass.")
+    else:
+        lines.append("No immediate follow-up task was generated by this review. If this run was meant to verify a specific risky change, inspect the coverage and intent test artifacts before treating the result as complete assurance.")
+    lines.append("")
+    lines.extend(
         [
-            "# Codex Full Repository Review Report",
+            "## Machine-readable Sources",
             "",
-            "## Summary",
+            "- `report.agent.json` contains the normalized findings and follow-up task list.",
+            "- `intent-test-results.json` contains the detailed intent-test validation records when tests were generated.",
+            "- `artifact-manifest.json` lists the complete set of uploaded worker artifacts.",
             "",
-            f"- Mode: full repository scan",
-            f"- Commit: {report.get('commit_sha') or 'pending'}",
-            f"- Confirmed findings: {len(findings)}",
-            f"- Intent tests run: {len(tests)}",
-            "",
-            "## Top Findings",
-            "",
-            "No confirmed findings." if not findings else "",
-            "",
-            "## Intent Test Validation Summary",
-            "",
-            "No intent tests were run." if not tests else "",
         ]
     )
-
+    return "\n".join(lines)
 
 def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: str, *, error: str = "") -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -6264,14 +6449,14 @@ def repository_payload(job: dict[str, Any]) -> dict[str, Any]:
 
 def result_human_report(source_dir: Path | None) -> dict[str, str]:
     if source_dir is None:
-        return {"summaryMarkdown": "# Codex Full Repository Review Report\n"}
+        return {"summaryMarkdown": ""}
     report_path = source_dir / "report.md"
     try:
         markdown = report_path.read_text(encoding="utf-8")
     except OSError:
         markdown = ""
     markdown = markdown.strip()
-    return {"summaryMarkdown": markdown or "# Codex Full Repository Review Report\n"}
+    return {"summaryMarkdown": markdown}
 
 
 def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str, source_dir: Path | None = None) -> dict[str, Any]:

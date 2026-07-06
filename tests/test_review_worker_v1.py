@@ -50,6 +50,7 @@ from pullwise_worker.review_worker_v1 import (
     review_worker_policy_for_job,
     turn_timeout_for_job,
     result_payload,
+    render_markdown,
     bundle_plan_payload,
     phase_completion_data,
     phase_progress_data,
@@ -4512,6 +4513,90 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("## Summary", markdown)
         self.assertIn("Confirmed findings: 2", markdown)
 
+    def test_result_payload_hides_human_report_when_markdown_is_missing(self) -> None:
+        active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk-1")
+        envelope = {
+            "protocol_version": "review-worker-protocol/v1",
+            "job": {"run_id": "run_1"},
+            "execution": {"status": "completed", "duration_ms": 10},
+            "summary": {"top_findings": []},
+            "artifact_manifest": [],
+        }
+
+        payload = result_payload(active, envelope, "done")
+
+        self.assertEqual(payload["humanReport"]["summaryMarkdown"], "")
+
+    def test_render_markdown_includes_readable_finding_details_and_intent_results(self) -> None:
+        markdown = render_markdown(
+            {
+                "commit_sha": "abc123",
+                "summary": {"overall_risk": "high", "result_status": "complete"},
+                "coverage": {"source_like_files_total": 12, "deep_reviewed_files": 3, "skipped_files": 1},
+                "findings": [
+                    {
+                        "id": "finding-1",
+                        "category": "correctness",
+                        "severity": "high",
+                        "confidence": "high",
+                        "title": "Untouched password fields are cleared",
+                        "locations": [{"path": "src/settings.jsx", "start_line": 10, "end_line": 20}],
+                        "impact": "Admins can unintentionally clear the saved SMTP password.",
+                        "recommendation": "Omit untouched secret keys from the update payload.",
+                        "next_agent_task": "Add a save-path regression test for untouched secrets.",
+                        "evidence": [
+                            {
+                                "path": "src/settings.jsx",
+                                "line_start": 10,
+                                "line_end": 20,
+                                "detail": "The form submits the unchanged blank password field.",
+                            }
+                        ],
+                    }
+                ],
+                "intent_test_validation": {
+                    "test_results": [
+                        {"test_id": "ITV-pass", "status": "passed", "classification": "unclear_requirement"},
+                        {
+                            "test_id": "ITV-fail",
+                            "status": "failed",
+                            "classification": "confirmed_bug",
+                            "finding_confidence_impact": "high",
+                        },
+                    ]
+                },
+            }
+        )
+
+        self.assertIn("This review completed with 1 confirmed finding(s).", markdown)
+        self.assertIn("### 1. [high] Untouched password fields are cleared", markdown)
+        self.assertIn("- Confidence: 90%", markdown)
+        self.assertIn("- Location: `src/settings.jsx:10-20`", markdown)
+        self.assertIn("- Impact: Admins can unintentionally clear the saved SMTP password.", markdown)
+        self.assertIn("- Recommendation: Omit untouched secret keys from the update payload.", markdown)
+        self.assertIn("- Next agent task: Add a save-path regression test for untouched secrets.", markdown)
+        self.assertIn("  - `src/settings.jsx:10-20`: The form submits the unchanged blank password field.", markdown)
+        self.assertIn("- Status counts: failed 1, passed 1", markdown)
+        self.assertIn("- Classification counts: confirmed_bug 1, unclear_requirement 1", markdown)
+        self.assertIn("- `ITV-fail`: status failed; classification confirmed_bug; finding impact high", markdown)
+        self.assertIn("- Coverage: 12 source-like files; reviewed 3 deep; 1 skipped", markdown)
+
+    def test_render_markdown_explains_reviews_with_no_confirmed_findings(self) -> None:
+        markdown = render_markdown(
+            {
+                "commit_sha": "pending",
+                "summary": {"overall_risk": "unknown", "result_status": "complete"},
+                "coverage": {"source_like_files_total": 4, "light_reviewed_files": 4},
+                "findings": [],
+                "intent_test_validation": {"test_results": []},
+            }
+        )
+
+        self.assertIn("Confirmed findings: 0 (none)", markdown)
+        self.assertIn("This review completed without confirmed findings", markdown)
+        self.assertIn("it is not a proof that the repository has no defects", markdown)
+        self.assertIn("No intent tests were run or recorded for this review.", markdown)
+        self.assertIn("No immediate follow-up task was generated by this review.", markdown)
     def test_completed_progress_final_marks_cleanup_step_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run_1"
