@@ -1860,6 +1860,8 @@ class ReviewWorkerV1:
                         pass
                     elif phase in SEMANTIC_PHASES:
                         self.run_semantic_phase(app_server, repo_dir, run_dir, job, phase)
+                        if phase == "final_report_json":
+                            repair_agent_report_artifact(run_dir, job)
                     elif phase == "reviewer_json_validation":
                         self.run_reviewer_json_validation_phase(app_server, repo_dir, run_dir, job)
                     elif phase in MECHANICAL_PHASES:
@@ -5260,6 +5262,12 @@ def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
     if not isinstance(finding, dict):
         return None
     normalized = dict(finding)
+    if not str(normalized.get("id") or "").strip():
+        for key in ("finding_id", "local_id", "cluster_id"):
+            candidate = str(finding.get(key) or "").strip()
+            if candidate:
+                normalized["id"] = candidate
+                break
     normalized["locations"] = agent_report_locations(finding)
     normalized["confidence"] = agent_report_confidence(finding.get("confidence"))
     if "evidence" not in normalized:
@@ -5293,6 +5301,8 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     if isinstance(intent, dict):
         report["intent_test_validation"] = intent
     raw_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    if not raw_findings and isinstance(report.get("main_findings"), list):
+        raw_findings = report["main_findings"]
     findings = []
     next_tasks = report.get("next_agent_tasks") if isinstance(report.get("next_agent_tasks"), list) else []
     for raw_finding in raw_findings:

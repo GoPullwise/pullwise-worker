@@ -4159,6 +4159,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             repo.mkdir(parents=True)
             run_dir.mkdir(parents=True)
             (repo / "src.py").write_text("print('hello')\n", encoding="utf-8")
+            src_sha = hashlib.sha256((repo / "src.py").read_bytes()).hexdigest()
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [{"path": "src.py", "sha256": src_sha, "is_source_like": True}],
+                },
+            )
             (run_dir / "report.md").write_text("# Report\n", encoding="utf-8")
             (run_dir / "coverage.json").write_text(
                 json.dumps(
@@ -4176,6 +4184,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
             (run_dir / "token-budget.json").write_text(
                 json.dumps({"schema_version": "token-budget/v1"}), encoding="utf-8"
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-results.json",
+                {"schema_version": "intent-test-result/v1", "test_results": []},
             )
             write_json(
                 run_dir / "report.agent.json",
@@ -4210,6 +4222,44 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
         self.assertEqual(qa["status"], "pass")
         self.assertEqual(qa["errors"], [])
+
+    def test_agent_report_repair_promotes_main_findings_to_canonical_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [],
+                    "main_findings": [
+                        {
+                            "finding_id": "cluster_1",
+                            "title": "Bug",
+                            "severity": "P1",
+                            "confidence": "medium",
+                            "path": "worker.js",
+                            "start_line": 155,
+                            "end_line": 159,
+                            "evidence": "source evidence",
+                            "impact": "Limit bypass",
+                            "recommendation": "Count bytes",
+                        }
+                    ],
+                },
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            repaired = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(len(repaired["findings"]), 1)
+        self.assertEqual(repaired["findings"][0]["id"], "cluster_1")
+        self.assertEqual(repaired["findings"][0]["confidence"], 0.6)
+        self.assertEqual(
+            repaired["findings"][0]["locations"],
+            [{"path": "worker.js", "start_line": 155, "end_line": 159}],
+        )
 
     def test_default_agent_report_is_full_repo_schema(self) -> None:
         report = default_agent_report({"job_id": "job_1", "commit": "abc"})
