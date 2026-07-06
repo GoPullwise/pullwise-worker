@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -284,6 +285,7 @@ PROGRESS_COUNTER_KEYS = (
 )
 DEFAULT_PROVIDER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 LOG_ARTIFACT_NAMES = {"codex-events.jsonl", "worker.log.jsonl", "progress.log.jsonl"}
+FINAL_REFRESH_ARTIFACT_NAMES = LOG_ARTIFACT_NAMES | {"debug-bundle.zip"}
 DEBUG_BUNDLE_NAME = "debug-bundle.zip"
 DEBUG_BUNDLE_ARTIFACT_ID = "art_debug_bundle"
 MAX_BUNDLE_ESTIMATED_TOKENS = 60000
@@ -2174,6 +2176,12 @@ class ReviewWorkerV1:
             )
         else:
             clone_repository_checkout(job, repo_dir, deadline_monotonic=copy_deadline)
+        repo_supplied_review_root = repo_dir / ".codex-review"
+        if repo_supplied_review_root.exists():
+            if repo_supplied_review_root.is_symlink() or repo_supplied_review_root.is_file():
+                repo_supplied_review_root.unlink()
+            else:
+                shutil.rmtree(repo_supplied_review_root)
         enforce_repository_limits(
             repo_dir,
             max_files=limits.get("maxFiles") if limits else None,
@@ -2649,8 +2657,15 @@ def repository_limit_preflight_payload(
 
 
 def safe_id(value: Any, prefix: str) -> str:
-    text = str(value or "").strip().replace("/", "_").replace("\\", "_")
-    return text or f"{prefix}_{int(time.time())}"
+    fallback = f"{prefix}_{int(time.time())}"
+    text = str(value or "").strip()
+    text = text.replace("/", "_").replace("\\", "_")
+    text = re.sub(r"[\x00-\x1f\x7f]+", "_", text)
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("._-")
+    if not text or text in {".", ".."}:
+        return fallback
+    return text
 
 
 def iso_time(value: float) -> str:
@@ -4661,21 +4676,61 @@ def _unique_test_id_errors(artifact_name: str, collection_name: str, entries: An
 def _cluster_link_ids(run_dir: Path) -> set[str]:
     payload = read_json(run_dir / "clusters.json", {})
     ids: set[str] = set()
+    scalar_id_fields = {
+        "cluster_id",
+        "id",
+        "finding_id",
+        "local_id",
+        "candidate_id",
+        "target_id",
+        "source_id",
+        "reviewer_finding_id",
+    }
+    list_id_fields = {
+        "finding_ids",
+        "linked_finding_ids",
+        "source_finding_ids",
+        "supporting_finding_ids",
+        "member_ids",
+        "members",
+        "sources",
+        "source_findings",
+        "merged_findings",
+        "candidate_findings",
+        "findings",
+        "items",
+        "candidates",
+        "clusters",
+    }
 
     def visit(value: Any, depth: int = 0) -> None:
-        if depth > 5 or not isinstance(value, dict):
+        if depth > 7:
             return
-        for field in ("cluster_id", "id", "finding_id", "local_id"):
+        if isinstance(value, str):
+            item_id = value.strip()
+            if item_id:
+                ids.add(item_id)
+            return
+        if isinstance(value, list):
+            for child in value:
+                visit(child, depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+        for field in scalar_id_fields:
             item_id = str(value.get(field) or "").strip()
             if item_id:
                 ids.add(item_id)
-        for field in ("clusters", "candidate_findings", "findings", "items", "candidates", "source_findings", "merged_findings"):
+        for field in list_id_fields:
             children = value.get(field)
-            if isinstance(children, list):
-                for child in children:
-                    visit(child, depth + 1)
+            if isinstance(children, (list, dict)):
+                visit(children, depth + 1)
 
     visit(payload)
+    visit(read_json(run_dir / "validation-input.json", {}))
+    for directory in (run_dir / "raw-reviewers", run_dir / "verified-reviewers"):
+        for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+            visit(read_json(path, {}))
     return ids
 
 
@@ -5553,19 +5608,16 @@ def write_review_instruction_tree(repo_dir: Path) -> None:
     )
     for name in REQUIRED_TOOL_FILES:
         path = review_root / "tools" / name
-        if not path.exists():
-            path.write_text(tool_body, encoding="utf-8")
-            path.chmod(0o700)
+        path.write_text(tool_body, encoding="utf-8")
+        path.chmod(0o700)
     for name in REQUIRED_SCHEMA_FILES:
         path = review_root / "schemas" / name
-        if not path.exists():
-            schema_id = name.removesuffix(".schema.json")
-            write_json(path, {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": f"{schema_id}/v1", "type": "object", "required": ["schema_version"], "additionalProperties": True})
+        schema_id = name.removesuffix(".schema.json")
+        write_json(path, {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": f"{schema_id}/v1", "type": "object", "required": ["schema_version"], "additionalProperties": True})
     for name in REQUIRED_PROMPT_FILES:
         path = review_root / "prompts" / name
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(prompt_template_for_name(name), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(prompt_template_for_name(name), encoding="utf-8")
 
 
 def prompt_template_for_name(name: str) -> str:
@@ -6225,7 +6277,14 @@ def append_debug_bundle_artifact(
     return manifest
 
 
-def refresh_log_artifacts(run_dir: Path, artifact_dir: Path, manifest_payload: dict[str, Any] | None = None) -> None:
+def refresh_log_artifacts(
+    run_dir: Path,
+    artifact_dir: Path,
+    manifest_payload: dict[str, Any] | None = None,
+    *,
+    status: str = "completed",
+    error: str = "",
+) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     for name in LOG_ARTIFACT_NAMES:
         src = run_dir / name
@@ -6243,7 +6302,7 @@ def refresh_log_artifacts(run_dir: Path, artifact_dir: Path, manifest_payload: d
             _refresh_manifest_item(item, artifact_dir / name)
             changed = True
         if item.get("artifact_id") == DEBUG_BUNDLE_ARTIFACT_ID:
-            write_debug_bundle(run_dir, artifact_dir)
+            write_debug_bundle(run_dir, artifact_dir, status=status, error=error)
             _refresh_manifest_item(item, artifact_dir / DEBUG_BUNDLE_NAME)
             changed = True
     if changed:
@@ -6830,30 +6889,30 @@ def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Pat
     manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
     if not isinstance(manifest_payload, dict):
         raise RuntimeError("artifact manifest must be an object before final log upload")
-    refresh_log_artifacts(run_dir, artifact_dir, manifest_payload)
+    refresh_log_artifacts(run_dir, artifact_dir, manifest_payload, status="completed")
     manifest = artifact_manifest_items(manifest_payload)
     if not manifest:
         raise RuntimeError("artifact manifest must contain artifact items before final log upload")
     uploaded = 0
     for item in manifest:
         name = str(item.get("name") or "").strip()
-        if name not in LOG_ARTIFACT_NAMES:
+        if name not in FINAL_REFRESH_ARTIFACT_NAMES:
             continue
         artifact_id = str(item.get("artifact_id") or "").strip()
         if not artifact_id:
-            raise RuntimeError(f"log artifact manifest entry requires artifact_id: {name}")
+            raise RuntimeError(f"final refresh artifact manifest entry requires artifact_id: {name}")
         path = artifact_dir / name
         try:
             path.resolve(strict=False).relative_to(artifact_dir.resolve(strict=False))
         except ValueError as exc:
-            raise RuntimeError(f"log artifact path escapes artifact directory before upload: {name}") from exc
+            raise RuntimeError(f"final refresh artifact path escapes artifact directory before upload: {name}") from exc
         if not path.is_file():
-            raise RuntimeError(f"log artifact listed in manifest is missing before upload: {name}")
+            raise RuntimeError(f"final refresh artifact listed in manifest is missing before upload: {name}")
         data = path.read_bytes()
         if str(item.get("sha256") or "").lower() != hashlib.sha256(data).hexdigest():
-            raise RuntimeError(f"log artifact sha256 mismatch before upload: {name}")
+            raise RuntimeError(f"final refresh artifact sha256 mismatch before upload: {name}")
         if int(item.get("size_bytes") if item.get("size_bytes") is not None else -1) != len(data):
-            raise RuntimeError(f"log artifact size mismatch before upload: {name}")
+            raise RuntimeError(f"final refresh artifact size mismatch before upload: {name}")
         client.artifact(
             job_id,
             artifact_id,
@@ -6868,7 +6927,7 @@ def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Pat
         )
         uploaded += 1
     if uploaded == 0:
-        raise RuntimeError("artifact manifest contains no log artifacts before final log upload")
+        raise RuntimeError("artifact manifest contains no final refresh artifacts before final log upload")
 
 def upload_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, artifact_dir: Path) -> str:
     try:
@@ -6889,7 +6948,7 @@ def upload_artifacts(
 ) -> None:
     manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
     if source_run_dir is not None and isinstance(manifest_payload, dict):
-        refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload)
+        refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload, status="completed")
     manifest = artifact_manifest_items(manifest_payload)
     if not isinstance(manifest_payload, dict) or not manifest:
         raise RuntimeError("artifact manifest must contain artifact items before upload")
@@ -6927,7 +6986,7 @@ def upload_artifacts(
         artifact_id = str(item.get("artifact_id") or "").strip()
         name = str(item.get("name") or "").strip()
         if source_run_dir is not None and artifact_id == DEBUG_BUNDLE_ARTIFACT_ID:
-            refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload)
+            refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload, status="completed")
         data = path.read_bytes()
         actual_sha = hashlib.sha256(data).hexdigest()
         if str(item.get("sha256") or "").lower() != actual_sha:
@@ -6947,4 +7006,3 @@ def upload_artifacts(
         )
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
-
