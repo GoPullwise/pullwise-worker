@@ -3771,53 +3771,6 @@ def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None, profi
     return generic_file_tier(item, routing)
 
 
-def split_oversized_bundle_item(item: dict[str, Any]) -> list[dict[str, Any]]:
-    estimated_tokens = max(0, int(item.get("estimated_tokens") or 0))
-    if estimated_tokens <= MAX_BUNDLE_ESTIMATED_TOKENS:
-        return [item]
-    line_count = max(1, int(item.get("line_count") or 0))
-    chunk_count = max(1, math.ceil(estimated_tokens / MAX_BUNDLE_ESTIMATED_TOKENS))
-    tokens_per_chunk = max(1, math.ceil(estimated_tokens / chunk_count))
-    lines_per_chunk = max(1, math.ceil(line_count / chunk_count))
-    chunks: list[dict[str, Any]] = []
-    for index in range(chunk_count):
-        start_line = (index * lines_per_chunk) + 1
-        end_line = min(line_count, (index + 1) * lines_per_chunk)
-        chunk_tokens = min(tokens_per_chunk, max(1, estimated_tokens - (tokens_per_chunk * index)))
-        clone = dict(item)
-        clone["estimated_tokens"] = chunk_tokens
-        clone["_bundle_slice"] = {
-            "index": index + 1,
-            "total": chunk_count,
-            "start_line": start_line,
-            "end_line": end_line,
-            "estimated_tokens": chunk_tokens,
-            "original_estimated_tokens": estimated_tokens,
-        }
-        chunks.append(clone)
-    return chunks
-
-
-def _bundle_file_ranges(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    ranges = []
-    for item in files:
-        path = str(item.get("path") or "")
-        bundle_slice = item.get("_bundle_slice") if isinstance(item.get("_bundle_slice"), dict) else None
-        if not path or not bundle_slice:
-            continue
-        ranges.append(
-            {
-                "path": path,
-                "start_line": int(bundle_slice.get("start_line") or 1),
-                "end_line": int(bundle_slice.get("end_line") or bundle_slice.get("start_line") or 1),
-                "slice_index": int(bundle_slice.get("index") or 1),
-                "slice_total": int(bundle_slice.get("total") or 1),
-                "estimated_tokens": int(bundle_slice.get("estimated_tokens") or item.get("estimated_tokens") or 0),
-                "original_estimated_tokens": int(bundle_slice.get("original_estimated_tokens") or item.get("estimated_tokens") or 0),
-            }
-        )
-    return ranges
-
 def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     inv = read_json(run_dir / "inventory.json", {})
     files = inv.get("files") if isinstance(inv.get("files"), list) else []
@@ -3844,10 +3797,7 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     }
     bundles = []
     for tier in ("P0", "P1", "P2"):
-        tier_items = sorted(grouped[tier], key=lambda item: (_bundle_component_key(str(item.get("path") or "")), str(item.get("path") or "")))
-        tier_files: list[dict[str, Any]] = []
-        for item in tier_items:
-            tier_files.extend(split_oversized_bundle_item(item))
+        tier_files = sorted(grouped[tier], key=lambda item: (_bundle_component_key(str(item.get("path") or "")), str(item.get("path") or "")))
         chunk: list[dict[str, Any]] = []
         token_count = 0
         for item in tier_files:
@@ -3933,9 +3883,6 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
         "intent_test_eligible": tier in {"P0", "P1"},
         "risk_reasons": sorted({hint for item in files for hint in item.get("risk_hints", [])})[:12],
     }
-    file_ranges = _bundle_file_ranges(files)
-    if file_ranges:
-        payload["file_ranges"] = file_ranges
     payload.update(_bundle_metadata(files))
     return payload
 
@@ -3961,18 +3908,9 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
             "## Files",
             "",
         ]
-        file_ranges = bundle.get("file_ranges") if isinstance(bundle.get("file_ranges"), list) else []
-        if file_ranges:
-            file_entries = [entry for entry in file_ranges if isinstance(entry, dict)]
-        else:
-            file_entries = [{"path": str(rel)} for rel in bundle.get("paths") or []]
-        for entry in file_entries:
-            rel = str(entry.get("path") or "")
-            path = repo_dir / rel
-            start_line = int(entry.get("start_line") or 1) if isinstance(entry, dict) else 1
-            end_line = int(entry.get("end_line") or 0) if isinstance(entry, dict) else 0
-            range_label = f" (lines {start_line}-{end_line})" if end_line else ""
-            lines.append(f"### {rel}{range_label}")
+        for rel in bundle.get("paths") or []:
+            path = repo_dir / str(rel)
+            lines.append(f"### {rel}")
             lines.append("")
             if not path.is_file():
                 lines.append("```text")
@@ -3983,8 +3921,6 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
             suffix = path.suffix.lstrip(".") or "text"
             lines.append(f"```{suffix}")
             for index, source_line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-                if end_line and (index < start_line or index > end_line):
-                    continue
                 lines.append(f"{index} | {source_line}")
             lines.append("```")
             lines.append("")
@@ -7011,13 +6947,4 @@ def upload_artifacts(
         )
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
-
-
-
-
-
-
-
-
-
 
