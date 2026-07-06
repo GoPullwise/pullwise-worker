@@ -549,6 +549,18 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "npm test -- itv.test.js", "cwd": str(workspace.parent / "validation-repo")}},
                 workspace,
             )
+            denied_go_mod, _reason = decide_approval(
+                {"method": "approval/request", "params": {"type": "commandExecution", "command": "go mod download", "cwd": str(workspace.parent / "validation-repo")}},
+                workspace,
+            )
+            denied_cargo_metadata, _reason = decide_approval(
+                {"method": "approval/request", "params": {"type": "commandExecution", "command": "cargo metadata", "cwd": str(workspace.parent / "validation-repo")}},
+                workspace,
+            )
+            denied_make_clean, _reason = decide_approval(
+                {"method": "approval/request", "params": {"type": "commandExecution", "command": "make clean", "cwd": str(workspace.parent / "validation-repo")}},
+                workspace,
+            )
             allowed_git_status, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "git status --short", "cwd": str(workspace)}},
                 workspace,
@@ -572,6 +584,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(allowed_command, "acceptForSession")
         self.assertEqual(denied_install, "decline")
         self.assertEqual(allowed_validation_test, "acceptForSession")
+        self.assertEqual(denied_go_mod, "decline")
+        self.assertEqual(denied_cargo_metadata, "decline")
+        self.assertEqual(denied_make_clean, "decline")
         self.assertEqual(allowed_git_status, "acceptForSession")
         self.assertEqual(denied_cwd, "decline")
         self.assertEqual(denied_git_clean, "decline")
@@ -1258,6 +1273,62 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(len(large_bundles), 2)
         self.assertTrue(all(bundle["estimated_tokens"] <= 60000 for bundle in large_bundles))
         self.assertEqual(sorted(path for bundle in large_bundles for path in bundle["paths"]), ["app/large/routes.py", "app/large/service.py"])
+
+    def test_bundle_plan_splits_single_file_when_token_cap_is_exceeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            source_path = repo_dir / "pullwise_worker" / "review_worker_v1.py"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("\n".join(f"line {index}" for index in range(1, 1201)), encoding="utf-8")
+            run_dir.mkdir(parents=True)
+            files = [
+                {
+                    "path": "pullwise_worker/review_worker_v1.py",
+                    "is_source_like": True,
+                    "is_binary": False,
+                    "is_generated_candidate": False,
+                    "risk_hints": [],
+                    "estimated_tokens": 77052,
+                    "line_count": 1200,
+                }
+            ]
+            (run_dir / "inventory.json").write_text(json.dumps({"schema_version": "inventory/v1", "files": files}), encoding="utf-8")
+            (run_dir / "risk-routing.json").write_text(json.dumps({"schema_version": "risk-routing/v1", "routes": [{"path": "pullwise_worker/review_worker_v1.py", "tier": "P0"}]}), encoding="utf-8")
+
+            plan = bundle_plan_payload(run_dir)
+            (run_dir / "bundle-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            pack_bundles(repo_dir, run_dir)
+            review_bundles = [bundle for bundle in plan["bundles"] if bundle["paths"] == ["pullwise_worker/review_worker_v1.py"]]
+            first_bundle = review_bundles[0]
+            first_range = first_bundle["file_ranges"][0]
+            packed = (run_dir / "bundles" / f"{first_bundle['bundle_id']}.md").read_text(encoding="utf-8")
+
+        self.assertGreaterEqual(len(review_bundles), 2)
+        self.assertTrue(all(bundle["estimated_tokens"] <= 60000 for bundle in review_bundles))
+        self.assertTrue(all(bundle.get("file_ranges") for bundle in review_bundles))
+        self.assertEqual(first_range["start_line"], 1)
+        self.assertLess(first_range["end_line"], 1200)
+        self.assertIn("### pullwise_worker/review_worker_v1.py (lines 1-", packed)
+        self.assertIn("1 | line 1", packed)
+        self.assertNotIn("1200 | line 1200", packed)
+
+    def test_refresh_coverage_intent_counters_uses_actual_intent_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            (run_dir / "coverage.json").write_text(json.dumps({"schema_version": "coverage/v1", "intent_tests_planned": 0, "intent_tests_run": 0, "intent_tests_supporting_findings": 0}), encoding="utf-8")
+            (intent_dir / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-001"}, {"test_id": "ITV-002"}]}), encoding="utf-8")
+            (intent_dir / "intent-test-results.raw.json").write_text(json.dumps({"schema_version": "intent-test-run-results/v1", "test_runs": [{"test_id": "ITV-001"}, {"test_id": "ITV-002"}]}), encoding="utf-8")
+            (intent_dir / "intent-test-results.json").write_text(json.dumps({"schema_version": "intent-test-result/v1", "test_results": [{"test_id": "ITV-001", "linked_finding_ids": ["finding-1"]}, {"test_id": "ITV-002", "linked_finding_ids": ["finding-1", "finding-2"]}]}), encoding="utf-8")
+
+            refresh_coverage_intent_counters(run_dir)
+            coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(coverage["intent_tests_planned"], 2)
+        self.assertEqual(coverage["intent_tests_run"], 2)
+        self.assertEqual(coverage["intent_tests_supporting_findings"], 2)
 
     def test_effective_routing_preserves_semantic_routes_and_explains_fallbacks(self) -> None:
         inv = {
@@ -3001,7 +3072,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
 
         uploaded_ids = [artifact_id for _job_id, artifact_id, _payload in calls]
-        self.assertEqual(uploaded_ids[0], "art_debug_bundle")
+        self.assertEqual(uploaded_ids[-1], "art_debug_bundle")
         self.assertIn("art_error_report", set(uploaded_ids))
 
     def test_upload_log_artifacts_refreshes_and_reuploads_final_logs(self) -> None:
@@ -3193,6 +3264,30 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(payload["attempt_id"], "wk_1-1")
             self.assertEqual(payload["run_id"], "run_1")
             self.assertIn("content_base64", payload)
+
+    def test_upload_artifacts_refreshes_and_uploads_debug_bundle_last(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            (run_dir / "worker.log.jsonl").write_text('{"event":"late-before-upload"}\n', encoding="utf-8")
+            calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, payload))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+
+        self.assertEqual(calls[-1][0], DEBUG_BUNDLE_ARTIFACT_ID)
+        debug_payload = calls[-1][1]
+        debug_bytes = base64.b64decode(debug_payload["content_base64"])
+        with zipfile.ZipFile(BytesIO(debug_bytes)) as archive:
+            worker_log = archive.read("run/worker.log.jsonl").decode("utf-8")
+        self.assertIn("late-before-upload", worker_log)
 
     def test_upload_artifacts_phase_posts_progress_per_uploaded_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4797,9 +4892,4 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-
 
