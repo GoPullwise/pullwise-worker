@@ -179,6 +179,8 @@ REQUIRED_PROMPT_FILES = (
     "08_validator.md",
     "09_reporter.md",
 )
+REVIEWER_OUTPUT_SCHEMA_VERSION = "codex-reviewer-output/v1"
+REVIEWER_OUTPUT_SCHEMA_ALIASES = {"reviewer-output/v1"}
 INTENT_TEST_CLASSIFICATIONS = {
     "confirmed_bug",
     "plausible_bug",
@@ -3940,8 +3942,11 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
             errors.append({"file": path.name, "error": "not an object"})
             continue
         schema_version = str(payload.get("schema_version") or "").strip()
-        if schema_version != "codex-reviewer-output/v1":
-            errors.append({"file": path.name, "error": "schema_version must be codex-reviewer-output/v1"})
+        if schema_version in REVIEWER_OUTPUT_SCHEMA_ALIASES:
+            payload = dict(payload)
+            payload["schema_version"] = REVIEWER_OUTPUT_SCHEMA_VERSION
+        elif schema_version != REVIEWER_OUTPUT_SCHEMA_VERSION:
+            errors.append({"file": path.name, "error": f"schema_version must be {REVIEWER_OUTPUT_SCHEMA_VERSION}"})
             continue
         if not isinstance(payload.get("findings"), list):
             errors.append({"file": path.name, "error": "findings must be a list"})
@@ -5468,11 +5473,8 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
             if not raw_files:
                 raise RuntimeError("reviewer_fanout produced no raw reviewer JSON outputs")
             for raw_file in raw_files:
-                payload = parse_required_json_output(raw_file)
-                if str(payload.get("schema_version") or "").strip() != "codex-reviewer-output/v1":
-                    raise RuntimeError(f"raw reviewer output {raw_file.name} must use schema_version codex-reviewer-output/v1")
-                if not isinstance(payload.get("findings"), list):
-                    raise RuntimeError(f"raw reviewer output {raw_file.name} findings must be a list")
+                if not raw_file.is_file() or raw_file.stat().st_size == 0:
+                    raise RuntimeError(f"raw reviewer output {raw_file.name} is empty")
         if path.is_file() and path.name == "artifact-manifest.json":
             try:
                 manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -5550,9 +5552,9 @@ def prompt_template_for_name(name: str) -> str:
         "01_risk_router.md": "You are the Risk Router. Classify files and directories into P0/P1/P2/P3/SKIP. Return JSON only using risk-routing/v1.\n",
         "02_bundle_planner.md": "You may adjust mechanical bundle boundaries without changing the review policy. Return JSON only using bundle-plan/v1.\n",
         "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Return JSON only using codex-reviewer-output/v1.\n",
-        "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only.\n",
-        "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only.\n",
-        "reviewers/correctness_lite.md": "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. Return JSON only.\n",
+        "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only using codex-reviewer-output/v1.\n",
+        "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only using codex-reviewer-output/v1.\n",
+        "reviewers/correctness_lite.md": "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. Return JSON only using codex-reviewer-output/v1.\n",
         "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Do not create new findings. Return JSON only.\n",
         "intent/04_intent_miner.md": "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route definitions, and error messages. Do not infer intent only from implementation code. Return JSON only using intent-map/v1.\n",
         "intent/05_intent_test_planner.md": "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return JSON only using intent-test-plan/v1.\n",

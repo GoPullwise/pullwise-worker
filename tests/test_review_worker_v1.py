@@ -3377,6 +3377,34 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "reviewer JSON validation failed"):
                 validate_phase_outputs(run_dir, "reviewer_json_validation")
 
+    def test_validate_reviewer_outputs_normalizes_legacy_schema_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            payload = {"schema_version": "reviewer-output/v1", "protocol": "codex-reviewer-output/v1", "findings": []}
+            (raw_dir / "correctness.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            validate_reviewer_outputs(run_dir)
+
+            validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
+            verified = json.loads((run_dir / "verified-reviewers" / "correctness.json").read_text(encoding="utf-8"))
+            self.assertEqual(validation["errors"], [])
+            self.assertEqual(verified["schema_version"], "codex-reviewer-output/v1")
+            self.assertEqual(verified["protocol"], "codex-reviewer-output/v1")
+
+    def test_reviewer_fanout_allows_repairable_raw_reviewer_schema_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            (raw_dir / "correctness.json").write_text(
+                json.dumps({"schema_version": "reviewer-output/v1", "protocol": "codex-reviewer-output/v1", "findings": []}),
+                encoding="utf-8",
+            )
+
+            validate_phase_outputs(run_dir, "reviewer_fanout")
+
     def test_validate_reviewer_outputs_copies_valid_outputs_to_verified_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
