@@ -4079,7 +4079,14 @@ def _intent_inferred_command(generated: dict[str, Any], target: dict[str, Any], 
     framework = ""
     for source in (generated, target):
         raw_runnability = source.get("runnability") if isinstance(source.get("runnability"), dict) else {}
-        framework = str(source.get("framework") or raw_runnability.get("framework") or framework or "").strip().lower()
+        framework = str(
+            source.get("framework")
+            or source.get("test_framework")
+            or source.get("testFramework")
+            or raw_runnability.get("framework")
+            or framework
+            or ""
+        ).strip().lower()
     if framework in {"vitest", "jest", "node", "npm"} or suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
         return ["npm", "test", "--", rel_path]
     if framework in {"pytest", "python"} or suffix == ".py":
@@ -4534,6 +4541,21 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
         test_path = _intent_source_path_from_entry(test)
         if test_path:
             tests_by_path[_path_key(test_path)] = test
+    intended_by_id: dict[str, object] = {}
+    intended_commands = payload.get("intended_commands") if isinstance(payload.get("intended_commands"), list) else []
+    for intended in intended_commands:
+        if not isinstance(intended, dict):
+            continue
+        command = intended.get("command") or intended.get("test_command") or intended.get("run_command")
+        if not command:
+            continue
+        targets = intended.get("targets") or intended.get("test_ids") or intended.get("testIds") or []
+        if not isinstance(targets, list):
+            targets = [targets]
+        for target_id in targets:
+            test_id = str(target_id or "").strip()
+            if test_id:
+                intended_by_id[test_id] = command
     generated = payload.get("generated_tests")
     if not isinstance(generated, list):
         generated = tests if tests else payload.get("created_files") or payload.get("createdFiles") or []
@@ -4556,6 +4578,9 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
                 "run_command",
                 "runCommand",
                 "cwd",
+                "framework",
+                "test_framework",
+                "testFramework",
                 "linked_finding_ids",
                 "target_finding_ids",
                 "intent_contract_ids",
@@ -4565,6 +4590,10 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
                     entry[key] = supporting[key]
         test_id = _intent_test_id(entry, _intent_test_id(supporting, f"ITV-{index + 1:03d}"))
         entry["test_id"] = test_id
+        if not _intent_generated_command(entry, {}):
+            intended_command = intended_by_id.get(test_id)
+            if intended_command:
+                entry["command"] = intended_command
         if test_path:
             entry["path"] = test_path
         if not _string_items(entry.get("artifact_refs") or entry.get("artifactRefs")):
@@ -6094,6 +6123,8 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
         finding = normalized_agent_report_finding(raw_finding)
         if finding is None:
             continue
+        if not str(finding.get("id") or "").strip():
+            finding["id"] = f"finding-{len(findings) + 1:03d}"
         findings.append(finding)
         task = str(finding.get("next_agent_task") or "").strip()
         if task:

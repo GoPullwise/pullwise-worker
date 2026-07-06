@@ -5153,7 +5153,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     "summary": {"overall_risk": "unknown", "result_status": "complete"},
                     "findings": [
                         {
-                            "id": "f_line_range",
+                            "id": None,
                             "title": "Bug",
                             "severity": "medium",
                             "confidence": 0.9,
@@ -5176,6 +5176,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             summary["top_findings"][0]["locations"],
             [{"path": "app.py", "start_line": 2, "end_line": 3}],
         )
+        self.assertEqual(summary["top_findings"][0]["id"], "finding-001")
 
     def test_agent_report_repair_promotes_main_findings_to_canonical_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
