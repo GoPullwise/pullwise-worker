@@ -1351,6 +1351,65 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(coverage["intent_tests_run"], 2)
         self.assertEqual(coverage["intent_tests_supporting_findings"], 2)
 
+    def test_run_intent_tests_preserves_dependency_missing_when_writer_skips_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            generated_dir = validation_repo / ".codex-review" / "generated-tests"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            generated_dir.mkdir(parents=True)
+            intent_dir.mkdir(parents=True)
+            generated_test = generated_dir / "intent-root-relative-api-base.test.jsx"
+            generated_test.write_text("test('placeholder', () => {})\n", encoding="utf-8")
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {"schema_version": "validation-workspace/v1", "validation_repo_root": str(validation_repo)},
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True, "max_tests_per_run": 1},
+            )
+            write_json(
+                intent_dir / "intent-test-plan.json",
+                {
+                    "schema_version": "intent-test-plan/v1",
+                    "test_targets": [
+                        {
+                            "test_id": "ITV-001",
+                            "title": "Root relative API base",
+                            "expected_result_before_fix": "unknown",
+                            "linked_finding_ids": ["finding-1"],
+                            "runnability": {"framework": "vitest"},
+                        }
+                    ],
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "execution": {
+                        "ran": False,
+                        "reason": "Dependencies are not installed in the disposable validation workspace.",
+                    },
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": str(generated_test),
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            raw = run_intent_tests(run_dir)
+
+        self.assertEqual(raw["test_runs"][0]["status"], "skipped")
+        self.assertEqual(raw["test_runs"][0]["classification"], "dependency_missing")
+        self.assertEqual(raw["test_runs"][0]["command"], "npm test -- .codex-review/generated-tests/intent-root-relative-api-base.test.jsx")
+        self.assertIn("Dependencies are not installed", raw["test_runs"][0]["skip_reason"])
+
     def test_intent_counters_do_not_report_more_runs_than_total_when_source_has_extra_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -5077,6 +5136,46 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
         self.assertEqual(qa["status"], "pass")
         self.assertEqual(qa["errors"], [])
+
+    def test_agent_report_repair_uses_line_range_for_result_envelope_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            repo.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (repo / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "unknown", "result_status": "complete"},
+                    "findings": [
+                        {
+                            "id": "f_line_range",
+                            "title": "Bug",
+                            "severity": "medium",
+                            "confidence": 0.9,
+                            "path": "app.py",
+                            "line_range": "2-3",
+                            "locations": [{"path": "app.py", "start_line": None, "end_line": None}],
+                            "evidence": "Line range evidence",
+                            "impact": "Breaks behavior",
+                            "recommendation": "Fix it",
+                        }
+                    ],
+                },
+            )
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            summary = summary_payload(run_dir, "completed")
+
+        self.assertEqual(
+            summary["top_findings"][0]["locations"],
+            [{"path": "app.py", "start_line": 2, "end_line": 3}],
+        )
 
     def test_agent_report_repair_promotes_main_findings_to_canonical_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

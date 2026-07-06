@@ -4057,7 +4057,43 @@ def _intent_command(value: object) -> list[str]:
     return []
 
 
-def _intent_generated_command(generated: dict[str, Any], target: dict[str, Any]) -> list[str]:
+def _intent_relative_test_path(raw_path: str, validation_repo: Path | None) -> str:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return ""
+    path = Path(path_text)
+    if path.is_absolute() and validation_repo is not None:
+        try:
+            return path.resolve(strict=False).relative_to(validation_repo.resolve(strict=False)).as_posix()
+        except ValueError:
+            pass
+    return path.as_posix()
+
+
+def _intent_inferred_command(generated: dict[str, Any], target: dict[str, Any], validation_repo: Path | None) -> list[str]:
+    path_text = _intent_source_path_from_entry(generated) or _intent_source_path_from_entry(target)
+    rel_path = _intent_relative_test_path(path_text, validation_repo)
+    if not rel_path:
+        return []
+    suffix = Path(rel_path).suffix.lower()
+    framework = ""
+    for source in (generated, target):
+        raw_runnability = source.get("runnability") if isinstance(source.get("runnability"), dict) else {}
+        framework = str(source.get("framework") or raw_runnability.get("framework") or framework or "").strip().lower()
+    if framework in {"vitest", "jest", "node", "npm"} or suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+        return ["npm", "test", "--", rel_path]
+    if framework in {"pytest", "python"} or suffix == ".py":
+        return ["python", "-m", "pytest", rel_path]
+    if framework == "go" or suffix == ".go":
+        return ["go", "test", "./..."]
+    return []
+
+
+def _intent_generated_command(
+    generated: dict[str, Any],
+    target: dict[str, Any],
+    validation_repo: Path | None = None,
+) -> list[str]:
     for key in ("command", "test_command", "testCommand", "run_command", "runCommand"):
         command = _intent_command(generated.get(key))
         if command:
@@ -4066,7 +4102,23 @@ def _intent_generated_command(generated: dict[str, Any], target: dict[str, Any])
         command = _intent_command(target.get(key))
         if command:
             return command
-    return []
+    return _intent_inferred_command(generated, target, validation_repo)
+
+
+def _intent_source_execution_skip(run_dir: Path) -> tuple[str, str]:
+    source = read_json(run_dir / "intent" / "intent-test-source.json", {})
+    execution = source.get("execution") if isinstance(source, dict) and isinstance(source.get("execution"), dict) else {}
+    if execution.get("ran") is not False:
+        return "", ""
+    reason = str(execution.get("reason") or "").strip()
+    if not reason:
+        return "", ""
+    lowered = reason.lower()
+    if "dependenc" in lowered or "node_modules" in lowered or "not installed" in lowered:
+        return reason, "dependency_missing"
+    if "environment" in lowered or "sandbox" in lowered:
+        return reason, "environment_error"
+    return reason, "skipped_not_runnable"
 
 
 def _intent_test_cwd(validation_repo: Path, generated: dict[str, Any], target: dict[str, Any]) -> Path | None:
@@ -4237,10 +4289,25 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     for test_id in ordered_ids[:max_tests]:
         generated = generated_by_id.get(test_id) if isinstance(generated_by_id.get(test_id), dict) else {}
         target = target_by_id.get(test_id) if isinstance(target_by_id.get(test_id), dict) else {}
-        command = _intent_generated_command(generated, target)
+        command = _intent_generated_command(generated, target, validation_repo)
         base_result = {"schema_version": "project-test-run/v1", "test_id": test_id}
         if not validation_repo:
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "validation workspace was not prepared"})
+            continue
+        source_skip_reason, source_skip_classification = _intent_source_execution_skip(run_dir)
+        if source_skip_reason:
+            skipped_result = {
+                **base_result,
+                "status": "skipped",
+                "classification": source_skip_classification,
+                "exit_code": None,
+                "duration_ms": 0,
+                "timed_out": False,
+                "skip_reason": source_skip_reason,
+            }
+            if command:
+                skipped_result["command"] = " ".join(shlex.quote(part) for part in command)
+            raw_results.append(skipped_result)
             continue
         if not command:
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "no generated test command was produced"})
@@ -4369,6 +4436,9 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
 
 
 def _fallback_intent_classification(raw_result: dict[str, Any]) -> str:
+    raw_classification = str(raw_result.get("classification") or "").strip()
+    if raw_classification in INTENT_TEST_CLASSIFICATIONS:
+        return raw_classification
     status = str(raw_result.get("status") or "").strip().lower()
     if status in {"skipped", "timeout", "error"}:
         return "test_harness_error"
@@ -5811,6 +5881,22 @@ def agent_report_contract_errors(report: dict[str, Any]) -> list[str]:
     return errors
 
 
+def agent_report_line_range(value: object) -> tuple[int, int]:
+    if isinstance(value, (list, tuple)) and len(value) >= 1:
+        start = _qa_int(value[0])
+        end = _qa_int(value[1] if len(value) > 1 else value[0], start)
+        return (start, end if end > 0 else start)
+    text = str(value or "").strip()
+    if not text:
+        return (0, 0)
+    numbers = [int(match) for match in re.findall(r"\d+", text)]
+    if not numbers:
+        return (0, 0)
+    start = numbers[0]
+    end = numbers[1] if len(numbers) > 1 else start
+    return (start, end if end > 0 else start)
+
+
 def agent_report_location(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -5831,16 +5917,37 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
         or value.get("lineEnd")
         or start
     )
+    if start <= 0:
+        start, end = agent_report_line_range(
+            value.get("line_range")
+            or value.get("lineRange")
+            or value.get("range")
+            or value.get("lines")
+        )
     if end <= 0:
         end = start
-    if not path and start <= 0:
+    if not path or start <= 0:
         return None
     location = dict(value)
     location["path"] = path
-    if start > 0:
-        location["start_line"] = start
-    if end > 0:
-        location["end_line"] = end
+    for key in (
+        "line",
+        "line_start",
+        "line_end",
+        "lineStart",
+        "lineEnd",
+        "startLine",
+        "endLine",
+        "line_number",
+        "lineNumber",
+        "line_range",
+        "lineRange",
+        "range",
+        "lines",
+    ):
+        location.pop(key, None)
+    location["start_line"] = start
+    location["end_line"] = end
     return location
 
 
@@ -5864,6 +5971,7 @@ def agent_report_finding_location(finding: dict[str, Any]) -> dict[str, Any] | N
                 or finding.get("lineEnd")
                 or finding.get("line")
             ),
+            "line_range": finding.get("line_range") or finding.get("lineRange") or finding.get("range") or finding.get("lines"),
         }
     )
 
@@ -5887,6 +5995,10 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
         location = agent_report_location(raw_location)
         if location is not None:
             locations.append(location)
+    if not locations:
+        finding_location = agent_report_finding_location(finding)
+        if finding_location is not None:
+            locations.append(finding_location)
     return locations
 
 
