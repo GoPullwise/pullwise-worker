@@ -5435,6 +5435,29 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
     }
 
 
+def _json_list_len(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
+    plan_targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
+    generated = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
+    raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
+    analyzed_runs = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
+    planned = _json_list_len(plan_targets)
+    written = _json_list_len(generated)
+    run = _json_list_len(raw_runs)
+    analyzed = _json_list_len(analyzed_runs)
+    total = max(planned, written, run, analyzed)
+    return {
+        "intent_tests_total": total,
+        "intent_tests_planned": total,
+        "intent_tests_written": written,
+        "intent_tests_run": min(run if run else analyzed, total) if total else 0,
+        "intent_tests_analyzed": min(analyzed, total) if total else 0,
+    }
+
+
 def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> dict[str, Any]:
     if phase == "reviewer_fanout":
         bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
@@ -5443,15 +5466,7 @@ def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = N
         total = len(bundles) if isinstance(bundles, list) else completed
         return {"reviewer_runs_total": total, "reviewer_runs_completed": min(completed, total) if total else completed}
     if phase == "intent_test_validation":
-        plan_targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
-        generated = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
-        raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
-        analyzed_runs = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
-        return {
-            "intent_tests_total": len(plan_targets) if isinstance(plan_targets, list) else 0,
-            "intent_tests_written": len(generated) if isinstance(generated, list) else 0,
-            "intent_tests_run": len(raw_runs) if isinstance(raw_runs, list) else len(analyzed_runs) if isinstance(analyzed_runs, list) else 0,
-        }
+        return intent_test_artifact_counts(run_dir)
     if phase == "upload_artifacts":
         manifest_dir = artifact_dir or run_dir
         manifest = artifact_manifest_items(read_json(manifest_dir / "artifact-manifest.json", {}))
@@ -5468,11 +5483,10 @@ def refresh_coverage_intent_counters(run_dir: Path) -> None:
     coverage = read_json(run_dir / "coverage.json", {})
     if not isinstance(coverage, dict) or coverage.get("schema_version") != "coverage/v1":
         return
-    plan_targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
-    raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
+    counts = intent_test_artifact_counts(run_dir)
     analyzed_results = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
-    coverage["intent_tests_planned"] = len(plan_targets) if isinstance(plan_targets, list) else 0
-    coverage["intent_tests_run"] = len(raw_runs) if isinstance(raw_runs, list) else 0
+    coverage["intent_tests_planned"] = counts["intent_tests_planned"]
+    coverage["intent_tests_run"] = counts["intent_tests_run"]
     supporting_ids: set[str] = set()
     if isinstance(analyzed_results, list):
         for result in analyzed_results:
@@ -5576,11 +5590,17 @@ def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None =
         bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
         return {"bundles_total": len(bundles) if isinstance(bundles, list) else 0}
     if phase == "intent_test_planning":
-        targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
-        return {"intent_tests_total": len(targets) if isinstance(targets, list) else 0}
+        return {"intent_tests_total": intent_test_artifact_counts(run_dir)["intent_tests_total"]}
     if phase == "intent_test_running":
-        runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
-        return {"intent_tests_run": len(runs) if isinstance(runs, list) else 0}
+        counts = intent_test_artifact_counts(run_dir)
+        return {"intent_tests_total": counts["intent_tests_total"], "intent_tests_run": counts["intent_tests_run"]}
+    if phase == "intent_test_failure_analysis":
+        counts = intent_test_artifact_counts(run_dir)
+        return {
+            "intent_tests_total": counts["intent_tests_total"],
+            "intent_tests_run": counts["intent_tests_run"],
+            "intent_tests_analyzed": counts["intent_tests_analyzed"],
+        }
     return {}
 
 
@@ -6429,8 +6449,12 @@ def summary_payload(run_dir: Path, status: str) -> dict[str, Any]:
     agent = read_json(run_dir / "report.agent.json", {})
     coverage = read_json(run_dir / "coverage.json", {})
     findings = agent.get("findings") if isinstance(agent.get("findings"), list) else []
+    agent_summary = agent.get("summary") if isinstance(agent.get("summary"), dict) else {}
+    overall_risk = str((agent_summary or {}).get("overall_risk") or "unknown").strip().lower() or "unknown"
+    if overall_risk in {"unknown", "none"}:
+        overall_risk = highest_finding_risk(findings)
     return {
-        "overall_risk": (agent.get("summary") or {}).get("overall_risk", "unknown") if isinstance(agent.get("summary"), dict) else "unknown",
+        "overall_risk": overall_risk,
         "result_status": "complete" if status == "completed" else "incomplete",
         "finding_counts": {
             "confirmed_critical": count_findings(findings, "critical"),
@@ -6516,7 +6540,42 @@ def progress_final_payload(run_dir: Path, run_id: str, status: str) -> dict[str,
 
 
 def count_findings(findings: list[Any], severity: str) -> int:
-    return sum(1 for item in findings if isinstance(item, dict) and str(item.get("severity")).lower() == severity)
+    return sum(1 for item in findings if isinstance(item, dict) and normalized_finding_severity(item.get("severity")) == severity)
+
+
+def normalized_finding_severity(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "p0": "critical",
+        "blocker": "critical",
+        "critical": "critical",
+        "p1": "high",
+        "high": "high",
+        "p2": "medium",
+        "medium": "medium",
+        "moderate": "medium",
+        "p3": "low",
+        "low": "low",
+        "p4": "info",
+        "informational": "info",
+        "info": "info",
+    }
+    return aliases.get(text, text)
+
+
+def highest_finding_risk(findings: list[Any]) -> str:
+    ranked = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    best = "unknown"
+    best_rank = -1
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        severity = normalized_finding_severity(item.get("severity"))
+        rank = ranked.get(severity, -1)
+        if rank > best_rank:
+            best = severity
+            best_rank = rank
+    return best
 
 
 def repository_payload(job: dict[str, Any]) -> dict[str, Any]:

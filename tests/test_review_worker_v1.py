@@ -71,6 +71,7 @@ from pullwise_worker.review_worker_v1 import (
     run_intent_tests,
     safe_id,
     scoped_codex_command,
+    summary_payload,
     upload_artifacts,
     upload_log_artifacts,
     validate_job_policy,
@@ -1349,6 +1350,72 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(coverage["intent_tests_planned"], 2)
         self.assertEqual(coverage["intent_tests_run"], 2)
         self.assertEqual(coverage["intent_tests_supporting_findings"], 2)
+
+    def test_intent_counters_do_not_report_more_runs_than_total_when_source_has_extra_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            (run_dir / "coverage.json").write_text(
+                json.dumps({"schema_version": "coverage/v1", "intent_tests_planned": 0, "intent_tests_run": 0}),
+                encoding="utf-8",
+            )
+            (intent_dir / "intent-test-plan.json").write_text(
+                json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]}),
+                encoding="utf-8",
+            )
+            (intent_dir / "intent-test-source.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [{"test_id": "ITP-001", "path": "a.test"}, {"test_id": "ITV-002", "path": "b.test"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (intent_dir / "intent-test-results.raw.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-run-results/v1",
+                        "test_runs": [{"test_id": "ITP-001", "status": "failed"}, {"test_id": "ITV-002", "status": "skipped"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            running_data = phase_completion_data(run_dir, "intent_test_running")
+            refresh_coverage_intent_counters(run_dir)
+            coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(running_data["intent_tests_total"], 2)
+        self.assertEqual(running_data["intent_tests_run"], 2)
+        self.assertEqual(coverage["intent_tests_planned"], 2)
+        self.assertEqual(coverage["intent_tests_run"], 2)
+
+    def test_summary_payload_normalizes_priority_style_finding_severities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "unknown"},
+                    "findings": [
+                        {"id": "CL-001", "severity": "P1", "title": "High priority issue"},
+                        {"id": "CL-002", "severity": "P2", "title": "Medium priority issue"},
+                    ],
+                },
+            )
+
+            summary = summary_payload(run_dir, "completed")
+
+        self.assertEqual(summary["overall_risk"], "high")
+        self.assertEqual(summary["finding_counts"]["confirmed_high"], 1)
+        self.assertEqual(summary["finding_counts"]["confirmed_medium"], 1)
+        self.assertEqual(summary["finding_counts"]["confirmed_low"], 0)
 
     def test_effective_routing_preserves_semantic_routes_and_explains_fallbacks(self) -> None:
         inv = {
