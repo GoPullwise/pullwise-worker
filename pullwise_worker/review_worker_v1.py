@@ -5439,6 +5439,57 @@ def _json_list_len(value: Any) -> int:
     return len(value) if isinstance(value, list) else 0
 
 
+def _json_file_count(path: Path) -> int:
+    return len(list(path.glob("*.json"))) if path.is_dir() else 0
+
+
+def _planned_bundle_ids(run_dir: Path) -> set[str]:
+    bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
+    if not isinstance(bundles, list):
+        return set()
+    bundle_ids: set[str] = set()
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        bundle_id = str(bundle.get("bundle_id") or bundle.get("id") or "").strip()
+        if bundle_id:
+            bundle_ids.add(bundle_id)
+    return bundle_ids
+
+
+def _reviewed_bundle_ids_from_reviewer_outputs(run_dir: Path) -> set[str]:
+    reviewed: set[str] = set()
+    for output_dir in (run_dir / "raw-reviewers", run_dir / "verified-reviewers"):
+        if not output_dir.is_dir():
+            continue
+        for output_path in output_dir.glob("*.json"):
+            payload = read_json(output_path, {})
+            if not isinstance(payload, dict):
+                continue
+            for key in ("reviewed_bundles", "bundle_ids", "target_bundle_ids"):
+                values = payload.get(key)
+                if isinstance(values, list):
+                    reviewed.update(str(value).strip() for value in values if str(value).strip())
+    return reviewed
+
+
+def reviewer_fanout_artifact_counts(run_dir: Path) -> dict[str, int]:
+    planned_bundle_ids = _planned_bundle_ids(run_dir)
+    planned = len(planned_bundle_ids)
+    raw_count = _json_file_count(run_dir / "raw-reviewers")
+    verified_count = _json_file_count(run_dir / "verified-reviewers")
+    observed = max(raw_count, verified_count)
+    if not observed:
+        return {"reviewer_runs_total": planned, "reviewer_runs_completed": 0}
+
+    total = planned
+    if not total or observed >= total:
+        total = observed
+    elif planned_bundle_ids.issubset(_reviewed_bundle_ids_from_reviewer_outputs(run_dir)):
+        total = observed
+    return {"reviewer_runs_total": total, "reviewer_runs_completed": min(observed, total)}
+
+
 def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
     plan_targets = read_json(run_dir / "intent" / "intent-test-plan.json", {}).get("test_targets", [])
     generated = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
@@ -5460,11 +5511,7 @@ def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
 
 def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> dict[str, Any]:
     if phase == "reviewer_fanout":
-        bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
-        raw_dir = run_dir / "raw-reviewers"
-        completed = len(list(raw_dir.glob("*.json"))) if raw_dir.is_dir() else 0
-        total = len(bundles) if isinstance(bundles, list) else completed
-        return {"reviewer_runs_total": total, "reviewer_runs_completed": min(completed, total) if total else completed}
+        return reviewer_fanout_artifact_counts(run_dir)
     if phase == "intent_test_validation":
         return intent_test_artifact_counts(run_dir)
     if phase == "upload_artifacts":
