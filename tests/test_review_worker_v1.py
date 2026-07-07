@@ -343,6 +343,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         initialize = calls[0]
         self.assertEqual(initialize[1], "initialize")
         self.assertEqual(initialize[2]["clientInfo"]["name"], "codex_repo_review_worker")
+        self.assertEqual(initialize[2]["clientInfo"]["version"], __version__)
         self.assertEqual(initialize[2]["capabilities"], {"experimentalApi": False})
         self.assertEqual(calls[1], ("notify", "initialized", {}, 0))
 
@@ -4737,6 +4738,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(envelope["job"]["run_id"], "run_1")
         self.assertEqual(envelope["job"]["lease_id"], "lease_1")
         self.assertEqual(envelope["worker"]["worker_id"], "wk_1")
+        self.assertEqual(envelope["worker"]["worker_version"], __version__)
         self.assertEqual(envelope["execution"]["status"], "completed")
         self.assertEqual(envelope["progress_final"]["status"], "completed")
         self.assertEqual(envelope["progress_final"]["overall_percent"], 100.0)
@@ -5225,3 +5227,4 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

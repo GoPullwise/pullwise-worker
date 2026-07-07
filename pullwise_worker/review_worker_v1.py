@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import __version__
 from ._main_part_01_bootstrap import worker_machine_metrics_payload
 
 try:
@@ -28,7 +29,7 @@ except ImportError:  # pragma: no cover - runtime is Linux only; import stays te
     fcntl = None
 
 PROTOCOL_VERSION = "review-worker-protocol/v1"
-WORKER_VERSION = "0.1.0"
+WORKER_VERSION = __version__
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 PIPELINE_PHASES = (
@@ -7255,3 +7256,4 @@ def upload_artifacts(
         )
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
+
