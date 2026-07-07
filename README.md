@@ -34,7 +34,14 @@ Required environment:
 - `PULLWISE_CHECKOUT_ROOT` optional, defaults to the temp directory
 - `PULLWISE_WORKER_WORK_DIR` optional
 - `PULLWISE_LOG_DIR` optional, defaults to the temp directory
+- `PULLWISE_SERVICE_NAME`, `PULLWISE_SERVICE_USER`, `PULLWISE_SERVICE_HOME`, `PULLWISE_SERVICE_PATH`, `PULLWISE_WORKER_ENV_FILE`, `PULLWISE_WORKER_ENV_BACKUP_FILE`, `PULLWISE_WORKER_BIN_PATH`, and `PULLWISE_LOGROTATE_FILE` optional for local/manual runs; server-generated installs set them per worker instance
+- `PULLWISE_LIFECYCLE_WATCHER_ENABLED`, `PULLWISE_WATCHER_SERVICE_NAME`, `PULLWISE_WATCHER_SERVICE_FILE`, `PULLWISE_WATCHER_POLL_SECONDS`, `PULLWISE_REMOTE_UNINSTALL_FINALIZER`, and `PULLWISE_UNINSTALL_MARKER_FILE` optional watcher/finalizer settings used by installed workers
+- `PULLWISE_WORKER_PACKAGE` optional package URL for controlled upgrades
 - `PULLWISE_CODEX_COMMAND` optional, defaults to `/var/lib/pullwise-worker/<safe-worker-id>/workers/<worker-id>/.local/bin/codex`
+- `PULLWISE_CODEX_HOME` optional, defaults to `<worker-root>/codex-home`
+- `PULLWISE_CODEX_SQLITE_HOME` optional, defaults to `<worker-root>/codex-sqlite`
+- `PULLWISE_CODEX_RELEASE` optional installer-selected Codex CLI release, defaults to `latest` in server-generated installs
+- `PULLWISE_CODEX_INSTALLER_URL` optional Codex standalone installer URL
 - `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` optional, defaults to `1800`
 - `PULLWISE_CODEX_APP_SERVER_MAX_TURNS` optional, defaults to `8`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
@@ -105,8 +112,12 @@ pullwise-worker restart
 pullwise-worker update
 pullwise-worker cleanup
 pullwise-worker uninstall
+pullwise-worker watch
+pullwise-worker finalize-uninstall
 ```
 
+`pullwise-worker watch` and `pullwise-worker finalize-uninstall` are normally
+run by the installed watcher/systemd units, not typed during ordinary operation.
 `pullwise-worker stop` is a local host operation and normally needs root or
 systemd authorization. Admin-queued stop commands are handled by the running
 worker exiting cleanly; the installed unit uses `Restart=on-failure` so the
