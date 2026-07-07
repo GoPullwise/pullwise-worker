@@ -4820,6 +4820,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             write_json(run_dir / "report.agent.json", report)
 
             envelope = worker.build_envelope(job, "run_1", "completed", 1.0, artifact_dir, run_dir)
+            terminal_progress = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
+            terminal_run_state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
 
         self.assertEqual(envelope["protocol_version"], "review-worker-protocol/v1")
         self.assertEqual(envelope["message_type"], "review_run_result")
@@ -4833,8 +4835,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(envelope["progress_final"]["status"], "completed")
         self.assertEqual(envelope["progress_final"]["overall_percent"], 100.0)
         self.assertEqual(envelope["progress_final"]["run_id"], "run_1")
-        self.assertEqual(json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))["current_phase"], "cleanup_active_job")
-        self.assertEqual(json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))["progress"]["status"], "completed")
+        self.assertEqual(terminal_progress["current_phase"], "cleanup_active_job")
+        self.assertEqual(terminal_run_state["progress"]["status"], "completed")
         self.assertEqual(envelope["quality_gate"]["status"], "pass")
         self.assertTrue(envelope["artifact_manifest"])
         for item in envelope["artifact_manifest"]:

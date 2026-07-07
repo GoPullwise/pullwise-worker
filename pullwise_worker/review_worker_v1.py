@@ -2560,6 +2560,7 @@ class ReviewWorkerV1:
                 materialize_artifacts(run_dir, artifact_dir)
         else:
             materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
+        refresh_terminal_run_snapshot(run_dir, run_id, status)
         refresh_log_artifacts(run_dir, artifact_dir)
         manifest = artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))
         now = time.time()
