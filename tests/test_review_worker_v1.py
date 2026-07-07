@@ -3655,6 +3655,54 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(summary["status"], "completed")
         self.assertIn("late-before-upload", worker_log)
 
+    def test_upload_artifacts_continues_after_optional_upload_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    if artifact_id == DEBUG_BUNDLE_ARTIFACT_ID:
+                        raise RuntimeError("HTTP 413: Request Entity Too Large")
+                    calls.append((artifact_id, payload))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+            manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+
+        uploaded_ids = {artifact_id for artifact_id, _payload in calls}
+        self.assertIn("art_report_human", uploaded_ids)
+        self.assertIn("art_qa", uploaded_ids)
+        self.assertNotIn(DEBUG_BUNDLE_ARTIFACT_ID, uploaded_ids)
+        self.assertTrue(
+            any(
+                DEBUG_BUNDLE_ARTIFACT_ID in str(warning)
+                and "Request Entity Too Large" in str(warning)
+                for warning in manifest_payload["warnings"]
+            )
+        )
+
+    def test_upload_artifacts_keeps_required_upload_failures_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, _payload: dict) -> dict:
+                    if artifact_id == "art_qa":
+                        raise RuntimeError("HTTP 413: Request Entity Too Large")
+                    return {"accepted": True}
+
+            with self.assertRaisesRegex(RuntimeError, "Request Entity Too Large"):
+                upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+
     def test_completed_result_manifest_keeps_uploaded_artifact_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -4371,6 +4419,77 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(payload["generated_tests"][0]["path"], first_path)
         self.assertEqual(payload["generated_tests"][0]["artifact_refs"], ["art_intent_test_source"])
         self.assertEqual(payload["generated_tests"][1]["command"], ["npm", "test", "--", second_path])
+
+    def test_repair_intent_test_source_fills_missing_path_from_supporting_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            test_path = "intent/generated-tests/intent-review-artifact-url.test.jsx"
+            (run_dir / test_path).parent.mkdir(parents=True)
+            (run_dir / test_path).write_text("test('artifact url', () => {})\n", encoding="utf-8")
+            source_path = run_dir / "intent" / "intent-test-source.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITP-001",
+                                "command": ["npm", "test", "--", test_path],
+                                "linked_finding_ids": [],
+                            }
+                        ],
+                        "tests": [
+                            {
+                                "test_id": "ITP-001",
+                                "test_file": test_path,
+                                "framework": "vitest",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "generated_tests\\[0\\].path is missing"):
+                validate_phase_outputs(run_dir, "intent_test_writing")
+
+            repair_intent_test_source_artifact(source_path, run_dir)
+            validate_phase_outputs(run_dir, "intent_test_writing")
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["generated_tests"][0]["path"], test_path)
+        self.assertEqual(payload["generated_tests"][0]["framework"], "vitest")
+
+    def test_repair_intent_test_source_infers_single_materialized_generated_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            test_path = "intent/generated-tests/intent-generated.test.py"
+            (run_dir / test_path).parent.mkdir(parents=True)
+            (run_dir / test_path).write_text("def test_generated():\n    assert True\n", encoding="utf-8")
+            source_path = run_dir / "intent" / "intent-test-source.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITP-001",
+                                "command": ["python", "-m", "pytest", test_path],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "generated_tests\\[0\\].path is missing"):
+                validate_phase_outputs(run_dir, "intent_test_writing")
+
+            repair_intent_test_source_artifact(source_path, run_dir)
+            validate_phase_outputs(run_dir, "intent_test_writing")
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["generated_tests"][0]["path"], test_path)
 
     def test_fallback_semantic_artifact_repairs_outcome_style_intent_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

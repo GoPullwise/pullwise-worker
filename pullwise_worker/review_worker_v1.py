@@ -4528,7 +4528,21 @@ def _path_key(value: object) -> str:
 
 
 def _intent_source_path_from_entry(entry: dict[str, Any]) -> str:
-    for key in ("path", "artifact_path", "artifactPath", "file", "test_file", "testFile"):
+    for key in (
+        "path",
+        "artifact_path",
+        "artifactPath",
+        "file",
+        "filename",
+        "test_file",
+        "testFile",
+        "test_path",
+        "testPath",
+        "source_path",
+        "sourcePath",
+        "generated_file",
+        "generatedFile",
+    ):
         text = str(entry.get(key) or "").strip()
         if text:
             return text
@@ -4587,18 +4601,42 @@ def _normalize_intent_generated_test_path(run_dir: Path, raw_path: str) -> str:
     return run_rel or path_text.replace("\\", "/")
 
 
+def _intent_generated_test_candidate_paths(run_dir: Path) -> list[str]:
+    roots = [run_dir / "intent" / "generated-tests"]
+    repo_root = _repo_root_for_run_dir(run_dir)
+    if repo_root is not None:
+        roots.append(repo_root / ".codex-review" / "generated-tests")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        for path in sorted(root.rglob("*")) if root.is_dir() else []:
+            if not path.is_file() or path.is_symlink():
+                continue
+            rel = _relative_path_if_under(path, run_dir)
+            if not rel and repo_root is not None:
+                rel = _relative_path_if_under(path, repo_root)
+            if rel and rel not in seen:
+                paths.append(rel)
+                seen.add(rel)
+    return paths
+
+
 def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
     payload = read_json(path, {})
     if not isinstance(payload, dict):
         payload = {}
     tests = payload.get("tests") if isinstance(payload.get("tests"), list) else []
     tests_by_path: dict[str, dict[str, Any]] = {}
+    tests_by_id: dict[str, dict[str, Any]] = {}
     for test in tests:
         if not isinstance(test, dict):
             continue
         test_path = _normalize_intent_generated_test_path(run_dir, _intent_source_path_from_entry(test))
         if test_path:
             tests_by_path[_path_key(test_path)] = test
+        test_id = _intent_test_id(test, "")
+        if test_id:
+            tests_by_id[test_id] = test
     intended_by_id: dict[str, object] = {}
     intended_commands = payload.get("intended_commands") if isinstance(payload.get("intended_commands"), list) else []
     for intended in intended_commands:
@@ -4617,8 +4655,10 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
     generated = payload.get("generated_tests")
     if not isinstance(generated, list):
         generated = tests if tests else payload.get("created_files") or payload.get("createdFiles") or []
+    generated_items = generated if isinstance(generated, list) else []
+    candidate_paths = _intent_generated_test_candidate_paths(run_dir)
     repaired: list[dict[str, Any]] = []
-    for index, item in enumerate(generated if isinstance(generated, list) else []):
+    for index, item in enumerate(generated_items):
         if isinstance(item, dict):
             entry = dict(item)
             test_path = _normalize_intent_generated_test_path(run_dir, _intent_source_path_from_entry(entry))
@@ -4627,7 +4667,14 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
             entry = {"path": test_path}
         else:
             continue
-        supporting = tests_by_path.get(_path_key(test_path), {})
+        entry_id = _intent_test_id(entry, "")
+        supporting = tests_by_path.get(_path_key(test_path), {}) if test_path else {}
+        if not supporting and entry_id:
+            supporting = tests_by_id.get(entry_id, {})
+        if not test_path and supporting:
+            test_path = _normalize_intent_generated_test_path(run_dir, _intent_source_path_from_entry(supporting))
+        if not test_path and len(candidate_paths) == len(generated_items) and index < len(candidate_paths):
+            test_path = candidate_paths[index]
         if supporting:
             for key in (
                 "command",
@@ -7353,6 +7400,7 @@ def upload_artifacts(
         uploadable.append((item, path))
     uploadable.sort(key=lambda pair: 1 if pair[0].get("artifact_id") == DEBUG_BUNDLE_ARTIFACT_ID else 0)
     total = len(uploadable)
+    optional_upload_errors: list[str] = []
     for uploaded, (item, path) in enumerate(uploadable, start=1):
         artifact_id = str(item.get("artifact_id") or "").strip()
         name = str(item.get("name") or "").strip()
@@ -7364,16 +7412,32 @@ def upload_artifacts(
             raise RuntimeError(f"artifact sha256 mismatch before upload: {name}")
         if int(item.get("size_bytes") if item.get("size_bytes") is not None else -1) != len(data):
             raise RuntimeError(f"artifact size mismatch before upload: {name}")
-        client.artifact(
-            job_id,
-            artifact_id,
-            {
-                "protocol_version": PROTOCOL_VERSION,
-                "attempt_id": attempt_id,
-                "run_id": artifact_dir.name,
-                "artifact": item,
-                "content_base64": base64.b64encode(data).decode("ascii"),
-            },
-        )
+        try:
+            client.artifact(
+                job_id,
+                artifact_id,
+                {
+                    "protocol_version": PROTOCOL_VERSION,
+                    "attempt_id": attempt_id,
+                    "run_id": artifact_dir.name,
+                    "artifact": item,
+                    "content_base64": base64.b64encode(data).decode("ascii"),
+                },
+            )
+        except Exception as exc:
+            if item.get("required") is True:
+                raise
+            optional_upload_errors.append(f"{artifact_id}: {exc}")
+            continue
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
+    if optional_upload_errors:
+        warnings = manifest_payload.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+        for message in optional_upload_errors:
+            warnings.append(f"optional artifact upload failed: {message}")
+        manifest_payload["warnings"] = warnings
+        write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
+        if source_run_dir is not None:
+            write_json(source_run_dir / "artifact-manifest.json", manifest_payload)

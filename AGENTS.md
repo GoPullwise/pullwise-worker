@@ -218,6 +218,16 @@ Review pipeline rules:
   `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
   `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,
   `storage`, `sha256`, and `size_bytes`.
+- Intent source repair must run before strict validation is retried for
+  `intent_test_writing`. Preserve strict validation, but normalize common
+  Codex output variants such as generated test objects with `test_file`,
+  `filename`, `created_files`, or materialized generated-test files but no
+  canonical `path`.
+- Required artifact upload failures must remain terminal for completed uploads.
+  Optional artifact upload failures, especially large debug/log artifacts that
+  hit server/proxy body limits, should be recorded as artifact-manifest warnings
+  and must not prevent result envelope submission when required artifacts were
+  uploaded.
 - For completed runs, the terminal result envelope must reuse the exact
   artifact manifest that was uploaded before result submission. Do not refresh
   log/debug-bundle hashes while building the completed result envelope; final
