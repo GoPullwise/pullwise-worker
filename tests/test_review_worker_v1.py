@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -68,6 +68,7 @@ from pullwise_worker.review_worker_v1 import (
     prepare_validation_workspace,
     qa_gate_payload,
     repair_agent_report_artifact,
+    repair_intent_test_source_artifact,
     run_intent_tests,
     safe_id,
     scoped_codex_command,
@@ -3254,6 +3255,72 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("run_completed", uploaded_progress)
         self.assertTrue(progress_upload["final_log_upload"])
         self.assertEqual(progress_upload["artifact"]["size_bytes"], len(uploaded_progress.encode("utf-8")))
+    def test_refreshing_logs_packs_debug_bundle_with_final_log_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            (run_dir / "worker.log.jsonl").write_text("old worker\n", encoding="utf-8")
+            (run_dir / "progress.log.jsonl").write_text("old progress\n", encoding="utf-8")
+            materialize_artifacts(run_dir, artifact_dir)
+
+            (run_dir / "worker.log.jsonl").write_text("final worker\n", encoding="utf-8")
+            (run_dir / "progress.log.jsonl").write_text("final progress\n", encoding="utf-8")
+            upload_calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, _artifact_id: str, payload: dict) -> dict:
+                    upload_calls.append(payload)
+                    return {"accepted": True}
+
+            upload_log_artifacts(Client(), "job_1", "wk_1-1", run_dir, artifact_dir)
+
+            debug_payload = next(payload for payload in upload_calls if payload["artifact"]["kind"] == "debug_bundle")
+            debug_zip = base64.b64decode(debug_payload["content_base64"])
+            with zipfile.ZipFile(BytesIO(debug_zip), "r") as archive:
+                manifest = json.loads(archive.read("artifacts/artifact-manifest.json").decode("utf-8"))
+                worker_log = archive.read("artifacts/worker.log.jsonl")
+                progress_log = archive.read("artifacts/progress.log.jsonl")
+            by_name = {item["name"]: item for item in manifest["items"]}
+
+        self.assertEqual(by_name["worker.log.jsonl"]["sha256"], hashlib.sha256(worker_log).hexdigest())
+        self.assertEqual(by_name["worker.log.jsonl"]["size_bytes"], len(worker_log))
+        self.assertEqual(by_name["progress.log.jsonl"]["sha256"], hashlib.sha256(progress_log).hexdigest())
+        self.assertEqual(by_name["progress.log.jsonl"]["size_bytes"], len(progress_log))
+
+    def test_intent_test_source_repair_normalizes_validation_workspace_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            repo.mkdir()
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            prepare_validation_workspace(repo, run_dir)
+            validation_repo = root / "validation-repo"
+            generated_path = validation_repo / "src" / "screens" / "intent.validation.flow.test.jsx"
+            generated_path.parent.mkdir(parents=True, exist_ok=True)
+            generated_path.write_text("test('intent', () => {})\n", encoding="utf-8")
+            source_path = run_dir / "intent" / "intent-test-source.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-001",
+                                "path": "../../../../../validation-repo/src/screens/intent.validation.flow.test.jsx",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            repair_intent_test_source_artifact(source_path, run_dir)
+            repaired = json.loads(source_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(repaired["generated_tests"][0]["path"], "src/screens/intent.validation.flow.test.jsx")
+        self.assertNotIn("..", repaired["generated_tests"][0]["path"])
     def test_completed_run_uploads_final_logs_after_result_submit(self) -> None:
         calls = []
 

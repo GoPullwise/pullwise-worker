@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import fnmatch
@@ -17,7 +17,7 @@ import threading
 import time
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import __version__
@@ -4530,6 +4530,49 @@ def _intent_source_path_from_entry(entry: dict[str, Any]) -> str:
     return ""
 
 
+
+def _validation_repo_root_for_run_dir(run_dir: Path) -> Path | None:
+    validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+    validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+    return Path(validation_root) if validation_root else None
+
+
+def _relative_path_if_under(path: Path, root: Path) -> str:
+    try:
+        return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+    except ValueError:
+        return ""
+
+
+def _strip_validation_workspace_prefix(path_text: str) -> str:
+    parts = PurePosixPath(path_text.replace("\\", "/")).parts
+    for marker in ("validation-repo", "validation_repo"):
+        if marker not in parts:
+            continue
+        index = parts.index(marker)
+        tail = [part for part in parts[index + 1 :] if part not in {"", "."}]
+        if tail and all(part != ".." for part in tail):
+            return PurePosixPath(*tail).as_posix()
+    return ""
+
+
+def _normalize_intent_generated_test_path(run_dir: Path, raw_path: str) -> str:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return ""
+    validation_root = _validation_repo_root_for_run_dir(run_dir)
+    if validation_root is not None:
+        for candidate in _candidate_paths_for_recorded_path(run_dir, path_text, str(validation_root)):
+            rel = _relative_path_if_under(candidate, validation_root)
+            if rel:
+                return rel
+    stripped = _strip_validation_workspace_prefix(path_text)
+    if stripped:
+        return stripped
+    run_rel = _relative_path_if_under(Path(path_text), run_dir) if Path(path_text).is_absolute() else ""
+    return run_rel or path_text.replace("\\", "/")
+
+
 def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
     payload = read_json(path, {})
     if not isinstance(payload, dict):
@@ -4539,7 +4582,7 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
     for test in tests:
         if not isinstance(test, dict):
             continue
-        test_path = _intent_source_path_from_entry(test)
+        test_path = _normalize_intent_generated_test_path(run_dir, _intent_source_path_from_entry(test))
         if test_path:
             tests_by_path[_path_key(test_path)] = test
     intended_by_id: dict[str, object] = {}
@@ -4564,9 +4607,9 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
     for index, item in enumerate(generated if isinstance(generated, list) else []):
         if isinstance(item, dict):
             entry = dict(item)
-            test_path = _intent_source_path_from_entry(entry)
+            test_path = _normalize_intent_generated_test_path(run_dir, _intent_source_path_from_entry(entry))
         elif isinstance(item, str) and item.strip():
-            test_path = item.strip()
+            test_path = _normalize_intent_generated_test_path(run_dir, item.strip())
             entry = {"path": test_path}
         else:
             continue
@@ -6506,20 +6549,26 @@ def refresh_log_artifacts(
     payload = manifest_payload if isinstance(manifest_payload, dict) else read_json(artifact_dir / "artifact-manifest.json", {})
     if not isinstance(payload, dict):
         return
+    manifest_items = artifact_manifest_items(payload)
     changed = False
-    for item in artifact_manifest_items(payload):
+    debug_item: dict[str, Any] | None = None
+    for item in manifest_items:
         name = str(item.get("name") or "")
         if name in LOG_ARTIFACT_NAMES:
             _refresh_manifest_item(item, artifact_dir / name)
             changed = True
         if item.get("artifact_id") == DEBUG_BUNDLE_ARTIFACT_ID:
-            write_debug_bundle(run_dir, artifact_dir, status=status, error=error)
-            _refresh_manifest_item(item, artifact_dir / DEBUG_BUNDLE_NAME)
-            changed = True
+            debug_item = item
     if changed:
         write_json(artifact_dir / "artifact-manifest.json", payload)
         write_json(run_dir / "artifact-manifest.json", payload)
-
+    if debug_item is not None:
+        write_debug_bundle(run_dir, artifact_dir, status=status, error=error)
+        _refresh_manifest_item(debug_item, artifact_dir / DEBUG_BUNDLE_NAME)
+        changed = True
+    if changed:
+        write_json(artifact_dir / "artifact-manifest.json", payload)
+        write_json(run_dir / "artifact-manifest.json", payload)
 def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     required_files = ("report.md", "report.agent.json", "coverage.json", "qa.json", "token-budget.json")
@@ -6856,8 +6905,8 @@ def failure_payload_for_error(error: object, *, status: str = "", phase: str = "
     code = codex_error_code(error)
 
     category = "codex_turn_failure"
-    action = "fail_job_retryable"
-    retryable = True
+    action = "fail_job_terminal"
+    retryable = False
 
     if isinstance(error, RepositoryLimitExceeded) or "repositorylimits.max" in lowered:
         code = "REPOSITORY_TOO_LARGE"
@@ -6869,9 +6918,9 @@ def failure_payload_for_error(error: object, *, status: str = "", phase: str = "
     elif phase_text == "start_codex_app_server":
         category, action, retryable = "codex_app_server_failure", "disable_worker", False
     elif phase_text == "check_codex_auth" or code == "CODEX_UNAUTHORIZED":
-        category, action, retryable = "codex_auth_failure", "fail_job_retryable", True
+        category, action, retryable = "codex_auth_failure", "fail_job_terminal", False
     elif code == "CODEX_QUOTA_EXHAUSTED":
-        category, action, retryable = "codex_usage_limit_exceeded", "fail_job_retryable", True
+        category, action, retryable = "codex_usage_limit_exceeded", "fail_job_terminal", False
     elif code == "CODEX_CONTEXT_WINDOW_EXCEEDED":
         category, action, retryable = "context_budget_failure", "split_bundle_and_retry", True
     elif code == "CODEX_SANDBOX_ERROR":
