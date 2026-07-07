@@ -1478,6 +1478,25 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(summary["finding_counts"]["confirmed_medium"], 1)
         self.assertEqual(summary["finding_counts"]["confirmed_low"], 0)
 
+    def test_agent_report_repair_derives_unknown_overall_risk_from_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "unknown", "result_status": "complete"},
+                    "findings": [{"id": "cluster-001", "severity": "P1", "title": "High risk finding"}],
+                },
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(report["summary"]["overall_risk"], "high")
     def test_effective_routing_preserves_semantic_routes_and_explains_fallbacks(self) -> None:
         inv = {
             "schema_version": "inventory/v1",
@@ -4794,8 +4813,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "run_id": "run_1",
                 "lease_id": "lease_1",
                 "repo": "acme/api",
-                "commit": "abc123",
+                "commit": "pending",
             }
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+            report["commit_sha"] = "1234567890abcdef1234567890abcdef12345678"
+            write_json(run_dir / "report.agent.json", report)
 
             envelope = worker.build_envelope(job, "run_1", "completed", 1.0, artifact_dir, run_dir)
 
@@ -4806,10 +4828,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(envelope["job"]["lease_id"], "lease_1")
         self.assertEqual(envelope["worker"]["worker_id"], "wk_1")
         self.assertEqual(envelope["worker"]["worker_version"], __version__)
+        self.assertEqual(envelope["repository"]["commit_sha"], "1234567890abcdef1234567890abcdef12345678")
         self.assertEqual(envelope["execution"]["status"], "completed")
         self.assertEqual(envelope["progress_final"]["status"], "completed")
         self.assertEqual(envelope["progress_final"]["overall_percent"], 100.0)
         self.assertEqual(envelope["progress_final"]["run_id"], "run_1")
+        self.assertEqual(json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))["current_phase"], "cleanup_active_job")
+        self.assertEqual(json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))["progress"]["status"], "completed")
         self.assertEqual(envelope["quality_gate"]["status"], "pass")
         self.assertTrue(envelope["artifact_manifest"])
         for item in envelope["artifact_manifest"]:

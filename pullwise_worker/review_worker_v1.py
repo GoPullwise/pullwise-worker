@@ -2580,7 +2580,7 @@ class ReviewWorkerV1:
                 "concurrency": {"max_active_jobs": 1, "maintains_local_queue": False},
                 "engine": {"type": "codex_app_server", "app_server_transport": "stdio"},
             },
-            "repository": repository_payload(job),
+            "repository": repository_payload(job, run_dir),
             "execution": {
                 "status": status,
                 "review_mode": "full_repo",
@@ -6133,6 +6133,26 @@ def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
     return normalized
 
 
+
+def _non_pending_text(value: object) -> str:
+    text = str(value or "").strip()
+    return "" if not text or text.lower() == "pending" else text
+
+
+def resolved_report_commit_sha(run_dir: Path, report: dict[str, Any] | None, job: dict[str, Any] | None = None) -> str:
+    report = report if isinstance(report, dict) else {}
+    job = job if isinstance(job, dict) else {}
+    for value in (report.get("commit_sha"), report.get("commit"), job.get("commit")):
+        commit = _non_pending_text(value)
+        if commit:
+            return commit
+    repo_root = _repo_root_for_run_dir(run_dir)
+    if repo_root is not None:
+        commit = _non_pending_text(git_commit(repo_root))
+        if commit:
+            return commit
+    return "pending"
+
 def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     path = run_dir / "report.agent.json"
     raw = read_json(path, {}) if path.exists() else {}
@@ -6142,7 +6162,7 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     report["schema_id"] = "codex-full-repo-review"
     report["schema_version"] = "v1"
     report["run_id"] = str(report.get("run_id") or default_agent_report(job)["run_id"])
-    report["commit_sha"] = str(report.get("commit_sha") or job.get("commit") or "pending")
+    report["commit_sha"] = resolved_report_commit_sha(run_dir, report, job)
     summary = report.get("summary")
     if not isinstance(summary, dict):
         summary = {"overall_risk": "unknown", "result_status": "complete"}
@@ -6178,6 +6198,12 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
         if not isinstance(report.get(key), list):
             report[key] = []
     report["next_agent_tasks"] = list(dict.fromkeys(str(item) for item in next_tasks if str(item).strip()))
+    overall_risk = str(summary.get("overall_risk") or "unknown").strip().lower() or "unknown"
+    if overall_risk in {"unknown", "none"}:
+        summary["overall_risk"] = highest_finding_risk(findings)
+    else:
+        summary["overall_risk"] = overall_risk
+    report["summary"] = summary
     write_json(path, report)
 
 
@@ -6685,6 +6711,22 @@ def artifact_item(
     }
 
 
+
+def refresh_terminal_run_snapshot(run_dir: Path, run_id: str, status: str) -> dict[str, Any]:
+    snapshot = progress_final_payload(run_dir, run_id, status)
+    write_json(run_dir / "progress.json", snapshot)
+    run_state = read_json(run_dir / "run-state.json", {})
+    if not isinstance(run_state, dict):
+        run_state = {}
+    run_state["progress"] = snapshot
+    active_job = run_state.get("active_job") if isinstance(run_state.get("active_job"), dict) else {}
+    if active_job:
+        active_job["current_phase"] = snapshot.get("current_phase")
+        active_job["state"] = "completed" if status == "completed" else status
+        active_job["message"] = snapshot.get("message")
+        run_state["active_job"] = active_job
+    write_json(run_dir / "run-state.json", run_state)
+    return snapshot
 def summary_payload(run_dir: Path, status: str) -> dict[str, Any]:
     agent = read_json(run_dir / "report.agent.json", {})
     coverage = read_json(run_dir / "coverage.json", {})
@@ -6818,17 +6860,17 @@ def highest_finding_risk(findings: list[Any]) -> str:
     return best
 
 
-def repository_payload(job: dict[str, Any]) -> dict[str, Any]:
+def repository_payload(job: dict[str, Any], run_dir: Path | None = None) -> dict[str, Any]:
     repo = str(job.get("repo") or "")
     owner, _, name = repo.partition("/")
+    report = read_json(run_dir / "report.agent.json", {}) if run_dir is not None else {}
+    commit_sha = resolved_report_commit_sha(run_dir, report, job) if run_dir is not None else (_non_pending_text(job.get("commit")) or "pending")
     return {
         "provider": "github",
         "owner": owner,
         "name": name or repo,
-        "commit_sha": str(job.get("commit") or "pending"),
+        "commit_sha": commit_sha,
     }
-
-
 def result_human_report(source_dir: Path | None) -> dict[str, str]:
     if source_dir is None:
         return {"summaryMarkdown": ""}
