@@ -39,6 +39,7 @@ from pullwise_worker.review_worker_v1 import (
     JobCancelled,
     JsonRpcAppServer,
     ReviewWorkerV1,
+    RepositoryLimitExceeded,
     WorkerState,
     artifact_manifest_items,
     codex_error_code,
@@ -1037,6 +1038,28 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     {"job_id": "job_1", "checkout_dir": str(source), "repositoryLimits": {"maxFiles": 1, "maxBytes": 4096}},
                     "run_1",
                 )
+
+    def test_prepare_workspace_reports_full_repository_stats_when_limit_exceeded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source = root / "source"
+            source.mkdir()
+            (source / "one.py").write_text("1\n", encoding="utf-8")
+            (source / "two.py").write_text("22\n", encoding="utf-8")
+            (source / "three.py").write_text("333\n", encoding="utf-8")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+
+            with self.assertRaises(RepositoryLimitExceeded) as caught:
+                worker.prepare_workspace(
+                    {"job_id": "job_1", "checkout_dir": str(source), "repositoryLimits": {"maxFiles": 1, "maxBytes": 4096}},
+                    "run_1",
+                )
+
+        stats = caught.exception.preflight["repositoryStats"]
+        self.assertEqual(stats["fileCount"], 3)
+        self.assertEqual(stats["totalBytes"], 9)
+        self.assertFalse(stats["scanStoppedEarly"])
+        self.assertEqual(caught.exception.preflight["repositoryLimitReasons"], ["file_count"])
 
     def test_run_job_rejects_cloned_checkout_over_repository_limit_before_app_server(self) -> None:
         results = []
@@ -3631,6 +3654,51 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker_log = archive.read("run/worker.log.jsonl").decode("utf-8")
         self.assertEqual(summary["status"], "completed")
         self.assertIn("late-before-upload", worker_log)
+
+    def test_completed_result_manifest_keeps_uploaded_artifact_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, payload))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+            uploaded = {
+                artifact_id: (
+                    payload["artifact"]["sha256"],
+                    payload["artifact"]["size_bytes"],
+                )
+                for artifact_id, payload in calls
+            }
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "submit_result_envelope_started"})
+            append_jsonl(run_dir / "progress.log.jsonl", {"event": "submit_result_envelope_started"})
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            envelope = worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "completed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+            )
+            manifest_by_id = {item["artifact_id"]: item for item in envelope["artifact_manifest"]}
+
+        for artifact_id, (sha256, size_bytes) in uploaded.items():
+            self.assertEqual(manifest_by_id[artifact_id]["sha256"], sha256, artifact_id)
+            self.assertEqual(manifest_by_id[artifact_id]["size_bytes"], size_bytes, artifact_id)
 
     def test_upload_log_artifacts_refreshes_and_reuploads_final_debug_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

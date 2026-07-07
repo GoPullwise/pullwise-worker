@@ -2561,7 +2561,8 @@ class ReviewWorkerV1:
         else:
             materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
         refresh_terminal_run_snapshot(run_dir, run_id, status)
-        refresh_log_artifacts(run_dir, artifact_dir)
+        if status != "completed":
+            refresh_log_artifacts(run_dir, artifact_dir)
         manifest = artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))
         now = time.time()
         error_payload = failure_payload_for_error(error, status=status, phase=phase) if error else None
@@ -2650,7 +2651,7 @@ def repository_limit_preflight_payload(
         "repositoryStats": {
             "fileCount": int(files_seen),
             "totalBytes": int(bytes_seen),
-            "scanStoppedEarly": True,
+            "scanStoppedEarly": False,
         },
         "repositoryLimits": limits,
         "repositoryLimitExceeded": True,
@@ -3178,14 +3179,12 @@ CONFIG_NAMES = {
 GENERATED_PARTS = {"node_modules", "dist", "build", "target", "vendor", "coverage", ".pytest_cache", "__pycache__"}
 
 
-def enforce_repository_limits(
+def repository_scan_stats(
     repo_dir: Path,
     *,
-    max_files: int | None = None,
-    max_bytes: int | None = None,
-    context: str = "preparing checkout",
+    context: str,
     deadline_monotonic: float | None = None,
-) -> None:
+) -> dict[str, int]:
     files_seen = 0
     bytes_seen = 0
     for path in sorted(repo_dir.rglob("*")):
@@ -3198,22 +3197,50 @@ def enforce_repository_limits(
         stat_result = path.stat(follow_symlinks=False)
         files_seen += 1
         bytes_seen += stat_result.st_size
-        if max_files is not None and files_seen > max_files:
-            raise RepositoryLimitExceeded(
-                f"repositoryLimits.maxFiles exceeded while {context}",
-                files_seen=files_seen,
-                bytes_seen=bytes_seen,
-                max_files=max_files,
-                max_bytes=max_bytes,
-            )
-        if max_bytes is not None and bytes_seen > max_bytes:
-            raise RepositoryLimitExceeded(
-                f"repositoryLimits.maxBytes exceeded while {context}",
-                files_seen=files_seen,
-                bytes_seen=bytes_seen,
-                max_files=max_files,
-                max_bytes=max_bytes,
-            )
+    return {"files": files_seen, "bytes": bytes_seen}
+
+
+def raise_repository_limit_if_exceeded(
+    stats: dict[str, int],
+    *,
+    max_files: int | None = None,
+    max_bytes: int | None = None,
+    context: str,
+) -> None:
+    files_seen = int(stats.get("files") or 0)
+    bytes_seen = int(stats.get("bytes") or 0)
+    if max_files is not None and files_seen > max_files:
+        raise RepositoryLimitExceeded(
+            f"repositoryLimits.maxFiles exceeded while {context}",
+            files_seen=files_seen,
+            bytes_seen=bytes_seen,
+            max_files=max_files,
+            max_bytes=max_bytes,
+        )
+    if max_bytes is not None and bytes_seen > max_bytes:
+        raise RepositoryLimitExceeded(
+            f"repositoryLimits.maxBytes exceeded while {context}",
+            files_seen=files_seen,
+            bytes_seen=bytes_seen,
+            max_files=max_files,
+            max_bytes=max_bytes,
+        )
+
+
+def enforce_repository_limits(
+    repo_dir: Path,
+    *,
+    max_files: int | None = None,
+    max_bytes: int | None = None,
+    context: str = "preparing checkout",
+    deadline_monotonic: float | None = None,
+) -> None:
+    raise_repository_limit_if_exceeded(
+        repository_scan_stats(repo_dir, context=context, deadline_monotonic=deadline_monotonic),
+        max_files=max_files,
+        max_bytes=max_bytes,
+        context=context,
+    )
 
 
 def inventory(
@@ -3223,9 +3250,13 @@ def inventory(
     max_bytes: int | None = None,
     deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
+    raise_repository_limit_if_exceeded(
+        repository_scan_stats(repo_dir, context="inventorying checkout", deadline_monotonic=deadline_monotonic),
+        max_files=max_files,
+        max_bytes=max_bytes,
+        context="inventorying checkout",
+    )
     files = []
-    files_seen = 0
-    bytes_seen = 0
     for path in sorted(repo_dir.rglob("*")):
         if ".git" in path.parts or ".codex-review" in path.parts:
             continue
@@ -3235,24 +3266,6 @@ def inventory(
             continue
         rel = path.relative_to(repo_dir).as_posix()
         stat_result = path.stat(follow_symlinks=False)
-        files_seen += 1
-        bytes_seen += stat_result.st_size
-        if max_files is not None and files_seen > max_files:
-            raise RepositoryLimitExceeded(
-                "repositoryLimits.maxFiles exceeded while inventorying checkout",
-                files_seen=files_seen,
-                bytes_seen=bytes_seen,
-                max_files=max_files,
-                max_bytes=max_bytes,
-            )
-        if max_bytes is not None and bytes_seen > max_bytes:
-            raise RepositoryLimitExceeded(
-                "repositoryLimits.maxBytes exceeded while inventorying checkout",
-                files_seen=files_seen,
-                bytes_seen=bytes_seen,
-                max_files=max_files,
-                max_bytes=max_bytes,
-            )
         data = path.read_bytes()
         is_binary = b"\x00" in data[:4096]
         text = ""
@@ -7046,14 +7059,23 @@ def copy_tree(
     if not stat.S_ISDIR(source_mode):
         raise RuntimeError(f"repository source must be a real directory: {source}")
 
-    files_seen = 0
-    bytes_seen = 0
+    raise_repository_limit_if_exceeded(
+        repository_scan_stats(source, context="copying checkout", deadline_monotonic=deadline_monotonic),
+        max_files=max_files,
+        max_bytes=max_bytes,
+        context="copying checkout",
+    )
+
     for root, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
         root_path = Path(root)
-        if ".git" in root_path.parts:
+        if ".git" in root_path.parts or ".codex-review" in root_path.parts:
             dirnames[:] = []
             continue
-        dirnames[:] = [name for name in dirnames if name != ".git" and not (root_path / name).is_symlink()]
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in {".git", ".codex-review"} and not (root_path / name).is_symlink()
+        ]
         rel_root = root_path.relative_to(source)
         if rel_root != Path("."):
             (dest / rel_root).mkdir(parents=True, exist_ok=True)
@@ -7065,25 +7087,6 @@ def copy_tree(
                 continue
             rel = path.relative_to(source)
             target = dest / rel
-            file_size = path.stat(follow_symlinks=False).st_size
-            files_seen += 1
-            bytes_seen += file_size
-            if max_files is not None and files_seen > max_files:
-                raise RepositoryLimitExceeded(
-                    "repositoryLimits.maxFiles exceeded while copying checkout",
-                    files_seen=files_seen,
-                    bytes_seen=bytes_seen,
-                    max_files=max_files,
-                    max_bytes=max_bytes,
-                )
-            if max_bytes is not None and bytes_seen > max_bytes:
-                raise RepositoryLimitExceeded(
-                    "repositoryLimits.maxBytes exceeded while copying checkout",
-                    files_seen=files_seen,
-                    bytes_seen=bytes_seen,
-                    max_files=max_files,
-                    max_bytes=max_bytes,
-                )
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target, follow_symlinks=False)
 

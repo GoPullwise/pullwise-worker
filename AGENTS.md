@@ -218,6 +218,11 @@ Review pipeline rules:
   `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
   `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,
   `storage`, `sha256`, and `size_bytes`.
+- For completed runs, the terminal result envelope must reuse the exact
+  artifact manifest that was uploaded before result submission. Do not refresh
+  log/debug-bundle hashes while building the completed result envelope; final
+  log uploads after accepted result submission are best-effort replacements and
+  must not change the manifest used for terminal result validation.
 - Artifact IDs in one manifest must be unique, and upload must reject
   duplicates before posting any artifact, because artifact upload idempotency is
   keyed by `run_id + artifact_id`.
@@ -320,6 +325,10 @@ Repository checkout performance depends on the worker mirror cache.
   `preflight.repositoryLimits`, `repositoryLimitExceeded = true`, and concrete
   `repositoryLimitReasons` so scan history, audit bundles, and quota handling
   have evidence immediately.
+- Repository limit preflight stats must report the full eligible checkout
+  totals, not the first threshold-crossing values. For example, a 1,028-file
+  checkout with `maxFiles = 200` must report `fileCount = 1028`, not `201`;
+  only set `scanStoppedEarly` when the stats are actually truncated.
 - Keep repository mirrors under `.pullwise-repo-cache` and protect that runtime
   directory from ordinary checkout cleanup.
 - Commit-specific jobs should use shallow fetch into the mirror plus a shared
