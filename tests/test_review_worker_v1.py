@@ -5027,12 +5027,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             "job": {"run_id": "run_1"},
             "execution": {"status": "completed", "duration_ms": 10},
             "summary": {"top_findings": []},
+            "repository": {"commit_sha": "1234567890abcdef1234567890abcdef12345678"},
             "artifact_manifest": [],
         }
 
         payload = result_payload(active, envelope, "done")
 
         self.assertEqual(payload["reviewWorkerProtocol"], envelope)
+        self.assertEqual(payload["resolved_commit"], "1234567890abcdef1234567890abcdef12345678")
         self.assertFalse(any(key.lower().startswith("graph") for key in payload))
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["attempt_id"], "wk-1")

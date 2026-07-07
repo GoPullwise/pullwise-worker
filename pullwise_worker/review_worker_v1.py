@@ -6886,6 +6886,8 @@ def result_human_report(source_dir: Path | None) -> dict[str, str]:
 
 def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str, source_dir: Path | None = None) -> dict[str, Any]:
     agent_report = {}
+    repository = envelope.get("repository") if isinstance(envelope.get("repository"), dict) else {}
+    resolved_commit = str(repository.get("commit_sha") or repository.get("commit") or "").strip()
     for item in envelope.get("artifact_manifest") or []:
         if item.get("name") == "report.agent.json":
             break
@@ -6893,6 +6895,7 @@ def result_payload(active: ActiveJob, envelope: dict[str, Any], status: str, sou
         "status": status,
         "attempt_id": active.attempt_id,
         "result_checksum": hashlib.sha256(json.dumps(envelope, sort_keys=True).encode("utf-8")).hexdigest(),
+        **({"resolved_commit": resolved_commit} if resolved_commit and resolved_commit.lower() != "pending" else {}),
         "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
         "reviewWorkerProtocol": envelope,
         "humanReport": result_human_report(source_dir),
