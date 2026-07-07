@@ -33,6 +33,7 @@ from pullwise_worker.review_worker_v1 import (
     SEMANTIC_PHASES,
     SEMANTIC_PHASE_PROMPT_SPECS,
     ActiveJob,
+    append_jsonl,
     approval_response_for_request,
     CodexQuotaMonitor,
     JobCancelled,
@@ -873,7 +874,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(skipped[phase]["progress"]["status"], "skipped")
             self.assertEqual(skipped[phase]["data"]["skip_reason"], "intent test validation disabled")
 
-    def test_completed_run_preserves_codex_events_and_posts_terminal_event_before_result(self) -> None:
+    def test_completed_run_preserves_codex_events(self) -> None:
         calls = []
         app_server_holder = {}
 
@@ -956,7 +957,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertIn("thread/started", run_codex_events)
         self.assertEqual(artifact_codex_events, run_codex_events)
-        self.assertLess(calls.index(("event", "run_completed")), calls.index(("result", "done")))
+        self.assertLess(calls.index(("result", "done")), calls.index(("event", "run_completed")))
 
     def test_prepare_workspace_bootstraps_design_review_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5268,6 +5269,27 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(payload["current_phase"], "cleanup_active_job")
         self.assertEqual(cleanup_step["status"], "completed")
         self.assertEqual(cleanup_step["percent"], 100.0)
+
+    def test_incomplete_progress_final_preserves_v1_snapshot_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk-1")
+            active.current_phase = "qa_gate"
+            active.current_phase_status = "failed"
+            active.current_phase_percent = 100.0
+            active.overall_percent = 99.0
+            active.message = "finding[0].evidence is missing"
+            active.counters["source_like_files_total"] = 70
+            active.active_unit = {"kind": "phase", "id": "qa_gate", "label": "QA gate"}
+            write_json(run_dir / "progress.json", active.progress_snapshot())
+
+            payload = progress_final_payload(run_dir, "run_1", "partial_completed")
+
+        self.assertEqual(payload["current_phase"], "qa_gate")
+        self.assertEqual(payload["status"], "partial_completed")
+        self.assertEqual(payload["steps"], active.progress_steps())
+        self.assertEqual(payload["counters"]["source_like_files_total"], 70)
+        self.assertEqual(payload["active_unit"]["id"], "qa_gate")
 
     def test_agent_report_repair_normalizes_top_level_locations_and_confidence_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -2021,6 +2021,11 @@ class ReviewWorkerV1:
                             raise JobPartialCompleted(reason)
                     self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
                     if phase == "submit_result_envelope":
+                        envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
+                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
+                            terminal_state = "result_submit_pending"
+                            return
+                        terminal_state = "completed"
                         self.emit_event(
                             active,
                             run_dir,
@@ -2031,11 +2036,6 @@ class ReviewWorkerV1:
                             current_phase_percent=100,
                             message="Run completed.",
                         )
-                        envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
-                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
-                            terminal_state = "result_submit_pending"
-                            return
-                        terminal_state = "completed"
                         upload_log_artifacts_best_effort(self.client, job_id, active.attempt_id, run_dir, artifact_dir)
                 except JobCancelled:
                     raise
@@ -6797,6 +6797,14 @@ def progress_final_payload(run_dir: Path, run_id: str, status: str) -> dict[str,
         "status": status,
         "message": message,
     }
+    for key in ("steps", "counters", "active_unit", "last_event_sequence", "updated_at"):
+        value = snapshot.get(key)
+        if key == "steps" and isinstance(value, list):
+            payload[key] = value
+        elif key in {"counters", "active_unit"} and isinstance(value, dict):
+            payload[key] = value
+        elif key in {"last_event_sequence", "updated_at"} and value is not None:
+            payload[key] = value
     if status == "completed":
         snapshot_steps = snapshot.get("steps") if isinstance(snapshot.get("steps"), list) else []
         steps = snapshot_steps or default_progress_steps()
