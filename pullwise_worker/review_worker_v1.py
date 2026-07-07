@@ -1916,7 +1916,7 @@ class ReviewWorkerV1:
             wall_deadline = started + scan_deadline_seconds if scan_deadline_seconds > 0 else None
             repo_dir, run_dir, artifact_dir = self.prepare_workspace(job, run_id)
             active.run_dir = run_dir
-            events_path = artifact_dir / "codex-events.jsonl"
+            events_path = run_dir / "codex-events.jsonl"
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_started", "job_id": job_id, "run_id": run_id, "time": iso_time(started)})
             self.emit_event(active, run_dir, "run_started", "prepare_workspace", status="running", progress=0, message="Run started.")
             for phase, progress in PIPELINE_PHASES:
@@ -2021,11 +2021,6 @@ class ReviewWorkerV1:
                             raise JobPartialCompleted(reason)
                     self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
                     if phase == "submit_result_envelope":
-                        envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
-                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
-                            terminal_state = "result_submit_pending"
-                            return
-                        terminal_state = "completed"
                         self.emit_event(
                             active,
                             run_dir,
@@ -2036,6 +2031,11 @@ class ReviewWorkerV1:
                             current_phase_percent=100,
                             message="Run completed.",
                         )
+                        envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
+                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
+                            terminal_state = "result_submit_pending"
+                            return
+                        terminal_state = "completed"
                         upload_log_artifacts_best_effort(self.client, job_id, active.attempt_id, run_dir, artifact_dir)
                 except JobCancelled:
                     raise
@@ -6471,6 +6471,19 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
     }
     write_json(run_dir / "error-report.json", error_report)
     shutil.copy2(run_dir / "error-report.json", artifact_dir / "error-report.json")
+    terminal_report_path = run_dir / "report.agent.json"
+    include_terminal_report = False
+    if terminal_report_path.exists():
+        report = read_json(terminal_report_path, {})
+        if isinstance(report, dict):
+            summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+            summary = dict(summary)
+            summary.setdefault("overall_risk", highest_finding_risk(report.get("findings") if isinstance(report.get("findings"), list) else []))
+            summary["result_status"] = "incomplete"
+            report["summary"] = summary
+            write_json(terminal_report_path, report)
+            shutil.copy2(terminal_report_path, artifact_dir / "report.agent.json")
+            include_terminal_report = True
     manifest = [
         artifact_item(artifact_dir / "worker.log.jsonl", "worker_log", "application/jsonl", "worker-log", True),
         artifact_item(artifact_dir / "qa.json", "qa", "application/json", "qa-gate", True),
@@ -6478,6 +6491,8 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
         artifact_item(artifact_dir / "codex-events.jsonl", "codex_event_log", "application/jsonl", "codex-events", False),
         artifact_item(artifact_dir / "progress.log.jsonl", "progress_log", "application/jsonl", "progress-log", False),
     ]
+    if include_terminal_report:
+        manifest.append(artifact_item(artifact_dir / "report.agent.json", "report.agent", "application/json", "codex-full-repo-review", False))
     manifest = append_debug_bundle_artifact(manifest, run_dir, artifact_dir, status=status, error=error)
     manifest_payload = artifact_manifest_payload(artifact_dir.name, manifest)
     write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
@@ -7351,4 +7366,3 @@ def upload_artifacts(
         )
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
-

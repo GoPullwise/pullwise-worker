@@ -873,6 +873,91 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(skipped[phase]["progress"]["status"], "skipped")
             self.assertEqual(skipped[phase]["data"]["skip_reason"], "intent test validation disabled")
 
+    def test_completed_run_preserves_codex_events_and_posts_terminal_event_before_result(self) -> None:
+        calls = []
+        app_server_holder = {}
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, _run_id: str, event: dict) -> dict:
+                calls.append(("event", event["event_type"]))
+                return {}
+
+            def artifact(self, _job_id: str, artifact_id: str, _payload: dict) -> dict:
+                calls.append(("artifact", artifact_id))
+                return {"accepted": True}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                calls.append(("result", payload["status"]))
+
+        class FakeAppServer:
+            def __init__(self, events_path: Path) -> None:
+                self.events_path = events_path
+
+            def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                append_jsonl(self.events_path, {"method": "thread/started", "params": {"threadId": "thread_1"}})
+                return "thread_1"
+
+            def set_events_path(self, events_path: Path) -> None:
+                self.events_path = events_path
+
+        class Worker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                artifact_dir = root / "artifacts" / run_id
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                write_completed_artifact_inputs(run_dir)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+            def ensure_app_server(self, events_path: Path | None = None) -> FakeAppServer:
+                if events_path is None and "app_server" in app_server_holder:
+                    return app_server_holder["app_server"]
+                assert events_path is not None
+                app_server = FakeAppServer(events_path)
+                app_server_holder["app_server"] = app_server
+                return app_server
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "model_profile": {"default_model": "gpt-5.5", "core_effort": "high", "non_core_effort": "medium"},
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = Worker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            phases = (
+                ("start_codex_app_server", 7),
+                ("initialize_codex_connection", 10),
+                ("submit_result_envelope", 100),
+            )
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", phases):
+                worker.run_job(job)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            run_codex_events = (run_dir / "codex-events.jsonl").read_text(encoding="utf-8")
+            artifact_codex_events = (artifact_dir / "codex-events.jsonl").read_text(encoding="utf-8")
+
+        self.assertIn("thread/started", run_codex_events)
+        self.assertEqual(artifact_codex_events, run_codex_events)
+        self.assertLess(calls.index(("event", "run_completed")), calls.index(("result", "done")))
+
     def test_prepare_workspace_bootstraps_design_review_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3242,6 +3327,27 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(uploaded_ids[-1], "art_debug_bundle")
         self.assertIn("art_error_report", set(uploaded_ids))
 
+    def test_terminal_artifacts_mark_existing_agent_report_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+            report["summary"] = {"overall_risk": "medium", "result_status": "complete"}
+            report["findings"] = [{"id": "finding_1", "title": "Missing evidence"}]
+            (run_dir / "report.agent.json").write_text(json.dumps(report), encoding="utf-8")
+
+            materialize_terminal_artifacts(run_dir, artifact_dir, "partial_completed", error="qa failed")
+
+            run_report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+            artifact_report = json.loads((artifact_dir / "report.agent.json").read_text(encoding="utf-8"))
+            manifest = artifact_manifest_items(json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8")))
+
+        self.assertEqual(run_report["summary"]["result_status"], "incomplete")
+        self.assertEqual(artifact_report["summary"]["result_status"], "incomplete")
+        self.assertIn("report.agent", {item["kind"] for item in manifest})
+
     def test_upload_log_artifacts_refreshes_and_reuploads_final_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -5323,4 +5429,3 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
