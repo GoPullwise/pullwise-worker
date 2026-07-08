@@ -4055,6 +4055,49 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(manifest_by_id[artifact_id]["sha256"], sha256, artifact_id)
             self.assertEqual(manifest_by_id[artifact_id]["size_bytes"], size_bytes, artifact_id)
 
+    def test_completed_result_manifest_keeps_uploaded_required_hashes_after_artifact_files_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, dict(payload["artifact"])))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+            uploaded = {
+                artifact_id: (item["sha256"], item["size_bytes"])
+                for artifact_id, item in calls
+                if item.get("required") is True
+            }
+            (artifact_dir / "qa.json").write_text('{"schema_version":"qa/v1","status":"fail"}\n', encoding="utf-8")
+            (artifact_dir / "report.agent.json").write_text('{"schema_version":"codex-full-repo-report/v1"}\n', encoding="utf-8")
+            (artifact_dir / "coverage.json").write_text('{"schema_version":"coverage/v1","changed":true}\n', encoding="utf-8")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+            envelope = worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "completed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+            )
+            manifest_by_id = {item["artifact_id"]: item for item in envelope["artifact_manifest"]}
+
+        for artifact_id, (sha256, size_bytes) in uploaded.items():
+            self.assertEqual(manifest_by_id[artifact_id]["sha256"], sha256, artifact_id)
+            self.assertEqual(manifest_by_id[artifact_id]["size_bytes"], size_bytes, artifact_id)
     def test_completed_result_manifest_keeps_uploaded_qa_hash_after_late_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
