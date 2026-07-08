@@ -1093,9 +1093,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             root = Path(tmp_dir)
             source = root / "source"
             source.mkdir()
-            (source / "one.py").write_text("1\n", encoding="utf-8")
-            (source / "two.py").write_text("22\n", encoding="utf-8")
-            (source / "three.py").write_text("333\n", encoding="utf-8")
+            (source / "one.py").write_bytes(b"1\n")
+            (source / "two.py").write_bytes(b"22\n")
+            (source / "three.py").write_bytes(b"333\n")
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
 
             with self.assertRaises(RepositoryLimitExceeded) as caught:
@@ -1687,6 +1687,18 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(len(demoted), 1)
         self.assertIs(demoted[0]["demoted_from_main_findings"], True)
         self.assertEqual(demoted[0]["demoted_reason"], "missing_confirmed_or_plausible_validation")
+
+    def test_qa_gate_rejects_non_empty_main_findings_when_validation_artifact_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding_payload("CL-001")]})
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertIn("validated-findings.json is missing or invalid for non-empty main findings", qa["errors"])
 
     def test_qa_gate_rejects_main_finding_not_in_validated_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2553,6 +2565,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+
+            finding["id"] = "intent-1"
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("intent-1", status="confirmed", title="Intent-only signal")))
 
             missing_validator = qa_gate_payload(repo, run_dir)
             finding["validation_sources"]["validator_status"] = "confirmed"
@@ -5069,6 +5084,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("VAL-001", status="confirmed", title="Bad output", path="app.py", line=3)))
+
             with self.assertRaisesRegex(RuntimeError, "codex-full-repo-review"):
                 validate_phase_outputs(run_dir, "final_report_json")
             fallback_semantic_artifact(run_dir, {"job_id": "job_1", "commit": "abc"}, "final_report_json")
@@ -5691,6 +5708,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 },
             )
 
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("f_1", status="confirmed", title="Bug", path="src.py", line=1)))
+
             repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1", "commit": "abc"})
             repaired = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
             qa = qa_gate_payload(repo, run_dir)
@@ -5735,6 +5754,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
             write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
 
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("VAL-001", status="confirmed", title="Bug", path="app.py", line=2)))
+
             repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
             summary = summary_payload(run_dir, "completed")
 
@@ -5770,6 +5791,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     ],
                 },
             )
+
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("cluster_1", status="confirmed", title="Bug", path="worker.js", line=155)))
 
             repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
             repaired = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))

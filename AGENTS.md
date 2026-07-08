@@ -355,6 +355,8 @@ and line locations, include a clear failure scenario or risk, and provide an
 actionable recommendation. Weak or uncertain observations belong in appendix or
 internal artifacts, not as confirmed findings.
 
+Main `report.agent.json.findings` are a mechanically validated surface. Each main finding must be backed by `validated-findings.json.validated_findings` with status `confirmed`, `plausible`, or `validated`. Report repair must demote unbacked findings into `appendix_findings` with `demoted_from_main_findings = true`, recompute `summary.overall_risk` from retained main findings, and rebuild `next_agent_tasks` only from retained main findings. QA must fail non-empty main findings when `validated-findings.json` is missing, malformed, or lacks a matching accepted validation entry.
+
 Terminal result envelopes must include the stable v1 summary shape:
 `overall_risk`, `result_status`, `finding_counts`, `coverage`, and
 `top_findings`. Do not submit top-findings-only summaries.

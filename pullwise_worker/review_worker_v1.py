@@ -5714,6 +5714,14 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
         intent_classification = str(intent_signal.get("classification") or "").strip()
         if intent_classification in {"confirmed_bug", "plausible_bug"} and validator_status not in {"confirmed", "plausible", "validated"}:
             errors.append(f"finding[{index}] uses bug-supporting intent test signal without validator_status")
+    if findings:
+        validation_ok, accepted_validation = validation_binding_entries(run_dir)
+        if not validation_ok:
+            errors.append("validated-findings.json is missing or invalid for non-empty main findings")
+        else:
+            for index, finding in enumerate(findings):
+                if not finding_is_backed_by_validation(finding, accepted_validation):
+                    errors.append(f"finding[{index}] is not backed by confirmed/plausible validation")
     coverage = read_json(run_dir / "coverage.json", {})
     if isinstance(coverage, dict):
         total = _qa_int(coverage.get("source_like_files_total"))
