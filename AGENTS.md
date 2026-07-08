@@ -233,6 +233,11 @@ Review pipeline rules:
   log/debug-bundle hashes while building the completed result envelope; final
   log uploads after accepted result submission are best-effort replacements and
   must not change the manifest used for terminal result validation.
+- The worker persists `uploaded-artifact-manifest.json` as the upload-success
+  snapshot. Result envelopes must merge this snapshot over the mutable
+  `artifact-manifest.json` by `artifact_id`, because `artifact-manifest.json`
+  can be rewritten by late logs, debug-bundle refresh, terminal snapshots, or
+  local mutation after artifact upload.
 - Artifact IDs in one manifest must be unique, and upload must reject
   duplicates before posting any artifact, because artifact upload idempotency is
   keyed by `run_id + artifact_id`.

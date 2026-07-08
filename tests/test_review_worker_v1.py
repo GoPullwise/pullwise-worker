@@ -78,6 +78,7 @@ from pullwise_worker.review_worker_v1 import (
     summary_payload,
     upload_artifacts,
     upload_log_artifacts,
+    write_uploaded_artifact_manifest,
     validate_job_policy,
     validate_phase_outputs,
     validate_reviewer_outputs,
