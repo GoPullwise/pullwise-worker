@@ -111,6 +111,55 @@ def write_completed_artifact_inputs(run_dir: Path) -> None:
         encoding="utf-8",
     )
 
+def finding_payload(finding_id: str = "CL-001", *, title: str = "Backed finding", severity: str = "high", path: str = "app.py", line: int = 1) -> dict:
+    return {
+        "id": finding_id,
+        "title": title,
+        "severity": severity,
+        "confidence": 0.9,
+        "locations": [{"path": path, "start_line": line, "end_line": line}],
+        "evidence": [{"path": path, "start_line": line, "end_line": line, "summary": "Code evidence"}],
+        "impact": "The behavior can produce an incorrect result.",
+        "recommendation": "Fix the guarded branch and add a regression test.",
+        "next_agent_task": f"Fix {title}",
+    }
+
+
+def validation_payload(*entries: dict) -> dict:
+    return {
+        "schema_version": "validation-output/v1",
+        "validated_findings": list(entries),
+        "disproven_findings": [],
+    }
+
+
+def validation_entry(finding_id: str = "CL-001", *, status: str = "confirmed", title: str = "Backed finding", path: str = "app.py", line: int = 1) -> dict:
+    return {
+        "id": finding_id,
+        "status": status,
+        "title": title,
+        "locations": [{"path": path, "start_line": line, "end_line": line}],
+    }
+
+
+def write_basic_qa_inputs(repo: Path, run_dir: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    write_completed_artifact_inputs(run_dir)
+    write_json(run_dir / "inventory.json", inventory(repo))
+    write_json(
+        run_dir / "coverage.json",
+        {
+            "schema_version": "coverage/v1",
+            "source_like_files_total": 1,
+            "deep_reviewed_files": 1,
+            "standard_reviewed_files": 0,
+            "light_reviewed_files": 0,
+            "inventory_only_files": 0,
+            "skipped_files": 0,
+        },
+    )
+    write_json(run_dir / "intent" / "intent-test-validation.json", {"schema_version": "intent-test-validation/v1", "enabled": False})
 
 class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_worker_state_allows_lease_only_when_idle_without_active_job(self) -> None:
@@ -1602,10 +1651,114 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 },
             )
 
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("cluster-001", status="confirmed")))
+
             repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
             report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
 
         self.assertEqual(report["summary"]["overall_risk"], "high")
+    def test_repair_agent_report_demotes_unvalidated_main_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            backed = finding_payload("CL-001", title="Backed finding", severity="high")
+            unbacked = finding_payload("CL-002", title="Unbacked finding", severity="critical")
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "critical", "result_status": "complete"},
+                    "findings": [backed, unbacked],
+                    "appendix_findings": [],
+                    "next_agent_tasks": ["Fix stale unbacked task"],
+                },
+            )
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("CL-001", status="confirmed", title="Backed finding")))
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual([finding["id"] for finding in report["findings"]], ["CL-001"])
+        self.assertEqual(report["summary"]["overall_risk"], "high")
+        self.assertEqual(report["next_agent_tasks"], ["Fix Backed finding"])
+        demoted = [finding for finding in report["appendix_findings"] if finding.get("id") == "CL-002"]
+        self.assertEqual(len(demoted), 1)
+        self.assertIs(demoted[0]["demoted_from_main_findings"], True)
+        self.assertEqual(demoted[0]["demoted_reason"], "missing_confirmed_or_plausible_validation")
+
+    def test_qa_gate_rejects_main_finding_not_in_validated_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding_payload("CL-001")]})
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("CL-001", status="weak")))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertIn("finding[0] is not backed by confirmed/plausible validation", qa["errors"])
+
+    def test_qa_gate_accepts_main_finding_backed_by_plausible_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding_payload("CL-001")]})
+            write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("CL-001", status="plausible")))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "pass")
+
+    def test_qa_gate_allows_empty_main_findings_with_empty_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": []})
+            write_json(run_dir / "validated-findings.json", validation_payload())
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "pass")
+
+    def test_validation_binding_supports_cluster_id_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            finding = finding_payload("", title="Alias backed finding")
+            finding.pop("id", None)
+            finding["cluster_id"] = "cluster-alias-1"
+            validation = validation_entry("", status="validated", title="Alias backed finding")
+            validation.pop("id", None)
+            validation["finding_id"] = "cluster-alias-1"
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]})
+            write_json(run_dir / "validated-findings.json", validation_payload(validation))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "pass")
+
+    def test_validation_binding_fallback_requires_unique_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            finding = finding_payload("", title="Ambiguous finding")
+            finding.pop("id", None)
+            first = validation_entry("VAL-001", status="confirmed", title="Ambiguous finding")
+            second = validation_entry("VAL-002", status="confirmed", title="Ambiguous finding")
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]})
+            write_json(run_dir / "validated-findings.json", validation_payload(first, second))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertIn("finding[0] is not backed by confirmed/plausible validation", qa["errors"])
     def test_effective_routing_preserves_semantic_routes_and_explains_fallbacks(self) -> None:
         inv = {
             "schema_version": "inventory/v1",

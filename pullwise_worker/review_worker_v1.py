@@ -5519,6 +5519,128 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
             errors.append(f"artifact {path.name} storage must reference server_artifact")
 
 
+MAIN_FINDING_VALIDATION_STATUSES = {"confirmed", "plausible", "validated"}
+FINDING_ID_ALIAS_FIELDS = ("id", "finding_id", "cluster_id", "local_id", "source_finding_id", "source_finding_ids")
+VALIDATION_STATUS_ALIAS_FIELDS = ("status", "validator_status", "validation_status", "classification")
+
+
+def _binding_scalar_ids(value: object) -> set[str]:
+    ids: set[str] = set()
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            ids.update(_binding_scalar_ids(item))
+        return ids
+    text = str(value or "").strip()
+    if text:
+        ids.add(text)
+    return ids
+
+
+def finding_binding_ids(record: object) -> set[str]:
+    if not isinstance(record, dict):
+        return set()
+    ids: set[str] = set()
+    for field in FINDING_ID_ALIAS_FIELDS:
+        ids.update(_binding_scalar_ids(record.get(field)))
+    return ids
+
+
+def validation_entry_status(entry: object) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    for field in VALIDATION_STATUS_ALIAS_FIELDS:
+        status = str(entry.get(field) or "").strip().lower()
+        if status:
+            return status
+    return ""
+
+
+def validation_entry_is_main_backing(entry: object) -> bool:
+    return validation_entry_status(entry) in MAIN_FINDING_VALIDATION_STATUSES
+
+
+def _binding_title(record: object) -> str:
+    if not isinstance(record, dict):
+        return ""
+    return " ".join(str(record.get("title") or "").strip().lower().split())
+
+
+def _binding_location_source(record: dict[str, Any]) -> dict[str, Any]:
+    locations = record.get("locations")
+    if isinstance(locations, list):
+        for location in locations:
+            if isinstance(location, dict):
+                return location
+    location = record.get("location")
+    if isinstance(location, dict):
+        return location
+    return record
+
+
+def _binding_path(record: object) -> str:
+    if not isinstance(record, dict):
+        return ""
+    source = _binding_location_source(record)
+    for field in ("path", "file", "primaryFile", "primary_file"):
+        text = str(source.get(field) or record.get(field) or "").strip().replace("\\", "/")
+        if text:
+            while text.startswith("./"):
+                text = text[2:]
+            return text
+    return ""
+
+
+def _binding_start_line(record: object) -> int:
+    if not isinstance(record, dict):
+        return 0
+    source = _binding_location_source(record)
+    for field in ("start_line", "line", "line_start", "primaryLine", "primary_line", "startLine", "lineStart"):
+        value = source.get(field) if field in source else record.get(field)
+        line = _qa_int(value)
+        if line > 0:
+            return line
+    return 0
+
+
+def finding_fallback_binding_key(record: object) -> tuple[str, str, int] | None:
+    if not isinstance(record, dict):
+        return None
+    title = _binding_title(record)
+    path = _binding_path(record)
+    start_line = _binding_start_line(record)
+    if title and path and start_line > 0:
+        return (title, path, start_line)
+    return None
+
+
+def validation_binding_entries(run_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
+    path = run_dir / "validated-findings.json"
+    if not path.is_file():
+        return (False, [])
+    payload = read_json(path, None)
+    if not isinstance(payload, dict):
+        return (False, [])
+    if payload.get("schema_version") != "validation-output/v1":
+        return (False, [])
+    entries = payload.get("validated_findings")
+    if not isinstance(entries, list):
+        return (False, [])
+    accepted = [entry for entry in entries if isinstance(entry, dict) and validation_entry_is_main_backing(entry)]
+    return (True, accepted)
+
+
+def finding_is_backed_by_validation(finding: object, accepted_entries: list[dict[str, Any]]) -> bool:
+    if not isinstance(finding, dict):
+        return False
+    ids = finding_binding_ids(finding)
+    if ids:
+        return any(ids & finding_binding_ids(entry) for entry in accepted_entries)
+    key = finding_fallback_binding_key(finding)
+    if key is None:
+        return False
+    matches = [entry for entry in accepted_entries if finding_fallback_binding_key(entry) == key]
+    return len(matches) == 1
+
 def validate_source_unmodified_for_qa(repo_dir: Path, run_dir: Path, errors: list[str]) -> None:
     inventory_payload = read_json(run_dir / "inventory.json", {})
     files = inventory_payload.get("files") if isinstance(inventory_payload.get("files"), list) else None
@@ -6227,7 +6349,6 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     summary = report.get("summary")
     if not isinstance(summary, dict):
         summary = {"overall_risk": "unknown", "result_status": "complete"}
-    summary.setdefault("overall_risk", "unknown")
     summary.setdefault("result_status", "complete")
     report["summary"] = summary
     coverage = read_json(run_dir / "coverage.json", {})
@@ -6242,28 +6363,38 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     raw_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
     if not raw_findings and isinstance(report.get("main_findings"), list):
         raw_findings = report["main_findings"]
-    findings = []
-    next_tasks = report.get("next_agent_tasks") if isinstance(report.get("next_agent_tasks"), list) else []
+
+    _valid_validation, accepted_validation = validation_binding_entries(run_dir)
+    findings: list[dict[str, Any]] = []
+    demoted_findings: list[dict[str, Any]] = []
     for raw_finding in raw_findings:
         finding = normalized_agent_report_finding(raw_finding)
         if finding is None:
             continue
-        if not str(finding.get("id") or "").strip():
-            finding["id"] = f"finding-{len(findings) + 1:03d}"
-        findings.append(finding)
-        task = str(finding.get("next_agent_task") or "").strip()
-        if task:
-            next_tasks.append(task)
+        if finding_is_backed_by_validation(finding, accepted_validation):
+            if not str(finding.get("id") or "").strip():
+                finding["id"] = f"finding-{len(findings) + 1:03d}"
+            findings.append(finding)
+            continue
+        demoted = dict(finding)
+        demoted["demoted_from_main_findings"] = True
+        demoted["demoted_reason"] = "missing_confirmed_or_plausible_validation"
+        demoted_findings.append(demoted)
+
+    appendix_findings = report.get("appendix_findings") if isinstance(report.get("appendix_findings"), list) else []
+    report["appendix_findings"] = [*appendix_findings, *demoted_findings]
     report["findings"] = findings
-    for key in ("appendix_findings", "disproven_findings", "next_agent_tasks", "raw_artifact_refs"):
+    for key in ("disproven_findings", "raw_artifact_refs"):
         if not isinstance(report.get(key), list):
             report[key] = []
-    report["next_agent_tasks"] = list(dict.fromkeys(str(item) for item in next_tasks if str(item).strip()))
-    overall_risk = str(summary.get("overall_risk") or "unknown").strip().lower() or "unknown"
-    if overall_risk in {"unknown", "none"}:
-        summary["overall_risk"] = highest_finding_risk(findings)
-    else:
-        summary["overall_risk"] = overall_risk
+    report["next_agent_tasks"] = list(
+        dict.fromkeys(
+            str(finding.get("next_agent_task") or "").strip()
+            for finding in findings
+            if str(finding.get("next_agent_task") or "").strip()
+        )
+    )
+    summary["overall_risk"] = highest_finding_risk(findings)
     report["summary"] = summary
     write_json(path, report)
 
