@@ -4100,6 +4100,43 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         for artifact_id, (sha256, size_bytes) in uploaded.items():
             self.assertEqual(manifest_by_id[artifact_id]["sha256"], sha256, artifact_id)
             self.assertEqual(manifest_by_id[artifact_id]["size_bytes"], size_bytes, artifact_id)
+    def test_uploaded_artifact_manifest_write_uses_atomic_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            artifact_dir = root / "artifacts" / "run_1"
+            artifact_dir.mkdir(parents=True)
+            item = {
+                "artifact_id": "art_qa",
+                "kind": "qa",
+                "name": "qa.json",
+                "media_type": "application/json",
+                "schema_id": "qa-gate",
+                "schema_version": "v1",
+                "encoding": "utf-8",
+                "compression": "none",
+                "required": True,
+                "storage": {"type": "server_artifact", "url": "/v1/review-runs/run_1/artifacts/art_qa"},
+                "sha256": "1" * 64,
+                "size_bytes": 2,
+            }
+            manifest_payload = {"schema_version": "artifact-manifest/v1", "run_id": "run_1", "items": [item]}
+            replacements = []
+            real_replace = os.replace
+
+            def replace_and_record(src: object, dst: object) -> None:
+                replacements.append((Path(src), Path(dst)))
+                real_replace(src, dst)
+
+            with patch("pullwise_worker.review_worker_v1.os.replace", side_effect=replace_and_record):
+                write_uploaded_artifact_manifest(artifact_dir, manifest_payload, [item])
+
+            snapshot_path = artifact_dir / "uploaded-artifact-manifest.json"
+            self.assertEqual(len(replacements), 1)
+            self.assertEqual(replacements[0][1], snapshot_path)
+            self.assertEqual(replacements[0][0].parent, artifact_dir)
+            self.assertNotEqual(replacements[0][0], snapshot_path)
+            self.assertTrue(snapshot_path.is_file())
+            self.assertFalse(replacements[0][0].exists())
     def test_completed_result_manifest_uses_uploaded_snapshot_after_manifest_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -5899,7 +5936,64 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(run_state["failure"]["failure_action"], "repair_output")
         self.assertIs(run_state["failure"]["retryable"], True)
 
-    def test_result_submit_failure_spools_pending_and_keeps_active_job(self) -> None:
+    def test_submit_result_blocks_required_manifest_mismatch_against_uploaded_snapshot(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.results = []
+
+            def result(self, job_id: str, payload: dict) -> None:
+                self.results.append((job_id, payload))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            artifact_dir = root / "artifacts" / "run_1"
+            artifact_dir.mkdir(parents=True)
+            uploaded_qa = {
+                "artifact_id": "art_qa",
+                "kind": "qa",
+                "name": "qa.json",
+                "media_type": "application/json",
+                "schema_id": "qa-gate",
+                "schema_version": "v1",
+                "encoding": "utf-8",
+                "compression": "none",
+                "required": True,
+                "storage": {"type": "server_artifact", "url": "/v1/review-runs/run_1/artifacts/art_qa"},
+                "sha256": "1" * 64,
+                "size_bytes": 2,
+            }
+            write_uploaded_artifact_manifest(
+                artifact_dir,
+                {"schema_version": "artifact-manifest/v1", "run_id": "run_1", "items": [uploaded_qa]},
+                [uploaded_qa],
+            )
+            envelope_qa = dict(uploaded_qa)
+            envelope_qa["sha256"] = "0" * 64
+            envelope = {
+                "protocol_version": "review-worker-protocol/v1",
+                "job": {"run_id": "run_1", "job_id": "job_1", "lease_id": "lease_1"},
+                "execution": {"status": "completed"},
+                "artifact_manifest": [envelope_qa],
+            }
+            client = Client()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=client)
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+
+            submitted = worker.submit_result_or_mark_pending(
+                active,
+                "job_1",
+                {"status": "done", "reviewWorkerProtocol": envelope},
+                artifact_dir,
+                envelope,
+            )
+            blocked = json.loads((artifact_dir / "result-submit-blocked.json").read_text(encoding="utf-8"))
+
+        self.assertFalse(submitted)
+        self.assertEqual(client.results, [])
+        self.assertFalse((artifact_dir / "pending-submit.json").exists())
+        self.assertIn("art_qa", blocked["error"])
+        self.assertEqual(active.current_phase_status, "blocked")
+    def test_result_submit_failure_records_failure_without_pending_retry(self) -> None:
         class Client:
             def result(self, job_id: str, payload: dict) -> None:
                 raise RuntimeError("server unavailable")
@@ -5925,14 +6019,17 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             if active.state in {"completed", "failed", "cancelled", "partial_completed"}:
                 worker.state.clear_active(active.state)
 
-            pending = __import__("json").loads((artifact_dir / "pending-submit.json").read_text(encoding="utf-8"))
+            failed = __import__("json").loads((artifact_dir / "result-submit-failed.json").read_text(encoding="utf-8"))
 
         self.assertFalse(submitted)
         self.assertEqual(worker.state.active_job.job_id, "job_1")
         self.assertEqual(active.state, "finishing")
-        self.assertEqual(pending["status"], "result_submit_pending")
+        self.assertEqual(active.current_phase_status, "failed")
+        self.assertEqual(failed["status"], "result_submit_failed")
+        self.assertIs(failed["retry_disabled"], True)
+        self.assertFalse((artifact_dir / "pending-submit.json").exists())
 
-    def test_recover_pending_submission_retries_and_clears_active_job(self) -> None:
+    def test_recover_pending_submission_disables_retry_without_resubmitting(self) -> None:
         class Client:
             def __init__(self) -> None:
                 self.results = []
@@ -5971,15 +6068,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             worker.recover_pending_submissions()
 
-            pending_exists = (artifact_dir / "pending-submit.json").exists()
+            pending = json.loads((artifact_dir / "pending-submit.json").read_text(encoding="utf-8"))
             active_job = worker.state.active_job
             results = client.results
 
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0][0], "job_1")
-        self.assertEqual(results[0][1]["status"], "done")
-        self.assertEqual(results[0][1]["attempt_id"], "wk_1-1")
-        self.assertFalse(pending_exists)
+        self.assertEqual(results, [])
+        self.assertEqual(pending["status"], "result_submit_retry_disabled")
+        self.assertIs(pending["retry_disabled"], True)
         self.assertIsNone(active_job)
 
     def test_isolation_env_does_not_inherit_provider_credentials(self) -> None:

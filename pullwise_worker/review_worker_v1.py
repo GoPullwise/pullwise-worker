@@ -2221,27 +2221,48 @@ class ReviewWorkerV1:
         envelope: dict[str, Any],
     ) -> bool:
         try:
-            self.client.result(job_id, payload)
-            return True
+            validate_result_manifest_matches_uploaded_snapshot(envelope, artifact_dir)
         except Exception as exc:
             active.state = "finishing"
             active.current_phase = "submit_result_envelope"
-            active.current_phase_status = "retrying"
-            active.message = f"Result submit pending: {exc}"
+            active.current_phase_status = "blocked"
+            active.message = f"Result submit blocked: {exc}"
             write_json(artifact_dir / "result-envelope.json", envelope)
             write_json(
-                artifact_dir / "pending-submit.json",
+                artifact_dir / "result-submit-blocked.json",
                 {
                     "run_id": active.run_id,
                     "job_id": active.job_id,
                     "lease_id": active.lease_id,
                     "attempt_id": active.attempt_id,
                     "result_status": result_status_from_envelope(envelope),
-                    "status": "result_submit_pending",
+                    "status": "result_submit_blocked",
                     "created_at": iso_time(time.time()),
-                    "retry_count": 0,
-                    "next_retry_after": None,
-                    "result_envelope_path": "result-envelope.json",
+                    "retry_disabled": True,
+                    "error": str(exc),
+                },
+            )
+            return False
+        try:
+            self.client.result(job_id, payload)
+            return True
+        except Exception as exc:
+            active.state = "finishing"
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "failed"
+            active.message = f"Result submit failed without retry: {exc}"
+            write_json(artifact_dir / "result-envelope.json", envelope)
+            write_json(
+                artifact_dir / "result-submit-failed.json",
+                {
+                    "run_id": active.run_id,
+                    "job_id": active.job_id,
+                    "lease_id": active.lease_id,
+                    "attempt_id": active.attempt_id,
+                    "result_status": result_status_from_envelope(envelope),
+                    "status": "result_submit_failed",
+                    "created_at": iso_time(time.time()),
+                    "retry_disabled": True,
                     "error": str(exc),
                 },
             )
@@ -2276,78 +2297,49 @@ class ReviewWorkerV1:
         active.message = "Recovered pending result submission."
         return active
 
-    def recover_pending_submissions(self) -> None:
-        if self.state.active_job is not None:
-            return
-        for pending_path in self.pending_submission_files():
-            pending = read_json(pending_path, {})
-            if not isinstance(pending, dict):
-                pending = {}
-            envelope_path = pending_path.parent / str(pending.get("result_envelope_path") or "result-envelope.json")
-            envelope = read_json(envelope_path, {})
-            if not isinstance(envelope, dict):
-                envelope = {}
-            active = self.active_job_from_pending_submission(pending_path, pending, envelope)
-            self.state.set_active(active)
-            if not self.retry_pending_submission(active, pending_path):
-                return
-
-    def retry_pending_submission_for_active(self, active: ActiveJob) -> bool:
-        pending_path = self.isolation.artifacts / active.run_id / "pending-submit.json"
-        if not pending_path.exists():
-            active.message = "Pending result submission metadata is missing."
-            return False
-        return self.retry_pending_submission(active, pending_path)
-
-    def retry_pending_submission(self, active: ActiveJob, pending_path: Path) -> bool:
+    def mark_pending_submission_retry_disabled(self, pending_path: Path, *, reason: str) -> None:
         pending = read_json(pending_path, {})
         if not isinstance(pending, dict):
             pending = {}
-        next_retry_after = pending.get("next_retry_after")
-        if isinstance(next_retry_after, (int, float)) and next_retry_after > time.time():
-            return False
-        envelope_path = pending_path.parent / str(pending.get("result_envelope_path") or "result-envelope.json")
-        envelope = read_json(envelope_path, {})
-        if not isinstance(envelope, dict) or not envelope:
-            pending["error"] = "result envelope is missing or invalid"
-            pending["retry_count"] = int(pending.get("retry_count") or 0) + 1
-            pending["next_retry_after"] = int(time.time() + 60)
-            write_json(pending_path, pending)
-            active.message = "Result submit pending: result envelope is missing or invalid"
-            return False
-        status = str(pending.get("result_status") or result_status_from_envelope(envelope))
-        payload = result_payload(active, envelope, status, pending_path.parent)
-        try:
-            self.client.result(active.job_id, payload)
-        except Exception as exc:
-            retry_count = int(pending.get("retry_count") or 0) + 1
-            pending.update(
-                {
-                    "run_id": active.run_id,
-                    "job_id": active.job_id,
-                    "lease_id": active.lease_id,
-                    "attempt_id": active.attempt_id,
-                    "result_status": status,
-                    "status": "result_submit_pending",
-                    "retry_count": retry_count,
-                    "next_retry_after": int(time.time() + min(300, 2 ** min(retry_count, 8))),
-                    "result_envelope_path": str(pending.get("result_envelope_path") or "result-envelope.json"),
-                    "error": str(exc),
-                }
+        pending.update(
+            {
+                "status": "result_submit_retry_disabled",
+                "retry_disabled": True,
+                "disabled_at": iso_time(time.time()),
+                "error": reason,
+            }
+        )
+        write_json(pending_path, pending)
+
+    def recover_pending_submissions(self) -> None:
+        for pending_path in self.pending_submission_files():
+            self.mark_pending_submission_retry_disabled(
+                pending_path,
+                reason="pending result submission retry is disabled",
             )
-            write_json(pending_path, pending)
-            active.state = "finishing"
-            active.current_phase = "submit_result_envelope"
-            active.current_phase_status = "retrying"
-            active.message = f"Result submit pending: {exc}"
-            return False
-        try:
-            pending_path.unlink()
-        except FileNotFoundError:
-            pass
-        if self.state.active_job is active:
-            self.state.clear_active(terminal_state_from_result_status(status))
-        return True
+
+    def retry_pending_submission_for_active(self, active: ActiveJob) -> bool:
+        pending_path = self.isolation.artifacts / active.run_id / "pending-submit.json"
+        if pending_path.exists():
+            self.mark_pending_submission_retry_disabled(
+                pending_path,
+                reason="pending result submission retry is disabled",
+            )
+        active.message = "Result submit retry is disabled."
+        active.current_phase_status = "blocked"
+        return False
+
+    def retry_pending_submission(self, active: ActiveJob, pending_path: Path) -> bool:
+        self.mark_pending_submission_retry_disabled(
+            pending_path,
+            reason="pending result submission retry is disabled",
+        )
+        active.state = "finishing"
+        active.current_phase = "submit_result_envelope"
+        active.current_phase_status = "blocked"
+        active.message = "Result submit retry is disabled."
+        return False
+
     def run_codex_auth_check(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
         if app_server is None:
             raise RuntimeError("Codex app-server is missing")
@@ -5466,9 +5458,9 @@ def write_uploaded_artifact_manifest(
     summary["artifacts_total"] = len(uploaded_items)
     summary["required_artifacts"] = sum(1 for item in uploaded_items if item.get("required") is True)
     payload["summary"] = summary
-    write_json(uploaded_artifact_manifest_path(artifact_dir), payload)
+    write_json_atomic(uploaded_artifact_manifest_path(artifact_dir), payload)
     if source_run_dir is not None:
-        write_json(source_run_dir / UPLOADED_ARTIFACT_MANIFEST_NAME, payload)
+        write_json_atomic(source_run_dir / UPLOADED_ARTIFACT_MANIFEST_NAME, payload)
 
 
 def uploaded_artifact_manifest_items(artifact_dir: Path) -> list[dict[str, Any]]:
@@ -5507,6 +5499,35 @@ def reconcile_envelope_artifact_manifest_with_uploads(envelope: dict[str, Any], 
     manifest = result_artifact_manifest_items(artifact_dir)
     if manifest:
         envelope["artifact_manifest"] = manifest
+
+
+def result_manifest_uploaded_snapshot_mismatches(envelope: dict[str, Any], artifact_dir: Path) -> list[str]:
+    uploaded = uploaded_artifact_manifest_items(artifact_dir)
+    if not uploaded:
+        return []
+    uploaded_by_id = {
+        str(item.get("artifact_id") or "").strip(): item
+        for item in uploaded
+        if str(item.get("artifact_id") or "").strip()
+    }
+    manifest = envelope.get("artifact_manifest") if isinstance(envelope.get("artifact_manifest"), list) else []
+    mismatches: list[str] = []
+    for item in manifest:
+        if not isinstance(item, dict) or item.get("required") is not True:
+            continue
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if not artifact_id or artifact_id not in uploaded_by_id:
+            continue
+        if item != uploaded_by_id[artifact_id]:
+            mismatches.append(artifact_id)
+    return mismatches
+
+
+def validate_result_manifest_matches_uploaded_snapshot(envelope: dict[str, Any], artifact_dir: Path) -> None:
+    mismatches = result_manifest_uploaded_snapshot_mismatches(envelope, artifact_dir)
+    if mismatches:
+        raise RuntimeError("result artifact manifest differs from uploaded artifact snapshot: " + ", ".join(mismatches[:10]))
+
 
 def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors: list[str]) -> None:
     manifest_path = artifact_dir / "artifact-manifest.json"
@@ -7481,6 +7502,19 @@ def read_json(path: Path, default: Any = None) -> Any:
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def write_json_atomic(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        temp_path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def append_jsonl(path: Path, value: Any) -> None:
