@@ -3932,6 +3932,36 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(manifest_by_id["art_worker_log"]["sha256"], uploaded_worker_log["sha256"])
         self.assertEqual(manifest_by_id["art_worker_log"]["size_bytes"], uploaded_worker_log["size_bytes"])
+
+    def test_upload_artifacts_keeps_uploaded_other_log_manifests_when_logs_change_before_debug_bundle(self) -> None:
+        cases = (
+            ("progress.log.jsonl", "art_progress_log"),
+            ("codex-events.jsonl", "art_codex_event_log"),
+        )
+        for log_name, target_artifact_id in cases:
+            with self.subTest(log_name=log_name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    root = Path(tmp_dir)
+                    run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+                    artifact_dir = root / "artifacts" / "run_1"
+                    write_completed_artifact_inputs(run_dir)
+                    materialize_artifacts(run_dir, artifact_dir)
+                    calls = []
+
+                    class Client:
+                        def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                            calls.append((artifact_id, dict(payload["artifact"])))
+                            if artifact_id == target_artifact_id:
+                                append_jsonl(run_dir / log_name, {"event": "after_log_upload"})
+                            return {"accepted": True}
+
+                    upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+                    uploaded_log = next(item for artifact_id, item in calls if artifact_id == target_artifact_id)
+                    manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+                    manifest_by_id = {item["artifact_id"]: item for item in manifest_payload["items"]}
+
+                self.assertEqual(manifest_by_id[target_artifact_id]["sha256"], uploaded_log["sha256"])
+                self.assertEqual(manifest_by_id[target_artifact_id]["size_bytes"], uploaded_log["size_bytes"])
     def test_upload_artifacts_continues_after_optional_upload_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -4201,6 +4231,43 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 worker.run_job(job)
 
         self.assertIsNotNone(client.result_payload)
+    def test_failed_result_upload_uses_terminal_worker_log_snapshot_even_if_run_log_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_terminal_artifacts(run_dir, artifact_dir, "failed", error="boom")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+            envelope = worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "failed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+                error="boom",
+            )
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "after_terminal_envelope"})
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, dict(payload["artifact"])))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+            uploaded_worker_log = next(item for artifact_id, item in calls if artifact_id == "art_worker_log")
+            manifest_by_id = {item["artifact_id"]: item for item in envelope["artifact_manifest"]}
+
+        self.assertEqual(manifest_by_id["art_worker_log"]["sha256"], uploaded_worker_log["sha256"])
+        self.assertEqual(manifest_by_id["art_worker_log"]["size_bytes"], uploaded_worker_log["size_bytes"])
     def test_failed_result_manifest_matches_uploaded_required_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
