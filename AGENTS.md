@@ -300,18 +300,16 @@ Plan policy:
 
 Each worker instance has exactly one job execution slot. It does not maintain a
 local job queue and must claim a new server-side job only after the current job
-has finished. The only job slot must not be occupied by avoidable retry sleep or
-cleanup IO.
+has finished. The only job slot must not be occupied by avoidable job-level retry sleep or`r`ncleanup IO.
 
 - Final result upload should attempt the immediate request once. If submission
   fails or local manifest/upload-snapshot validation blocks submission, write
   `result-envelope.json` plus `result-submit-failed.json` or
   `result-submit-blocked.json`, keep `active_job` in `finishing`, continue
-  heartbeat with the active job id, and do not create, scan, migrate, or
-  resubmit `pending-submit.json` files.
+  heartbeat with the active job id, and do not create, scan, migrate, or`r`n  resubmit saved result-submission queue files.
 - Result upload payloads should use gzip compression for large JSON. Keep server
   gzip JSON support and worker compression thresholds aligned.
-- Do not add unbounded `time.sleep()` retry loops to `run_job()` or other code
+- Do not add unbounded job-level `time.sleep()` retry loops to `run_job()` or other code
   that holds the only job execution slot.
 - Cleanup should run only when the worker is idle or on a low-priority
   background path. Do not run checkout/log cleanup before heartbeat/claim in the

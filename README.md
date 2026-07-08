@@ -64,7 +64,7 @@ The v1.2 pipeline is a full repository scan, not a diff or PR review. It invento
 
 Core semantic phases use the server subscription plan reasoning effort; mechanical and non-core phases use the same model with medium reasoning effort. Do not add alternate review pipelines, per-task CLI review flows, local job queues, or worker-side prefetch.
 
-If terminal result submission fails, the worker writes `result-envelope.json` and `pending-submit.json` under the run artifact directory, keeps the active job in `finishing`, continues heartbeat with the active job id, and must not claim another job until recovery or operator action resolves the pending submit.
+If terminal result submission fails, the worker writes `result-envelope.json` plus `result-submit-failed.json` or `result-submit-blocked.json`, keeps the active job in `finishing`, continues heartbeat with the active job id, and does not create a saved submission queue. Retrying the scan requires the user to start a new scan.
 
 Production local capability example:
 

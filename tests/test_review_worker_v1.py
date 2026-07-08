@@ -3789,7 +3789,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         uploaded_progress = base64.b64decode(progress_payload["content_base64"]).decode("utf-8")
         self.assertIn("phase_completed", uploaded_progress)
         self.assertIn("run_completed", uploaded_progress)
-    def test_completed_run_does_not_emit_completed_or_final_logs_when_result_submit_pending(self) -> None:
+    def test_completed_run_does_not_emit_completed_or_final_logs_when_result_submit_fails(self) -> None:
         calls = []
 
         class Client:
@@ -5979,7 +5979,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=client)
             active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
 
-            submitted = worker.submit_result_or_mark_pending(
+            submitted = worker.submit_result_or_record_failure(
                 active,
                 "job_1",
                 {"status": "done", "reviewWorkerProtocol": envelope},
@@ -5993,7 +5993,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse((artifact_dir / "pending-submit.json").exists())
         self.assertIn("art_qa", blocked["error"])
         self.assertEqual(active.current_phase_status, "blocked")
-    def test_result_submit_failure_records_failure_without_pending_retry(self) -> None:
+    def test_result_submit_failure_records_failure_without_saved_queue(self) -> None:
         class Client:
             def result(self, job_id: str, payload: dict) -> None:
                 raise RuntimeError("server unavailable")
@@ -6008,7 +6008,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
             worker.state.set_active(active)
 
-            submitted = worker.submit_result_or_mark_pending(
+            submitted = worker.submit_result_or_record_failure(
                 active,
                 "job_1",
                 {"status": "done"},

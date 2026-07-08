@@ -458,9 +458,7 @@ class WorkerLifecycleWatcher:
         if parsed is None:
             return False
         command_id, action = parsed
-        if action == "uninstall" and (
-            command_worker_has_active_jobs(worker_state) or pending_result_uploads_exist(self.config)
-        ):
+        if action == "uninstall" and command_worker_has_active_jobs(worker_state):
             return False
         try:
             self.client.command_status(command_id, "running")
