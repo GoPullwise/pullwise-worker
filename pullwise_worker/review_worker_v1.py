@@ -1614,11 +1614,7 @@ class ReviewWorkerV1:
             if hasattr(self.client, "register"):
                 self.client.register()
             self.state.state = "idle"
-            self.recover_pending_submissions()
             while True:
-                active = self.state.active_job
-                if active is not None and active.state == "finishing":
-                    self.retry_pending_submission_for_active(active)
                 self.heartbeat()
                 if self.state.can_lease():
                     job = self.client.claim()
@@ -1883,7 +1879,6 @@ class ReviewWorkerV1:
             "message": str(error),
             "category": failure.get("category"),
             "failure_action": failure.get("failure_action"),
-            "retryable": failure.get("retryable"),
             "updated_at": iso_time(time.time()),
         }
         write_json(run_dir / "run-state.json", run_state)
@@ -2024,8 +2019,8 @@ class ReviewWorkerV1:
                     self.complete_phase(active, run_dir, phase, progress, data=phase_completion_data(run_dir, phase, artifact_dir))
                     if phase == "submit_result_envelope":
                         envelope = self.build_envelope(job, run_id, "completed", started, artifact_dir, run_dir)
-                        if not self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
-                            terminal_state = "result_submit_pending"
+                        if not self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
+                            terminal_state = "result_submit_failed"
                             return
                         terminal_state = "completed"
                         self.emit_event(
@@ -2078,10 +2073,10 @@ class ReviewWorkerV1:
             reconcile_envelope_artifact_manifest_with_uploads(envelope, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "cancelled", run_dir), artifact_dir, envelope):
+            if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "cancelled", run_dir), artifact_dir, envelope):
                 terminal_state = "cancelled"
             else:
-                terminal_state = "result_submit_pending"
+                terminal_state = "result_submit_failed"
                 return
         except JobPartialCompleted as exc:
             artifact_dir = artifact_dir or self.isolation.artifacts / run_id
@@ -2115,10 +2110,10 @@ class ReviewWorkerV1:
             reconcile_envelope_artifact_manifest_with_uploads(envelope, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "partial_completed", run_dir), artifact_dir, envelope):
+            if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "partial_completed", run_dir), artifact_dir, envelope):
                 terminal_state = "partial_completed"
             else:
-                terminal_state = "result_submit_pending"
+                terminal_state = "result_submit_failed"
                 return
         except Exception as exc:
             if codex_error_code(str(exc)) == "CODEX_QUOTA_EXHAUSTED":
@@ -2143,10 +2138,10 @@ class ReviewWorkerV1:
             reconcile_envelope_artifact_manifest_with_uploads(envelope, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
-            if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "failed", run_dir), artifact_dir, envelope):
+            if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "failed", run_dir), artifact_dir, envelope):
                 terminal_state = "failed"
             else:
-                terminal_state = "result_submit_pending"
+                terminal_state = "result_submit_failed"
                 return
         finally:
             if app_server is not None:
@@ -2212,7 +2207,7 @@ class ReviewWorkerV1:
         write_review_instruction_tree(repo_dir)
         return repo_dir, run_dir, artifact_dir
 
-    def submit_result_or_mark_pending(
+    def submit_result_or_record_failure(
         self,
         active: ActiveJob,
         job_id: str,
@@ -2238,7 +2233,6 @@ class ReviewWorkerV1:
                     "result_status": result_status_from_envelope(envelope),
                     "status": "result_submit_blocked",
                     "created_at": iso_time(time.time()),
-                    "retry_disabled": True,
                     "error": str(exc),
                 },
             )
@@ -2250,7 +2244,7 @@ class ReviewWorkerV1:
             active.state = "finishing"
             active.current_phase = "submit_result_envelope"
             active.current_phase_status = "failed"
-            active.message = f"Result submit failed without retry: {exc}"
+            active.message = f"Result submit failed: {exc}"
             write_json(artifact_dir / "result-envelope.json", envelope)
             write_json(
                 artifact_dir / "result-submit-failed.json",
@@ -2262,83 +2256,11 @@ class ReviewWorkerV1:
                     "result_status": result_status_from_envelope(envelope),
                     "status": "result_submit_failed",
                     "created_at": iso_time(time.time()),
-                    "retry_disabled": True,
                     "error": str(exc),
                 },
             )
             return False
 
-
-    def pending_submission_files(self) -> list[Path]:
-        if not self.isolation.artifacts.exists():
-            return []
-        return sorted(
-            self.isolation.artifacts.glob("*/pending-submit.json"),
-            key=lambda path: path.stat().st_mtime if path.exists() else 0,
-        )
-
-    def active_job_from_pending_submission(
-        self,
-        pending_path: Path,
-        pending: dict[str, Any],
-        envelope: dict[str, Any],
-    ) -> ActiveJob:
-        job_info = envelope.get("job") if isinstance(envelope.get("job"), dict) else {}
-        run_id = safe_id(pending.get("run_id") or job_info.get("run_id") or pending_path.parent.name, "run")
-        job_id = safe_id(pending.get("job_id") or job_info.get("job_id") or f"job_{run_id}", "job")
-        lease_id = safe_id(pending.get("lease_id") or job_info.get("lease_id") or f"lease_{job_id}", "lease")
-        attempt_id = str(pending.get("attempt_id") or f"{self.config.worker_id}-recovered")
-        active = ActiveJob(job_id=job_id, run_id=run_id, lease_id=lease_id, attempt_id=attempt_id)
-        active.state = "finishing"
-        active.current_phase = "submit_result_envelope"
-        active.current_phase_status = "retrying"
-        active.current_phase_percent = 100.0
-        active.overall_percent = 100.0
-        active.message = "Recovered pending result submission."
-        return active
-
-    def mark_pending_submission_retry_disabled(self, pending_path: Path, *, reason: str) -> None:
-        pending = read_json(pending_path, {})
-        if not isinstance(pending, dict):
-            pending = {}
-        pending.update(
-            {
-                "status": "result_submit_retry_disabled",
-                "retry_disabled": True,
-                "disabled_at": iso_time(time.time()),
-                "error": reason,
-            }
-        )
-        write_json(pending_path, pending)
-
-    def recover_pending_submissions(self) -> None:
-        for pending_path in self.pending_submission_files():
-            self.mark_pending_submission_retry_disabled(
-                pending_path,
-                reason="pending result submission retry is disabled",
-            )
-
-    def retry_pending_submission_for_active(self, active: ActiveJob) -> bool:
-        pending_path = self.isolation.artifacts / active.run_id / "pending-submit.json"
-        if pending_path.exists():
-            self.mark_pending_submission_retry_disabled(
-                pending_path,
-                reason="pending result submission retry is disabled",
-            )
-        active.message = "Result submit retry is disabled."
-        active.current_phase_status = "blocked"
-        return False
-
-    def retry_pending_submission(self, active: ActiveJob, pending_path: Path) -> bool:
-        self.mark_pending_submission_retry_disabled(
-            pending_path,
-            reason="pending result submission retry is disabled",
-        )
-        active.state = "finishing"
-        active.current_phase = "submit_result_envelope"
-        active.current_phase_status = "blocked"
-        active.message = "Result submit retry is disabled."
-        return False
 
     def run_codex_auth_check(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
         if app_server is None:
@@ -7273,51 +7195,48 @@ def failure_payload_for_error(error: object, *, status: str = "", phase: str = "
 
     category = "codex_turn_failure"
     action = "fail_job_terminal"
-    retryable = False
-
     if isinstance(error, RepositoryLimitExceeded) or "repositorylimits.max" in lowered:
         code = "REPOSITORY_TOO_LARGE"
-        category, action, retryable = "repository_limit_exceeded", "fail_job_terminal", False
+        category, action = "repository_limit_exceeded", "fail_job_terminal"
     elif status_text == "cancelled" or "cancel" in lowered:
-        category, action, retryable = "job_cancelled", "cancel_job", False
+        category, action = "job_cancelled", "cancel_job"
     elif status_text == "partial_completed":
-        category, action, retryable = "qa_failure", "partial_result", False
+        category, action = "qa_failure", "partial_result"
     elif phase_text == "start_codex_app_server":
-        category, action, retryable = "codex_app_server_failure", "disable_worker", False
+        category, action = "codex_app_server_failure", "disable_worker"
     elif phase_text == "check_codex_auth" or code == "CODEX_UNAUTHORIZED":
-        category, action, retryable = "codex_auth_failure", "fail_job_terminal", False
+        category, action = "codex_auth_failure", "fail_job_terminal"
     elif code == "CODEX_QUOTA_EXHAUSTED":
-        category, action, retryable = "codex_usage_limit_exceeded", "fail_job_terminal", False
+        category, action = "codex_usage_limit_exceeded", "fail_job_terminal"
     elif code == "CODEX_CONTEXT_WINDOW_EXCEEDED":
-        category, action, retryable = "context_budget_failure", "split_bundle_and_retry", True
+        category, action = "context_budget_failure", "fail_job_terminal"
     elif code == "CODEX_SANDBOX_ERROR":
-        category, action, retryable = "worker_environment_failure", "fail_job_terminal", False
+        category, action = "worker_environment_failure", "fail_job_terminal"
     elif "artifact" in lowered and "upload" in lowered:
-        category, action, retryable = "artifact_upload_failure", "retry_phase", True
-    elif "result submit" in lowered or "pending-submit" in lowered:
-        category, action, retryable = "result_submit_failure", "retry_phase", True
+        category, action = "artifact_upload_failure", "fail_job_terminal"
+    elif "result submit" in lowered:
+        category, action = "result_submit_failure", "fail_job_terminal"
     elif "server unavailable" in lowered or "connection" in lowered:
-        category, action, retryable = "server_connection_failure", "retry_phase", True
+        category, action = "server_connection_failure", "fail_job_terminal"
     elif phase_text in {"reviewer_json_validation"} or "json" in lowered or "schema" in lowered:
-        category, action, retryable = "json_schema_failure", "repair_output", True
+        category, action = "json_schema_failure", "repair_output"
     elif phase_text == "location_validation":
-        category, action, retryable = "location_validation_failure", "degrade_scope", False
+        category, action = "location_validation_failure", "degrade_scope"
     elif phase_text == "intent_test_planning":
-        category, action, retryable = "intent_test_planning_failure", "skip_intent_test", False
+        category, action = "intent_test_planning_failure", "skip_intent_test"
     elif phase_text == "intent_test_writing":
-        category, action, retryable = "intent_test_generation_failure", "skip_intent_test", False
+        category, action = "intent_test_generation_failure", "skip_intent_test"
     elif phase_text == "intent_test_running":
-        category, action, retryable = "intent_test_runtime_failure", "degrade_scope", False
+        category, action = "intent_test_runtime_failure", "degrade_scope"
     elif phase_text == "intent_test_failure_analysis":
-        category, action, retryable = "intent_test_oracle_failure", "degrade_scope", False
+        category, action = "intent_test_oracle_failure", "degrade_scope"
     elif phase_text == "qa_gate" or "qa" in lowered:
-        category, action, retryable = "qa_failure", "partial_result", False
+        category, action = "qa_failure", "partial_result"
 
     return {
         "code": code,
         "category": category,
         "message": message,
-        "retryable": retryable,
         "failure_action": action,
     }
 

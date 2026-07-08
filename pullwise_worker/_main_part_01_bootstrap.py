@@ -890,29 +890,7 @@ class WorkerConfig:
             DEFAULT_MACHINE_METRICS_INTERVAL_SECONDS,
             minimum=1,
         )
-        self.result_upload_attempts = env_int("PULLWISE_RESULT_UPLOAD_ATTEMPTS", 5, maximum=20)
         self.result_upload_compress_min_bytes = env_int("PULLWISE_RESULT_UPLOAD_COMPRESS_MIN_BYTES", 1024, minimum=0)
-        self.result_upload_pending_backoff_base_seconds = env_int(
-            "PULLWISE_RESULT_UPLOAD_PENDING_BACKOFF_BASE_SECONDS",
-            30,
-            minimum=1,
-        )
-        self.result_upload_pending_backoff_max_seconds = env_int(
-            "PULLWISE_RESULT_UPLOAD_PENDING_BACKOFF_MAX_SECONDS",
-            15 * 60,
-            minimum=1,
-        )
-        self.result_upload_pending_max_age_seconds = env_int(
-            "PULLWISE_RESULT_UPLOAD_PENDING_MAX_AGE_SECONDS",
-            7 * 24 * 60 * 60,
-            minimum=60,
-        )
-        self.result_upload_pending_max_attempts = env_int(
-            "PULLWISE_RESULT_UPLOAD_PENDING_MAX_ATTEMPTS",
-            100,
-            minimum=1,
-            maximum=10000,
-        )
         self.failed_checkout_retention_seconds = env_int("PULLWISE_RETAIN_FAILED_CHECKOUT_SECONDS", 0, minimum=0)
         self.max_checkout_bytes = env_int(
             "PULLWISE_MAX_CHECKOUT_BYTES",

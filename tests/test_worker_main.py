@@ -68,7 +68,7 @@ class WorkerMainContractsTest(unittest.TestCase):
         self.assertFalse(command_worker_has_active_jobs({"runningJobs": 1}))
         self.assertFalse(command_worker_has_active_jobs({"active_job_ids": ["job_1"]}))
 
-    def test_lifecycle_watcher_defers_uninstall_when_result_submit_is_pending(self) -> None:
+    def test_lifecycle_watcher_ignores_legacy_pending_submit_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             worker_root = Path(tmpdir)
             pending_dir = worker_root / "artifacts" / "run_1"
@@ -87,15 +87,14 @@ class WorkerMainContractsTest(unittest.TestCase):
             watcher.last_error = None
             watcher.log_tailers = {}
 
-            with patch.object(lifecycle, "execute_watcher_lifecycle_command", side_effect=AssertionError("cleanup should be deferred")):
+            with patch.object(lifecycle, "execute_watcher_lifecycle_command", return_value=0):
                 handled = watcher.handle_lifecycle_command(
                     {"id": "wcmd_pending", "command": "uninstall"},
                     worker_state={"running_jobs": 0},
                 )
 
-        self.assertFalse(handled)
-        self.assertEqual(calls, [])
-
+        self.assertTrue(handled)
+        self.assertEqual(calls, [("wcmd_pending", "running", None), ("wcmd_pending", "succeeded", None)])
     def test_lifecycle_watcher_reports_successful_uninstall_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             calls = []

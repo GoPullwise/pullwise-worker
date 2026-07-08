@@ -427,24 +427,6 @@ def worker_artifact_root(config: WorkerConfig) -> Path:
     return Path(config.work_dir) / "artifacts"
 
 
-def pending_result_uploads_exist(config: WorkerConfig) -> bool:
-    try:
-        artifact_root = worker_artifact_root(config)
-    except Exception:
-        return True
-    if artifact_root.is_symlink():
-        return True
-    if not artifact_root.is_dir():
-        return False
-    try:
-        for path in artifact_root.glob("*/pending-submit.json"):
-            if path.is_symlink() or path.is_file():
-                return True
-    except OSError:
-        return True
-    return False
-
-
 class WorkerLifecycleWatcher:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config

@@ -307,9 +307,8 @@ cleanup IO.
   fails or local manifest/upload-snapshot validation blocks submission, write
   `result-envelope.json` plus `result-submit-failed.json` or
   `result-submit-blocked.json`, keep `active_job` in `finishing`, continue
-  heartbeat with the active job id, and do not auto-retry or resubmit a saved
-  result envelope. Legacy `pending-submit.json` files must be marked
-  `result_submit_retry_disabled`, not replayed.
+  heartbeat with the active job id, and do not create, scan, migrate, or
+  resubmit `pending-submit.json` files.
 - Result upload payloads should use gzip compression for large JSON. Keep server
   gzip JSON support and worker compression thresholds aligned.
 - Do not add unbounded `time.sleep()` retry loops to `run_job()` or other code

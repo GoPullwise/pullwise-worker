@@ -5896,8 +5896,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(envelope["error"]["code"], "CODEX_CONTEXT_WINDOW_EXCEEDED")
         self.assertEqual(envelope["error"]["category"], "context_budget_failure")
-        self.assertEqual(envelope["error"]["failure_action"], "split_bundle_and_retry")
-        self.assertIs(envelope["error"]["retryable"], True)
+        self.assertEqual(envelope["error"]["failure_action"], "fail_job_terminal")
+        self.assertNotIn("retryable", envelope["error"])
 
     def test_cancelled_envelope_includes_cancel_failure_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5920,7 +5920,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(envelope["error"]["category"], "job_cancelled")
         self.assertEqual(envelope["error"]["failure_action"], "cancel_job")
-        self.assertIs(envelope["error"]["retryable"], False)
+        self.assertNotIn("retryable", envelope["error"])
 
     def test_phase_failure_persists_structured_failure_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5934,7 +5934,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(run_state["failure"]["category"], "json_schema_failure")
         self.assertEqual(run_state["failure"]["failure_action"], "repair_output")
-        self.assertIs(run_state["failure"]["retryable"], True)
+        self.assertNotIn("retryable", run_state["failure"])
 
     def test_submit_result_blocks_required_manifest_mismatch_against_uploaded_snapshot(self) -> None:
         class Client:
@@ -6026,56 +6026,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(active.state, "finishing")
         self.assertEqual(active.current_phase_status, "failed")
         self.assertEqual(failed["status"], "result_submit_failed")
-        self.assertIs(failed["retry_disabled"], True)
         self.assertFalse((artifact_dir / "pending-submit.json").exists())
-
-    def test_recover_pending_submission_disables_retry_without_resubmitting(self) -> None:
-        class Client:
-            def __init__(self) -> None:
-                self.results = []
-
-            def result(self, job_id: str, payload: dict) -> None:
-                self.results.append((job_id, payload))
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            client = Client()
-            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=client)
-            artifact_dir = worker.isolation.artifacts / "run_1"
-            artifact_dir.mkdir(parents=True)
-            envelope = {
-                "protocol_version": "review-worker-protocol/v1",
-                "job": {"run_id": "run_1", "job_id": "job_1", "lease_id": "lease_1"},
-                "execution": {"status": "completed", "duration_ms": 10},
-                "summary": {"top_findings": []},
-                "artifact_manifest": [],
-            }
-            (artifact_dir / "result-envelope.json").write_text(json.dumps(envelope), encoding="utf-8")
-            (artifact_dir / "pending-submit.json").write_text(
-                json.dumps(
-                    {
-                        "run_id": "run_1",
-                        "job_id": "job_1",
-                        "lease_id": "lease_1",
-                        "attempt_id": "wk_1-1",
-                        "status": "result_submit_pending",
-                        "result_status": "done",
-                        "result_envelope_path": "result-envelope.json",
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            worker.recover_pending_submissions()
-
-            pending = json.loads((artifact_dir / "pending-submit.json").read_text(encoding="utf-8"))
-            active_job = worker.state.active_job
-            results = client.results
-
-        self.assertEqual(results, [])
-        self.assertEqual(pending["status"], "result_submit_retry_disabled")
-        self.assertIs(pending["retry_disabled"], True)
-        self.assertIsNone(active_job)
 
     def test_isolation_env_does_not_inherit_provider_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
