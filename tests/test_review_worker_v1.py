@@ -4002,6 +4002,85 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(manifest_by_id[artifact_id]["sha256"], sha256, artifact_id)
             self.assertEqual(manifest_by_id[artifact_id]["size_bytes"], size_bytes, artifact_id)
 
+    def test_completed_result_manifest_keeps_uploaded_qa_hash_after_late_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, payload))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+            uploaded_qa = next(payload["artifact"] for artifact_id, payload in calls if artifact_id == "art_qa")
+            append_jsonl(run_dir / "worker.log.jsonl", {"event": "submit_result_envelope_started"})
+            append_jsonl(run_dir / "progress.log.jsonl", {"event": "submit_result_envelope_started"})
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+            envelope = worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "completed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+            )
+            manifest_qa = next(item for item in envelope["artifact_manifest"] if item["artifact_id"] == "art_qa")
+
+        self.assertEqual(manifest_qa["sha256"], uploaded_qa["sha256"])
+        self.assertEqual(manifest_qa["size_bytes"], uploaded_qa["size_bytes"])
+
+    def test_failed_result_manifest_matches_uploaded_required_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            run_dir.mkdir(parents=True)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+            job = {
+                "job_id": "job_1",
+                "run_id": "run_1",
+                "lease_id": "lease_1",
+                "repo": "acme/api",
+                "commit": "abc123",
+            }
+            envelope = worker.build_envelope(job, "run_1", "failed", 1000.0, artifact_dir, run_dir, error="boom")
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, payload))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+            uploaded = {
+                artifact_id: (
+                    payload["artifact"]["sha256"],
+                    payload["artifact"]["size_bytes"],
+                )
+                for artifact_id, payload in calls
+            }
+            required_manifest = {
+                item["artifact_id"]: item
+                for item in envelope["artifact_manifest"]
+                if item.get("required") is True
+            }
+
+        self.assertTrue({"art_worker_log", "art_qa", "art_error_report"}.issubset(required_manifest))
+        for artifact_id, item in required_manifest.items():
+            self.assertEqual(uploaded[artifact_id][0], item["sha256"], artifact_id)
+            self.assertEqual(uploaded[artifact_id][1], item["size_bytes"], artifact_id)
+
     def test_upload_log_artifacts_refreshes_and_reuploads_final_debug_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
