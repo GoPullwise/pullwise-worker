@@ -7544,7 +7544,16 @@ def upload_artifacts(
         artifact_id = str(item.get("artifact_id") or "").strip()
         name = str(item.get("name") or "").strip()
         if source_run_dir is not None and artifact_id == DEBUG_BUNDLE_ARTIFACT_ID:
-            refresh_log_artifacts(source_run_dir, artifact_dir, manifest_payload, status="completed")
+            for log_name in LOG_ARTIFACT_NAMES:
+                src = source_run_dir / log_name
+                if not src.exists():
+                    src.parent.mkdir(parents=True, exist_ok=True)
+                    src.write_text("", encoding="utf-8")
+                shutil.copy2(src, artifact_dir / log_name)
+            write_debug_bundle(source_run_dir, artifact_dir, status="completed")
+            _refresh_manifest_item(item, artifact_dir / DEBUG_BUNDLE_NAME)
+            write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
+            write_json(source_run_dir / "artifact-manifest.json", manifest_payload)
         data = path.read_bytes()
         actual_sha = hashlib.sha256(data).hexdigest()
         if str(item.get("sha256") or "").lower() != actual_sha:

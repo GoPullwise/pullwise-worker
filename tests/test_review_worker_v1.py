@@ -3909,6 +3909,29 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(summary["status"], "completed")
         self.assertIn("late-before-upload", worker_log)
 
+    def test_upload_artifacts_keeps_uploaded_worker_log_manifest_when_log_changes_before_debug_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, dict(payload["artifact"])))
+                    if artifact_id == "art_worker_log":
+                        append_jsonl(run_dir / "worker.log.jsonl", {"event": "after_worker_log_upload"})
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+            uploaded_worker_log = next(item for artifact_id, item in calls if artifact_id == "art_worker_log")
+            manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            manifest_by_id = {item["artifact_id"]: item for item in manifest_payload["items"]}
+
+        self.assertEqual(manifest_by_id["art_worker_log"]["sha256"], uploaded_worker_log["sha256"])
+        self.assertEqual(manifest_by_id["art_worker_log"]["size_bytes"], uploaded_worker_log["size_bytes"])
     def test_upload_artifacts_continues_after_optional_upload_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -4040,6 +4063,144 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(manifest_qa["sha256"], uploaded_qa["sha256"])
         self.assertEqual(manifest_qa["size_bytes"], uploaded_qa["size_bytes"])
 
+    def test_completed_tail_run_keeps_uploaded_qa_and_worker_log_manifest(self) -> None:
+        class ValidatingClient:
+            def __init__(self) -> None:
+                self.uploaded = {}
+                self.result_payload = None
+
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, _run_id: str, _payload: dict) -> dict:
+                return {"accepted": True}
+
+            def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                self.uploaded[artifact_id] = payload["artifact"]
+                return {"accepted": True}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                self.result_payload = payload
+                manifest = {
+                    item["artifact_id"]: item
+                    for item in payload["reviewWorkerProtocol"]["artifact_manifest"]
+                }
+                for artifact_id in ("art_qa", "art_worker_log"):
+                    self.assert_artifact_matches(artifact_id, manifest)
+
+            def assert_artifact_matches(self, artifact_id: str, manifest: dict) -> None:
+                assert artifact_id in self.uploaded
+                assert manifest[artifact_id]["sha256"] == self.uploaded[artifact_id]["sha256"]
+                assert manifest[artifact_id]["size_bytes"] == self.uploaded[artifact_id]["size_bytes"]
+
+        class TailWorker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                write_basic_qa_inputs(repo_dir, run_dir)
+                return repo_dir, run_dir, artifact_dir
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {"default_model": "gpt-5.5", "core_effort": "high", "non_core_effort": "medium"},
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            client = ValidatingClient()
+            worker = TailWorker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=client)
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            with patch(
+                "pullwise_worker.review_worker_v1.PIPELINE_PHASES",
+                (("qa_gate", 99), ("hash_artifacts", 99), ("upload_artifacts", 100), ("submit_result_envelope", 100)),
+            ):
+                worker.run_job(job)
+
+        self.assertIsNotNone(client.result_payload)
+
+    def test_partial_completed_qa_gate_tail_keeps_uploaded_qa_and_worker_log_manifest(self) -> None:
+        class ValidatingClient:
+            def __init__(self) -> None:
+                self.uploaded = {}
+                self.result_payload = None
+
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, _run_id: str, _payload: dict) -> dict:
+                return {"accepted": True}
+
+            def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                self.uploaded[artifact_id] = payload["artifact"]
+                return {"accepted": True}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                self.result_payload = payload
+                self_status = payload["reviewWorkerProtocol"]["execution"]["status"]
+                assert self_status == "partial_completed"
+                manifest = {
+                    item["artifact_id"]: item
+                    for item in payload["reviewWorkerProtocol"]["artifact_manifest"]
+                }
+                for artifact_id in ("art_qa", "art_worker_log"):
+                    assert artifact_id in self.uploaded
+                    assert manifest[artifact_id]["sha256"] == self.uploaded[artifact_id]["sha256"]
+                    assert manifest[artifact_id]["size_bytes"] == self.uploaded[artifact_id]["size_bytes"]
+
+        class FailingQaWorker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                write_basic_qa_inputs(repo_dir, run_dir)
+                report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+                report["findings"] = [finding_payload()]
+                (run_dir / "report.agent.json").write_text(json.dumps(report), encoding="utf-8")
+                return repo_dir, run_dir, artifact_dir
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {"default_model": "gpt-5.5", "core_effort": "high", "non_core_effort": "medium"},
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            client = ValidatingClient()
+            worker = FailingQaWorker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=client)
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", (("qa_gate", 99),)):
+                worker.run_job(job)
+
+        self.assertIsNotNone(client.result_payload)
     def test_failed_result_manifest_matches_uploaded_required_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
