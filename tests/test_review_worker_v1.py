@@ -1713,6 +1713,31 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(qa["status"], "fail")
         self.assertIn("finding[0] is not backed by confirmed/plausible validation", qa["errors"])
 
+    def test_qa_gate_rejects_all_non_backing_validation_statuses(self) -> None:
+        for rejected_status in ("weak", "disproven", "rejected", "false_positive"):
+            with self.subTest(rejected_status=rejected_status):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    repo = Path(tmp_dir) / "repo"
+                    run_dir = repo / ".codex-review" / "runs" / "run_1"
+                    write_basic_qa_inputs(repo, run_dir)
+                    write_json(
+                        run_dir / "report.agent.json",
+                        {
+                            "schema_id": "codex-full-repo-review",
+                            "schema_version": "v1",
+                            "findings": [finding_payload("CL-001")],
+                        },
+                    )
+                    write_json(
+                        run_dir / "validated-findings.json",
+                        validation_payload(validation_entry("CL-001", status=rejected_status)),
+                    )
+
+                    qa = qa_gate_payload(repo, run_dir)
+
+                self.assertEqual(qa["status"], "fail")
+                self.assertIn("finding[0] is not backed by confirmed/plausible validation", qa["errors"])
+
     def test_qa_gate_accepts_main_finding_backed_by_plausible_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
@@ -1737,6 +1762,37 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(qa["status"], "pass")
 
+    def test_validation_binding_supports_id_and_status_aliases(self) -> None:
+        cases = (
+            ("finding_id", "local_id", "confirmed", "status", "alias-1"),
+            ("local_id", "source_finding_id", "plausible", "validator_status", "alias-2"),
+            ("source_finding_id", "cluster_id", "validated", "validation_status", "alias-3"),
+            ("source_finding_ids", "source_finding_ids", "confirmed", "classification", ["alias-4", "other"]),
+        )
+        for report_alias, validation_alias, accepted_status, status_alias, alias_value in cases:
+            with self.subTest(report_alias=report_alias, validation_alias=validation_alias, status_alias=status_alias):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    repo = Path(tmp_dir) / "repo"
+                    run_dir = repo / ".codex-review" / "runs" / "run_1"
+                    write_basic_qa_inputs(repo, run_dir)
+                    finding = finding_payload("", title="Alias backed finding")
+                    finding.pop("id", None)
+                    finding[report_alias] = alias_value
+                    validation = validation_entry("", status="", title="Alias backed finding")
+                    validation.pop("id", None)
+                    validation.pop("status", None)
+                    validation[validation_alias] = alias_value[-1] if isinstance(alias_value, list) else alias_value
+                    validation[status_alias] = accepted_status
+                    write_json(
+                        run_dir / "report.agent.json",
+                        {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]},
+                    )
+                    write_json(run_dir / "validated-findings.json", validation_payload(validation))
+
+                    qa = qa_gate_payload(repo, run_dir)
+
+                self.assertEqual(qa["status"], "pass")
+
     def test_validation_binding_supports_cluster_id_alias(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
@@ -1754,6 +1810,36 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             qa = qa_gate_payload(repo, run_dir)
 
         self.assertEqual(qa["status"], "pass")
+
+    def test_validation_binding_fallback_accepts_unique_match_without_report_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            finding = finding_payload("", title="Fallback finding", path="app.py", line=1)
+            finding.pop("id", None)
+            validation = validation_entry("VAL-001", status="confirmed", title="Fallback finding", path="app.py", line=1)
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]})
+            write_json(run_dir / "validated-findings.json", validation_payload(validation))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "pass")
+
+    def test_validation_binding_fallback_is_not_used_when_report_finding_has_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            finding = finding_payload("CL-NO-MATCH", title="Fallback finding", path="app.py", line=1)
+            validation = validation_entry("VAL-001", status="confirmed", title="Fallback finding", path="app.py", line=1)
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]})
+            write_json(run_dir / "validated-findings.json", validation_payload(validation))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertIn("finding[0] is not backed by confirmed/plausible validation", qa["errors"])
 
     def test_validation_binding_fallback_requires_unique_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
