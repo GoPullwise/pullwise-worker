@@ -45,6 +45,7 @@ from pullwise_worker.review_worker_v1 import (
     codex_error_code,
     codex_quota_payload_from_rate_limits,
     quota_refresh_error_is_exhaustion,
+    reconcile_envelope_artifact_manifest_with_uploads,
     refresh_coverage_intent_counters,
     decide_approval,
     default_agent_report,
@@ -4098,6 +4099,48 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         for artifact_id, (sha256, size_bytes) in uploaded.items():
             self.assertEqual(manifest_by_id[artifact_id]["sha256"], sha256, artifact_id)
             self.assertEqual(manifest_by_id[artifact_id]["size_bytes"], size_bytes, artifact_id)
+    def test_completed_result_manifest_uses_uploaded_snapshot_after_manifest_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, dict(payload["artifact"])))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir, source_run_dir=run_dir)
+            uploaded_qa = next(item for artifact_id, item in calls if artifact_id == "art_qa")
+            manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            for item in manifest_payload["items"]:
+                if item["artifact_id"] == "art_qa":
+                    item["sha256"] = "0" * 64
+                    item["size_bytes"] = 0
+            write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
+            write_json(run_dir / "artifact-manifest.json", manifest_payload)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+            envelope = worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "completed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+            )
+            manifest_qa = next(item for item in envelope["artifact_manifest"] if item["artifact_id"] == "art_qa")
+
+        self.assertEqual(manifest_qa["sha256"], uploaded_qa["sha256"])
+        self.assertEqual(manifest_qa["size_bytes"], uploaded_qa["size_bytes"])
     def test_completed_result_manifest_keeps_uploaded_qa_hash_after_late_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -4274,6 +4317,51 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 worker.run_job(job)
 
         self.assertIsNotNone(client.result_payload)
+    def test_terminal_result_manifest_reconciles_uploaded_snapshot_after_manifest_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_terminal_artifacts(run_dir, artifact_dir, "failed", error="boom")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+            envelope = worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "failed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+                error="boom",
+            )
+            rewritten_qa = b'{"schema_version":"qa/v1","status":"fail","errors":["rewritten"],"warnings":[]}\n'
+            (artifact_dir / "qa.json").write_bytes(rewritten_qa)
+            manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+            for item in manifest_payload["items"]:
+                if item["artifact_id"] == "art_qa":
+                    item["sha256"] = hashlib.sha256(rewritten_qa).hexdigest()
+                    item["size_bytes"] = len(rewritten_qa)
+            write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
+            calls = []
+
+            class Client:
+                def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
+                    calls.append((artifact_id, dict(payload["artifact"])))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+            reconcile_envelope_artifact_manifest_with_uploads(envelope, artifact_dir)
+            uploaded_qa = next(item for artifact_id, item in calls if artifact_id == "art_qa")
+            manifest_qa = next(item for item in envelope["artifact_manifest"] if item["artifact_id"] == "art_qa")
+
+        self.assertEqual(manifest_qa["sha256"], uploaded_qa["sha256"])
+        self.assertEqual(manifest_qa["size_bytes"], uploaded_qa["size_bytes"])
     def test_failed_result_upload_uses_terminal_worker_log_snapshot_even_if_run_log_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

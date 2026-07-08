@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import fnmatch
 import hashlib
 import json
@@ -289,6 +290,7 @@ LOG_ARTIFACT_NAMES = {"codex-events.jsonl", "worker.log.jsonl", "progress.log.js
 FINAL_REFRESH_ARTIFACT_NAMES = LOG_ARTIFACT_NAMES | {"debug-bundle.zip"}
 DEBUG_BUNDLE_NAME = "debug-bundle.zip"
 DEBUG_BUNDLE_ARTIFACT_ID = "art_debug_bundle"
+UPLOADED_ARTIFACT_MANIFEST_NAME = "uploaded-artifact-manifest.json"
 MAX_BUNDLE_ESTIMATED_TOKENS = 60000
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
     "LANG",
@@ -2073,6 +2075,7 @@ class ReviewWorkerV1:
                 phase=active.current_phase,
             )
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
+            reconcile_envelope_artifact_manifest_with_uploads(envelope, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "cancelled", run_dir), artifact_dir, envelope):
@@ -2109,6 +2112,7 @@ class ReviewWorkerV1:
                 phase=active.current_phase,
             )
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
+            reconcile_envelope_artifact_manifest_with_uploads(envelope, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "partial_completed", run_dir), artifact_dir, envelope):
@@ -2136,6 +2140,7 @@ class ReviewWorkerV1:
                 phase=active.current_phase,
             )
             upload_error = upload_artifacts_best_effort(self.client, job_id, active.attempt_id, artifact_dir)
+            reconcile_envelope_artifact_manifest_with_uploads(envelope, artifact_dir)
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_mark_pending(active, job_id, result_payload(active, envelope, "failed", run_dir), artifact_dir, envelope):
@@ -2563,7 +2568,7 @@ class ReviewWorkerV1:
         refresh_terminal_run_snapshot(run_dir, run_id, status)
         if status != "completed":
             refresh_log_artifacts(run_dir, artifact_dir)
-        manifest = artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))
+        manifest = result_artifact_manifest_items(artifact_dir)
         now = time.time()
         error_payload = failure_payload_for_error(error, status=status, phase=phase) if error else None
         return {
@@ -5432,6 +5437,77 @@ def artifact_manifest_payload(run_id: str, items: list[dict[str, Any]]) -> dict[
     }
 
 
+
+def uploaded_artifact_manifest_path(artifact_dir: Path) -> Path:
+    return artifact_dir / UPLOADED_ARTIFACT_MANIFEST_NAME
+
+
+def clear_uploaded_artifact_manifest(artifact_dir: Path, *, source_run_dir: Path | None = None) -> None:
+    paths = [uploaded_artifact_manifest_path(artifact_dir)]
+    if source_run_dir is not None:
+        paths.append(source_run_dir / UPLOADED_ARTIFACT_MANIFEST_NAME)
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+def write_uploaded_artifact_manifest(
+    artifact_dir: Path,
+    manifest_payload: dict[str, Any],
+    uploaded_items: list[dict[str, Any]],
+    *,
+    source_run_dir: Path | None = None,
+) -> None:
+    payload = copy.deepcopy(manifest_payload)
+    payload["items"] = copy.deepcopy(uploaded_items)
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    summary = dict(summary)
+    summary["artifacts_total"] = len(uploaded_items)
+    summary["required_artifacts"] = sum(1 for item in uploaded_items if item.get("required") is True)
+    payload["summary"] = summary
+    write_json(uploaded_artifact_manifest_path(artifact_dir), payload)
+    if source_run_dir is not None:
+        write_json(source_run_dir / UPLOADED_ARTIFACT_MANIFEST_NAME, payload)
+
+
+def uploaded_artifact_manifest_items(artifact_dir: Path) -> list[dict[str, Any]]:
+    payload = read_json(uploaded_artifact_manifest_path(artifact_dir), {})
+    if not isinstance(payload, dict) or payload.get("schema_version") != "artifact-manifest/v1":
+        return []
+    if str(payload.get("run_id") or "").strip() != artifact_dir.name:
+        return []
+    return [copy.deepcopy(item) for item in artifact_manifest_items(payload)]
+
+
+def result_artifact_manifest_items(artifact_dir: Path) -> list[dict[str, Any]]:
+    current = [copy.deepcopy(item) for item in artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))]
+    uploaded = uploaded_artifact_manifest_items(artifact_dir)
+    if not uploaded:
+        return current
+    uploaded_by_id = {str(item.get("artifact_id") or "").strip(): item for item in uploaded if str(item.get("artifact_id") or "").strip()}
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in current:
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if artifact_id and artifact_id in uploaded_by_id:
+            merged.append(copy.deepcopy(uploaded_by_id[artifact_id]))
+            seen.add(artifact_id)
+        else:
+            merged.append(item)
+    for item in uploaded:
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if artifact_id and artifact_id not in seen:
+            merged.append(copy.deepcopy(item))
+            seen.add(artifact_id)
+    return merged
+
+
+def reconcile_envelope_artifact_manifest_with_uploads(envelope: dict[str, Any], artifact_dir: Path) -> None:
+    manifest = result_artifact_manifest_items(artifact_dir)
+    if manifest:
+        envelope["artifact_manifest"] = manifest
+
 def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors: list[str]) -> None:
     manifest_path = artifact_dir / "artifact-manifest.json"
     if not manifest_path.is_file():
@@ -6637,6 +6713,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: str, *, error: str = "") -> None:
+    clear_uploaded_artifact_manifest(artifact_dir, source_run_dir=run_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     for name, content in (
         ("worker.log.jsonl", ""),
@@ -6811,6 +6888,7 @@ def refresh_log_artifacts(
         write_json(artifact_dir / "artifact-manifest.json", payload)
         write_json(run_dir / "artifact-manifest.json", payload)
 def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
+    clear_uploaded_artifact_manifest(artifact_dir, source_run_dir=run_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     required_files = ("report.md", "report.agent.json", "coverage.json", "qa.json", "token-budget.json")
     missing = [name for name in required_files if not (run_dir / name).is_file()]
@@ -7513,6 +7591,7 @@ def upload_artifacts(
         raise RuntimeError("artifact manifest must use schema_version artifact-manifest/v1 before upload")
     if str(manifest_payload.get("run_id") or "").strip() != artifact_dir.name:
         raise RuntimeError("artifact manifest run_id does not match upload run before upload")
+    clear_uploaded_artifact_manifest(artifact_dir, source_run_dir=source_run_dir)
     uploadable: list[tuple[dict[str, Any], Path]] = []
     seen_artifact_ids: set[str] = set()
     for item in manifest:
@@ -7539,6 +7618,7 @@ def upload_artifacts(
         uploadable.append((item, path))
     uploadable.sort(key=lambda pair: 1 if pair[0].get("artifact_id") == DEBUG_BUNDLE_ARTIFACT_ID else 0)
     total = len(uploadable)
+    uploaded_manifest_items: list[dict[str, Any]] = []
     optional_upload_errors: list[str] = []
     for uploaded, (item, path) in enumerate(uploadable, start=1):
         artifact_id = str(item.get("artifact_id") or "").strip()
@@ -7577,6 +7657,8 @@ def upload_artifacts(
                 raise
             optional_upload_errors.append(f"{artifact_id}: {exc}")
             continue
+        uploaded_manifest_items.append(copy.deepcopy(item))
+        write_uploaded_artifact_manifest(artifact_dir, manifest_payload, uploaded_manifest_items, source_run_dir=source_run_dir)
         if progress_callback is not None:
             progress_callback(uploaded, total, item)
     if optional_upload_errors:
@@ -7589,3 +7671,5 @@ def upload_artifacts(
         write_json(artifact_dir / "artifact-manifest.json", manifest_payload)
         if source_run_dir is not None:
             write_json(source_run_dir / "artifact-manifest.json", manifest_payload)
+        if uploaded_manifest_items:
+            write_uploaded_artifact_manifest(artifact_dir, manifest_payload, uploaded_manifest_items, source_run_dir=source_run_dir)
