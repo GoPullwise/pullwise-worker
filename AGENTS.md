@@ -1,4 +1,4 @@
-﻿# Pullwise Worker Agent Notes
+# Pullwise Worker Agent Notes
 
 ## Problem Solving Discipline
 
@@ -97,11 +97,11 @@ Hard invariants:
 
 Codex execution rules:
 
-- Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Keep `CodexConfig.codex_bin`, `cwd`, and `env` instance-scoped to the worker-owned Codex runtime.
+- Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Omit `CodexConfig.codex_bin` by default so the SDK uses its pinned runtime; pass it only for an explicit worker-local `PULLWISE_CODEX_COMMAND` override, while keeping `cwd` and `env` instance-scoped.
 - The Python SDK owns Codex runtime/app-server lifecycle for worker automation. Do not reintroduce worker-managed app-server process lifetime knobs such as `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` or `PULLWISE_CODEX_APP_SERVER_MAX_TURNS`.
 - Use one instance-scoped Codex App Server per worker through the SDK runtime; prefer stdio transport or
   a worker-unique Unix socket.
-- Do not use `codex exec` for review phases and do not launch one Codex CLI
+- Do not use `codex exec` for review phases and do not launch one Codex runtime
   process per reviewer/subtask.
 - Each run has one root Codex thread. Logical subagents are sequential Codex
   turns by default; the default active Codex turns per worker is one.

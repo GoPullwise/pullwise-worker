@@ -204,7 +204,7 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
             codex_login_ok = True
             codex_login_detail = "busy: ready check deferred while codex is running"
         checks.append(("codex_ready", codex_login_ok, codex_login_detail))
-        if codex_cli_ok and codex_login_ok:
+        if codex_runtime_ok and codex_login_ok:
             ready_providers.append("codex")
     provider_ready = bool(ready_providers)
     provider_ready_detail = (

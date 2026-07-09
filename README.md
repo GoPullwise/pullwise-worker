@@ -1,4 +1,4 @@
-﻿# pullwise-worker
+# pullwise-worker
 
 Pull-based Pullwise scan worker.
 
@@ -37,11 +37,11 @@ Required environment:
 - `PULLWISE_SERVICE_NAME`, `PULLWISE_SERVICE_USER`, `PULLWISE_SERVICE_HOME`, `PULLWISE_SERVICE_PATH`, `PULLWISE_WORKER_ENV_FILE`, `PULLWISE_WORKER_ENV_BACKUP_FILE`, `PULLWISE_WORKER_BIN_PATH`, and `PULLWISE_LOGROTATE_FILE` optional for local/manual runs; server-generated installs set them per worker instance
 - `PULLWISE_LIFECYCLE_WATCHER_ENABLED`, `PULLWISE_WATCHER_SERVICE_NAME`, `PULLWISE_WATCHER_SERVICE_FILE`, `PULLWISE_WATCHER_POLL_SECONDS`, `PULLWISE_REMOTE_UNINSTALL_FINALIZER`, and `PULLWISE_UNINSTALL_MARKER_FILE` optional watcher/finalizer settings used by installed workers
 - `PULLWISE_WORKER_PACKAGE` optional package URL for controlled upgrades
-- `PULLWISE_CODEX_COMMAND` optional, defaults to `/var/lib/pullwise-worker/<safe-worker-id>/workers/<worker-id>/.local/bin/codex`
+- `PULLWISE_CODEX_COMMAND` optional explicit local Codex executable override; unset uses the `openai-codex` SDK pinned runtime
 - `PULLWISE_CODEX_HOME` optional, defaults to `<worker-root>/codex-home`
 - `PULLWISE_CODEX_SQLITE_HOME` optional, defaults to `<worker-root>/codex-sqlite`
-- `PULLWISE_CODEX_RELEASE` optional installer-selected Codex CLI release, defaults to `latest` in server-generated installs
-- `PULLWISE_CODEX_INSTALLER_URL` optional Codex standalone installer URL
+- `PULLWISE_CODEX_RELEASE` optional standalone Codex CLI release; only used when explicitly opting into a local CLI override
+- `PULLWISE_CODEX_INSTALLER_URL` optional Codex standalone installer URL; only used with an explicit local CLI override
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
 - `PULLWISE_ACTIVE_READINESS_CHECK_SECONDS` optional, defaults to `60`; used while the worker can claim jobs
 - `PULLWISE_DEGRADED_READINESS_CHECK_SECONDS` optional, defaults to `600`; used while readiness is degraded and the worker is waiting for auth/quota/operator recovery
@@ -54,7 +54,7 @@ Required environment:
 
 Each worker processes exactly one job at a time. Queuing is maintained on the server; after a job finishes, the worker returns to the server to claim the next job. Worker cleanup runs at startup and then periodically. It removes expired failed checkouts, prunes checkout disk usage by oldest inactive job directory, deletes old run logs, caps total log bytes, and truncates `scan-summary.log` to its configured maximum.
 
-Review model, reasoning effort, repository file/byte limits, intent-test limits, and worker review deadlines come from the claimed job payload. The payload must include canonical v1 `model_profile`, `review_request.policy`, `review_request.budget`, and `repositoryLimits`; `agentConfig` may be present as server metadata, but the worker must not use it to fill missing policy fields. Executable command paths such as `PULLWISE_CODEX_COMMAND` remain local worker configuration and are not overridden by job policy. Provider commands must be absolute paths inside the worker instance home, for example `/var/lib/pullwise-worker/wk_x/workers/wk_x/.local/bin/codex`; global `codex` commands are rejected before subprocess launch. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for server-owned review policy.
+Review model, reasoning effort, repository file/byte limits, intent-test limits, and worker review deadlines come from the claimed job payload. The payload must include canonical v1 `model_profile`, `review_request.policy`, `review_request.budget`, and `repositoryLimits`; `agentConfig` may be present as server metadata, but the worker must not use it to fill missing policy fields. The default Codex runtime comes from the `openai-codex` SDK pinned dependency, so no Codex executable path is required. If `PULLWISE_CODEX_COMMAND` is set as an explicit local override, it remains local worker configuration, is not overridden by job policy, must be an absolute path inside the worker instance home, and global `codex` commands are rejected before launch. Those runtime policies are server database config delivered over HTTP; the worker never reads the server database and does not use local env vars for server-owned review policy.
 
 Codex review work runs through one instance-scoped OpenAI Codex Python SDK client per worker identity. A worker has one active job slot, never prefetches jobs, and drives one root Codex thread with sequential turns by default. Review transport uses the `review-worker-protocol/v1` register, lease, heartbeat, run event, artifact, and terminal result routes under `/v1/workers...` and `/v1/review-runs/{run_id}/...`; lifecycle command/log endpoints are separate operator plumbing, not the core review pipeline. Review output is the v1 result envelope plus `.codex-review/runs/<run_id>/` artifacts such as `report.md`, `report.agent.json`, `coverage.json`, `token-budget.json`, `qa.json`, `artifact-manifest.json`, `codex-events.jsonl`, `worker.log.jsonl`, and `progress.log.jsonl`.
 
@@ -68,7 +68,7 @@ Production local capability example:
 
 ```bash
 PULLWISE_PROVIDER_CHAIN=codex
-PULLWISE_CODEX_COMMAND=/var/lib/pullwise-worker/wk_x/workers/wk_x/.local/bin/codex
+# PULLWISE_CODEX_COMMAND is normally unset; openai-codex supplies the pinned runtime.
 ```
 
 ## Deploy
@@ -87,7 +87,7 @@ printf '%s  %s\n' '<sha256 from admin install command>' "$install_script" | sha2
 bash "$install_script" --server https://pullwise.example.com --worker-id wk_x
 ```
 
-The installer is served by Pullwise Server at `/install-worker.sh`. It creates a worker-specific system user, writes a locked-down worker env file, installs the selected worker package, installs the worker-scoped Codex CLI with OpenAI's official standalone installer, installs a systemd unit and logrotate config, starts the worker, and runs `pullwise-worker doctor`. The default Codex release is `latest`; server worker creation can pin a specific Codex CLI release. The worker package intentionally does not ship a second install script; server is the single installer source of truth.
+The installer is served by Pullwise Server at `/install-worker.sh`. It creates a worker-specific system user, writes a locked-down worker env file, installs the selected worker package, installs a systemd unit and logrotate config, starts the worker, and runs `pullwise-worker doctor`. The worker package dependency on `openai-codex` supplies the pinned Codex runtime by default; the standalone Codex CLI installer runs only when an explicit local override such as `PULLWISE_CODEX_COMMAND` or `PULLWISE_CODEX_RELEASE` is provided. The worker package intentionally does not ship a second install script; server is the single installer source of truth.
 
 ## Release
 

@@ -22,7 +22,7 @@ from pullwise_worker._main_part_01_bootstrap import (
     WorkerConfig,
     worker_registration_payload,
 )
-from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error, writable_path_check
+from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error, worker_readiness_state, writable_path_check
 from pullwise_worker.review_worker_v1 import (
     DEBUG_BUNDLE_ARTIFACT_ID,
     INTENT_TEST_CLASSIFICATIONS,
@@ -555,6 +555,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(ready_providers, ["codex"])
         self.assertIn(("codex", True, "SDK pinned runtime"), checks)
         self.assertEqual([call.args[0] for call in command_ok.call_args_list], [["git", "--version"]])
+
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service_home = Path(tmp_dir) / "service"
