@@ -214,6 +214,16 @@ Review pipeline rules:
   timeout, or environment-limited intent tests are degraded evidence and must
   not fail the whole repository scan after they can be represented in
   `intent-test-result/v1`.
+- Semantic artifact repair must also overwrite existing malformed phase outputs
+  when a common schema alias can be normalized. For example, a Codex-created
+  `bootstrap_helper_scripts.summary.json` with
+  `bootstrap-helper-scripts-summary/v1` must be rewritten to canonical
+  `bootstrap-helper-summary/v1` before strict phase validation is retried.
+- Intent test result repair must classify missing local test runners or missing
+  project dependencies, such as exit code 127 or `vitest: not found`, as
+  `dependency_missing` with zero confidence and no finding confidence impact.
+  Do not leave these as `unclear_requirement` or let model-provided confidence
+  promote the linked finding.
 - QA must fail completed runs when intent-test validation is enabled and
   `intent-test-results.json` is missing unless an explicit skipped reason is
   recorded in the intent validation, planning, source, or raw run artifacts.
@@ -374,6 +384,11 @@ Main `report.agent.json.findings` are a mechanically validated surface. Each mai
 Accepted validation status may arrive through common alias fields including
 `status`, `validator_status`, `validation_status`, `classification`, or
 `disposition`; keep QA/report repair binding logic aligned across those aliases.
+When Codex assigns different local ids to the same finding across
+`report.agent.json` and `validated-findings.json`, QA/report repair may bind by
+the unique `(title, path, start_line)` fallback key even if both records have
+non-matching ids. Keep this fallback unique-match-only; ambiguous fallback
+matches must remain unbacked.
 
 Terminal result envelopes must include the stable v1 summary shape:
 `overall_risk`, `result_status`, `finding_counts`, `coverage`, and
@@ -492,5 +507,3 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Server-side evidence should include only scoped records for the same scan/job/run: scan/job/attempt/run identifiers, phase/progress/error snapshots, review-run events, artifact metadata/storage references, quota state, and relevant timestamps. It must not include full database dumps, secrets, other users' data, or unrelated scans.
 - The UI must disable or omit debug bundle actions when no real debug_bundle artifact/server debug bundle endpoint exists. Do not substitute /scans/{scanId}/audit-bundle.zip as a debug zip URL.
 - Tests should protect this contract: missing debugBundleUrl must not produce an audit-bundle URL, and server/worker tests must verify failed runs still expose a real debug_bundle artifact or explicit absence.
-
-
