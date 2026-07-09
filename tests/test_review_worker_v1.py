@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -1326,6 +1326,21 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("fastapi", profile["framework_signals"])
         self.assertIn("pyproject.toml", profile["manifest_files"])
 
+    def test_minimal_repo_profile_does_not_infer_pytest_from_unittest_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            (repo / "tests").mkdir()
+            (repo / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
+            (repo / "tests" / "test_main.py").write_text(
+                "import unittest\n\nclass MainTest(unittest.TestCase):\n    def test_main(self):\n        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+
+            profile = minimal_repo_profile_payload(inventory(repo), repo)
+
+        self.assertNotIn("pytest", profile["test_frameworks"])
+        self.assertIn("unittest", profile["test_frameworks"])
+
     def test_minimal_repo_profile_detects_node_go_and_generic_signals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             node_repo = Path(tmp_dir) / "node"
@@ -1795,6 +1810,20 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             write_basic_qa_inputs(repo, run_dir)
             write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding_payload("CL-001")]})
             write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("CL-001", status="plausible")))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "pass")
+
+    def test_qa_gate_accepts_main_finding_backed_by_confirmed_disposition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            validation = validation_entry("CL-001", status="", title="Backed finding")
+            validation["disposition"] = "confirmed"
+            write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding_payload("CL-001")]})
+            write_json(run_dir / "validated-findings.json", validation_payload(validation))
 
             qa = qa_gate_payload(repo, run_dir)
 
@@ -6502,3 +6531,4 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
