@@ -280,7 +280,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
         self.assertNotIn("danger", json.dumps(requests).lower())
 
-    def test_codex_sdk_start_uses_worker_scoped_codex_config(self) -> None:
+    def test_codex_sdk_start_uses_sdk_pinned_runtime_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
             created_configs = []
@@ -302,10 +302,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             runtime = SimpleNamespace(Codex=Codex, CodexConfig=Config)
             with patch("pullwise_worker.review_worker_v1.load_codex_sdk_runtime", return_value=runtime):
-                server = CodexSdkClient("/opt/pullwise/codex", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
+                server = CodexSdkClient("", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
                 server.start()
 
-        self.assertEqual(created_configs[0]["codex_bin"], "/opt/pullwise/codex")
+        self.assertNotIn("codex_bin", created_configs[0])
         self.assertEqual(created_configs[0]["cwd"], str(workspace))
         self.assertEqual(created_configs[0]["env"]["CODEX_HOME"], str(workspace / "codex-home"))
         self.assertEqual(created_configs[0]["client_name"], "codex_repo_review_worker")
@@ -313,6 +313,30 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(created_configs[0]["client_version"], __version__)
         self.assertFalse(created_configs[0]["experimental_api"])
         self.assertIsNotNone(created_codex[0]._client._approval_handler)
+
+    def test_codex_sdk_start_passes_codex_bin_only_for_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            created_configs = []
+
+            class Config:
+                def __init__(self, **kwargs: object) -> None:
+                    created_configs.append(kwargs)
+
+            class Codex:
+                def __init__(self, config: Config) -> None:
+                    self.config = config
+                    self._client = SimpleNamespace(_approval_handler=None)
+
+                def close(self) -> None:
+                    return
+
+            runtime = SimpleNamespace(Codex=Codex, CodexConfig=Config)
+            with patch("pullwise_worker.review_worker_v1.load_codex_sdk_runtime", return_value=runtime):
+                server = CodexSdkClient("/opt/pullwise/codex", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
+                server.start()
+
+        self.assertEqual(created_configs[0]["codex_bin"], "/opt/pullwise/codex")
 
     def test_codex_sdk_device_code_login_is_exposed_for_worker_auth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -332,14 +356,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertTrue(ok, detail)
 
-    def test_scoped_codex_command_defaults_inside_service_home(self) -> None:
+    def test_scoped_codex_command_uses_sdk_runtime_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service_home = Path(tmp_dir) / "service"
             command = scoped_codex_command(SimpleNamespace(service_home=str(service_home)))
 
-        self.assertEqual(command, str(service_home / "workers" / "worker" / ".local" / "bin" / "codex"))
+        self.assertEqual(command, "")
 
-    def test_worker_config_default_codex_command_matches_installer_path(self) -> None:
+    def test_worker_config_default_codex_command_uses_sdk_pinned_runtime(self) -> None:
         service_home = "/var/lib/pullwise-worker/wk_test"
         with patch.dict(
             os.environ,
@@ -353,7 +377,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         ):
             config = WorkerConfig(SimpleNamespace(), validate_server_url=False)
 
-        self.assertEqual(config.codex_command, f"{service_home}/workers/wk_test/.local/bin/codex")
+        self.assertEqual(config.codex_command, "")
         self.assertEqual(config.worker_root, f"{service_home}/workers/wk_test")
         self.assertEqual(config.codex_home, f"{service_home}/workers/wk_test/codex-home")
 
@@ -384,7 +408,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             "subscription plan agent configs invalid: free.codex.reasoningEffort is required",
         )
 
-    def test_doctor_does_not_require_node_for_standalone_codex_cli(self) -> None:
+    def test_doctor_does_not_require_node_or_standalone_codex_cli(self) -> None:
         config = SimpleNamespace(
             provider="codex",
             provider_chain=["codex"],
@@ -488,6 +512,49 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertFalse(run_doctor(config))
 
         self.assertEqual(heartbeats[0]["doctor_status"], "degraded")
+
+    def test_codex_readiness_uses_sdk_runtime_without_cli_version_precheck(self) -> None:
+        config = SimpleNamespace(
+            server_url="http://127.0.0.1:18080",
+            allow_insecure_server_url=False,
+            worker_token="pww_test",
+            provider="codex",
+            provider_chain=["codex"],
+            service_name="pullwise-worker-test",
+            service_home="/var/lib/pullwise-worker/wk_1",
+            worker_id="wk_1",
+            worker_root="/var/lib/pullwise-worker/wk_1/workers/wk_1",
+            codex_command="",
+            codex_doctor_timeout_seconds=10,
+            work_dir=Path(tempfile.gettempdir()) / "pullwise-work",
+            log_dir=Path(tempfile.gettempdir()) / "pullwise-log",
+        )
+
+        with patch(
+            "pullwise_worker._main_part_07_readiness_doctor.worker_agent_configs_check",
+            return_value=(
+                True,
+                "loaded",
+                {
+                    "agentConfigs": {
+                        plan: {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}}
+                        for plan in ("free", "pro", "max")
+                    }
+                },
+            ),
+        ), patch(
+            "pullwise_worker._main_part_07_readiness_doctor.command_ok",
+            return_value=(True, "git version 2.0"),
+        ) as command_ok, patch(
+            "pullwise_worker._main_part_07_readiness_doctor.codex_ready_check",
+            return_value=(True, "ready"),
+        ):
+            checks, provider_ready, ready_providers = worker_readiness_state(config)
+
+        self.assertTrue(provider_ready)
+        self.assertEqual(ready_providers, ["codex"])
+        self.assertIn(("codex", True, "SDK pinned runtime"), checks)
+        self.assertEqual([call.args[0] for call in command_ok.call_args_list], [["git", "--version"]])
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service_home = Path(tmp_dir) / "service"
