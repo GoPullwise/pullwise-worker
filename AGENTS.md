@@ -1,4 +1,4 @@
-# Pullwise Worker Agent Notes
+﻿# Pullwise Worker Agent Notes
 
 ## Problem Solving Discipline
 
@@ -27,7 +27,7 @@ worker instance's config.
   - `$worker_root/.local/bin/codex`
   - `$worker_root/.codex/bin/codex`
 - Review execution and Codex quota refresh must enforce this at runtime before
-  starting the app-server; do not fall back to `codex` from `PATH` or any global
+  starting the worker-scoped Codex SDK client; do not fall back to `codex` from `PATH` or any global
   Codex binary.
 - Provider subprocesses must run with instance-scoped environment values:
   - `HOME=$worker_root`
@@ -90,7 +90,7 @@ Hard invariants:
   `CODEX_SQLITE_HOME`, Codex auth/config/log/session/cache directories,
   workspace root, artifact root, and worker log.
 - Multiple workers on one host must not share Codex config, auth, sqlite state,
-  app-server process, sockets, workspaces, artifacts, service user runtime, or
+  SDK client process, Codex sockets, workspaces, artifacts, service user runtime, or
   mutable lifecycle files.
 - Worker runtime targets Linux/Ubuntu 22.04 only. Do not add Windows or macOS
   worker runtime behavior.
@@ -104,7 +104,7 @@ Codex execution rules:
   process per reviewer/subtask.
 - Each run has one root Codex thread. Logical subagents are sequential Codex
   turns by default; the default active Codex turns per worker is one.
-- Start the app-server with the worker-owned `CODEX_HOME` and
+- Start the Codex SDK client with the worker-owned `CODEX_HOME` and
   `CODEX_SQLITE_HOME`, then initialize the JSON-RPC connection before turns.
 - After root thread initialization, store the `thread_id` on the active job and
   include it as `codex_app_server.active_thread_id` in busy heartbeats until the
@@ -166,7 +166,7 @@ Review pipeline rules:
   test failure analysis, validator disproof, or final report generation.
 - Semantic phases and semantic output repair require an initialized Codex
   App Server and root thread. Do not satisfy a semantic phase by writing local
-  fallback artifacts when the app-server or thread is missing.
+  fallback artifacts when the SDK client or thread is missing.
 - A phase may emit `phase_completed` only after its required output files or
   directories exist and local validation passes. Schema-bound phase outputs must
   be parseable JSON objects with the expected `schema_version`; hash-artifact
@@ -476,8 +476,9 @@ instance service and instance resources have been successfully uninstalled.
 A debug bundle is not the audit bundle and must never silently fall back to the audit bundle.
 
 - A real debug bundle combines worker-side live evidence and server-side evidence for the same scan/job/run.
-- Worker-side evidence should include run-local logs, Codex app-server events, progress logs, run-state, phase outputs, terminal QA/error reports, and the worker artifact manifest. It must not include repository source files, raw API keys, unredacted environment dumps, or unrelated worker-instance state.
+- Worker-side evidence should include run-local logs, Codex SDK events, progress logs, run-state, phase outputs, terminal QA/error reports, and the worker artifact manifest. It must not include repository source files, raw API keys, unredacted environment dumps, or unrelated worker-instance state.
 - Server-side evidence should include only scoped records for the same scan/job/run: scan/job/attempt/run identifiers, phase/progress/error snapshots, review-run events, artifact metadata/storage references, quota state, and relevant timestamps. It must not include full database dumps, secrets, other users' data, or unrelated scans.
 - The UI must disable or omit debug bundle actions when no real debug_bundle artifact/server debug bundle endpoint exists. Do not substitute /scans/{scanId}/audit-bundle.zip as a debug zip URL.
 - Tests should protect this contract: missing debugBundleUrl must not produce an audit-bundle URL, and server/worker tests must verify failed runs still expose a real debug_bundle artifact or explicit absence.
+
 

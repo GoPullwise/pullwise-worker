@@ -179,7 +179,7 @@ _CODEX_READINESS_ISSUE_MESSAGES = {
     "codex_authorization_failed": "codex_authorization_failed: Codex account or workspace is not authorized",
     "codex_subscription_inactive": "codex_subscription_inactive: ChatGPT subscription is inactive or lacks Codex access",
     "codex_quota_exhausted": "codex_quota_exhausted: Codex usage quota or credits are exhausted",
-    "codex_version_unsupported": "codex_version_unsupported: installed Codex CLI does not support the required app-server interface",
+    "codex_version_unsupported": "codex_version_unsupported: installed Codex CLI does not support the required SDK interface",
 }
 _CODEX_READINESS_FAILURE_CACHEABLE_ISSUES = set(_CODEX_READINESS_ISSUE_MESSAGES)
 _UBUNTU_2204_DEPENDENCY_PACKAGES = {
@@ -215,7 +215,7 @@ def codex_readiness_issue_kind(detail: object) -> str:
         return "codex_authorization_failed"
     if any(marker in lowered for marker in _CODEX_AUTH_REQUIRED_MARKERS):
         return "codex_auth_required"
-    if "app-server" in lowered and any(marker in lowered for marker in _CODEX_VERSION_MARKERS):
+    if "SDK" in lowered and any(marker in lowered for marker in _CODEX_VERSION_MARKERS):
         return "codex_version_unsupported"
     return ""
 
@@ -1341,5 +1341,6 @@ def main() -> None:
     worker.run(once=args.once)
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
+
 
 

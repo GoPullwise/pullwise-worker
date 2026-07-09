@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -38,7 +38,7 @@ from pullwise_worker.review_worker_v1 import (
     approval_response_for_request,
     CodexQuotaMonitor,
     JobCancelled,
-    JsonRpcAppServer,
+    CodexSdkClient,
     ReviewWorkerV1,
     RepositoryLimitExceeded,
     WorkerState,
@@ -232,7 +232,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 def turn_interrupt(self, thread_id: str, turn_id: str) -> None:
                     calls.append(("turn_interrupt", thread_id, turn_id))
 
-            server = JsonRpcAppServer("codex", {}, workspace, workspace / "events.jsonl")
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
             server._client = Client()
             server._threads["thread_1"] = SimpleNamespace(id="thread_1")
 
@@ -265,7 +265,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 def unregister_turn_notifications(self, turn_id: str) -> None:
                     return
 
-            server = JsonRpcAppServer("codex", {}, workspace, workspace / "events.jsonl")
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
             server._client = Client()
             server._threads["thread_1"] = SimpleNamespace(id="thread_1")
             server.run_turn(thread_id="thread_1", repo_dir=workspace, prompt="review", effort="medium", read_only=True, timeout_seconds=2)
@@ -302,7 +302,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             runtime = SimpleNamespace(Codex=Codex, CodexConfig=Config)
             with patch("pullwise_worker.review_worker_v1.load_codex_sdk_runtime", return_value=runtime):
-                server = JsonRpcAppServer("/opt/pullwise/codex", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
+                server = CodexSdkClient("/opt/pullwise/codex", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
                 server.start()
 
         self.assertEqual(created_configs[0]["codex_bin"], "/opt/pullwise/codex")
@@ -318,7 +318,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
             handle = SimpleNamespace(verification_url="https://example.test/device", user_code="ABCD-EFGH")
-            server = JsonRpcAppServer("codex", {}, workspace, workspace / "events.jsonl")
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
             server._codex = SimpleNamespace(login_chatgpt_device_code=lambda: handle)
 
             result = server.login_chatgpt_device_code()
@@ -500,10 +500,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config = SimpleNamespace(worker_id="wk_1", service_home=str(Path(tmp_dir) / "service"), codex_command="/usr/bin/codex")
             worker = ReviewWorkerV1(config, client=object())
-            with patch("pullwise_worker.review_worker_v1.subprocess.Popen") as popen:
+            with patch("pullwise_worker.review_worker_v1.load_codex_sdk_runtime") as load_runtime:
                 snapshot = worker.quota_monitor.refresh(current_time=123)
 
-        popen.assert_not_called()
+        load_runtime.assert_not_called()
         self.assertEqual(snapshot["status"], "unavailable")
         self.assertIn("inside worker_root", snapshot["lastError"])
 
@@ -580,7 +580,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(denied_git_clean, "decline")
         self.assertEqual(denied_sed_in_place, "decline")
 
-    def test_codex_approval_responses_use_current_app_server_enums(self) -> None:
+    def test_codex_approval_responses_use_current_codex_client_enums(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
             (workspace / ".codex-review" / "tools").mkdir(parents=True)
@@ -811,7 +811,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 artifact_dir.mkdir(parents=True)
                 return repo_dir, run_dir, artifact_dir
 
-            def run_semantic_phase(self, _app_server: object, _repo_dir: Path, _run_dir: Path, _job: dict, phase: str) -> None:
+            def run_semantic_phase(self, _codex_client: object, _repo_dir: Path, _run_dir: Path, _job: dict, phase: str) -> None:
                 semantic_calls.append(phase)
                 raise AssertionError(f"semantic phase should have been skipped: {phase}")
 
@@ -859,7 +859,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
     def test_completed_run_preserves_codex_events(self) -> None:
         calls = []
-        app_server_holder = {}
+        codex_client_holder = {}
 
         class Client:
             def heartbeat(self, **_payload: dict) -> dict:
@@ -876,7 +876,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             def result(self, _job_id: str, payload: dict) -> None:
                 calls.append(("result", payload["status"]))
 
-        class FakeAppServer:
+        class FakeCodexClient:
             def __init__(self, events_path: Path) -> None:
                 self.events_path = events_path
 
@@ -896,13 +896,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 artifact_dir.mkdir(parents=True)
                 return repo_dir, run_dir, artifact_dir
 
-            def ensure_app_server(self, events_path: Path | None = None) -> FakeAppServer:
-                if events_path is None and "app_server" in app_server_holder:
-                    return app_server_holder["app_server"]
+            def ensure_codex_client(self, events_path: Path | None = None) -> FakeCodexClient:
+                if events_path is None and "codex_client" in codex_client_holder:
+                    return codex_client_holder["codex_client"]
                 assert events_path is not None
-                app_server = FakeAppServer(events_path)
-                app_server_holder["app_server"] = app_server
-                return app_server
+                codex_client = FakeCodexClient(events_path)
+                codex_client_holder["codex_client"] = codex_client
+                return codex_client
 
         job = {
             "job_id": "job_1",
@@ -1043,7 +1043,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse(stats["scanStoppedEarly"])
         self.assertEqual(caught.exception.preflight["repositoryLimitReasons"], ["file_count"])
 
-    def test_run_job_rejects_cloned_checkout_over_repository_limit_before_app_server(self) -> None:
+    def test_run_job_rejects_cloned_checkout_over_repository_limit_before_codex_client(self) -> None:
         results = []
 
         class Client:
@@ -1060,7 +1060,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 results.append(payload)
 
         class Worker(ReviewWorkerV1):
-            def ensure_app_server(self, events_path: Path | None = None) -> JsonRpcAppServer:
+            def ensure_codex_client(self, events_path: Path | None = None) -> CodexSdkClient:
                 raise AssertionError("app server should not start after repository limit precheck fails")
 
         job = {
@@ -2727,7 +2727,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 ),
                 client=Client(),
             )
-            worker.app_server = AppServer()  # type: ignore[assignment]
+            worker.codex_client = AppServer()  # type: ignore[assignment]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
 
             with patch("pullwise_worker.review_worker_v1.worker_machine_metrics_payload", return_value=metrics) as collect:
@@ -3158,14 +3158,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 def close(self) -> None:
                     return None
 
-            worker.app_server = AppServer()  # type: ignore[assignment]
+            worker.codex_client = AppServer()  # type: ignore[assignment]
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 worker.run(once=True)
 
         self.assertEqual(calls, ["register", "heartbeat", "claim"])
 
-    def test_heartbeat_keeps_ready_when_quota_probe_is_unavailable_but_app_server_runs(self) -> None:
+    def test_heartbeat_keeps_ready_when_quota_probe_is_unavailable_but_codex_client_runs(self) -> None:
         heartbeat_payloads = []
 
         class Client:
@@ -3188,8 +3188,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root), client=Client())
-            worker.ensure_app_server = lambda events_path=None: AppServer()  # type: ignore[method-assign, return-value]
-            worker.app_server = worker.ensure_app_server()
+            worker.ensure_codex_client = lambda events_path=None: AppServer()  # type: ignore[method-assign, return-value]
+            worker.codex_client = worker.ensure_codex_client()
 
             worker.heartbeat()
 
@@ -3200,7 +3200,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(heartbeat_payloads[0]["codex_quota"]["status"], "unavailable")
         self.assertEqual(heartbeat_payloads[0]["codex_quota"]["reason"], "codex_quota_unavailable")
 
-    def test_worker_closes_app_server_when_control_plane_stops_accepting_heartbeat(self) -> None:
+    def test_worker_closes_codex_client_when_control_plane_stops_accepting_heartbeat(self) -> None:
         events = []
 
         class Client:
@@ -3225,7 +3225,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.lock.acquire = lambda: None  # type: ignore[method-assign]
             worker.lock.release = lambda: None  # type: ignore[method-assign]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
-            worker.app_server = AppServer()  # type: ignore[assignment]
+            worker.codex_client = AppServer()  # type: ignore[assignment]
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 with self.assertRaisesRegex(RuntimeError, "worker disabled"):
@@ -3396,7 +3396,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(monitor.snapshot["status"], "exhausted")
         self.assertEqual(monitor.snapshot["reason"], "codex_quota_exhausted")
 
-    def test_codex_quota_refresh_reuses_worker_app_server_without_closing_it(self) -> None:
+    def test_codex_quota_refresh_reuses_worker_codex_client_without_closing_it(self) -> None:
         calls = []
 
         class AppServer:
@@ -5591,7 +5591,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(report["findings"][0]["locations"][0]["end_line"], 4)
         self.assertEqual(report["next_agent_tasks"], ["Patch the issue."])
 
-    def test_run_semantic_phase_requires_codex_app_server(self) -> None:
+    def test_run_semantic_phase_requires_codex_sdk_client(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             repo = root / "repo"
@@ -5599,7 +5599,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir.mkdir(parents=True)
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
 
-            with self.assertRaisesRegex(RuntimeError, "Codex app-server is missing"):
+            with self.assertRaisesRegex(RuntimeError, "Codex SDK client is missing"):
                 worker.run_semantic_phase(None, repo, run_dir, {"job_id": "job_1"}, "repo_map")
 
             self.assertFalse((run_dir / "repo-map.json").exists())
@@ -5646,7 +5646,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "repo-map"):
                 validate_phase_outputs(run_dir, "repo_map")
 
-    def test_repair_semantic_phase_requires_codex_app_server(self) -> None:
+    def test_repair_semantic_phase_requires_codex_sdk_client(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             repo = root / "repo"
@@ -5654,7 +5654,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir.mkdir(parents=True)
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
 
-            with self.assertRaisesRegex(RuntimeError, "Codex app-server is missing"):
+            with self.assertRaisesRegex(RuntimeError, "Codex SDK client is missing"):
                 worker.repair_semantic_phase_outputs(None, repo, run_dir, {"job_id": "job_1"}, "repo_map", RuntimeError("bad schema"))
 
             self.assertFalse((run_dir / "repo-map.json").exists())
@@ -6316,6 +6316,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
 
 
 

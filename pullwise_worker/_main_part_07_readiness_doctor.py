@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 # Imported by main.py and re-exported from the aggregate module.
 
@@ -6,7 +6,7 @@ from ._main_part_01_bootstrap import *  # noqa: F403
 
 import posixpath
 
-from .review_worker_v1 import JsonRpcAppServer
+from .review_worker_v1 import CodexSdkClient
 
 
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
@@ -478,12 +478,12 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         provider_env = provider_process_env(config)
-        server = JsonRpcAppServer(config.codex_command, provider_env, tmp_path, tmp_path / "codex-events.jsonl")
+        server = CodexSdkClient(config.codex_command, provider_env, tmp_path, tmp_path / "codex-events.jsonl")
         try:
             server.start()
             thread_id = server.start_thread(tmp_path, model)
             if not thread_id:
-                return False, "codex app-server ready check did not create a thread"
+                return False, "codex SDK ready check did not create a thread"
             server.run_turn(
                 thread_id=thread_id,
                 repo_dir=tmp_path,
@@ -496,18 +496,18 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
         except FileNotFoundError:
             return False, "codex not found"
         except TimeoutError:
-            return False, "codex app-server ready check timed out"
+            return False, "codex SDK ready check timed out"
         except Exception as exc:
             detail = redact_secrets(str(exc), config)
             diagnostic = codex_readiness_issue_detail(detail, config)
             if diagnostic:
                 return False, diagnostic
             if codex_node_runtime_error(detail):
-                return False, "Codex app-server failed to start; reinstall the worker-scoped Codex CLI"
+                return False, "Codex SDK client failed to start; reinstall the worker-scoped Codex CLI"
             lowered = detail.lower()
             if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
                 return False, codex_readiness_issue_detail(f"not authenticated: {detail}", config) or "not logged in"
-            return False, detail or "codex app-server ready check failed"
+            return False, detail or "codex SDK ready check failed"
         finally:
             server.close()
 
@@ -519,7 +519,7 @@ def run_codex_device_login(config: WorkerConfig) -> bool:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         provider_env = provider_process_env(config)
-        server = JsonRpcAppServer(config.codex_command, provider_env, tmp_path, tmp_path / "codex-login-events.jsonl")
+        server = CodexSdkClient(config.codex_command, provider_env, tmp_path, tmp_path / "codex-login-events.jsonl")
         try:
             server.start()
             login = server.login_chatgpt_device_code()
@@ -541,5 +541,6 @@ def run_codex_device_login(config: WorkerConfig) -> bool:
             server.close()
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
+
 
 

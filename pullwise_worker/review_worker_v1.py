@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import copy
@@ -629,7 +629,7 @@ def load_codex_sdk_runtime() -> CodexSdkRuntime:
     return CodexSdkRuntime(Codex=Codex, CodexConfig=CodexConfig, ApprovalMode=ApprovalMode, Sandbox=Sandbox)
 
 
-class JsonRpcAppServer:
+class CodexSdkClient:
     def __init__(
         self,
         command: str,
@@ -1108,11 +1108,11 @@ class CodexQuotaMonitor:
         self,
         config: Any,
         isolation: Isolation,
-        app_server_provider: Callable[[], JsonRpcAppServer] | None = None,
+        codex_client_provider: Callable[[], CodexSdkClient] | None = None,
     ) -> None:
         self.config = config
         self.isolation = isolation
-        self.app_server_provider = app_server_provider
+        self.codex_client_provider = codex_client_provider
         self.snapshot: dict[str, Any] | None = None
         self.rate_limits_response: dict[str, Any] = {}
         self.next_check_at = 0
@@ -1130,15 +1130,15 @@ class CodexQuotaMonitor:
         threshold = codex_quota_threshold_percent(self.config)
         interval = codex_quota_check_seconds(self.config)
         next_check_at = checked_at + interval
-        server: JsonRpcAppServer | None = None
+        server: CodexSdkClient | None = None
         close_server = False
         try:
-            if self.app_server_provider is not None:
-                server = self.app_server_provider()
+            if self.codex_client_provider is not None:
+                server = self.codex_client_provider()
             else:
                 self.isolation.runtime.mkdir(parents=True, exist_ok=True)
                 self.isolation.logs.mkdir(parents=True, exist_ok=True)
-                server = JsonRpcAppServer(
+                server = CodexSdkClient(
                     scoped_codex_command(self.config),
                     self.isolation.env(self.config),
                     self.isolation.runtime,
@@ -1551,40 +1551,40 @@ class ReviewWorkerV1:
         self.client = client
         self.state = WorkerState()
         self.isolation = Isolation(config)
-        self.app_server: JsonRpcAppServer | None = None
-        self.quota_monitor = CodexQuotaMonitor(config, self.isolation, self.ensure_app_server)
+        self.codex_client: CodexSdkClient | None = None
+        self.quota_monitor = CodexQuotaMonitor(config, self.isolation, self.ensure_codex_client)
         self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id), self.isolation.codex_home)
         self._machine_metrics_payload: dict[str, Any] | None = None
         self._machine_metrics_collected_at = 0.0
 
-    def default_app_server_events_path(self) -> Path:
-        return self.isolation.logs / "codex-app-server-events.jsonl"
+    def default_codex_events_path(self) -> Path:
+        return self.isolation.logs / "codex-sdk-events.jsonl"
 
-    def ensure_app_server(self, events_path: Path | None = None) -> JsonRpcAppServer:
+    def ensure_codex_client(self, events_path: Path | None = None) -> CodexSdkClient:
         self.isolation.runtime.mkdir(parents=True, exist_ok=True)
         self.isolation.logs.mkdir(parents=True, exist_ok=True)
-        target_events_path = events_path or self.default_app_server_events_path()
-        if self.app_server is not None and not self.app_server.is_running():
-            self.app_server.close()
-            self.app_server = None
-        if self.app_server is None:
-            self.app_server = JsonRpcAppServer(
+        target_events_path = events_path or self.default_codex_events_path()
+        if self.codex_client is not None and not self.codex_client.is_running():
+            self.codex_client.close()
+            self.codex_client = None
+        if self.codex_client is None:
+            self.codex_client = CodexSdkClient(
                 scoped_codex_command(self.config),
                 self.isolation.env(self.config),
                 self.isolation.runtime,
                 target_events_path,
                 rate_limit_callback=self.quota_monitor.apply_rate_limit_update,
             )
-            self.app_server.start()
+            self.codex_client.start()
         else:
-            self.app_server.set_events_path(target_events_path)
-        return self.app_server
+            self.codex_client.set_events_path(target_events_path)
+        return self.codex_client
 
-    def close_app_server(self) -> None:
-        if self.app_server is None:
+    def close_codex_client(self) -> None:
+        if self.codex_client is None:
             return
-        self.app_server.close()
-        self.app_server = None
+        self.codex_client.close()
+        self.codex_client = None
 
     def machine_metrics_payload(self) -> dict[str, Any] | None:
         interval_seconds = max(1, int(getattr(self.config, "machine_metrics_interval_seconds", 10) or 10))
@@ -1619,27 +1619,27 @@ class ReviewWorkerV1:
                     return
                 time.sleep(max(1, int(getattr(self.config, "poll_seconds", 5) or 5)))
         finally:
-            self.close_app_server()
+            self.close_codex_client()
             self.lock.release()
 
     def heartbeat(self) -> dict[str, Any]:
         active = self.state.active_job
-        app_server_error = ""
-        if active is None or self.app_server is None or not self.app_server.is_running():
+        codex_client_error = ""
+        if active is None or self.codex_client is None or not self.codex_client.is_running():
             try:
-                self.ensure_app_server()
+                self.ensure_codex_client()
             except Exception as exc:
-                app_server_error = quota_text(exc, 500)
+                codex_client_error = quota_text(exc, 500)
         quota = self.quota_monitor.snapshot_if_due(active=active is not None)
         quota_ready = bool((quota or {}).get("ready", True))
-        app_server_ready = self.app_server is not None and self.app_server.is_running()
-        provider_ready = app_server_ready and quota_ready
+        codex_client_ready = self.codex_client is not None and self.codex_client.is_running()
+        provider_ready = codex_client_ready and quota_ready
         self.state.provider_ready = provider_ready
         readiness_reason = quota_text((quota or {}).get("reason") or (quota or {}).get("status"), 160)
-        if app_server_error:
-            readiness_reason = f"codex_app_server_unavailable: {app_server_error}"
-        elif not app_server_ready:
-            readiness_reason = readiness_reason or "codex_app_server_not_running"
+        if codex_client_error:
+            readiness_reason = f"codex_sdk_unavailable: {codex_client_error}"
+        elif not codex_client_ready:
+            readiness_reason = readiness_reason or "codex_sdk_not_running"
         active_jobs = 1 if active else 0
         worker_status = "idle"
         if active is not None:
@@ -1658,7 +1658,7 @@ class ReviewWorkerV1:
                 "local_queue_depth": 0,
             },
             "codex_app_server": {
-                "status": "ready" if app_server_ready else "needs_attention",
+                "status": "ready" if codex_client_ready else "needs_attention",
                 "transport": "stdio",
                 "active_thread_id": active.thread_id if active and active.thread_id else None,
             },
@@ -1897,7 +1897,7 @@ class ReviewWorkerV1:
         active = ActiveJob(job_id=job_id, run_id=run_id, lease_id=lease_id, attempt_id=f"{self.config.worker_id}-{attempt}")
         self.state.set_active(active)
         terminal_state = "failed"
-        app_server: JsonRpcAppServer | None = None
+        codex_client: CodexSdkClient | None = None
         repo_dir: Path | None = None
         run_dir: Path | None = None
         artifact_dir: Path | None = None
@@ -1933,9 +1933,9 @@ class ReviewWorkerV1:
                     if phase == "prepare_workspace":
                         pass
                     elif phase == "start_codex_app_server":
-                        app_server = self.ensure_app_server(events_path)
+                        codex_client = self.ensure_codex_client(events_path)
                     elif phase == "initialize_codex_connection":
-                        thread_id = app_server.start_thread(repo_dir, model_for_job(job)) if app_server else ""
+                        thread_id = codex_client.start_thread(repo_dir, model_for_job(job)) if codex_client else ""
                         active.thread_id = thread_id
                         run_state = read_json(run_dir / "run-state.json", {})
                         if not isinstance(run_state, dict):
@@ -1943,17 +1943,17 @@ class ReviewWorkerV1:
                         run_state.update({"thread_id": thread_id, "active_job": active.heartbeat_payload()})
                         write_json(run_dir / "run-state.json", run_state)
                     elif phase == "check_codex_auth":
-                        self.run_codex_auth_check(app_server, repo_dir, run_dir, job)
+                        self.run_codex_auth_check(codex_client, repo_dir, run_dir, job)
                     elif phase == "submit_result_envelope":
                         pass
                     elif phase == "cleanup_active_job":
                         pass
                     elif phase in SEMANTIC_PHASES:
-                        self.run_semantic_phase(app_server, repo_dir, run_dir, job, phase)
+                        self.run_semantic_phase(codex_client, repo_dir, run_dir, job, phase)
                         if phase == "final_report_json":
                             repair_agent_report_artifact(run_dir, job)
                     elif phase == "reviewer_json_validation":
-                        self.run_reviewer_json_validation_phase(app_server, repo_dir, run_dir, job)
+                        self.run_reviewer_json_validation_phase(codex_client, repo_dir, run_dir, job)
                     elif phase in MECHANICAL_PHASES:
                         self.run_mechanical_phase(repo_dir, run_dir, job, phase, active=active, progress=progress)
                     if phase in {"reviewer_fanout", "intent_test_validation"}:
@@ -1972,7 +1972,7 @@ class ReviewWorkerV1:
                         if phase not in SEMANTIC_PHASES:
                             raise
                         self.repair_semantic_phase_outputs(
-                            app_server,
+                            codex_client,
                             repo_dir,
                             run_dir,
                             job,
@@ -2139,8 +2139,8 @@ class ReviewWorkerV1:
                 terminal_state = "result_submit_failed"
                 return
         finally:
-            if app_server is not None:
-                app_server.set_events_path(self.default_app_server_events_path())
+            if codex_client is not None:
+                codex_client.set_events_path(self.default_codex_events_path())
             if terminal_state in TERMINAL_STATES:
                 self.state.clear_active(terminal_state)
             self.heartbeat()
@@ -2257,14 +2257,14 @@ class ReviewWorkerV1:
             return False
 
 
-    def run_codex_auth_check(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
-        if app_server is None:
-            raise RuntimeError("Codex app-server is missing")
+    def run_codex_auth_check(self, codex_client: CodexSdkClient | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
+        if codex_client is None:
+            raise RuntimeError("Codex SDK client is missing")
         state = read_json(run_dir / "run-state.json")
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
-        app_server.run_turn(
+        codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
             prompt='Codex auth check: return only JSON {"ok": true}.',
@@ -2274,16 +2274,16 @@ class ReviewWorkerV1:
             cancel_requested=self.poll_cancel_requested,
         )
 
-    def run_semantic_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
-        if app_server is None:
-            raise RuntimeError("Codex app-server is missing")
+    def run_semantic_phase(self, codex_client: CodexSdkClient | None, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
+        if codex_client is None:
+            raise RuntimeError("Codex SDK client is missing")
         state = read_json(run_dir / "run-state.json")
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
         effort = effort_for_phase(job, phase)
         prompt = phase_prompt(phase, run_dir)
-        app_server.run_turn(
+        codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
             prompt=prompt,
@@ -2295,7 +2295,7 @@ class ReviewWorkerV1:
 
     def repair_semantic_phase_outputs(
         self,
-        app_server: JsonRpcAppServer | None,
+        codex_client: CodexSdkClient | None,
         repo_dir: Path,
         run_dir: Path,
         job: dict[str, Any],
@@ -2311,13 +2311,13 @@ class ReviewWorkerV1:
                 "time": iso_time(time.time()),
             },
         )
-        if app_server is None:
-            raise RuntimeError("Codex app-server is missing")
+        if codex_client is None:
+            raise RuntimeError("Codex SDK client is missing")
         state = read_json(run_dir / "run-state.json")
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
-        app_server.run_turn(
+        codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
             prompt=phase_repair_prompt(phase, run_dir, validation_error),
@@ -2328,16 +2328,16 @@ class ReviewWorkerV1:
         )
         fallback_semantic_artifact(run_dir, job, phase)
 
-    def run_reviewer_json_validation_phase(self, app_server: JsonRpcAppServer | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
+    def run_reviewer_json_validation_phase(self, codex_client: CodexSdkClient | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
         try:
             validate_reviewer_outputs(run_dir)
         except RuntimeError as validation_exc:
-            self.repair_reviewer_outputs(app_server, repo_dir, run_dir, job, validation_exc)
+            self.repair_reviewer_outputs(codex_client, repo_dir, run_dir, job, validation_exc)
             validate_reviewer_outputs(run_dir)
 
     def repair_reviewer_outputs(
         self,
-        app_server: JsonRpcAppServer | None,
+        codex_client: CodexSdkClient | None,
         repo_dir: Path,
         run_dir: Path,
         job: dict[str, Any],
@@ -2352,13 +2352,13 @@ class ReviewWorkerV1:
                 "time": iso_time(time.time()),
             },
         )
-        if app_server is None:
-            raise RuntimeError("Codex app-server is missing")
+        if codex_client is None:
+            raise RuntimeError("Codex SDK client is missing")
         state = read_json(run_dir / "run-state.json")
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
-        app_server.run_turn(
+        codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
             prompt=reviewer_json_repair_prompt(run_dir, validation_error),
@@ -7621,4 +7621,7 @@ def upload_artifacts(
             write_json(source_run_dir / "artifact-manifest.json", manifest_payload)
         if uploaded_manifest_items:
             write_uploaded_artifact_manifest(artifact_dir, manifest_payload, uploaded_manifest_items, source_run_dir=source_run_dir)
+
+
+
 
