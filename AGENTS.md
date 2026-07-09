@@ -131,6 +131,11 @@ Codex execution rules:
 - Keep the full-repository pipeline fixed. Do not change `PIPELINE_PHASES`, create repo-type-specific pipelines, let adapters skip core phases, or let adapters decide terminal status, QA gates, upload/result envelopes, or final finding confidence.
 - `repo-profile.json` is an optional, mechanical, best-effort side artifact produced from inventory/file-tree evidence only. It must not call Codex, depend on semantic artifacts, fail `inventory_repository`, enter `PHASE_JSON_OUTPUTS`, or enter `REQUIRED_COMPLETED_ARTIFACT_FILES`.
 - Repo profile generation and helper scripts must use the Python standard library only and remain Python 3.10 compatible. Do not add `tomli`, `PyYAML`, dependency-audit parsing, package installs, or external scan services.
+- Repo profile test-framework detection must use mechanical evidence. Infer
+  `pytest` only from explicit pytest config/dependencies/files such as
+  `pytest.ini`, `conftest.py`, `[tool.pytest]`/requirements text, or
+  package scripts; do not classify a Python project as pytest merely because
+  tests live under `tests/` or files start with `test_`.
 - If profile generation fails, keep `inventory.json`, log `repo_profile_skipped` to `worker.log.jsonl`, and continue the phase.
 - Treat adapters as strategy providers only. They may provide signals, fallback risk rules, skip patterns, grouping hints, prompt emphasis, and intent-test preferences; they must not become a scheduler or artifact-contract owner.
 - Risk tier priority is `hard skip/generated/binary > semantic explicit route > profile fallback > generic default`. Broad semantic routes must not promote generated, vendor, cache, minified, binary, or lock-file source into review bundles.
@@ -366,6 +371,9 @@ actionable recommendation. Weak or uncertain observations belong in appendix or
 internal artifacts, not as confirmed findings.
 
 Main `report.agent.json.findings` are a mechanically validated surface. Each main finding must be backed by `validated-findings.json.validated_findings` with status `confirmed`, `plausible`, or `validated`. Report repair must demote unbacked findings into `appendix_findings` with `demoted_from_main_findings = true`, recompute `summary.overall_risk` from retained main findings, and rebuild `next_agent_tasks` only from retained main findings. QA must fail non-empty main findings when `validated-findings.json` is missing, malformed, or lacks a matching accepted validation entry.
+Accepted validation status may arrive through common alias fields including
+`status`, `validator_status`, `validation_status`, `classification`, or
+`disposition`; keep QA/report repair binding logic aligned across those aliases.
 
 Terminal result envelopes must include the stable v1 summary shape:
 `overall_risk`, `result_status`, `finding_counts`, `coverage`, and
