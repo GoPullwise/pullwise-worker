@@ -421,6 +421,7 @@ Provider readiness is plan-aware and provider-specific.
   server-required idle concurrency shape (`active_jobs = 0`,
   `available_job_slots = 1`) and carries the failure through `codex_ready`,
   `codex_quota`, `doctor_status`, and `last_error`.
+- Codex quota telemetry shown to admin should represent the worker's main review model bucket, currently GPT-5.5/GPT-5.4/GPT-5 preference order; do not use Spark-specific buckets such as `GPT-5.3-Codex-Spark` or `codex_bengalfox` as the fallback main quota.
 - Only check providers required by the loaded plan configs.
 - Login/auth instructions printed by `doctor` must use the same instance-scoped
   command environment documented above.

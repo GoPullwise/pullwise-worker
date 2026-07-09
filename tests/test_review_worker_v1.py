@@ -3484,6 +3484,73 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual([window["windowKind"] for window in payload["windows"]], ["five_hour", "weekly"])
         self.assertEqual(payload["windows"][0]["remainingPercent"], 92)
         self.assertEqual(payload["windows"][1]["remainingPercent"], 78)
+
+    def test_codex_quota_payload_prefers_gpt_55_over_spark_bucket(self) -> None:
+        payload = codex_quota_payload_from_rate_limits(
+            {
+                "rateLimits": {
+                    "limitId": "codex_bengalfox",
+                    "limitName": "GPT-5.3-Codex-Spark",
+                    "primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1782918371},
+                    "secondary": {"usedPercent": 1, "windowDurationMins": 10080, "resetsAt": 1783419385},
+                },
+                "rateLimitsByLimitId": {
+                    "codex_bengalfox": {
+                        "limitId": "codex_bengalfox",
+                        "limitName": "GPT-5.3-Codex-Spark",
+                        "primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1782918371},
+                        "secondary": {"usedPercent": 1, "windowDurationMins": 10080, "resetsAt": 1783419385},
+                    },
+                    "gpt-5.5": {
+                        "limitId": "gpt-5.5",
+                        "limitName": "GPT-5.5",
+                        "primary": {"usedPercent": 27, "windowDurationMins": 300, "resetsAt": 1782918371},
+                        "secondary": {"usedPercent": 58, "windowDurationMins": 10080, "resetsAt": 1783419385},
+                        "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+                        "planType": "plus",
+                        "rateLimitReachedType": None,
+                    },
+                },
+                "rateLimitResetCredits": {"availableCount": 1},
+            },
+            threshold_percent=5,
+            checked_at=1782900000,
+            next_check_at=1782900300,
+            preferred_models=["gpt-5.5", "gpt-5.4"],
+        )
+
+        self.assertEqual(payload["limitName"], "GPT-5.5")
+        self.assertEqual(payload["remainingPercent"], 42)
+        self.assertEqual(payload["windows"][0]["remainingPercent"], 73)
+        self.assertEqual(payload["windows"][1]["remainingPercent"], 42)
+
+    def test_codex_quota_payload_does_not_report_spark_as_main_quota(self) -> None:
+        payload = codex_quota_payload_from_rate_limits(
+            {
+                "rateLimits": {
+                    "limitId": "codex_bengalfox",
+                    "limitName": "GPT-5.3-Codex-Spark",
+                    "primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1782918371},
+                    "secondary": {"usedPercent": 1, "windowDurationMins": 10080, "resetsAt": 1783419385},
+                },
+                "rateLimitsByLimitId": {
+                    "codex_bengalfox": {
+                        "limitId": "codex_bengalfox",
+                        "limitName": "GPT-5.3-Codex-Spark",
+                        "primary": {"usedPercent": 0, "windowDurationMins": 300, "resetsAt": 1782918371},
+                        "secondary": {"usedPercent": 1, "windowDurationMins": 10080, "resetsAt": 1783419385},
+                    },
+                },
+            },
+            threshold_percent=5,
+            checked_at=1782900000,
+            next_check_at=1782900300,
+            preferred_models=["gpt-5.5", "gpt-5.4"],
+        )
+
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertNotIn("limitName", payload)
+
     def test_codex_quota_monitor_merges_rate_limit_updates(self) -> None:
         monitor = CodexQuotaMonitor(
             SimpleNamespace(

@@ -1209,6 +1209,7 @@ class CodexQuotaMonitor:
                 threshold_percent=threshold,
                 checked_at=checked_at,
                 next_check_at=next_check_at,
+                preferred_models=codex_quota_preferred_models(self.config),
             )
         except Exception as exc:
             if quota_refresh_error_is_exhaustion(exc):
@@ -1243,6 +1244,7 @@ class CodexQuotaMonitor:
             threshold_percent=threshold,
             checked_at=current_time,
             next_check_at=next_check_at,
+            preferred_models=codex_quota_preferred_models(self.config),
         )
         self.next_check_at = int((self.snapshot or {}).get("nextCheckAt") or next_check_at)
 
