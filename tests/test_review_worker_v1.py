@@ -3300,6 +3300,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     worker.run(once=True)
 
         self.assertEqual(events, ["closed"])
+
     def test_worker_does_not_claim_when_codex_quota_is_not_ready(self) -> None:
         calls = []
         heartbeat_payloads = []
@@ -3326,6 +3327,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "ready": False,
                 "reason": "codex usage limit exhausted",
             }
+            worker.ensure_codex_client = lambda events_path=None: (_ for _ in ()).throw(RuntimeError("codex SDK unavailable"))  # type: ignore[method-assign]
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 worker.run(once=True)
