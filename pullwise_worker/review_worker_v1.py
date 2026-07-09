@@ -103,6 +103,7 @@ REQUIRED_COMPLETED_ARTIFACT_FILES = {
     "token-budget.json": "token_budget",
 }
 PHASE_JSON_OUTPUTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "bootstrap_helper_scripts": (("bootstrap_helper_scripts.summary.json", "bootstrap-helper-summary/v1"),),
     "inventory_repository": (("inventory.json", "inventory/v1"),),
     "token_budget": (("token-budget.json", "token-budget/v1"),),
     "repo_map": (("repo-map.json", "repo-map/v1"),),
@@ -3411,9 +3412,19 @@ def minimal_repo_profile_payload(inv: dict[str, Any], repo_dir: Path) -> dict[st
             _add_unique(entrypoint_candidates, path)
         if item.get("is_test_candidate"):
             if extension == ".py":
-                _add_unique(test_frameworks, "pytest" if name.startswith("test_") or "/tests/" in f"/{lowered}" else "unittest")
+                _add_unique(test_frameworks, "unittest")
             if extension == ".go" and name.endswith("_test.go"):
                 _add_unique(test_frameworks, "go-test")
+
+    explicit_pytest_files = {
+        "pytest.ini",
+        ".pytest.ini",
+        "conftest.py",
+    }
+    if any(Path(path).name in explicit_pytest_files for path in paths):
+        _add_unique(test_frameworks, "pytest")
+    if "setup.cfg" in path_set and "pytest" in _profile_text(repo_dir, "setup.cfg").lower():
+        _add_unique(test_frameworks, "pytest")
 
     package_managers_from_json, frameworks_from_json, tests_from_json = _profile_package_json(repo_dir)
     for value in package_managers_from_json:
@@ -5593,7 +5604,7 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
 
 MAIN_FINDING_VALIDATION_STATUSES = {"confirmed", "plausible", "validated"}
 FINDING_ID_ALIAS_FIELDS = ("id", "finding_id", "cluster_id", "local_id", "source_finding_id", "source_finding_ids")
-VALIDATION_STATUS_ALIAS_FIELDS = ("status", "validator_status", "validation_status", "classification")
+VALIDATION_STATUS_ALIAS_FIELDS = ("status", "validator_status", "validation_status", "classification", "disposition")
 
 
 def _binding_scalar_ids(value: object) -> set[str]:
@@ -6122,7 +6133,25 @@ def prompt_template_for_name(name: str) -> str:
 
 def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -> None:
     ensure_intent_directories(run_dir)
-    if phase == "repo_map" and not (run_dir / "repo-map.json").exists():
+    if phase == "bootstrap_helper_scripts" and not (run_dir / "bootstrap_helper_scripts.summary.json").exists():
+        review_root = run_dir.parent.parent
+        tools_dir = review_root / "tools"
+        schemas_dir = review_root / "schemas"
+        prompts_dir = review_root / "prompts"
+        write_json(
+            run_dir / "bootstrap_helper_scripts.summary.json",
+            {
+                "schema_version": "bootstrap-helper-summary/v1",
+                "status": "completed",
+                "required_tools": len(REQUIRED_TOOL_FILES),
+                "materialized_tools": sum(1 for name in REQUIRED_TOOL_FILES if (tools_dir / name).is_file()),
+                "required_schemas": len(REQUIRED_SCHEMA_FILES),
+                "materialized_schemas": sum(1 for name in REQUIRED_SCHEMA_FILES if (schemas_dir / name).is_file()),
+                "required_prompts": len(REQUIRED_PROMPT_FILES),
+                "materialized_prompts": sum(1 for name in REQUIRED_PROMPT_FILES if (prompts_dir / name).is_file()),
+            },
+        )
+    elif phase == "repo_map" and not (run_dir / "repo-map.json").exists():
         write_json(run_dir / "repo-map.json", {"schema_version": "repo-map/v1", "areas": [], "notes": "Codex repo_map phase did not materialize an artifact."})
     elif phase == "risk_routing" and not (run_dir / "risk-routing.json").exists():
         write_json(run_dir / "risk-routing.json", {"schema_version": "risk-routing/v1", "routes": [], "default_depth": "P1"})

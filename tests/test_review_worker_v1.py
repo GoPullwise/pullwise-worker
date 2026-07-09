@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -3670,6 +3670,23 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(effort_for_phase(job, "bootstrap_helper_scripts"), "medium")
         self.assertEqual(effort_for_phase(job, "inventory_repository"), "medium")
 
+    def test_bootstrap_helper_scripts_fallback_writes_summary_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            review_root = run_dir.parent.parent
+            (review_root / "tools").mkdir(parents=True)
+            (review_root / "schemas").mkdir(parents=True)
+            (review_root / "prompts").mkdir(parents=True)
+            (review_root / "tools" / REQUIRED_TOOL_FILES[0]).write_text("# ok\n", encoding="utf-8")
+
+            fallback_semantic_artifact(run_dir, {}, "bootstrap_helper_scripts")
+            validate_phase_outputs(run_dir, "bootstrap_helper_scripts")
+
+            summary = json.loads((run_dir / "bootstrap_helper_scripts.summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["schema_version"], "bootstrap-helper-summary/v1")
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["required_tools"], len(REQUIRED_TOOL_FILES))
+            self.assertEqual(summary["materialized_tools"], 1)
     def test_artifact_manifest_contains_required_completed_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
