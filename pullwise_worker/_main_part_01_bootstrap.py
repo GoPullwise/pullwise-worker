@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 # Loaded by main.py; definitions are executed in that module's globals.
 
@@ -68,7 +68,7 @@ DEFAULT_SERVICE_NAME = "pullwise-worker"
 DEFAULT_SERVICE_USER = "pullwise-worker"
 DEFAULT_SERVICE_HOME = "/var/lib/pullwise-worker"
 DEFAULT_SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-DEFAULT_CODEX_COMMAND = f"{DEFAULT_SERVICE_HOME}/workers/<worker-id>/.local/bin/codex"
+DEFAULT_CODEX_COMMAND = ""
 DEFAULT_PROVIDER_AUTH_PATH = (
     f"{DEFAULT_SERVICE_HOME}/workers/<worker-id>/.local/bin:{DEFAULT_SERVICE_HOME}/workers/<worker-id>/.codex/bin:{DEFAULT_SERVICE_HOME}/workers/<worker-id>/codex-home/bin:{DEFAULT_SERVICE_PATH}"
 )
@@ -179,7 +179,7 @@ _CODEX_READINESS_ISSUE_MESSAGES = {
     "codex_authorization_failed": "codex_authorization_failed: Codex account or workspace is not authorized",
     "codex_subscription_inactive": "codex_subscription_inactive: ChatGPT subscription is inactive or lacks Codex access",
     "codex_quota_exhausted": "codex_quota_exhausted: Codex usage quota or credits are exhausted",
-    "codex_version_unsupported": "codex_version_unsupported: installed Codex CLI does not support the required SDK interface",
+    "codex_version_unsupported": "codex_version_unsupported: Codex SDK pinned runtime or configured Codex executable does not support the required SDK interface",
 }
 _CODEX_READINESS_FAILURE_CACHEABLE_ISSUES = set(_CODEX_READINESS_ISSUE_MESSAGES)
 _UBUNTU_2204_DEPENDENCY_PACKAGES = {
@@ -237,7 +237,7 @@ def codex_readiness_issue_detail(detail: object, config: object) -> str:
     if kind == "codex_subscription_inactive":
         message = f"{message}; renew or switch the Codex login to an account with Codex access"
     if kind == "codex_version_unsupported":
-        message = f"{message}; upgrade the Codex CLI installed for the worker service user"
+        message = f"{message}; upgrade openai-codex or the explicitly configured Codex executable"
     if clean_detail:
         message = f"{message}; detail: {clean_detail}"
     return message[:500]
@@ -851,8 +851,7 @@ class WorkerConfig:
             os.environ.get("PULLWISE_UNINSTALL_MARKER_FILE", f"/run/{self.service_name}/uninstall-requested").strip()
             or f"/run/{self.service_name}/uninstall-requested"
         )
-        default_codex_command = default_provider_command(self.worker_root, "codex")
-        self.codex_command = getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or default_codex_command
+        self.codex_command = (getattr(args, "codex_command", None) or os.environ.get("PULLWISE_CODEX_COMMAND") or "").strip()
         self.codex_doctor_timeout_seconds = env_int("PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS", 60, minimum=10)
         readiness_check_seconds_fallback = env_int(
             "PULLWISE_READINESS_CHECK_SECONDS",

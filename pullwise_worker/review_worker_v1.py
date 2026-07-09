@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import copy
@@ -598,7 +598,7 @@ def scoped_codex_command(config: Any) -> str:
     worker_root = Path(str(getattr(config, "worker_root", "") or service_home / "workers" / str(getattr(config, "worker_id", "worker") or "worker"))).expanduser()
     command = str(getattr(config, "codex_command", "") or "").strip()
     if not command:
-        command = str(worker_root / ".local" / "bin" / "codex")
+        return ""
     command_path = Path(command).expanduser()
     if not command_path.is_absolute():
         raise RuntimeError(f"Codex command must be an absolute path inside worker_root: {command}")
@@ -611,7 +611,6 @@ def scoped_codex_command(config: Any) -> str:
         except ValueError:
             continue
     raise RuntimeError(f"Codex command must be inside worker_root {worker_root}: {command}")
-
 
 @dataclass(frozen=True)
 class CodexSdkRuntime:
@@ -638,7 +637,7 @@ class CodexSdkClient:
         events_path: Path,
         rate_limit_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
-        self.command = command or "codex"
+        self.command = str(command or "").strip()
         self.env = env
         self.cwd = cwd
         self.events_path = events_path
@@ -654,15 +653,17 @@ class CodexSdkClient:
             return
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         runtime = load_codex_sdk_runtime()
-        config = runtime.CodexConfig(
-            codex_bin=self.command,
-            cwd=str(self.cwd),
-            env=self.env,
-            client_name="codex_repo_review_worker",
-            client_title="Codex Repo Review Worker",
-            client_version=WORKER_VERSION,
-            experimental_api=False,
-        )
+        config_kwargs = {
+            "cwd": str(self.cwd),
+            "env": self.env,
+            "client_name": "codex_repo_review_worker",
+            "client_title": "Codex Repo Review Worker",
+            "client_version": WORKER_VERSION,
+            "experimental_api": False,
+        }
+        if self.command:
+            config_kwargs["codex_bin"] = self.command
+        config = runtime.CodexConfig(**config_kwargs)
         codex = runtime.Codex(config)
         client = getattr(codex, "_client", None)
         if client is not None and hasattr(client, "_approval_handler"):

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 # Imported by main.py and re-exported from the aggregate module.
 
@@ -181,17 +181,21 @@ def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, 
     if "codex" in providers_to_check:
         home_ok, home_detail = worker_provider_home_isolation_check(config)
         checks.append(("worker_home_isolation", home_ok, home_detail))
-        codex_scope_ok, codex_scope_detail = (
-            provider_command_scope_check(config.codex_command, config, "Codex")
-            if home_ok
-            else (False, "skipped until worker home isolation passes")
-        )
-        codex_cli_ok, codex_cli_detail = (
-            command_ok([config.codex_command, "--version"], env=provider_env) if codex_scope_ok else (False, codex_scope_detail)
-        )
-        checks.append(("codex", codex_cli_ok, codex_cli_detail))
+        configured_codex_command = str(getattr(config, "codex_command", "") or "").strip()
+        if configured_codex_command:
+            codex_scope_ok, codex_scope_detail = (
+                provider_command_scope_check(configured_codex_command, config, "Codex")
+                if home_ok
+                else (False, "skipped until worker home isolation passes")
+            )
+            codex_runtime_ok, codex_runtime_detail = (
+                command_ok([configured_codex_command, "--version"], env=provider_env) if codex_scope_ok else (False, codex_scope_detail)
+            )
+        else:
+            codex_runtime_ok, codex_runtime_detail = True, "SDK pinned runtime"
+        checks.append(("codex", codex_runtime_ok, codex_runtime_detail))
         codex_ready_model = subscription_plan_codex_model(agent_configs) if agent_configs_ok else ""
-        codex_login_ok, codex_login_detail = codex_ready_check(config, codex_ready_model) if codex_cli_ok else (False, "skipped until codex CLI passes --version")
+        codex_login_ok, codex_login_detail = codex_ready_check(config, codex_ready_model) if codex_runtime_ok else (False, "skipped until Codex runtime check passes")
         if (
             not codex_login_ok
             and "deferred" in str(codex_login_detail or "").lower()
@@ -472,13 +476,15 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
     model = str(model or "").strip()
     if not model:
         return False, "subscription plan Codex model is required"
-    scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
-    if not scope_ok:
-        return False, scope_detail
+    codex_command = str(getattr(config, "codex_command", "") or "").strip()
+    if codex_command:
+        scope_ok, scope_detail = provider_command_scope_check(codex_command, config, "Codex")
+        if not scope_ok:
+            return False, scope_detail
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         provider_env = provider_process_env(config)
-        server = CodexSdkClient(config.codex_command, provider_env, tmp_path, tmp_path / "codex-events.jsonl")
+        server = CodexSdkClient(codex_command, provider_env, tmp_path, tmp_path / "codex-events.jsonl")
         try:
             server.start()
             thread_id = server.start_thread(tmp_path, model)
@@ -494,7 +500,7 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
             )
             return True, "ready"
         except FileNotFoundError:
-            return False, "codex not found"
+            return False, "Codex SDK pinned runtime not found; reinstall pullwise-worker dependencies"
         except TimeoutError:
             return False, "codex SDK ready check timed out"
         except Exception as exc:
@@ -503,7 +509,7 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
             if diagnostic:
                 return False, diagnostic
             if codex_node_runtime_error(detail):
-                return False, "Codex SDK client failed to start; reinstall the worker-scoped Codex CLI"
+                return False, "Codex SDK client failed to start; reinstall openai-codex or its pinned runtime dependency"
             lowered = detail.lower()
             if "login" in lowered or "auth" in lowered or "api key" in lowered or "not authenticated" in lowered:
                 return False, codex_readiness_issue_detail(f"not authenticated: {detail}", config) or "not logged in"
@@ -512,14 +518,16 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
             server.close()
 
 def run_codex_device_login(config: WorkerConfig) -> bool:
-    scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
-    if not scope_ok:
-        print(scope_detail)
-        return False
+    codex_command = str(getattr(config, "codex_command", "") or "").strip()
+    if codex_command:
+        scope_ok, scope_detail = provider_command_scope_check(codex_command, config, "Codex")
+        if not scope_ok:
+            print(scope_detail)
+            return False
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         provider_env = provider_process_env(config)
-        server = CodexSdkClient(config.codex_command, provider_env, tmp_path, tmp_path / "codex-login-events.jsonl")
+        server = CodexSdkClient(codex_command, provider_env, tmp_path, tmp_path / "codex-login-events.jsonl")
         try:
             server.start()
             login = server.login_chatgpt_device_code()
