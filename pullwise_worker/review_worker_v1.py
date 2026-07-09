@@ -686,7 +686,7 @@ class CodexSdkClient:
             raise RuntimeError("Codex SDK is not running")
         self._approval_workspace = repo_dir
         thread = self._codex.thread_start(
-            approval_mode=self._runtime.ApprovalMode.never,
+            approval_mode=self._runtime.ApprovalMode.deny_all,
             cwd=str(repo_dir),
             sandbox=self._runtime.Sandbox.workspace_write,
             service_name="codex_repo_review_worker",

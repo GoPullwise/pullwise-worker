@@ -340,6 +340,32 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(created_configs[0]["codex_bin"], "/opt/pullwise/codex")
 
+    def test_codex_sdk_start_thread_uses_sdk_deny_all_approval_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            captured = []
+
+            class Codex:
+                def thread_start(self, **kwargs: object) -> SimpleNamespace:
+                    captured.append(kwargs)
+                    return SimpleNamespace(id="thread_1")
+
+            runtime = SimpleNamespace(
+                ApprovalMode=SimpleNamespace(deny_all="deny_all"),
+                Sandbox=SimpleNamespace(workspace_write="workspace_write"),
+            )
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
+            server._codex = Codex()
+            server._runtime = runtime
+
+            thread_id = server.start_thread(workspace, "gpt-5.5")
+
+        self.assertEqual(thread_id, "thread_1")
+        self.assertEqual(captured[0]["approval_mode"], "deny_all")
+        self.assertEqual(captured[0]["sandbox"], "workspace_write")
+        self.assertEqual(captured[0]["cwd"], str(workspace))
+        self.assertEqual(captured[0]["model"], "gpt-5.5")
+
     def test_codex_sdk_device_code_login_is_exposed_for_worker_auth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
