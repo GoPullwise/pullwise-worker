@@ -2077,17 +2077,21 @@ class ReviewWorkerV1:
                             terminal_state = "result_submit_failed"
                             return
                         terminal_state = "completed"
+                        if any(next_phase == "cleanup_active_job" for next_phase, _ in PIPELINE_PHASES):
+                            self.start_phase(active, run_dir, "cleanup_active_job", 100)
+                            self.complete_phase(active, run_dir, "cleanup_active_job", 100, data=phase_completion_data(run_dir, "cleanup_active_job", artifact_dir))
                         self.emit_event(
                             active,
                             run_dir,
                             "run_completed",
-                            "submit_result_envelope",
+                            "cleanup_active_job",
                             status="completed",
                             progress=100,
                             current_phase_percent=100,
                             message="Run completed.",
                         )
                         upload_log_artifacts_best_effort(self.client, job_id, active.attempt_id, run_dir, artifact_dir)
+                        return
                 except JobCancelled:
                     raise
                 except JobPartialCompleted:

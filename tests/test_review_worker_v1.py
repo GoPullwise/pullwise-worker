@@ -1986,7 +1986,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(qa["status"], "pass")
 
-    def test_validation_binding_fallback_is_not_used_when_report_finding_has_id(self) -> None:
+    def test_validation_binding_fallback_accepts_unique_match_when_model_ids_differ(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
             run_dir = repo / ".codex-review" / "runs" / "run_1"
@@ -1998,16 +1998,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             qa = qa_gate_payload(repo, run_dir)
 
-        self.assertEqual(qa["status"], "fail")
-        self.assertIn("finding[0] is not backed by confirmed/plausible validation", qa["errors"])
+        self.assertEqual(qa["status"], "pass")
 
     def test_validation_binding_fallback_requires_unique_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
             run_dir = repo / ".codex-review" / "runs" / "run_1"
             write_basic_qa_inputs(repo, run_dir)
-            finding = finding_payload("", title="Ambiguous finding")
-            finding.pop("id", None)
+            finding = finding_payload("CL-NO-MATCH", title="Ambiguous finding")
             first = validation_entry("VAL-001", status="confirmed", title="Ambiguous finding")
             second = validation_entry("VAL-002", status="confirmed", title="Ambiguous finding")
             write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding]})
@@ -4523,8 +4521,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
                 repo_dir = root / "repo"
                 run_dir = repo_dir / ".codex-review" / "runs" / run_id
-                artifact_dir = root / "artifacts" / run_id
+                artifact_dir = self.isolation.artifacts / run_id
                 write_basic_qa_inputs(repo_dir, run_dir)
+                materialize_artifacts(run_dir, artifact_dir)
                 return repo_dir, run_dir, artifact_dir
 
         job = {
@@ -4553,11 +4552,22 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
             with patch(
                 "pullwise_worker.review_worker_v1.PIPELINE_PHASES",
-                (("qa_gate", 99), ("hash_artifacts", 99), ("upload_artifacts", 100), ("submit_result_envelope", 100)),
+                (("upload_artifacts", 100), ("submit_result_envelope", 100), ("cleanup_active_job", 100)),
             ):
                 worker.run_job(job)
+            progress = json.loads((root / "repo" / ".codex-review" / "runs" / "run_1" / "progress.json").read_text(encoding="utf-8"))
+            progress_events = [
+                json.loads(line)
+                for line in (root / "repo" / ".codex-review" / "runs" / "run_1" / "progress.log.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
 
         self.assertIsNotNone(client.result_payload)
+        self.assertEqual(client.result_payload["status"], "done")
+        cleanup_step = next(step for step in progress["steps"] if step["id"] == "cleanup_active_job")
+        self.assertEqual(cleanup_step["status"], "completed")
+        run_completed = [event for event in progress_events if event.get("event_type") == "run_completed"][-1]
+        run_completed_cleanup = next(step for step in run_completed["progress"]["steps"] if step["id"] == "cleanup_active_job")
+        self.assertEqual(run_completed_cleanup["status"], "completed")
 
     def test_partial_completed_qa_gate_tail_keeps_uploaded_qa_and_worker_log_manifest(self) -> None:
         class ValidatingClient:
