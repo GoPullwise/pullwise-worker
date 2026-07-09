@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -1061,7 +1061,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         class Worker(ReviewWorkerV1):
             def ensure_codex_client(self, events_path: Path | None = None) -> CodexSdkClient:
-                raise AssertionError("app server should not start after repository limit precheck fails")
+                raise AssertionError("Codex SDK client should not start after repository limit precheck fails")
 
         job = {
             "job_id": "job_1",
@@ -2701,7 +2701,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 calls.append(payload)
                 return {}
 
-        class AppServer:
+        class FakeCodexClient:
             def is_running(self) -> bool:
                 return True
 
@@ -2727,7 +2727,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 ),
                 client=Client(),
             )
-            worker.codex_client = AppServer()  # type: ignore[assignment]
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
 
             with patch("pullwise_worker.review_worker_v1.worker_machine_metrics_payload", return_value=metrics) as collect:
@@ -3151,14 +3151,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.lock.acquire = lambda: None  # type: ignore[method-assign]
             worker.lock.release = lambda: None  # type: ignore[method-assign]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
-            class AppServer:
+            class FakeCodexClient:
                 def is_running(self) -> bool:
                     return True
 
                 def close(self) -> None:
                     return None
 
-            worker.codex_client = AppServer()  # type: ignore[assignment]
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 worker.run(once=True)
@@ -3173,7 +3173,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 heartbeat_payloads.append(payload)
                 return {}
 
-        class AppServer:
+        class FakeCodexClient:
             def is_running(self) -> bool:
                 return True
 
@@ -3188,7 +3188,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root), client=Client())
-            worker.ensure_codex_client = lambda events_path=None: AppServer()  # type: ignore[method-assign, return-value]
+            worker.ensure_codex_client = lambda events_path=None: FakeCodexClient()  # type: ignore[method-assign, return-value]
             worker.codex_client = worker.ensure_codex_client()
 
             worker.heartbeat()
@@ -3213,7 +3213,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             def claim(self) -> None:
                 return None
 
-        class AppServer:
+        class FakeCodexClient:
             def is_running(self) -> bool:
                 return True
 
@@ -3225,7 +3225,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.lock.acquire = lambda: None  # type: ignore[method-assign]
             worker.lock.release = lambda: None  # type: ignore[method-assign]
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
-            worker.codex_client = AppServer()  # type: ignore[assignment]
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 with self.assertRaisesRegex(RuntimeError, "worker disabled"):
@@ -3399,7 +3399,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_codex_quota_refresh_reuses_worker_codex_client_without_closing_it(self) -> None:
         calls = []
 
-        class AppServer:
+        class FakeCodexClient:
             def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
                 calls.append((method, params or {}, timeout_seconds))
                 return {
@@ -3413,7 +3413,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             def close(self) -> None:
                 calls.append(("close", {}, 0))
 
-        server = AppServer()
+        server = FakeCodexClient()
         monitor = CodexQuotaMonitor(
             SimpleNamespace(codex_quota_check_seconds=60, codex_quota_min_remaining_percent=20),
             SimpleNamespace(),
@@ -4773,7 +4773,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (raw_dir / "security.json").write_text(json.dumps({"findings": []}), encoding="utf-8")
             calls = []
 
-            class AppServer:
+            class FakeCodexClient:
                 def run_turn(self, **kwargs: object) -> None:
                     calls.append(kwargs)
                     (raw_dir / "security.json").write_text(
@@ -4801,7 +4801,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             }
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
 
-            worker.run_reviewer_json_validation_phase(AppServer(), repo, run_dir, job)
+            worker.run_reviewer_json_validation_phase(FakeCodexClient(), repo, run_dir, job)
 
             validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
             verified = json.loads((run_dir / "verified-reviewers" / "security.json").read_text(encoding="utf-8"))
@@ -5613,7 +5613,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "run-state.json").write_text(json.dumps({"thread_id": "thread_1"}), encoding="utf-8")
             calls = []
 
-            class AppServer:
+            class FakeCodexClient:
                 def run_turn(self, **kwargs: object) -> None:
                     calls.append(kwargs)
                     return None
@@ -5639,7 +5639,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             }
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
 
-            worker.run_semantic_phase(AppServer(), repo, run_dir, job, "repo_map")
+            worker.run_semantic_phase(FakeCodexClient(), repo, run_dir, job, "repo_map")
 
             self.assertFalse(calls[0]["read_only"])
             self.assertFalse((run_dir / "repo-map.json").exists())
@@ -5669,7 +5669,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "repo-map.json").write_text(json.dumps({"schema_version": "wrong/v1"}), encoding="utf-8")
             calls = []
 
-            class AppServer:
+            class FakeCodexClient:
                 def run_turn(self, **kwargs: object) -> None:
                     calls.append(kwargs)
                     (run_dir / "repo-map.json").write_text(
@@ -5695,7 +5695,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "repo-map/v1"):
                 validate_phase_outputs(run_dir, "repo_map")
-            worker.repair_semantic_phase_outputs(AppServer(), repo, run_dir, job, "repo_map", RuntimeError("bad schema"))
+            worker.repair_semantic_phase_outputs(FakeCodexClient(), repo, run_dir, job, "repo_map", RuntimeError("bad schema"))
             validate_phase_outputs(run_dir, "repo_map")
 
         self.assertEqual(calls[0]["thread_id"], "thread_1")
@@ -5713,7 +5713,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "run-state.json").write_text(json.dumps({"thread_id": "thread_1"}), encoding="utf-8")
             calls = []
 
-            class AppServer:
+            class FakeCodexClient:
                 def run_turn(self, **kwargs: object) -> None:
                     calls.append(kwargs)
 
@@ -5735,7 +5735,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "repo-map.json"):
                 validate_phase_outputs(run_dir, "repo_map")
-            worker.repair_semantic_phase_outputs(AppServer(), repo, run_dir, job, "repo_map", RuntimeError("missing output"))
+            worker.repair_semantic_phase_outputs(FakeCodexClient(), repo, run_dir, job, "repo_map", RuntimeError("missing output"))
             validate_phase_outputs(run_dir, "repo_map")
 
         self.assertEqual(len(calls), 1)
@@ -6316,10 +6316,3 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-
-
-
