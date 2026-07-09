@@ -966,7 +966,8 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
         return 1
     package = default_worker_package()
-    default_python_bin = str(Path(config.worker_root) / ".venv" / "bin" / "python")`n    python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or default_python_bin
+    default_python_bin = str(Path(config.worker_root) / ".venv" / "bin" / "python")
+    python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or default_python_bin
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE", "").strip() or config.worker_env_file)
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", "").strip() or config.worker_env_backup_file)
     bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH", "").strip() or config.worker_bin_path)

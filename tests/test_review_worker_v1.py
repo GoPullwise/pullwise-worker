@@ -20,9 +20,11 @@ from pullwise_worker._main_part_01_bootstrap import (
     PullwiseClient,
     PullwiseResponse,
     WorkerConfig,
+    provider_tool_path,
     worker_registration_payload,
 )
 from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error, worker_readiness_state, writable_path_check
+from pullwise_worker._main_part_08_lifecycle_cleanup import worker_wrapper_script
 from pullwise_worker.review_worker_v1 import (
     DEBUG_BUNDLE_ARTIFACT_ID,
     INTENT_TEST_CLASSIFICATIONS,
@@ -362,6 +364,27 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             command = scoped_codex_command(SimpleNamespace(service_home=str(service_home)))
 
         self.assertEqual(command, "")
+
+    def test_provider_tool_path_prefers_worker_instance_venv(self) -> None:
+        config = SimpleNamespace(
+            service_home="/var/lib/pullwise-worker/wk_safe",
+            worker_root="/var/lib/pullwise-worker/wk_safe/workers/wk_1",
+            codex_home="/var/lib/pullwise-worker/wk_safe/workers/wk_1/codex-home",
+            service_path="/usr/local/bin:/usr/bin",
+        )
+
+        path_parts = provider_tool_path(config).split(os.pathsep)
+
+        self.assertEqual(path_parts[0], "/var/lib/pullwise-worker/wk_safe/workers/wk_1/.venv/bin")
+        self.assertIn("/var/lib/pullwise-worker/wk_safe/workers/wk_1/.local/bin", path_parts)
+        self.assertIn("/var/lib/pullwise-worker/wk_safe/workers/wk_1/.codex/bin", path_parts)
+
+    def test_lifecycle_wrapper_defaults_to_worker_instance_venv_python(self) -> None:
+        script = worker_wrapper_script(Path("/etc/pullwise-worker/wk_safe/worker.env"))
+
+        self.assertIn("$WORKER_ROOT/.venv/bin:$WORKER_ROOT/.local/bin", script)
+        self.assertIn("${PULLWISE_PYTHON_BIN:-$WORKER_ROOT/.venv/bin/python}", script)
+        self.assertNotIn("${PULLWISE_PYTHON_BIN:-python3.10}", script)
 
     def test_worker_config_default_codex_command_uses_sdk_pinned_runtime(self) -> None:
         service_home = "/var/lib/pullwise-worker/wk_test"

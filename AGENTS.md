@@ -36,7 +36,7 @@ worker instance's config.
   - `XDG_CONFIG_HOME=$worker_root/.config`
   - `XDG_CACHE_HOME=$worker_root/.cache`
   - `XDG_DATA_HOME=$worker_root/.local/share`
-  - `PATH` with this worker's `$worker_root/.local/bin`,
+  - `PATH` with this worker's `$worker_root/.venv/bin`, `$worker_root/.local/bin`,
     `$worker_root/.codex/bin`, `$worker_root/codex-home/bin` before the base service path
 - Do not inherit global provider credentials such as root `HOME`,
   root `CODEX_HOME`, or global API-key based readiness when checking or running
@@ -98,6 +98,7 @@ Hard invariants:
 Codex execution rules:
 
 - Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Omit `CodexConfig.codex_bin` by default so the SDK uses its pinned runtime; pass it only for an explicit worker-local `PULLWISE_CODEX_COMMAND` override, while keeping `cwd` and `env` instance-scoped.
+- Worker Python package dependencies such as `pullwise-worker`, `openai-codex`, `openai-codex-cli-bin`, and transitive runtime packages must run from the worker instance venv under `$worker_root/.venv`; do not rely on global/system Python packages or console scripts for worker execution.
 - The Python SDK owns Codex runtime/app-server lifecycle for worker automation. Do not reintroduce worker-managed app-server process lifetime knobs such as `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` or `PULLWISE_CODEX_APP_SERVER_MAX_TURNS`.
 - Use one instance-scoped Codex App Server per worker through the SDK runtime; prefer stdio transport or
   a worker-unique Unix socket.
