@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import sys
@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
             "finalize-uninstall",
             "watch",
             "cleanup",
+                    "codex-login",
         ],
     )
     parser.add_argument("--server-url")
@@ -82,7 +83,7 @@ def main() -> None:
         config = _config(
             args,
             require_worker_token=require_worker_token,
-            validate_server_url=args.command not in {"update", "cleanup"},
+            validate_server_url=args.command not in {"update", "cleanup", "codex-login"},
         )
 
         if args.command == "doctor":
@@ -90,7 +91,12 @@ def main() -> None:
 
             raise SystemExit(0 if run_doctor(config) else 1)
 
-        if args.command == "update":
+        
+        if args.command == "codex-login":
+            from ._main_part_07_readiness_doctor import run_codex_device_login
+
+            raise SystemExit(0 if run_codex_device_login(config) else 1)
+if args.command == "update":
             from ._main_part_08_lifecycle_cleanup import update_worker
 
             raise SystemExit(update_worker(config, dry_run=args.dry_run))

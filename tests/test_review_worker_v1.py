@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import hashlib
@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from io import BytesIO
@@ -211,22 +212,29 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(repo_step["percent"], 40)
         self.assertEqual(events[0]["progress"]["steps"], event["progress"]["steps"])
 
-    def test_codex_turn_interrupts_when_cancel_requested(self) -> None:
+    def test_codex_sdk_turn_interrupts_when_cancel_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
             calls = []
 
-            class AppServer(JsonRpcAppServer):
-                def __init__(self) -> None:
-                    super().__init__("codex", {}, workspace, workspace / "events.jsonl")
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    calls.append(("turn_start", thread_id, input_items, params or {}))
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn_1"))
 
-                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
-                    calls.append((method, params or {}))
-                    if method == "turn/start":
-                        return {"turnId": "turn_1"}
-                    return {}
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    time.sleep(5)
+                    return SimpleNamespace(method="turn/completed", payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)))
 
-            server = AppServer()
+                def unregister_turn_notifications(self, turn_id: str) -> None:
+                    calls.append(("unregister_turn_notifications", turn_id))
+
+                def turn_interrupt(self, thread_id: str, turn_id: str) -> None:
+                    calls.append(("turn_interrupt", thread_id, turn_id))
+
+            server = JsonRpcAppServer("codex", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._threads["thread_1"] = SimpleNamespace(id="thread_1")
 
             with self.assertRaises(JobCancelled):
                 server.run_turn(
@@ -239,121 +247,83 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     cancel_requested=lambda: True,
                 )
 
-        self.assertIn(("turn/interrupt", {"threadId": "thread_1", "turnId": "turn_1"}), calls)
+        self.assertIn(("turn_interrupt", "thread_1", "turn_1"), calls)
 
-    def test_codex_app_server_uses_current_sandbox_values(self) -> None:
+    def test_codex_sdk_turn_uses_restricted_workspace_write_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
-            requests = []
+            requests: list[dict] = []
 
-            class AppServer(JsonRpcAppServer):
-                def __init__(self) -> None:
-                    super().__init__("codex", {}, workspace, workspace / "events.jsonl")
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    requests.append(params or {})
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn_1"))
 
-                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
-                    requests.append((method, params or {}))
-                    if method == "thread/start":
-                        return {"threadId": "thread_1"}
-                    if method == "turn/start":
-                        return {"turnId": ""}
-                    return {}
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    return SimpleNamespace(method="turn/completed", payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)))
 
-            server = AppServer()
-            thread_id = server.start_thread(workspace, "gpt-5.5")
-            server.run_turn(
-                thread_id=thread_id,
-                repo_dir=workspace,
-                prompt="review",
-                effort="medium",
-                read_only=True,
-                timeout_seconds=2,
-            )
-            server.run_turn(
-                thread_id=thread_id,
-                repo_dir=workspace,
-                prompt="review",
-                effort="medium",
-                read_only=False,
-                timeout_seconds=2,
-            )
+                def unregister_turn_notifications(self, turn_id: str) -> None:
+                    return
 
-        thread_start = requests[0][1]
-        read_only_turn = requests[1][1]
-        write_turn = requests[2][1]
-        self.assertEqual(thread_start["sandbox"], "workspace-write")
-        self.assertNotIn("personality", thread_start)
-        self.assertEqual(read_only_turn["sandboxPolicy"], {"type": "readOnly", "networkAccess": False})
-        self.assertEqual(write_turn["sandboxPolicy"]["type"], "workspaceWrite")
-        self.assertNotIn('read-only', json.dumps(requests))
-        self.assertNotIn('danger-full-access', json.dumps(requests))
-        self.assertNotIn("precise", json.dumps(requests))
+            server = JsonRpcAppServer("codex", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._threads["thread_1"] = SimpleNamespace(id="thread_1")
+            server.run_turn(thread_id="thread_1", repo_dir=workspace, prompt="review", effort="medium", read_only=True, timeout_seconds=2)
+            server.run_turn(thread_id="thread_1", repo_dir=workspace, prompt="review", effort="medium", read_only=False, timeout_seconds=2)
 
-    def test_codex_app_server_caches_supported_thread_sandbox_mode_after_variant_error(self) -> None:
+        self.assertEqual(requests[0]["sandboxPolicy"], {"type": "readOnly", "networkAccess": False})
+        self.assertEqual(requests[1]["sandboxPolicy"]["type"], "workspaceWrite")
+        self.assertEqual(requests[1]["sandboxPolicy"]["networkAccess"], False)
+        self.assertEqual(
+            requests[1]["sandboxPolicy"]["writableRoots"],
+            [str(workspace / ".codex-review"), str(workspace.parent / "validation-repo")],
+        )
+        self.assertNotIn("danger", json.dumps(requests).lower())
+
+    def test_codex_sdk_start_uses_worker_scoped_codex_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
-            requests = []
+            created_configs = []
+            created_codex = []
 
-            class AppServer(JsonRpcAppServer):
-                def __init__(self) -> None:
-                    super().__init__("codex", {}, workspace, workspace / "events.jsonl")
+            class Config:
+                def __init__(self, **kwargs: object) -> None:
+                    self.kwargs = kwargs
+                    created_configs.append(kwargs)
 
-                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
-                    payload = params or {}
-                    requests.append((method, payload))
-                    if method == "thread/start" and payload.get("sandbox") == "workspace-write":
-                        raise RuntimeError("Invalid request: unknown variant `workspace-write`, expected one of `workspaceWrite`")
-                    if method == "thread/start":
-                        return {"threadId": "thread_1"}
-                    return {}
+            class Codex:
+                def __init__(self, config: Config) -> None:
+                    self.config = config
+                    self._client = SimpleNamespace(_approval_handler=None)
+                    created_codex.append(self)
 
-            server = AppServer()
-            first_thread_id = server.start_thread(workspace, "gpt-5.5")
-            second_thread_id = server.start_thread(workspace, "gpt-5.5")
+                def close(self) -> None:
+                    return
 
-        thread_sandboxes = [payload["sandbox"] for method, payload in requests if method == "thread/start"]
-        self.assertEqual(first_thread_id, "thread_1")
-        self.assertEqual(second_thread_id, "thread_1")
-        self.assertEqual(thread_sandboxes, ["workspace-write", "workspaceWrite", "workspaceWrite"])
+            runtime = SimpleNamespace(Codex=Codex, CodexConfig=Config)
+            with patch("pullwise_worker.review_worker_v1.load_codex_sdk_runtime", return_value=runtime):
+                server = JsonRpcAppServer("/opt/pullwise/codex", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
+                server.start()
 
-    def test_codex_app_server_caches_supported_turn_sandbox_policy_after_variant_error(self) -> None:
+        self.assertEqual(created_configs[0]["codex_bin"], "/opt/pullwise/codex")
+        self.assertEqual(created_configs[0]["cwd"], str(workspace))
+        self.assertEqual(created_configs[0]["env"]["CODEX_HOME"], str(workspace / "codex-home"))
+        self.assertEqual(created_configs[0]["client_name"], "codex_repo_review_worker")
+        self.assertEqual(created_configs[0]["client_title"], "Codex Repo Review Worker")
+        self.assertEqual(created_configs[0]["client_version"], __version__)
+        self.assertFalse(created_configs[0]["experimental_api"])
+        self.assertIsNotNone(created_codex[0]._client._approval_handler)
+
+    def test_codex_sdk_device_code_login_is_exposed_for_worker_auth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
-            requests = []
+            handle = SimpleNamespace(verification_url="https://example.test/device", user_code="ABCD-EFGH")
+            server = JsonRpcAppServer("codex", {}, workspace, workspace / "events.jsonl")
+            server._codex = SimpleNamespace(login_chatgpt_device_code=lambda: handle)
 
-            class AppServer(JsonRpcAppServer):
-                def __init__(self) -> None:
-                    super().__init__("codex", {}, workspace, workspace / "events.jsonl")
+            result = server.login_chatgpt_device_code()
 
-                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
-                    payload = params or {}
-                    requests.append((method, payload))
-                    if method == "turn/start" and payload.get("sandboxPolicy", {}).get("type") == "readOnly":
-                        raise RuntimeError("Invalid request: unknown variant `readOnly`, expected one of `read-only`")
-                    if method == "turn/start":
-                        return {"turnId": ""}
-                    return {}
-
-            server = AppServer()
-            server.run_turn(
-                thread_id="thread_1",
-                repo_dir=workspace,
-                prompt="review",
-                effort="medium",
-                read_only=True,
-                timeout_seconds=2,
-            )
-            server.run_turn(
-                thread_id="thread_1",
-                repo_dir=workspace,
-                prompt="review",
-                effort="medium",
-                read_only=True,
-                timeout_seconds=2,
-            )
-
-        policy_types = [payload["sandboxPolicy"]["type"] for method, payload in requests if method == "turn/start"]
-        self.assertEqual(policy_types, ["readOnly", "read-only", "read-only"])
-
+        self.assertIs(result, handle)
     def test_writable_path_check_uses_available_no_follow_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "logs"
@@ -361,45 +331,6 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             ok, detail = writable_path_check(path)
 
         self.assertTrue(ok, detail)
-
-    def test_codex_app_server_start_uses_stdio_and_initialize_contract(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
-            calls = []
-            launched = []
-
-            class Process:
-                stdin = None
-                stdout = None
-                stderr = None
-
-            class AppServer(JsonRpcAppServer):
-                def request(self, method: str, params: dict | None = None, timeout_seconds: int = 30) -> dict:
-                    calls.append(("request", method, params or {}, timeout_seconds))
-                    return {}
-
-                def notify(self, method: str, params: dict | None = None) -> None:
-                    calls.append(("notify", method, params or {}, 0))
-
-                def _reader(self) -> None:
-                    return
-
-            def popen(args: list[str], **kwargs: object) -> Process:
-                launched.append((args, kwargs))
-                return Process()
-
-            with patch("pullwise_worker.review_worker_v1.subprocess.Popen", popen):
-                server = AppServer("/opt/pullwise/codex", {"CODEX_HOME": str(workspace / "codex-home")}, workspace, workspace / "events.jsonl")
-                server.start()
-
-        self.assertEqual(launched[0][0], ["/opt/pullwise/codex", "app-server", "--listen", "stdio://"])
-        self.assertEqual(launched[0][1]["cwd"], str(workspace))
-        initialize = calls[0]
-        self.assertEqual(initialize[1], "initialize")
-        self.assertEqual(initialize[2]["clientInfo"]["name"], "codex_repo_review_worker")
-        self.assertEqual(initialize[2]["clientInfo"]["version"], __version__)
-        self.assertEqual(initialize[2]["capabilities"], {"experimentalApi": False})
-        self.assertEqual(calls[1], ("notify", "initialized", {}, 0))
 
     def test_scoped_codex_command_defaults_inside_service_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -6385,3 +6316,6 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

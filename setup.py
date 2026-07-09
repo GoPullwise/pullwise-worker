@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from pathlib import Path
@@ -20,6 +20,9 @@ setup(
     description="Pullwise pull-based scan worker",
     python_requires=">=3.10",
     packages=find_packages(include=["pullwise_worker"]),
+    install_requires=["openai-codex"],
     entry_points={"console_scripts": ["pullwise-worker=pullwise_worker.main:main"]},
     include_package_data=True,
 )
+
+

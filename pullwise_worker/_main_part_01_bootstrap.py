@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 # Loaded by main.py; definitions are executed in that module's globals.
 
@@ -571,7 +571,7 @@ def provider_process_env(config: WorkerConfig) -> dict[str, str]:
 
 
 def codex_login_command(config: WorkerConfig) -> str:
-    return service_user_command(config, [config.codex_command, "login", "--device-auth"])
+    return service_user_command(config, ["pullwise-worker", "codex-login"])
 
 
 def default_provider_command(service_home: str, provider: str) -> str:
@@ -1341,3 +1341,4 @@ def main() -> None:
     worker.run(once=args.once)
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
+

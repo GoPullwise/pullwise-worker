@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import copy
@@ -613,6 +613,22 @@ def scoped_codex_command(config: Any) -> str:
     raise RuntimeError(f"Codex command must be inside worker_root {worker_root}: {command}")
 
 
+@dataclass(frozen=True)
+class CodexSdkRuntime:
+    Codex: Any
+    CodexConfig: Any
+    ApprovalMode: Any
+    Sandbox: Any
+
+
+def load_codex_sdk_runtime() -> CodexSdkRuntime:
+    try:
+        from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox
+    except ImportError as exc:  # pragma: no cover - exercised on hosts missing the runtime dependency.
+        raise RuntimeError("openai-codex Python SDK is required; install the pullwise-worker package dependencies") from exc
+    return CodexSdkRuntime(Codex=Codex, CodexConfig=CodexConfig, ApprovalMode=ApprovalMode, Sandbox=Sandbox)
+
+
 class JsonRpcAppServer:
     def __init__(
         self,
@@ -626,85 +642,59 @@ class JsonRpcAppServer:
         self.env = env
         self.cwd = cwd
         self.events_path = events_path
-        self.process: subprocess.Popen[str] | None = None
-        self._next_id = 1
-        self._pending: dict[int, dict[str, Any]] = {}
-        self._turns: dict[str, threading.Event] = {}
-        self._turn_errors: dict[str, str] = {}
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._send_lock = threading.Lock()
         self.rate_limit_callback = rate_limit_callback
-        self.thread_sandbox_mode = "workspace-write"
-        self.read_only_sandbox_policy_type = "readOnly"
-        self.workspace_write_sandbox_policy_type = "workspaceWrite"
+        self._runtime: CodexSdkRuntime | None = None
+        self._codex: Any | None = None
+        self._client: Any | None = None
+        self._threads: dict[str, Any] = {}
+        self._approval_workspace = cwd
 
     def start(self) -> None:
         if self.is_running():
             return
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        self.process = subprocess.Popen(
-            [self.command, "app-server", "--listen", "stdio://"],
+        runtime = load_codex_sdk_runtime()
+        config = runtime.CodexConfig(
+            codex_bin=self.command,
             cwd=str(self.cwd),
             env=self.env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
+            client_name="codex_repo_review_worker",
+            client_title="Codex Repo Review Worker",
+            client_version=WORKER_VERSION,
+            experimental_api=False,
         )
-        self._thread = threading.Thread(target=self._reader, daemon=True)
-        self._thread.start()
-        self.request(
-            "initialize",
-            {
-                "clientInfo": {
-                    "name": "codex_repo_review_worker",
-                    "title": "Codex Repo Review Worker",
-                    "version": WORKER_VERSION,
-                },
-                "capabilities": {"experimentalApi": False},
-            },
-        )
-        self.notify("initialized", {})
+        codex = runtime.Codex(config)
+        client = getattr(codex, "_client", None)
+        if client is not None and hasattr(client, "_approval_handler"):
+            client._approval_handler = self._approval_handler
+        self._runtime = runtime
+        self._codex = codex
+        self._client = client
 
     def is_running(self) -> bool:
-        return self.process is not None and self.process.poll() is None
+        return self._codex is not None
 
     def set_events_path(self, events_path: Path) -> None:
         self.events_path = events_path
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
 
     def start_thread(self, repo_dir: Path, model: str) -> str:
-        last_error: RuntimeError | None = None
-        for sandbox_mode in self._thread_sandbox_mode_candidates():
-            try:
-                result = self.request(
-                    "thread/start",
-                    {
-                        "cwd": str(repo_dir),
-                        "approvalPolicy": "never",
-                        "sandbox": sandbox_mode,
-                        "serviceName": "codex_repo_review_worker",
-                        "model": model or None,
-                    },
-                )
-            except RuntimeError as exc:
-                if not codex_enum_variant_error(exc):
-                    raise
-                last_error = exc
-                continue
-            self.thread_sandbox_mode = sandbox_mode
-            return str(((result.get("thread") or {}).get("id")) or result.get("threadId") or "")
-        if last_error is not None:
-            raise last_error
-        return ""
-
-    def _thread_sandbox_mode_candidates(self) -> tuple[str, ...]:
-        preferred = self.thread_sandbox_mode or "workspace-write"
-        fallback = "workspaceWrite" if preferred == "workspace-write" else "workspace-write"
-        return (preferred, fallback)
+        if self._codex is None:
+            self.start()
+        if self._codex is None or self._runtime is None:
+            raise RuntimeError("Codex SDK is not running")
+        self._approval_workspace = repo_dir
+        thread = self._codex.thread_start(
+            approval_mode=self._runtime.ApprovalMode.never,
+            cwd=str(repo_dir),
+            sandbox=self._runtime.Sandbox.workspace_write,
+            service_name="codex_repo_review_worker",
+            model=model or None,
+        )
+        thread_id = str(getattr(thread, "id", "") or "")
+        if thread_id:
+            self._threads[thread_id] = thread
+        return thread_id
 
     def run_turn(
         self,
@@ -717,175 +707,180 @@ class JsonRpcAppServer:
         timeout_seconds: int,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
-        last_error: RuntimeError | None = None
-        result: dict[str, Any] = {}
-        for sandbox in self._sandbox_policy_candidates(repo_dir, read_only=read_only):
-            try:
-                result = self.request(
-                    "turn/start",
-                    {
-                        "threadId": thread_id,
-                        "input": [{"type": "text", "text": prompt}],
-                        "cwd": str(repo_dir),
-                        "approvalPolicy": "never",
-                        "sandboxPolicy": sandbox,
-                        "effort": effort,
-                        "summary": "concise",
-                    },
-                )
-            except RuntimeError as exc:
-                if not codex_enum_variant_error(exc):
-                    raise
-                last_error = exc
-                continue
-            self._remember_sandbox_policy_type(sandbox)
-            break
-        else:
-            if last_error is not None:
-                raise last_error
-        turn_id = str(((result.get("turn") or {}).get("id")) or result.get("turnId") or "")
+        client = self._sdk_client()
+        self._approval_workspace = repo_dir
+        params = {
+            "cwd": str(repo_dir),
+            "approvalPolicy": "never",
+            "sandboxPolicy": self._sandbox_policy(repo_dir, read_only=read_only),
+            "effort": effort,
+            "summary": "concise",
+        }
+        started = client.turn_start(thread_id, [{"type": "text", "text": prompt}], params=params)
+        turn = getattr(started, "turn", None)
+        turn_id = str(getattr(turn, "id", "") or getattr(started, "turn_id", "") or "")
         if not turn_id:
             return
-        event = threading.Event()
-        with self._lock:
-            self._turns[turn_id] = event
+
+        completed = threading.Event()
+        error: dict[str, str] = {}
+
+        def consume_turn() -> None:
+            try:
+                while True:
+                    notification = client.next_turn_notification(turn_id)
+                    self._record_sdk_notification(notification)
+                    method = str(getattr(notification, "method", "") or "")
+                    payload = getattr(notification, "payload", None)
+                    if method == "account/rateLimits/updated" and self.rate_limit_callback is not None:
+                        params = self._model_to_dict(payload)
+                        self.rate_limit_callback(params)
+                    if method != "turn/completed":
+                        continue
+                    completed_turn = getattr(payload, "turn", None)
+                    completed_turn_id = str(getattr(completed_turn, "id", "") or getattr(payload, "turn_id", "") or "")
+                    if completed_turn_id and completed_turn_id != turn_id:
+                        continue
+                    turn_error = getattr(completed_turn, "error", None) or getattr(completed_turn, "last_error", None)
+                    if turn_error:
+                        error["message"] = self._json_text(turn_error)
+                    break
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the worker phase as a Codex turn failure.
+                error["message"] = str(exc)
+            finally:
+                try:
+                    client.unregister_turn_notifications(turn_id)
+                except Exception:
+                    pass
+                completed.set()
+
+        consumer = threading.Thread(target=consume_turn, daemon=True)
+        consumer.start()
         deadline = time.monotonic() + max(1, int(timeout_seconds))
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self.interrupt(thread_id, turn_id)
                 raise TimeoutError(f"codex turn timed out: {turn_id}")
-            if event.wait(min(0.5, remaining)):
+            if completed.wait(min(0.5, remaining)):
                 break
             if cancel_requested is not None and cancel_requested():
                 self.interrupt(thread_id, turn_id)
                 raise JobCancelled("cancel requested")
-        error = self._turn_errors.get(turn_id)
-        if error:
-            raise RuntimeError(error)
+        if error.get("message"):
+            raise RuntimeError(error["message"])
 
-    def _sandbox_policy_candidates(self, repo_dir: Path, *, read_only: bool) -> tuple[dict[str, Any], ...]:
-        preferred = self.read_only_sandbox_policy_type if read_only else self.workspace_write_sandbox_policy_type
+    def _sandbox_policy(self, repo_dir: Path, *, read_only: bool) -> dict[str, Any]:
         if read_only:
-            fallback = "read-only" if preferred == "readOnly" else "readOnly"
-        else:
-            fallback = "workspace-write" if preferred == "workspaceWrite" else "workspaceWrite"
-        return (
-            self._sandbox_policy(repo_dir, read_only=read_only, policy_type=preferred),
-            self._sandbox_policy(repo_dir, read_only=read_only, policy_type=fallback),
-        )
-
-    def _sandbox_policy(self, repo_dir: Path, *, read_only: bool, policy_type: str) -> dict[str, Any]:
-        if read_only:
-            return {"type": policy_type, "networkAccess": False}
-        writable_roots = [str(repo_dir / ".codex-review")]
+            return {"type": "readOnly", "networkAccess": False}
         validation_repo = repo_dir.parent / "validation-repo"
-        writable_roots.append(str(validation_repo))
         return {
-            "type": policy_type,
+            "type": "workspaceWrite",
             "networkAccess": False,
-            "writableRoots": writable_roots,
+            "writableRoots": [str(repo_dir / ".codex-review"), str(validation_repo)],
         }
-
-    def _remember_sandbox_policy_type(self, sandbox: dict[str, Any]) -> None:
-        policy_type = str(sandbox.get("type") or "")
-        if policy_type in {"readOnly", "read-only"}:
-            self.read_only_sandbox_policy_type = policy_type
-        elif policy_type in {"workspaceWrite", "workspace-write"}:
-            self.workspace_write_sandbox_policy_type = policy_type
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
         try:
-            self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id}, timeout_seconds=5)
+            self._sdk_client().turn_interrupt(thread_id, turn_id)
         except Exception:
             pass
 
     def request(self, method: str, params: dict[str, Any] | None = None, timeout_seconds: int = 30) -> dict[str, Any]:
-        request_id = self._next_request_id()
-        event = threading.Event()
-        with self._lock:
-            self._pending[request_id] = {"event": event, "response": None}
-        self._send({"method": method, "id": request_id, "params": params or {}})
-        if not event.wait(timeout_seconds):
-            raise TimeoutError(f"codex app-server request timed out: {method}")
-        response = self._pending.pop(request_id, {}).get("response") or {}
-        if isinstance(response.get("error"), dict):
-            raise RuntimeError(str(response["error"].get("message") or response["error"]))
-        result = response.get("result")
-        return result if isinstance(result, dict) else {}
+        del timeout_seconds
+        client = self._sdk_client()
+        if hasattr(client, "_request_raw"):
+            result = client._request_raw(method, params or {})
+            return result if isinstance(result, dict) else {}
+        raise RuntimeError(f"Codex SDK client does not expose raw request support: {method}")
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        self._send({"method": method, "params": params or {}})
+        client = self._sdk_client()
+        if hasattr(client, "notify"):
+            client.notify(method, params or {})
+
+    def login_chatgpt(self) -> Any:
+        if self._codex is None:
+            self.start()
+        if self._codex is None:
+            raise RuntimeError("Codex SDK is not running")
+        return self._codex.login_chatgpt()
+
+    def login_chatgpt_device_code(self) -> Any:
+        if self._codex is None:
+            self.start()
+        if self._codex is None:
+            raise RuntimeError("Codex SDK is not running")
+        return self._codex.login_chatgpt_device_code()
+
+    def login_api_key(self, api_key: str) -> None:
+        if self._codex is None:
+            self.start()
+        if self._codex is None:
+            raise RuntimeError("Codex SDK is not running")
+        self._codex.login_api_key(api_key)
+
+    def account(self, *, refresh_token: bool = False) -> Any:
+        if self._codex is None:
+            self.start()
+        if self._codex is None:
+            raise RuntimeError("Codex SDK is not running")
+        return self._codex.account(refresh_token=refresh_token)
 
     def close(self) -> None:
-        process = self.process
-        self.process = None
-        if process is None:
-            return
-        try:
-            if process.stdin:
-                process.stdin.close()
-        except OSError:
-            pass
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
+        codex = self._codex
+        self._codex = None
+        self._client = None
+        self._threads.clear()
+        if codex is not None:
+            codex.close()
 
-    def _reader(self) -> None:
-        assert self.process is not None and self.process.stdout is not None
-        for line in self.process.stdout:
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            append_jsonl(self.events_path, message)
-            if "id" in message and ("result" in message or "error" in message):
-                request_id = int(message["id"])
-                with self._lock:
-                    pending = self._pending.get(request_id)
-                if pending is not None:
-                    pending["response"] = message
-                    pending["event"].set()
-                continue
-            if message.get("method") == "turn/completed":
-                params = message.get("params") if isinstance(message.get("params"), dict) else {}
-                turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-                turn_id = str(turn.get("id") or params.get("turnId") or "")
-                error = turn.get("error") or turn.get("lastError")
-                if turn_id:
-                    if error:
-                        self._turn_errors[turn_id] = json.dumps(error, ensure_ascii=False) if isinstance(error, (dict, list)) else str(error)
-                    with self._lock:
-                        event = self._turns.get(turn_id)
-                    if event is not None:
-                        event.set()
-            elif message.get("method") == "account/rateLimits/updated":
-                params = message.get("params") if isinstance(message.get("params"), dict) else {}
-                if self.rate_limit_callback is not None:
-                    self.rate_limit_callback(params)
-            elif "id" in message and "method" in message:
-                method = str(message.get("method") or "")
-                if method in CODEX_APPROVAL_RESPONSE_METHODS:
-                    self._send({"id": message.get("id"), "result": approval_response_for_request(message, self.cwd)})
-                else:
-                    self._send({"id": message.get("id"), "error": {"code": -32601, "message": "unsupported server request"}})
+    def _sdk_client(self) -> Any:
+        if self._client is None:
+            if self._codex is None:
+                self.start()
+            self._client = getattr(self._codex, "_client", None) if self._codex is not None else None
+        if self._client is None:
+            raise RuntimeError("Codex SDK client is not running")
+        return self._client
 
-    def _next_request_id(self) -> int:
-        with self._lock:
-            request_id = self._next_id
-            self._next_id += 1
-            return request_id
+    def _approval_handler(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        return approval_response_for_request({"method": method, "params": params or {}}, self._approval_workspace)
 
-    def _send(self, message: dict[str, Any]) -> None:
-        if self.process is None or self.process.stdin is None:
-            raise RuntimeError("codex app-server is not running")
-        with self._send_lock:
-            self.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-            self.process.stdin.flush()
+    def _record_sdk_notification(self, notification: Any) -> None:
+        method = str(getattr(notification, "method", "") or "")
+        payload = self._model_to_dict(getattr(notification, "payload", None))
+        append_jsonl(self.events_path, {"method": method, "params": payload})
 
+    def _model_to_dict(self, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "model_dump"):
+            dumped = value.model_dump(by_alias=True, exclude_none=True, mode="json")
+            return dumped if isinstance(dumped, dict) else {}
+        if hasattr(value, "__dict__"):
+            return {key: self._jsonable(item) for key, item in vars(value).items() if not key.startswith("_")}
+        return {}
+
+    def _jsonable(self, value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {str(key): self._jsonable(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._jsonable(item) for item in value]
+        if hasattr(value, "model_dump"):
+            return value.model_dump(by_alias=True, exclude_none=True, mode="json")
+        if hasattr(value, "__dict__"):
+            return {key: self._jsonable(item) for key, item in vars(value).items() if not key.startswith("_")}
+        return str(value)
+
+    def _json_text(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(self._jsonable(value), ensure_ascii=False, sort_keys=True)
 
 def codex_enum_variant_error(error: object) -> bool:
     message = str(error or "").lower()
@@ -7626,3 +7621,4 @@ def upload_artifacts(
             write_json(source_run_dir / "artifact-manifest.json", manifest_payload)
         if uploaded_manifest_items:
             write_uploaded_artifact_manifest(artifact_dir, manifest_payload, uploaded_manifest_items, source_run_dir=source_run_dir)
+

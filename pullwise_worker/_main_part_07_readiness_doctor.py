@@ -510,5 +510,36 @@ def codex_ready_check(config: WorkerConfig, model: str) -> tuple[bool, str]:
             return False, detail or "codex app-server ready check failed"
         finally:
             server.close()
+
+def run_codex_device_login(config: WorkerConfig) -> bool:
+    scope_ok, scope_detail = provider_command_scope_check(config.codex_command, config, "Codex")
+    if not scope_ok:
+        print(scope_detail)
+        return False
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        provider_env = provider_process_env(config)
+        server = JsonRpcAppServer(config.codex_command, provider_env, tmp_path, tmp_path / "codex-login-events.jsonl")
+        try:
+            server.start()
+            login = server.login_chatgpt_device_code()
+            verification_url = str(getattr(login, "verification_url", "") or "")
+            user_code = str(getattr(login, "user_code", "") or "")
+            if verification_url:
+                print(f"Open: {verification_url}")
+            if user_code:
+                print(f"Code: {user_code}")
+            completed = login.wait()
+            success = bool(getattr(completed, "success", False))
+            if success:
+                print("Codex device authorization completed.")
+                return True
+            error = str(getattr(completed, "error", "") or "device authorization failed")
+            print(redact_secrets(error, config))
+            return False
+        finally:
+            server.close()
+
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
+
 
