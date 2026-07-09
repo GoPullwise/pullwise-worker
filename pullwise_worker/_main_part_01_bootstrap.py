@@ -509,6 +509,7 @@ def provider_tool_path(config: WorkerConfig | None) -> str:
     codex_home = provider_codex_home_path(config)
     service_path = safe_service_path(getattr(config, "service_path", None))
     path_parts = [
+        f"{worker_root}/.venv/bin",
         f"{worker_root}/.local/bin",
         f"{worker_root}/.codex/bin",
         f"{codex_home}/bin",

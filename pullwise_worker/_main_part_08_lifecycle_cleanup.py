@@ -758,8 +758,8 @@ export XDG_CONFIG_HOME="$WORKER_ROOT/.config"
 export XDG_CACHE_HOME="$WORKER_ROOT/.cache"
 export XDG_DATA_HOME="$WORKER_ROOT/.local/share"
 SERVICE_PATH="${{PULLWISE_SERVICE_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}}"
-export PATH="$WORKER_ROOT/.local/bin:$WORKER_ROOT/.codex/bin:$CODEX_HOME/bin:$SERVICE_PATH"
-PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-python3.10}}"
+export PATH="$WORKER_ROOT/.venv/bin:$WORKER_ROOT/.local/bin:$WORKER_ROOT/.codex/bin:$CODEX_HOME/bin:$SERVICE_PATH"
+PYTHON_BIN="${{PULLWISE_PYTHON_BIN:-$WORKER_ROOT/.venv/bin/python}}"
 exec "$PYTHON_BIN" -m pullwise_worker.main "$@"
 """
 
@@ -966,7 +966,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         print(f"dependency install failed: {dependency_detail}", file=sys.stderr)
         return 1
     package = default_worker_package()
-    python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or "python3.10"
+    default_python_bin = str(Path(config.worker_root) / ".venv" / "bin" / "python")`n    python_bin = os.environ.get("PULLWISE_PYTHON_BIN", "").strip() or default_python_bin
     env_path = Path(os.environ.get("PULLWISE_WORKER_ENV_FILE", "").strip() or config.worker_env_file)
     backup_path = Path(os.environ.get("PULLWISE_WORKER_ENV_BACKUP_FILE", "").strip() or config.worker_env_backup_file)
     bin_path = Path(os.environ.get("PULLWISE_WORKER_BIN_PATH", "").strip() or config.worker_bin_path)
