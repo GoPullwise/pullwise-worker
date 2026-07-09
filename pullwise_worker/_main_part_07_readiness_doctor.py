@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 # Imported by main.py and re-exported from the aggregate module.
 

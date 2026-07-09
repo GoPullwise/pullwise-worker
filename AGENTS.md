@@ -97,7 +97,8 @@ Hard invariants:
 
 Codex execution rules:
 
-- Use one instance-scoped Codex App Server per worker; prefer stdio transport or
+- Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Keep `CodexConfig.codex_bin`, `cwd`, and `env` instance-scoped to the worker-owned Codex runtime.
+- Use one instance-scoped Codex App Server per worker through the SDK runtime; prefer stdio transport or
   a worker-unique Unix socket.
 - Do not use `codex exec` for review phases and do not launch one Codex CLI
   process per reviewer/subtask.
@@ -479,3 +480,4 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Server-side evidence should include only scoped records for the same scan/job/run: scan/job/attempt/run identifiers, phase/progress/error snapshots, review-run events, artifact metadata/storage references, quota state, and relevant timestamps. It must not include full database dumps, secrets, other users' data, or unrelated scans.
 - The UI must disable or omit debug bundle actions when no real debug_bundle artifact/server debug bundle endpoint exists. Do not substitute /scans/{scanId}/audit-bundle.zip as a debug zip URL.
 - Tests should protect this contract: missing debugBundleUrl must not produce an audit-bundle URL, and server/worker tests must verify failed runs still expose a real debug_bundle artifact or explicit absence.
+

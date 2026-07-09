@@ -134,8 +134,9 @@ cleanup, which is less reliable when the worker is already stopped or degraded.
 `PULLWISE_WORKER_TOKEN` is configured, then removes the local service. A stopped
 worker stays in the registry; an uninstalled worker is removed from admin lists.
 
-Codex must be authenticated for the service user before Codex scans can run:
+Codex must be authenticated for the service user before Codex scans can run. The worker uses the OpenAI Codex Python SDK and exposes a device-code login helper:
 
 ```bash
-sudo -u pullwise-worker-wk_x env HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x USERPROFILE=/var/lib/pullwise-worker/wk_x/workers/wk_x CODEX_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/codex-home CODEX_SQLITE_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/codex-sqlite XDG_CONFIG_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/.config XDG_CACHE_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/.cache XDG_DATA_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/.local/share PATH=/var/lib/pullwise-worker/wk_x/workers/wk_x/.local/bin:/var/lib/pullwise-worker/wk_x/workers/wk_x/.codex/bin:/var/lib/pullwise-worker/wk_x/workers/wk_x/codex-home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -lc 'cd "$HOME" && exec /var/lib/pullwise-worker/wk_x/workers/wk_x/.local/bin/codex login --device-auth'
+sudo -u pullwise-worker-wk_x env HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x USERPROFILE=/var/lib/pullwise-worker/wk_x/workers/wk_x CODEX_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/codex-home CODEX_SQLITE_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/codex-sqlite XDG_CONFIG_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/.config XDG_CACHE_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/.cache XDG_DATA_HOME=/var/lib/pullwise-worker/wk_x/workers/wk_x/.local/share PATH=/var/lib/pullwise-worker/wk_x/workers/wk_x/.local/bin:/var/lib/pullwise-worker/wk_x/workers/wk_x/.codex/bin:/var/lib/pullwise-worker/wk_x/workers/wk_x/codex-home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -lc 'cd "$HOME" && exec pullwise-worker codex-login'
 ```
+

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 # Loaded by main.py; definitions are executed in that module's globals.
 
