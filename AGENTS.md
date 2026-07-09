@@ -98,6 +98,7 @@ Hard invariants:
 Codex execution rules:
 
 - Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Keep `CodexConfig.codex_bin`, `cwd`, and `env` instance-scoped to the worker-owned Codex runtime.
+- The Python SDK owns Codex runtime/app-server lifecycle for worker automation. Do not reintroduce worker-managed app-server process lifetime knobs such as `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` or `PULLWISE_CODEX_APP_SERVER_MAX_TURNS`.
 - Use one instance-scoped Codex App Server per worker through the SDK runtime; prefer stdio transport or
   a worker-unique Unix socket.
 - Do not use `codex exec` for review phases and do not launch one Codex CLI

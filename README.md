@@ -42,8 +42,6 @@ Required environment:
 - `PULLWISE_CODEX_SQLITE_HOME` optional, defaults to `<worker-root>/codex-sqlite`
 - `PULLWISE_CODEX_RELEASE` optional installer-selected Codex CLI release, defaults to `latest` in server-generated installs
 - `PULLWISE_CODEX_INSTALLER_URL` optional Codex standalone installer URL
-- `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` optional, defaults to `1800`
-- `PULLWISE_CODEX_APP_SERVER_MAX_TURNS` optional, defaults to `8`
 - `PULLWISE_CODEX_DOCTOR_TIMEOUT_SECONDS` optional, defaults to `60`
 - `PULLWISE_ACTIVE_READINESS_CHECK_SECONDS` optional, defaults to `60`; used while the worker can claim jobs
 - `PULLWISE_DEGRADED_READINESS_CHECK_SECONDS` optional, defaults to `600`; used while readiness is degraded and the worker is waiting for auth/quota/operator recovery
