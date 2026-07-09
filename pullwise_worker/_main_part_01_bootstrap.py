@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 # Loaded by main.py; definitions are executed in that module's globals.
 
@@ -98,7 +98,7 @@ CODEX_LOGIN_COMMAND = (
     f"XDG_CACHE_HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id>/.cache "
     f"XDG_DATA_HOME={DEFAULT_SERVICE_HOME}/workers/<worker-id>/.local/share "
     f"PATH={DEFAULT_PROVIDER_AUTH_PATH} "
-    f"sh -lc 'cd \"$HOME\" && exec {DEFAULT_CODEX_COMMAND} login --device-auth'"
+    f"sh -lc 'cd \"$HOME\" && exec pullwise-worker codex-login'"
 )
 _CODEX_AUTH_FAILURE_MARKERS = (
     "401 Unauthorized",
@@ -229,7 +229,7 @@ def codex_readiness_issue_detail(detail: object, config: object) -> str:
         return clean_detail[:500]
     message = _CODEX_READINESS_ISSUE_MESSAGES[kind]
     if kind in {"codex_auth_required", "codex_auth_expired"}:
-        message = f"{message}; run codex login --device-auth as the worker service user"
+        message = f"{message}; run pullwise-worker codex-login as the worker service user"
     if kind == "codex_authorization_failed":
         message = f"{message}; check ChatGPT workspace/admin access and Codex Local availability"
     if kind == "codex_quota_exhausted":
@@ -1341,4 +1341,5 @@ def main() -> None:
     worker.run(once=args.once)
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
+
 
