@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pullwise-worker"
-version = "0.10.2"
+version = "0.10.3"
 description = "Pullwise pull-based scan worker"
 requires-python = ">=3.10"
 # The worker uses OpenAI's Codex Python SDK for automation while still
