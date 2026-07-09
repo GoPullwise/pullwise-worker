@@ -74,6 +74,7 @@ from pullwise_worker.review_worker_v1 import (
     prepare_validation_workspace,
     qa_gate_payload,
     repair_agent_report_artifact,
+    repair_intent_test_results_artifact,
     repair_intent_test_source_artifact,
     run_intent_tests,
     safe_id,
@@ -1753,6 +1754,48 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIs(demoted[0]["demoted_from_main_findings"], True)
         self.assertEqual(demoted[0]["demoted_reason"], "missing_confirmed_or_plausible_validation")
 
+    def test_repair_agent_report_uses_location_binding_when_model_ids_differ(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "medium", "result_status": "complete"},
+                    "findings": [
+                        finding_payload(
+                            "finding-001",
+                            title="Trusted-proxy IP extraction trusts the first X-Forwarded-For hop",
+                            severity="P2",
+                            path="app.py",
+                            line=1,
+                        )
+                    ],
+                    "appendix_findings": [],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(
+                    validation_entry(
+                        "cluster-001",
+                        status="confirmed",
+                        title="Trusted-proxy IP extraction trusts the first X-Forwarded-For hop",
+                        path="app.py",
+                        line=1,
+                    )
+                ),
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual([finding["id"] for finding in report["findings"]], ["finding-001"])
+        self.assertEqual(report["appendix_findings"], [])
+
     def test_qa_gate_rejects_non_empty_main_findings_when_validation_artifact_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
@@ -1824,6 +1867,44 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             validation["disposition"] = "confirmed"
             write_json(run_dir / "report.agent.json", {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": [finding_payload("CL-001")]})
             write_json(run_dir / "validated-findings.json", validation_payload(validation))
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "pass")
+
+    def test_qa_gate_accepts_location_binding_when_model_ids_differ(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [
+                        finding_payload(
+                            "finding-001",
+                            title="Trusted-proxy IP extraction trusts the first X-Forwarded-For hop",
+                            severity="P2",
+                            path="app.py",
+                            line=1,
+                        )
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(
+                    validation_entry(
+                        "cluster-001",
+                        status="confirmed",
+                        title="Trusted-proxy IP extraction trusts the first X-Forwarded-For hop",
+                        path="app.py",
+                        line=1,
+                    )
+                ),
+            )
 
             qa = qa_gate_payload(repo, run_dir)
 
@@ -3687,6 +3768,34 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(summary["status"], "completed")
             self.assertEqual(summary["required_tools"], len(REQUIRED_TOOL_FILES))
             self.assertEqual(summary["materialized_tools"], 1)
+
+    def test_bootstrap_helper_scripts_fallback_repairs_wrong_schema_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            review_root = run_dir.parent.parent
+            (review_root / "tools").mkdir(parents=True)
+            (review_root / "schemas").mkdir(parents=True)
+            (review_root / "prompts").mkdir(parents=True)
+            write_json(
+                run_dir / "bootstrap_helper_scripts.summary.json",
+                {
+                    "schema_version": "bootstrap-helper-scripts-summary/v1",
+                    "phase": "bootstrap_helper_scripts",
+                    "status": "completed",
+                    "implemented": [".codex-review/tools/00_bootstrap_check.py"],
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "bootstrap-helper-summary/v1"):
+                validate_phase_outputs(run_dir, "bootstrap_helper_scripts")
+
+            fallback_semantic_artifact(run_dir, {}, "bootstrap_helper_scripts")
+            validate_phase_outputs(run_dir, "bootstrap_helper_scripts")
+            summary = json.loads((run_dir / "bootstrap_helper_scripts.summary.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(summary["schema_version"], "bootstrap-helper-summary/v1")
+        self.assertEqual(summary["status"], "completed")
+
     def test_artifact_manifest_contains_required_completed_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -5443,6 +5552,61 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(result["confidence"], 0.0)
         self.assertIn("Worker policy blocked", result["evidence"][0])
 
+    def test_repair_intent_results_classifies_missing_test_runner_as_dependency_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            output_dir = run_dir / "intent" / "test-output"
+            output_dir.mkdir(parents=True)
+            (output_dir / "intent-test-001.stdout.log").write_text(
+                "> pullwise-admin@0.1.0 test\n> vitest run src/screens/plans.intent.test.jsx\n",
+                encoding="utf-8",
+            )
+            (output_dir / "intent-test-001.stderr.log").write_text("sh: 1: vitest: not found\n", encoding="utf-8")
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "run_id": "run_1",
+                    "test_runs": [
+                        {
+                            "schema_version": "project-test-run/v1",
+                            "test_id": "intent-test-001",
+                            "status": "failed",
+                            "exit_code": 127,
+                            "duration_ms": 647,
+                            "timed_out": False,
+                            "command": "npm test -- src/screens/plans.intent.test.jsx",
+                            "stdout_path": str(output_dir / "intent-test-001.stdout.log"),
+                            "stderr_path": str(output_dir / "intent-test-001.stderr.log"),
+                        }
+                    ],
+                },
+            )
+            result_path = run_dir / "intent" / "intent-test-results.json"
+            write_json(
+                result_path,
+                {
+                    "schema_version": "intent-test-result/v1",
+                    "test_results": [
+                        {
+                            "test_id": "intent-test-001",
+                            "status": "failed",
+                            "classification": "unclear_requirement",
+                            "confidence": 0.7,
+                            "evidence": ["stderr is `sh: 1: vitest: not found`."],
+                        }
+                    ],
+                },
+            )
+
+            repair_intent_test_results_artifact(result_path, run_dir)
+            validate_phase_outputs(run_dir, "intent_test_failure_analysis")
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["test_results"][0]["classification"], "dependency_missing")
+        self.assertEqual(payload["test_results"][0]["confidence"], 0.0)
+        self.assertEqual(payload["test_results"][0]["finding_confidence_impact"], "none")
+
     def test_validate_phase_outputs_rejects_malformed_intent_test_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -6548,4 +6712,3 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

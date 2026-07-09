@@ -4441,6 +4441,8 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
 
 
 def _fallback_intent_classification(raw_result: dict[str, Any]) -> str:
+    if _intent_dependency_missing(raw_result):
+        return "dependency_missing"
     raw_classification = str(raw_result.get("classification") or "").strip()
     if raw_classification in INTENT_TEST_CLASSIFICATIONS:
         return raw_classification
@@ -4705,6 +4707,40 @@ def _raw_intent_runs_by_id(run_dir: Path) -> dict[str, dict[str, Any]]:
     return runs
 
 
+def _intent_raw_output_text(raw_result: dict[str, Any]) -> str:
+    parts = []
+    for key in ("error", "stderr", "stdout", "observed_output", "sandbox_fallback_reason"):
+        text = str(raw_result.get(key) or "").strip()
+        if text:
+            parts.append(text)
+    for key in ("stderr_path", "stdout_path"):
+        raw_path = str(raw_result.get(key) or "").strip()
+        if not raw_path:
+            continue
+        try:
+            parts.append(Path(raw_path).read_text(encoding="utf-8", errors="replace")[:4096])
+        except OSError:
+            continue
+    return "\n".join(parts).lower()
+
+
+def _intent_dependency_missing(raw_result: dict[str, Any]) -> bool:
+    if raw_result.get("exit_code") == 127:
+        return True
+    output = _intent_raw_output_text(raw_result)
+    dependency_markers = (
+        "command not found",
+        ": not found",
+        "no module named ",
+        "modulenotfounderror",
+        "cannot find module",
+        "could not find module",
+        "executable not found",
+        "not installed",
+    )
+    return any(marker in output for marker in dependency_markers)
+
+
 def _intent_status_from_result(result: dict[str, Any], raw_result: dict[str, Any]) -> str:
     for value in (result.get("status"), result.get("raw_status"), raw_result.get("status")):
         status = str(value or "").strip()
@@ -4725,6 +4761,8 @@ def _intent_status_from_result(result: dict[str, Any], raw_result: dict[str, Any
 
 
 def _intent_classification_from_result(result: dict[str, Any], status: str, raw_result: dict[str, Any]) -> str:
+    if _intent_dependency_missing(raw_result):
+        return "dependency_missing"
     for value in (result.get("classification"), result.get("outcome")):
         classification = str(value or "").strip()
         if classification in INTENT_TEST_CLASSIFICATIONS:
@@ -4789,6 +4827,10 @@ def repair_intent_test_results_artifact(path: Path, run_dir: Path) -> None:
         confidence = result.get("confidence")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
             confidence = 0.0
+        if classification in {"dependency_missing", "environment_error", "test_harness_error", "skipped_not_runnable"}:
+            confidence = 0.0
+            result["finding_confidence_impact"] = "none"
+            result["confidence_delta"] = 0.0
         artifacts = _intent_result_artifacts(result, raw_result)
         result.update(
             {
@@ -5716,8 +5758,8 @@ def finding_is_backed_by_validation(finding: object, accepted_entries: list[dict
     if not isinstance(finding, dict):
         return False
     ids = finding_binding_ids(finding)
-    if ids:
-        return any(ids & finding_binding_ids(entry) for entry in accepted_entries)
+    if ids and any(ids & finding_binding_ids(entry) for entry in accepted_entries):
+        return True
     key = finding_fallback_binding_key(finding)
     if key is None:
         return False
@@ -6133,7 +6175,7 @@ def prompt_template_for_name(name: str) -> str:
 
 def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -> None:
     ensure_intent_directories(run_dir)
-    if phase == "bootstrap_helper_scripts" and not (run_dir / "bootstrap_helper_scripts.summary.json").exists():
+    if phase == "bootstrap_helper_scripts":
         review_root = run_dir.parent.parent
         tools_dir = review_root / "tools"
         schemas_dir = review_root / "schemas"
@@ -7708,7 +7750,3 @@ def upload_artifacts(
             write_json(source_run_dir / "artifact-manifest.json", manifest_payload)
         if uploaded_manifest_items:
             write_uploaded_artifact_manifest(artifact_dir, manifest_payload, uploaded_manifest_items, source_run_dir=source_run_dir)
-
-
-
-
