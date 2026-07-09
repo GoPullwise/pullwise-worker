@@ -943,18 +943,72 @@ def quota_window_payload(name: str, value: object) -> dict[str, Any] | None:
     }
 
 
-def codex_rate_limit_snapshot(response: dict[str, Any]) -> dict[str, Any]:
+def quota_compact_text(value: object) -> str:
+    return "".join(ch for ch in quota_text(value, 240).lower() if ch.isalnum())
+
+
+def quota_bucket_identity(limit_id: object, value: object) -> str:
+    if not isinstance(value, dict):
+        return quota_text(limit_id, 240).lower()
+    return " ".join(
+        part
+        for part in (
+            quota_text(limit_id, 120),
+            quota_text(value.get("limitId") or value.get("limit_id"), 120),
+            quota_text(value.get("limitName") or value.get("limit_name"), 160),
+        )
+        if part
+    ).lower()
+
+
+def codex_quota_preferred_models(config: Any | None = None) -> list[str]:
+    configured = quota_text(getattr(config, "codex_model", None), 80) if config is not None else ""
+    env_model = quota_text(os.environ.get("PULLWISE_CODEX_MODEL"), 80)
+    models = [configured, env_model, "gpt-5.5", "gpt-5.4", "gpt-5"]
+    seen: set[str] = set()
+    preferred: list[str] = []
+    for model in models:
+        compact = quota_compact_text(model)
+        if not compact or compact in seen:
+            continue
+        seen.add(compact)
+        preferred.append(model)
+    return preferred
+
+
+def codex_quota_bucket_is_spark(limit_id: object, value: object) -> bool:
+    identity = quota_bucket_identity(limit_id, value)
+    compact = quota_compact_text(identity)
+    return "spark" in identity or "bengalfox" in compact
+
+
+def codex_quota_bucket_matches_model(limit_id: object, value: object, preferred_models: list[str]) -> bool:
+    compact_identity = quota_compact_text(quota_bucket_identity(limit_id, value))
+    return any(quota_compact_text(model) in compact_identity for model in preferred_models)
+
+
+def codex_rate_limit_snapshot(response: dict[str, Any], preferred_models: list[str] | None = None) -> dict[str, Any]:
+    preferred_models = preferred_models or codex_quota_preferred_models()
     by_limit = response.get("rateLimitsByLimitId") if isinstance(response.get("rateLimitsByLimitId"), dict) else None
     if by_limit:
         for key, value in by_limit.items():
-            if quota_text(key).lower() == "codex" and isinstance(value, dict):
+            if (
+                isinstance(value, dict)
+                and not codex_quota_bucket_is_spark(key, value)
+                and codex_quota_bucket_matches_model(key, value, preferred_models)
+            ):
                 return value
         for key, value in by_limit.items():
-            if "codex" in quota_text(key).lower() and isinstance(value, dict):
+            if quota_text(key).lower() == "codex" and isinstance(value, dict) and not codex_quota_bucket_is_spark(key, value):
+                return value
+        for key, value in by_limit.items():
+            identity = quota_bucket_identity(key, value)
+            if "codex" in identity and isinstance(value, dict) and not codex_quota_bucket_is_spark(key, value):
                 return value
     rate_limits = response.get("rateLimits")
-    return rate_limits if isinstance(rate_limits, dict) else {}
-
+    if isinstance(rate_limits, dict) and not codex_quota_bucket_is_spark(rate_limits.get("limitId") or rate_limits.get("limit_id"), rate_limits):
+        return rate_limits
+    return {}
 
 def merge_rate_limit_bucket(current: object, update: object) -> dict[str, Any]:
     merged = dict(current) if isinstance(current, dict) else {}
@@ -1008,8 +1062,9 @@ def codex_quota_payload_from_rate_limits(
     threshold_percent: float,
     checked_at: int,
     next_check_at: int,
+    preferred_models: list[str] | None = None,
 ) -> dict[str, Any]:
-    snapshot = codex_rate_limit_snapshot(response)
+    snapshot = codex_rate_limit_snapshot(response, preferred_models=preferred_models)
     if not snapshot:
         return {
             "provider": "codex",
