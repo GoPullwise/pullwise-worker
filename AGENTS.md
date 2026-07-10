@@ -538,3 +538,11 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Server-side evidence should include only scoped records for the same scan/job/run: scan/job/attempt/run identifiers, phase/progress/error snapshots, review-run events, artifact metadata/storage references, quota state, and relevant timestamps. It must not include full database dumps, secrets, other users' data, or unrelated scans.
 - The UI must disable or omit debug bundle actions when no real debug_bundle artifact/server debug bundle endpoint exists. Do not substitute /scans/{scanId}/audit-bundle.zip as a debug zip URL.
 - Tests should protect this contract: missing debugBundleUrl must not produce an audit-bundle URL, and server/worker tests must verify failed runs still expose a real debug_bundle artifact or explicit absence.
+
+## Execution And Validation Resilience
+
+- Keep an independent active-job heartbeat/cancellation supervisor running from immediately after a job becomes active until terminal cleanup finishes, including checkout and other blocking setup work. The supervisor must not start a second Codex client while a job is active.
+- Validator output must be normalized to the canonical `validated_findings`, `weak_findings`, and `disproven_findings` collections before downstream progress/report generation. Legacy collection names may be repaired, but an unknown disposition must never default to confirmed.
+- Debug-bundle audit must fail noncanonical validator collections, progress counters that disagree with validator records, and intent summary counts that disagree with per-test classifications.
+- Intent regression commands generated as filesystem paths must run through a compatible discovery command, and duplicate records for the same generated test file must execute once while retaining all related finding ids.
+- Worker and Codex self-updates must stage and probe a new version before activation, retain the last working version through the post-restart doctor check, and restore it on install, wrapper, watcher, restart, or doctor failure.
