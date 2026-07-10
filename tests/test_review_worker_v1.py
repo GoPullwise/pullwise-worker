@@ -377,6 +377,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         run.assert_called_once()
 
     def test_installed_python_sdk_can_start_gpt_56_thread_with_external_codex_cli(self) -> None:
+        if os.environ.get("PULLWISE_RUN_CODEX_INTEGRATION") != "1":
+            self.skipTest("set PULLWISE_RUN_CODEX_INTEGRATION=1 to run the real Codex CLI integration")
         codex_command = shutil.which("codex")
         if not codex_command:
             self.skipTest("standalone Codex CLI is not available on PATH")
@@ -5722,6 +5724,23 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("Check external provider and deployment blast radius", prompt)
         self.assertNotIn("reviewers/performance.md", prompt)
         self.assertNotIn("repo-profile.json", prompt.split("Required outputs:", 1)[1].split("Phase instructions:", 1)[0])
+
+    def test_security_validation_prompts_require_end_to_end_controllability_and_severity_calibration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            reviewer_prompt = phase_prompt("reviewer_fanout", run_dir)
+            cluster_prompt = phase_prompt("clustering_and_voting", run_dir)
+            validator_prompt = phase_prompt("validator_disproof", run_dir)
+            reporter_prompt = phase_prompt("final_report_json", run_dir)
+
+        self.assertIn("end-to-end attacker-controlled path", reviewer_prompt)
+        self.assertIn("producer-side validation", reviewer_prompt)
+        self.assertIn("defense-in-depth", reviewer_prompt)
+        self.assertIn("Merge test-gap evidence into the underlying defect", cluster_prompt)
+        self.assertIn("unknown cross-service producer", validator_prompt)
+        self.assertIn("Do not inherit reviewer severity", reporter_prompt)
 
     def test_phase_prompt_omits_adaptive_context_when_profile_missing_or_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

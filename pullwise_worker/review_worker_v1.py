@@ -2909,6 +2909,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Review bundles in tier order using security, correctness, test-gap, and correctness-lite perspectives as applicable.",
             "Every finding must be concrete, located, evidenced, actionable, and include false-positive risk.",
+            "For security severity, demonstrate an end-to-end attacker-controlled path to the sink and account for producer-side validation, generated server values, and browser/process isolation. If controllability is unproven, label the issue defense-in-depth and do not rate it high or critical.",
             "Write JSON only using codex-reviewer-output/v1.",
         ],
     },
@@ -2919,6 +2920,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "outputs": ["clusters.json", "validation-input.json"],
         "instructions": [
             "Merge duplicate findings, preserve supporting agents, compute weighted confidence, and suppress vague findings.",
+            "Merge test-gap evidence into the underlying defect when it covers the same contract, sink, and fix; do not inflate the main finding count with a duplicate test-gap cluster.",
             "Do not inspect source code and do not create new findings.",
             "Write JSON only using cluster-output/v1 and validation-input/v1 compatible fields.",
         ],
@@ -2974,6 +2976,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "outputs": ["validated-findings.json"],
         "instructions": [
             "Try to disprove each candidate finding using reviewer evidence, location verification, related code, existing tests, and intent-test evidence.",
+            "Check producer invariants and the complete trust boundary before confirming exploitability. Treat an unknown cross-service producer as unresolved controllability, not proof of attacker control, and lower confidence or severity accordingly.",
             "Classify confirmed, plausible, weak, or disproven; do not add unrelated findings.",
             "Write JSON only using validation-output/v1.",
         ],
@@ -2985,6 +2988,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "outputs": ["report.agent.json"],
         "instructions": [
             "Include only confirmed or plausible actionable findings in the main list.",
+            "Do not inherit reviewer severity without re-calibrating it to demonstrated reachability, attacker control, user impact, and existing containment.",
             "Weak findings go to appendix; disproven findings are excluded from main findings.",
             "Preserve coverage, skipped scope, validation sources, and next_agent_task.",
             "Write JSON only using codex-full-repo-review/v1.",
@@ -6454,17 +6458,17 @@ def prompt_template_for_name(name: str) -> str:
         "00_repo_mapper.md": "You are the Repo Mapper. Produce repo-map.json. Do not report bugs. Return JSON only using repo-map/v1.\n",
         "01_risk_router.md": "You are the Risk Router. Classify files and directories into P0/P1/P2/P3/SKIP. Return JSON only using risk-routing/v1.\n",
         "02_bundle_planner.md": "You may adjust mechanical bundle boundaries without changing the review policy. Return JSON only using bundle-plan/v1.\n",
-        "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Return JSON only using codex-reviewer-output/v1.\n",
+        "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Demonstrate an end-to-end attacker-controlled path, account for producer-side validation and containment, and classify unproven reachability as defense-in-depth rather than high/critical. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/correctness_lite.md": "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. Return JSON only using codex-reviewer-output/v1.\n",
-        "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Do not create new findings. Return JSON only.\n",
+        "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Merge test-gap evidence into the underlying defect when contract, sink, and fix match. Do not create new findings. Return JSON only.\n",
         "intent/04_intent_miner.md": "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route definitions, and error messages. Do not infer intent only from implementation code. Return JSON only using intent-map/v1.\n",
         "intent/05_intent_test_planner.md": "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return JSON only using intent-test-plan/v1.\n",
         "intent/06_intent_test_writer.md": "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**. Do not modify the main repo workspace. Return JSON describing created test files.\n",
         "intent/07_intent_test_failure_analyzer.md": "You are the Test Failure Analyzer. A failing test is not automatically a bug. Classify each result using intent-test-result/v1. Return JSON only.\n",
-        "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. Return JSON only.\n",
-        "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to appendix. Return JSON only.\n",
+        "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. Return JSON only.\n",
+        "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to appendix. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",
     }
     discipline = (
         "\nRequired discipline:\n"
