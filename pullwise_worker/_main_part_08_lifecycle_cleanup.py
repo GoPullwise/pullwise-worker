@@ -888,6 +888,29 @@ def append_missing_env_values(env_path: Path, values: dict[str, str], *, dry_run
     append_no_follow_text_file(env_path, "".join(f"{key}={value}\n" for key, value in missing))
 
 
+def set_env_values(env_path: Path, values: dict[str, str], *, dry_run: bool = False) -> None:
+    for key, value in values.items():
+        if not isinstance(key, str) or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            raise ValueError(f"environment key is invalid: {key}")
+        if any(char in str(value) for char in "\r\n\x00"):
+            raise ValueError(f"environment value for {key} must be single-line")
+    if dry_run:
+        for key, value in values.items():
+            print(f"set env {key}={value}")
+        return
+    lines = read_no_follow_text_file(env_path).splitlines() if env_path.exists() else []
+    updated: list[str] = []
+    remaining = dict(values)
+    for line in lines:
+        key, separator, _old_value = line.partition("=")
+        if separator and key in remaining:
+            updated.append(f"{key}={remaining.pop(key)}")
+        else:
+            updated.append(line)
+    updated.extend(f"{key}={value}" for key, value in remaining.items())
+    write_no_follow_text_file(env_path, "\n".join(updated) + "\n")
+
+
 DEFAULT_CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"
 _CODEX_RELEASE_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta)(?:\.[0-9]+)?)?$")
 
@@ -992,21 +1015,30 @@ def refresh_codex_cli(
     dry_run: bool = False,
 ) -> int:
     dry_installer = "/tmp/pullwise-codex-install.sh"
+    live_command = Path(settings["command"])
+    versions_root = live_command.parent.parent / "codex-versions"
+    stage_name = "update-staged" if dry_run else f"update-{time.time_ns()}"
+    stage_dir = versions_root / stage_name
+    staged_settings = dict(settings)
+    staged_settings["install_dir"] = str(stage_dir)
+    staged_command = stage_dir / "codex"
+    staged_settings["command"] = str(staged_command)
     if dry_run:
         print(f"curl -fsSL {shlex.quote(settings['installer_url'])} -o {dry_installer}")
         install_command = service_user_codex_command(
             config,
-            settings,
+            staged_settings,
             [dry_installer, "--release", settings["release"]],
             install=True,
         )
         print(" ".join(shlex.quote(part) for part in install_command))
         version_command = service_user_codex_command(
             config,
-            settings,
-            [settings["command"], "--version"],
+            staged_settings,
+            [str(staged_command), "--version"],
         )
         print(" ".join(shlex.quote(part) for part in version_command))
+        print(f"activate {staged_command} as {live_command}")
         return 0
     descriptor, installer_path = tempfile.mkstemp(prefix="pullwise-codex-install-", suffix=".sh")
     os.close(descriptor)
@@ -1015,28 +1047,101 @@ def refresh_codex_cli(
         if downloaded.returncode != 0:
             return downloaded.returncode
         os.chmod(installer_path, 0o755)
+        prepared = subprocess.run(
+            service_user_codex_command(config, staged_settings, ["mkdir", "-p", str(stage_dir)])
+        )
+        if prepared.returncode != 0:
+            return prepared.returncode
         installed = subprocess.run(
             service_user_codex_command(
                 config,
-                settings,
+                staged_settings,
                 [installer_path, "--release", settings["release"]],
                 install=True,
             )
         )
         if installed.returncode != 0:
             return installed.returncode
-        return subprocess.run(
+        probed = subprocess.run(
             service_user_codex_command(
                 config,
-                settings,
-                [settings["command"], "--version"],
+                staged_settings,
+                [str(staged_command), "--version"],
             )
-        ).returncode
+        )
+        if probed.returncode != 0:
+            return probed.returncode
+        if not staged_command.is_file():
+            return 1
+        live_command.parent.mkdir(parents=True, exist_ok=True)
+        backup_path = codex_cli_backup_path(settings)
+        activation_path = live_command.with_name(f".{live_command.name}.activate-{time.time_ns()}")
+        if os.path.lexists(backup_path):
+            backup_path.unlink()
+        os.symlink(staged_command, activation_path)
+        try:
+            if os.path.lexists(live_command):
+                os.replace(live_command, backup_path)
+            os.replace(activation_path, live_command)
+        except OSError:
+            if os.path.lexists(activation_path):
+                activation_path.unlink()
+            restore_codex_cli_backup(settings)
+            return 1
+        return 0
     finally:
         try:
             os.unlink(installer_path)
         except OSError:
             pass
+
+
+def codex_cli_backup_path(settings: dict[str, str]) -> Path:
+    command = Path(settings["command"])
+    return command.with_name(f".{command.name}.pullwise-previous")
+
+
+def restore_codex_cli_backup(settings: dict[str, str]) -> None:
+    command = Path(settings["command"])
+    backup = codex_cli_backup_path(settings)
+    if not os.path.lexists(backup):
+        return
+    if os.path.lexists(command):
+        command.unlink()
+    os.replace(backup, command)
+
+
+def finalize_codex_cli_update(settings: dict[str, str]) -> None:
+    backup = codex_cli_backup_path(settings)
+    if os.path.lexists(backup):
+        backup.unlink()
+
+
+def install_staged_worker_package(
+    config: WorkerConfig,
+    current_python: str,
+    package: str,
+    *,
+    dry_run: bool = False,
+) -> tuple[int, str]:
+    worker_root = Path(str(config.worker_root))
+    stage_name = "update-staged" if dry_run else f"update-{time.time_ns()}"
+    stage_dir = worker_root / ".venvs" / stage_name
+    staged_python = stage_dir / "bin" / "python"
+    commands = (
+        [current_python, "-m", "venv", str(stage_dir)],
+        [str(staged_python), "-m", "pip", "install", "--upgrade", "--no-cache-dir", package],
+        [str(staged_python), "-c", "import pullwise_worker; print(pullwise_worker.__version__)"],
+    )
+    for command in commands:
+        if dry_run:
+            print(" ".join(command))
+            continue
+        completed = subprocess.run(command)
+        if completed.returncode != 0:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            return completed.returncode, str(staged_python)
+    return 0, str(staged_python)
 
 
 def copy_text_file_no_follow(source: Path, destination: Path) -> None:
@@ -1129,22 +1234,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    install_command = [
-        python_bin,
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "--force-reinstall",
-        "--no-cache-dir",
-        package,
-    ]
-    commands = [
-        ["systemctl", "stop", service_name],
-        install_command,
-        ["systemctl", "restart", service_name],
-        service_user_doctor_command(config, bin_path),
-    ]
+    env_existed = env_path.exists()
     if dry_run:
         print(f"backup {env_path} to {backup_path}")
     else:
@@ -1154,62 +1244,83 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
         except OSError as exc:
             print(f"failed to back up env file: {exc}", file=sys.stderr)
             return 1
-    for command in commands:
+
+    def restore_previous_activation(code: int) -> int:
+        if not dry_run:
+            if env_existed:
+                restore_worker_env_backup(backup_path, env_path)
+            elif env_path.exists():
+                try:
+                    env_path.unlink()
+                except OSError as exc:
+                    print(f"failed to remove newly created env file: {exc}", file=sys.stderr)
+            if codex_settings is not None:
+                restore_codex_cli_backup(codex_settings)
+            subprocess.run(["systemctl", "restart", service_name])
+        return code
+
+    stop_command = ["systemctl", "stop", service_name]
+    if dry_run:
+        print(" ".join(stop_command))
+    else:
+        stopped = subprocess.run(stop_command)
+        if stopped.returncode != 0:
+            return restore_previous_activation(stopped.returncode)
+
+    if codex_settings is not None:
+        codex_code = refresh_codex_cli(config, codex_settings, dry_run=dry_run)
+        if codex_code != 0:
+            return restore_previous_activation(codex_code)
+        try:
+            append_missing_env_values(
+                env_path,
+                {
+                    "PULLWISE_CODEX_COMMAND": codex_settings["command"],
+                    "PULLWISE_CODEX_RELEASE": codex_settings["release"],
+                    "PULLWISE_CODEX_INSTALLER_URL": codex_settings["installer_url"],
+                },
+                dry_run=dry_run,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"failed to update Codex worker environment: {exc}", file=sys.stderr)
+            return restore_previous_activation(1)
+
+    package_code, staged_python = install_staged_worker_package(
+        config,
+        python_bin,
+        package,
+        dry_run=dry_run,
+    )
+    if package_code != 0:
+        return restore_previous_activation(package_code)
+    try:
+        set_env_values(env_path, {"PULLWISE_PYTHON_BIN": staged_python}, dry_run=dry_run)
+    except (OSError, ValueError) as exc:
+        print(f"failed to activate staged worker package: {exc}", file=sys.stderr)
+        return restore_previous_activation(1)
+
+    if dry_run:
+        print(f"write env-loading wrapper {bin_path}")
+        watcher_code = ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=True)
+    else:
+        try:
+            write_worker_wrapper(bin_path, env_path)
+        except OSError as exc:
+            print(f"failed to write worker wrapper: {exc}", file=sys.stderr)
+            return restore_previous_activation(1)
+        watcher_code = ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=False)
+    if watcher_code != 0:
+        return restore_previous_activation(watcher_code)
+
+    for command in (["systemctl", "restart", service_name], service_user_doctor_command(config, bin_path)):
         if dry_run:
             print(" ".join(command))
-            if command[0:2] == ["systemctl", "stop"] and codex_settings is not None:
-                refresh_codex_cli(config, codex_settings, dry_run=True)
-                append_missing_env_values(
-                    env_path,
-                    {
-                        "PULLWISE_CODEX_COMMAND": codex_settings["command"],
-                        "PULLWISE_CODEX_RELEASE": codex_settings["release"],
-                        "PULLWISE_CODEX_INSTALLER_URL": codex_settings["installer_url"],
-                    },
-                    dry_run=True,
-                )
-            if command is install_command:
-                print(f"write env-loading wrapper {bin_path}")
-                ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=True)
             continue
         completed = subprocess.run(command)
         if completed.returncode != 0:
-            restore_worker_env_backup(backup_path, env_path)
-            subprocess.run(["systemctl", "restart", service_name])
-            return completed.returncode
-        if command[0:2] == ["systemctl", "stop"] and codex_settings is not None:
-            codex_code = refresh_codex_cli(config, codex_settings, dry_run=False)
-            if codex_code != 0:
-                restore_worker_env_backup(backup_path, env_path)
-                subprocess.run(["systemctl", "restart", service_name])
-                return codex_code
-            try:
-                append_missing_env_values(
-                    env_path,
-                    {
-                        "PULLWISE_CODEX_COMMAND": codex_settings["command"],
-                        "PULLWISE_CODEX_RELEASE": codex_settings["release"],
-                        "PULLWISE_CODEX_INSTALLER_URL": codex_settings["installer_url"],
-                    },
-                )
-            except (OSError, ValueError) as exc:
-                print(f"failed to update Codex worker environment: {exc}", file=sys.stderr)
-                restore_worker_env_backup(backup_path, env_path)
-                subprocess.run(["systemctl", "restart", service_name])
-                return 1
-        if command is install_command:
-            try:
-                write_worker_wrapper(bin_path, env_path)
-                watcher_code = ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=False)
-                if watcher_code != 0:
-                    restore_worker_env_backup(backup_path, env_path)
-                    subprocess.run(["systemctl", "restart", service_name])
-                    return watcher_code
-            except OSError as exc:
-                print(f"failed to write worker wrapper: {exc}", file=sys.stderr)
-                restore_worker_env_backup(backup_path, env_path)
-                subprocess.run(["systemctl", "restart", service_name])
-                return 1
+            return restore_previous_activation(completed.returncode)
+    if not dry_run and codex_settings is not None:
+        finalize_codex_cli_update(codex_settings)
     return 0
 
 

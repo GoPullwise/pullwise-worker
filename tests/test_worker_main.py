@@ -226,7 +226,7 @@ class WorkerMainContractsTest(unittest.TestCase):
         output = stdout.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("https://chatgpt.com/codex/install.sh", output)
-        self.assertIn(f"CODEX_INSTALL_DIR={worker_root}/.local/bin", output)
+        self.assertIn(f"CODEX_INSTALL_DIR={worker_root}/.local/codex-versions/update-staged", output)
         self.assertIn("CODEX_RELEASE=latest", output)
         self.assertIn("--release latest", output)
         self.assertIn(f"append env PULLWISE_CODEX_COMMAND={worker_root}/.local/bin/codex", output)
@@ -330,6 +330,55 @@ class WorkerMainContractsTest(unittest.TestCase):
             self.assertNotEqual(pip_command[0], str(old_python))
             self.assertEqual(env_path.read_text(encoding="utf-8"), f"PULLWISE_PYTHON_BIN={old_python}\n")
             self.assertEqual(old_python.read_text(encoding="utf-8"), "old-python\n")
+
+    def test_worker_doctor_failure_rolls_back_staged_python_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker_root = root / "worker"
+            old_python = worker_root / ".venv" / "bin" / "python"
+            old_python.parent.mkdir(parents=True)
+            old_python.write_text("old-python\n", encoding="utf-8")
+            env_path = root / "worker.env"
+            backup_path = root / "worker.env.bak"
+            env_path.write_text(f"PULLWISE_PYTHON_BIN={old_python}\n", encoding="utf-8")
+            config = argparse.Namespace(
+                service_name="pullwise-worker-wk_test",
+                service_user="pw-worker-wk-test",
+                service_home=str(root),
+                worker_id="wk_test",
+                worker_root=str(worker_root),
+                provider_chain=[],
+                codex_home=str(worker_root / "codex-home"),
+                codex_sqlite_home=str(worker_root / "codex-sqlite"),
+                service_path="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin",
+                worker_env_file=str(env_path),
+                worker_env_backup_file=str(backup_path),
+                worker_bin_path=str(root / "pullwise-worker-wk_test"),
+                watcher_service_name="pullwise-worker-wk_test-watcher",
+                watcher_service_file=str(root / "pullwise-worker-wk_test-watcher.service"),
+                watcher_poll_seconds=5,
+            )
+
+            def run(command: list[str], **_kwargs: object) -> argparse.Namespace:
+                return argparse.Namespace(returncode=7 if command == ["doctor"] else 0)
+
+            with patch.object(lifecycle, "install_ubuntu_2204_dependencies", return_value=(True, "")), patch.object(
+                lifecycle, "worker_env_target_paths", side_effect=lambda env, backup: (env, backup)
+            ), patch.object(
+                lifecycle, "worker_wrapper_target_path", side_effect=lambda path, _service: path
+            ), patch.object(lifecycle, "write_worker_wrapper"), patch.object(
+                lifecycle, "ensure_lifecycle_watcher", return_value=0
+            ), patch.object(lifecycle, "service_user_doctor_command", return_value=["doctor"]), patch.object(
+                lifecycle.subprocess, "run", side_effect=run
+            ), patch.dict(
+                lifecycle.os.environ,
+                {"PULLWISE_PYTHON_BIN": str(old_python)},
+                clear=False,
+            ):
+                code = lifecycle.update_worker(config)
+
+            self.assertEqual(code, 7)
+            self.assertEqual(env_path.read_text(encoding="utf-8"), f"PULLWISE_PYTHON_BIN={old_python}\n")
 
     def test_codex_cli_update_settings_default_to_latest_worker_local_command(self) -> None:
         worker_root = "/var/lib/pullwise-worker/wk_test/workers/wk_test"
