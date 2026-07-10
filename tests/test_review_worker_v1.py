@@ -5561,6 +5561,47 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             },
         )
 
+    def test_location_verification_reads_affected_and_top_level_reviewer_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            verified_dir = run_dir / "verified-reviewers"
+            verified_dir.mkdir(parents=True)
+            source = repo / "src" / "screens" / "flow.jsx"
+            source.parent.mkdir(parents=True)
+            source.write_text("\n".join(f"line {index}" for index in range(1, 201)) + "\n", encoding="utf-8")
+            write_json(
+                verified_dir / "security.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "findings": [
+                        {
+                            "finding_id": "finding-affected",
+                            "affected_locations": [
+                                {"path": "src/screens/flow.jsx", "start_line": 20, "end_line": 30}
+                            ],
+                        },
+                        {
+                            "local_id": "finding-top-level",
+                            "path": "src/screens/flow.jsx",
+                            "line_start": 40,
+                            "line_end": 45,
+                        },
+                    ],
+                },
+            )
+
+            verification = location_verification_payload(repo, run_dir)
+
+        self.assertEqual(
+            verification["summary"],
+            {"locations_total": 2, "valid_locations": 2, "invalid_locations": 0},
+        )
+        self.assertEqual(
+            {item["finding_id"] for item in verification["items"]},
+            {"finding-affected", "finding-top-level"},
+        )
+
     def test_reviewer_json_validation_repair_turn_fixes_invalid_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
