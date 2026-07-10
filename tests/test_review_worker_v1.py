@@ -5208,6 +5208,114 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertGreaterEqual(upload["artifacts_total"], 5)
         self.assertEqual(upload["artifacts_uploaded"], upload["artifacts_total"])
 
+    def test_phase_completion_and_final_snapshot_reconcile_counters_from_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            (run_dir / "bundles").mkdir(parents=True)
+            (run_dir / "intent").mkdir(parents=True)
+            inventory_files = [
+                {"path": "src/a.py", "is_source_like": True},
+                {"path": "src/b.py", "is_source_like": True},
+                {"path": "README.md", "is_source_like": False},
+            ]
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "summary": {"source_like_files": 2, "files_total": 3},
+                    "files": inventory_files,
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": item["path"], "tier": "P1"} for item in inventory_files],
+                },
+            )
+            write_json(
+                run_dir / "bundle-plan.json",
+                {"schema_version": "bundle-plan/v1", "bundles": [{"bundle_id": "b1"}, {"bundle_id": "b2"}]},
+            )
+            (run_dir / "bundles" / "b1.md").write_text("one", encoding="utf-8")
+            (run_dir / "bundles" / "b2.md").write_text("two", encoding="utf-8")
+            target_ids = ["intent-a", "intent-b"]
+            write_json(
+                run_dir / "intent" / "intent-test-plan.json",
+                {"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": value} for value in target_ids]},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "test_ids": target_ids,
+                            "path_kind": "disposable_validation_workspace",
+                        },
+                        {
+                            "test_id": "ITV-002",
+                            "test_ids": target_ids,
+                            "path_kind": "run_artifact_source_copy",
+                        },
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [{"test_id": "ITV-001", "target_test_ids": target_ids, "status": "passed"}],
+                },
+            )
+            write_json(
+                run_dir / "validation-input.json",
+                {"schema_version": "validation-input/v1", "candidates": [{"candidate_id": "candidate-1"}]},
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                {"schema_version": "validation-output/v1", "validated_findings": [{"candidate_id": "candidate-1"}]},
+            )
+            write_json(
+                run_dir / "progress.json",
+                {
+                    "run_id": "run_1",
+                    "overall_percent": 99,
+                    "current_phase": "qa_gate",
+                    "counters": {key: 0 for key in (
+                        "source_like_files_total",
+                        "source_like_files_classified",
+                        "bundles_total",
+                        "bundles_packed",
+                        "intent_tests_total",
+                        "intent_tests_written",
+                        "intent_tests_run",
+                        "validator_candidates_total",
+                        "validator_candidates_completed",
+                    )},
+                },
+            )
+
+            inventory_counts = phase_completion_data(run_dir, "inventory_repository")
+            routing_counts = phase_completion_data(run_dir, "risk_routing")
+            packing_counts = phase_completion_data(run_dir, "bundle_packing")
+            writing_counts = phase_completion_data(run_dir, "intent_test_writing")
+            validation_counts = phase_completion_data(run_dir, "validator_disproof")
+            final = progress_final_payload(run_dir, "run_1", "completed")
+
+        self.assertEqual(inventory_counts["source_like_files_total"], 2)
+        self.assertEqual(routing_counts["source_like_files_classified"], 2)
+        self.assertEqual(packing_counts, {"bundles_total": 2, "bundles_packed": 2})
+        self.assertEqual(writing_counts["intent_tests_written"], 2)
+        self.assertEqual(validation_counts, {"validator_candidates_total": 1, "validator_candidates_completed": 1})
+        self.assertEqual(final["counters"]["source_like_files_total"], 2)
+        self.assertEqual(final["counters"]["source_like_files_classified"], 2)
+        self.assertEqual(final["counters"]["bundles_packed"], 2)
+        self.assertEqual(final["counters"]["intent_tests_written"], 2)
+        self.assertEqual(final["counters"]["intent_tests_run"], 2)
+        self.assertEqual(final["counters"]["validator_candidates_completed"], 1)
+
     def test_reviewer_fanout_counts_grouped_outputs_covering_all_bundles_as_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"

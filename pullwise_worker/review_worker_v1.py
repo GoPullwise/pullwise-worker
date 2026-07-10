@@ -4093,6 +4093,8 @@ def _intent_inferred_command(generated: dict[str, Any], target: dict[str, Any], 
         ).strip().lower()
     if framework in {"vitest", "jest", "node", "npm"} or suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
         return ["npm", "test", "--", rel_path]
+    if framework in {"unittest", "python-unittest"}:
+        return ["python", "-m", "unittest", rel_path]
     if framework in {"pytest", "python"} or suffix == ".py":
         return ["python", "-m", "pytest", rel_path]
     if framework == "go" or suffix == ".go":
@@ -4100,13 +4102,99 @@ def _intent_inferred_command(generated: dict[str, Any], target: dict[str, Any], 
     return []
 
 
+def _intent_related_test_ids(value: dict[str, Any]) -> list[str]:
+    related: list[str] = []
+    for key in (
+        "test_ids",
+        "testIds",
+        "target_ids",
+        "targetIds",
+        "target_test_ids",
+        "targetTestIds",
+        "related_test_ids",
+        "relatedTestIds",
+        "targets",
+    ):
+        raw = value.get(key)
+        items = raw if isinstance(raw, list) else [raw] if isinstance(raw, str) else []
+        for item in items:
+            test_id = str(item or "").strip()
+            if test_id and test_id not in related:
+                related.append(test_id)
+    return related
+
+
+def _intent_source_command_specs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    for key in ("test_commands", "testCommands", "intended_commands", "intendedCommands"):
+        raw_specs = source.get(key)
+        if not isinstance(raw_specs, list):
+            continue
+        for raw_spec in raw_specs:
+            if isinstance(raw_spec, dict):
+                specs.append(raw_spec)
+            elif isinstance(raw_spec, str) and raw_spec.strip():
+                specs.append({"command": raw_spec})
+    return specs
+
+
+def _intent_source_command_value(
+    source: dict[str, Any],
+    generated: dict[str, Any],
+    generated_index: int,
+    generated_total: int,
+) -> object:
+    specs = _intent_source_command_specs(source)
+    if not specs:
+        return None
+    generated_ids = {_intent_test_id(generated, ""), *_intent_related_test_ids(generated)}
+    generated_ids.discard("")
+    generated_path = _path_key(_intent_source_path_from_entry(generated))
+    for spec in specs:
+        command = spec.get("command") or spec.get("test_command") or spec.get("run_command")
+        if not _intent_command(command):
+            continue
+        spec_ids = {_intent_test_id(spec, ""), *_intent_related_test_ids(spec)}
+        spec_ids.discard("")
+        if generated_ids.intersection(spec_ids):
+            return command
+        spec_path = _path_key(_intent_source_path_from_entry(spec))
+        if generated_path and spec_path and (
+            generated_path == spec_path
+            or generated_path.endswith("/" + spec_path)
+            or spec_path.endswith("/" + generated_path)
+        ):
+            return command
+    command_specs = [
+        spec
+        for spec in specs
+        if _intent_command(spec.get("command") or spec.get("test_command") or spec.get("run_command"))
+    ]
+    if len(command_specs) == 1 and generated_total == 1:
+        spec = command_specs[0]
+        return spec.get("command") or spec.get("test_command") or spec.get("run_command")
+    if len(command_specs) == generated_total and generated_index < len(command_specs):
+        spec = command_specs[generated_index]
+        return spec.get("command") or spec.get("test_command") or spec.get("run_command")
+    return None
+
+
 def _intent_generated_command(
     generated: dict[str, Any],
     target: dict[str, Any],
     validation_repo: Path | None = None,
+    source: dict[str, Any] | None = None,
+    generated_index: int = 0,
+    generated_total: int = 1,
 ) -> list[str]:
     for key in ("command", "test_command", "testCommand", "run_command", "runCommand"):
         command = _intent_command(generated.get(key))
+        if command:
+            return command
+    if isinstance(source, dict):
+        command = _intent_command(
+            _intent_source_command_value(source, generated, generated_index, generated_total)
+        )
         if command:
             return command
     for key in ("command", "test_command", "testCommand", "run_command", "runCommand"):
@@ -4114,6 +4202,17 @@ def _intent_generated_command(
         if command:
             return command
     return _intent_inferred_command(generated, target, validation_repo)
+
+
+def _intent_generated_execution_records(generated_tests: list[Any]) -> list[dict[str, Any]]:
+    records = [item for item in generated_tests if isinstance(item, dict)]
+    executable = []
+    for record in records:
+        path_kind = str(record.get("path_kind") or record.get("pathKind") or "").strip().lower()
+        if path_kind in {"run_artifact_source_copy", "artifact_source_copy"}:
+            continue
+        executable.append(record)
+    return executable or records
 
 
 def _intent_source_execution_skip(run_dir: Path) -> tuple[str, str]:
@@ -4276,32 +4375,47 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     targets = plan.get("test_targets") if isinstance(plan.get("test_targets"), list) else []
     source = read_json(run_dir / "intent" / "intent-test-source.json", {})
     generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
-    generated_by_id = {
-        _intent_test_id(generated, f"ITV-{index + 1:03d}"): generated
-        for index, generated in enumerate(generated_tests)
-        if isinstance(generated, dict)
-    }
     target_by_id = {
         _intent_test_id(target, f"ITV-{index + 1:03d}"): target
         for index, target in enumerate(targets)
         if isinstance(target, dict)
     }
-    ordered_ids = []
-    for collection in (targets, generated_tests):
-        for index, item in enumerate(collection):
-            if not isinstance(item, dict):
+    generated_records = _intent_generated_execution_records(generated_tests)
+    execution_records: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    if generated_records:
+        for index, generated in enumerate(generated_records):
+            test_id = _intent_test_id(generated, f"ITV-{index + 1:03d}")
+            related_ids = _intent_related_test_ids(generated)
+            target = target_by_id.get(test_id)
+            if not isinstance(target, dict):
+                target = next(
+                    (target_by_id[target_id] for target_id in related_ids if target_id in target_by_id),
+                    {},
+                )
+            execution_records.append((test_id, generated, target))
+    else:
+        for index, target in enumerate(targets):
+            if not isinstance(target, dict):
                 continue
-            test_id = _intent_test_id(item, f"ITV-{index + 1:03d}")
-            if test_id and test_id not in ordered_ids:
-                ordered_ids.append(test_id)
+            test_id = _intent_test_id(target, f"ITV-{index + 1:03d}")
+            execution_records.append((test_id, {}, target))
     max_tests = max(0, int((config if isinstance(config, dict) else {}).get("max_tests_per_run") or 20))
     total_deadline = time.monotonic() + max(0, int((config if isinstance(config, dict) else {}).get("max_total_test_run_seconds") or 900))
     raw_results = []
-    for test_id in ordered_ids[:max_tests]:
-        generated = generated_by_id.get(test_id) if isinstance(generated_by_id.get(test_id), dict) else {}
-        target = target_by_id.get(test_id) if isinstance(target_by_id.get(test_id), dict) else {}
-        command = _intent_generated_command(generated, target, validation_repo)
+    limited_records = execution_records[:max_tests]
+    for generated_index, (test_id, generated, target) in enumerate(limited_records):
+        command = _intent_generated_command(
+            generated,
+            target,
+            validation_repo,
+            source=source,
+            generated_index=generated_index,
+            generated_total=len(limited_records),
+        )
         base_result = {"schema_version": "project-test-run/v1", "test_id": test_id}
+        related_ids = _intent_related_test_ids(generated)
+        if related_ids:
+            base_result["target_test_ids"] = related_ids
         if not validation_repo:
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "validation workspace was not prepared"})
             continue
@@ -4686,8 +4800,19 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
                     entry[key] = supporting[key]
         test_id = _intent_test_id(entry, _intent_test_id(supporting, f"ITV-{index + 1:03d}"))
         entry["test_id"] = test_id
-        if not _intent_generated_command(entry, {}):
+        has_explicit_command = any(
+            _intent_command(entry.get(key))
+            for key in ("command", "test_command", "testCommand", "run_command", "runCommand")
+        )
+        if not has_explicit_command:
             intended_command = intended_by_id.get(test_id)
+            if not intended_command:
+                intended_command = _intent_source_command_value(
+                    payload,
+                    entry,
+                    index,
+                    len(generated_items),
+                )
             if intended_command:
                 entry["command"] = intended_command
         if test_path:
@@ -5960,11 +6085,33 @@ def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
     generated = read_json(run_dir / "intent" / "intent-test-source.json", {}).get("generated_tests", [])
     raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
     analyzed_runs = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
-    planned = _json_list_len(plan_targets)
-    written = _json_list_len(generated)
-    run = _json_list_len(raw_runs)
-    analyzed = _json_list_len(analyzed_runs)
-    total = max(planned, written, run, analyzed)
+
+    def logical_ids(records: Any, prefix: str, use_related: bool = True) -> set[str]:
+        ids: set[str] = set()
+        if not isinstance(records, list):
+            return ids
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                continue
+            related = _intent_related_test_ids(record) if use_related else []
+            if related:
+                ids.update(related)
+                continue
+            test_id = _intent_test_id(record, f"{prefix}-{index + 1:03d}")
+            if test_id:
+                ids.add(test_id)
+        return ids
+
+    executable_generated = _intent_generated_execution_records(generated if isinstance(generated, list) else [])
+    planned_ids = logical_ids(plan_targets, "ITP", use_related=False)
+    written_ids = logical_ids(executable_generated, "ITV")
+    raw_ids = logical_ids(raw_runs, "ITR")
+    analyzed_ids = logical_ids(analyzed_runs, "ITA")
+    all_ids = planned_ids | written_ids | raw_ids | analyzed_ids
+    total = len(all_ids)
+    written = len(written_ids)
+    run = len(raw_ids)
+    analyzed = len(analyzed_ids)
     return {
         "intent_tests_total": total,
         "intent_tests_planned": total,
@@ -6096,13 +6243,66 @@ def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None =
     if progress_data:
         return progress_data
     if phase == "inventory_repository":
-        summary = read_json(run_dir / "inventory.json", {}).get("summary", {})
-        return summary if isinstance(summary, dict) else {}
+        inventory_payload = read_json(run_dir / "inventory.json", {})
+        if not isinstance(inventory_payload, dict) or not (run_dir / "inventory.json").is_file():
+            return {}
+        summary = inventory_payload.get("summary") if isinstance(inventory_payload.get("summary"), dict) else {}
+        files = inventory_payload.get("files") if isinstance(inventory_payload.get("files"), list) else []
+        source_like = sum(1 for item in files if isinstance(item, dict) and item.get("is_source_like") is True)
+        try:
+            source_like = max(source_like, int(summary.get("source_like_files") or 0))
+        except (TypeError, ValueError):
+            pass
+        return {"source_like_files_total": source_like}
+    if phase == "risk_routing":
+        inventory_payload = read_json(run_dir / "inventory.json", {})
+        routing_payload = read_json(run_dir / "risk-routing.json", {})
+        if not isinstance(inventory_payload, dict) or not isinstance(routing_payload, dict):
+            return {}
+        files = inventory_payload.get("files") if isinstance(inventory_payload.get("files"), list) else []
+        source_paths = {
+            str(item.get("path") or "").strip()
+            for item in files
+            if isinstance(item, dict) and item.get("is_source_like") is True and str(item.get("path") or "").strip()
+        }
+        profile = read_json(run_dir / "repo-profile.json", {})
+        normalized_routing = effective_routing(routing_payload, profile, inventory_payload)
+        classified_paths = {
+            str(route.get("path") or "").strip()
+            for route in normalized_routing.get("routes", [])
+            if isinstance(route, dict) and str(route.get("path") or "").strip()
+        }
+        return {
+            "source_like_files_total": len(source_paths),
+            "source_like_files_classified": len(source_paths.intersection(classified_paths)),
+        }
     if phase == "bundle_planning":
         bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
         return {"bundles_total": len(bundles) if isinstance(bundles, list) else 0}
+    if phase == "bundle_packing":
+        plan_path = run_dir / "bundle-plan.json"
+        if not plan_path.is_file():
+            return {}
+        bundles = read_json(plan_path, {}).get("bundles", [])
+        bundles = bundles if isinstance(bundles, list) else []
+        planned_ids = {
+            str(bundle.get("bundle_id") or bundle.get("id") or "").strip()
+            for bundle in bundles
+            if isinstance(bundle, dict) and str(bundle.get("bundle_id") or bundle.get("id") or "").strip()
+        }
+        packed_ids = {path.stem for path in (run_dir / "bundles").glob("*.md")} if (run_dir / "bundles").is_dir() else set()
+        return {
+            "bundles_total": len(bundles),
+            "bundles_packed": len(planned_ids.intersection(packed_ids)),
+        }
     if phase == "intent_test_planning":
         return {"intent_tests_total": intent_test_artifact_counts(run_dir)["intent_tests_total"]}
+    if phase == "intent_test_writing":
+        counts = intent_test_artifact_counts(run_dir)
+        return {
+            "intent_tests_total": counts["intent_tests_total"],
+            "intent_tests_written": counts["intent_tests_written"],
+        }
     if phase == "intent_test_running":
         counts = intent_test_artifact_counts(run_dir)
         return {"intent_tests_total": counts["intent_tests_total"], "intent_tests_run": counts["intent_tests_run"]}
@@ -6113,7 +6313,62 @@ def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None =
             "intent_tests_run": counts["intent_tests_run"],
             "intent_tests_analyzed": counts["intent_tests_analyzed"],
         }
+    if phase == "validator_disproof":
+        input_path = run_dir / "validation-input.json"
+        output_path = run_dir / "validated-findings.json"
+        if not input_path.is_file() and not output_path.is_file():
+            return {}
+        validation_input = read_json(input_path, {})
+        validation_output = read_json(output_path, {})
+
+        def first_list_size(payload: Any, keys: tuple[str, ...]) -> int:
+            if not isinstance(payload, dict):
+                return 0
+            for key in keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return len(value)
+            return 0
+
+        total = first_list_size(
+            validation_input,
+            ("candidates", "candidate_findings", "findings", "clusters", "validation_candidates"),
+        )
+        completed = first_list_size(
+            validation_output,
+            ("validated_findings", "findings", "results", "validation_results"),
+        )
+        return {
+            "validator_candidates_total": max(total, completed),
+            "validator_candidates_completed": completed,
+        }
     return {}
+
+
+def artifact_backed_progress_counters(run_dir: Path) -> dict[str, int]:
+    counters: dict[str, int] = {}
+    phase_paths = (
+        ("inventory_repository", run_dir / "inventory.json"),
+        ("risk_routing", run_dir / "risk-routing.json"),
+        ("bundle_planning", run_dir / "bundle-plan.json"),
+        ("bundle_packing", run_dir / "bundle-plan.json"),
+        ("reviewer_fanout", run_dir / "bundle-plan.json"),
+        ("intent_test_writing", run_dir / "intent" / "intent-test-source.json"),
+        ("intent_test_running", run_dir / "intent" / "intent-test-results.raw.json"),
+        ("validator_disproof", run_dir / "validated-findings.json"),
+    )
+    for phase, evidence_path in phase_paths:
+        if not evidence_path.is_file():
+            continue
+        data = phase_completion_data(run_dir, phase)
+        for key in PROGRESS_COUNTER_KEYS:
+            if key not in data:
+                continue
+            try:
+                counters[key] = max(0, int(data[key]))
+            except (TypeError, ValueError):
+                continue
+    return counters
 
 
 def write_review_instruction_tree(repo_dir: Path) -> None:
@@ -7166,7 +7421,11 @@ def progress_final_payload(run_dir: Path, run_id: str, status: str) -> dict[str,
         value = snapshot.get(key)
         if key == "steps" and isinstance(value, list):
             payload[key] = value
-        elif key in {"counters", "active_unit"} and isinstance(value, dict):
+        elif key == "counters" and isinstance(value, dict):
+            reconciled = dict(value)
+            reconciled.update(artifact_backed_progress_counters(run_dir))
+            payload[key] = reconciled
+        elif key == "active_unit" and isinstance(value, dict):
             payload[key] = value
         elif key in {"last_event_sequence", "updated_at"} and value is not None:
             payload[key] = value
