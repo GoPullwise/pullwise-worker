@@ -66,6 +66,7 @@ from pullwise_worker.review_worker_v1 import (
     phase_prompt,
     progress_final_payload,
     inventory,
+    location_verification_payload,
     minimal_repo_profile_payload,
     package_json_has_test_script,
     materialize_artifacts,
@@ -1686,6 +1687,143 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(raw["test_runs"][0]["classification"], "dependency_missing")
         self.assertEqual(raw["test_runs"][0]["command"], "npm test -- .codex-review/generated-tests/intent-root-relative-api-base.test.jsx")
         self.assertIn("Dependencies are not installed", raw["test_runs"][0]["skip_reason"])
+
+    def test_run_intent_tests_executes_one_generated_file_once_for_multiple_plan_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            generated_test = validation_repo / ".codex-review" / "generated-tests" / "intent" / "test_protocol.py"
+            generated_test.parent.mkdir(parents=True)
+            generated_test.write_text("import unittest\n", encoding="utf-8")
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {"schema_version": "validation-workspace/v1", "validation_repo_root": str(validation_repo)},
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            target_ids = ["intent-completed", "intent-terminal"]
+            write_json(
+                intent_dir / "intent-test-plan.json",
+                {
+                    "schema_version": "intent-test-plan/v1",
+                    "test_targets": [{"test_id": target_id} for target_id in target_ids],
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "test_ids": target_ids,
+                            "path": ".codex-review/generated-tests/intent/test_protocol.py",
+                            "test_framework": "unittest",
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                    "test_commands": [
+                        {
+                            "command": "python3 -m unittest .codex-review/generated-tests/intent/test_protocol.py",
+                            "working_directory": "repository root",
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="python3",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as run:
+                raw = run_intent_tests(run_dir)
+
+        self.assertEqual(len(raw["test_runs"]), 1)
+        self.assertEqual(raw["test_runs"][0]["test_id"], "ITV-001")
+        self.assertEqual(raw["test_runs"][0]["target_test_ids"], target_ids)
+        self.assertEqual(
+            raw["test_runs"][0]["command"],
+            "python3 -m unittest .codex-review/generated-tests/intent/test_protocol.py",
+        )
+        run.assert_called_once()
+
+    def test_repair_intent_test_source_maps_single_top_level_test_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            test_path = "intent/generated-tests/test_protocol.py"
+            (run_dir / test_path).parent.mkdir(parents=True)
+            (run_dir / test_path).write_text("import unittest\n", encoding="utf-8")
+            source_path = run_dir / "intent" / "intent-test-source.json"
+            write_json(
+                source_path,
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "test_ids": ["intent-completed", "intent-terminal"],
+                            "path": test_path,
+                            "test_framework": "unittest",
+                        }
+                    ],
+                    "test_commands": [
+                        {
+                            "command": "python3 -m unittest intent/generated-tests/test_protocol.py",
+                            "working_directory": "repository root",
+                        }
+                    ],
+                },
+            )
+
+            repair_intent_test_source_artifact(source_path, run_dir)
+            repaired = json.loads(source_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            repaired["generated_tests"][0]["command"],
+            "python3 -m unittest intent/generated-tests/test_protocol.py",
+        )
+
+    def test_run_intent_tests_infers_unittest_for_unittest_python_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            generated_test = validation_repo / "test_generated.py"
+            validation_repo.mkdir(parents=True)
+            generated_test.write_text("import unittest\n", encoding="utf-8")
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(intent_dir / "validation-workspace.json", {"validation_repo_root": str(validation_repo)})
+            write_json(intent_dir / "intent-test-validation.json", {"schema_version": "intent-test-validation/v1", "enabled": True})
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": "test_generated.py",
+                            "test_framework": "unittest",
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ):
+                raw = run_intent_tests(run_dir)
+
+        self.assertEqual(raw["test_runs"][0]["command"], "python -m unittest test_generated.py")
 
     def test_intent_counters_do_not_report_more_runs_than_total_when_source_has_extra_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5192,8 +5330,53 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
             verified = json.loads((run_dir / "verified-reviewers" / "security.json").read_text(encoding="utf-8"))
-            self.assertEqual(validation["errors"], [])
-            self.assertEqual(verified, payload)
+        self.assertEqual(validation["errors"], [])
+        self.assertEqual(verified, payload)
+
+    def test_location_verification_reads_singular_reviewer_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            verified_dir = run_dir / "verified-reviewers"
+            verified_dir.mkdir(parents=True)
+            source = repo / "pullwise_server" / "worker_results.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("\n".join(f"line {index}" for index in range(1, 601)) + "\n", encoding="utf-8")
+            write_json(
+                verified_dir / "correctness.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "findings": [
+                        {
+                            "id": "finding-001",
+                            "location": {
+                                "path": "pullwise_server/worker_results.py",
+                                "start_line": 437,
+                                "end_line": 571,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            verification = location_verification_payload(repo, run_dir)
+
+        self.assertEqual(verification["summary"], {
+            "locations_total": 1,
+            "valid_locations": 1,
+            "invalid_locations": 0,
+        })
+        self.assertEqual(
+            verification["items"][0],
+            {
+                "finding_id": "finding-001",
+                "path": "pullwise_server/worker_results.py",
+                "start_line": 437,
+                "end_line": 571,
+                "line_count": 600,
+                "location_status": "valid",
+            },
+        )
 
     def test_reviewer_json_validation_repair_turn_fixes_invalid_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -6812,6 +6995,65 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(
             repaired["findings"][0]["locations"],
             [{"path": "src/screens/flow.jsx", "start_line": 83, "end_line": 110}],
+        )
+
+    def test_agent_report_repair_normalizes_affected_locations_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [
+                        {
+                            "id": "finding-001",
+                            "title": "Unsafe debug bundle URL",
+                            "severity": "high",
+                            "confidence": 0.9,
+                            "affected_locations": [
+                                {
+                                    "path": "src/screens/flow.jsx",
+                                    "start_line": 83,
+                                    "end_line": 90,
+                                },
+                                {
+                                    "path": "src/lib/pullwise-data.js",
+                                    "start_line": 1120,
+                                    "end_line": 1152,
+                                },
+                            ],
+                            "evidence": ["The URL scheme is not filtered."],
+                            "impact": "An unsafe link can be rendered.",
+                            "recommendation": "Allow only server artifact URLs.",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(
+                    validation_entry(
+                        "finding-001",
+                        status="confirmed",
+                        title="Unsafe debug bundle URL",
+                        path="src/screens/flow.jsx",
+                        line=83,
+                    )
+                ),
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            repaired = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            repaired["findings"][0]["locations"],
+            [
+                {"path": "src/screens/flow.jsx", "start_line": 83, "end_line": 90},
+                {"path": "src/lib/pullwise-data.js", "start_line": 1120, "end_line": 1152},
+            ],
         )
 
     def test_agent_report_repair_uses_line_range_for_result_envelope_locations(self) -> None:

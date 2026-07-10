@@ -3984,10 +3984,14 @@ def location_verification_payload(repo_dir: Path, run_dir: Path) -> dict[str, An
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
-            finding_id = str(finding.get("local_id") or finding.get("id") or "")
-            for location in finding.get("locations") or []:
-                if not isinstance(location, dict):
-                    continue
+            finding_id = str(
+                finding.get("local_id")
+                or finding.get("finding_id")
+                or finding.get("id")
+                or finding.get("cluster_id")
+                or ""
+            )
+            for location in agent_report_locations(finding):
                 rel = str(location.get("path") or "")
                 start = int(location.get("start_line") or location.get("line") or 0)
                 end = int(location.get("end_line") or start or 0)
@@ -6335,6 +6339,8 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
         )
     if end <= 0:
         end = start
+    if end < start:
+        start, end = end, start
     if not path or start <= 0:
         return None
     location = dict(value)
@@ -6391,8 +6397,11 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
         raw_locations = []
     if not raw_locations and isinstance(finding.get("location"), dict):
         raw_locations = [finding["location"]]
-    if not raw_locations and isinstance(finding.get("affectedLocations"), list):
-        raw_locations = finding["affectedLocations"]
+    if not raw_locations:
+        for key in ("affected_locations", "affectedLocations"):
+            if isinstance(finding.get(key), list):
+                raw_locations = finding[key]
+                break
     if not raw_locations:
         finding_location = agent_report_finding_location(finding)
         if finding_location is not None:
@@ -6463,6 +6472,8 @@ def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
                 normalized["id"] = candidate
                 break
     normalized["locations"] = agent_report_locations(finding)
+    normalized.pop("affected_locations", None)
+    normalized.pop("affectedLocations", None)
     normalized["confidence"] = agent_report_confidence(finding.get("confidence"))
     if not str(normalized.get("recommendation") or "").strip():
         for key in ("recommended_fix", "recommended_action", "remediation"):
