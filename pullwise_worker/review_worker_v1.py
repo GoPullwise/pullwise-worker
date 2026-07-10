@@ -1744,6 +1744,7 @@ class ReviewWorkerV1:
         self.lock = WorkerLock(self.isolation.worker_root, str(config.worker_id), self.isolation.codex_home)
         self._machine_metrics_payload: dict[str, Any] | None = None
         self._machine_metrics_collected_at = 0.0
+        self._heartbeat_lock = threading.RLock()
 
     def default_codex_events_path(self) -> Path:
         return self.isolation.logs / "codex-sdk-events.jsonl"
@@ -1811,9 +1812,13 @@ class ReviewWorkerV1:
             self.lock.release()
 
     def heartbeat(self) -> dict[str, Any]:
+        with self._heartbeat_lock:
+            return self._heartbeat_once()
+
+    def _heartbeat_once(self) -> dict[str, Any]:
         active = self.state.active_job
         codex_client_error = ""
-        if active is None or self.codex_client is None or not self.codex_client.is_running():
+        if active is None and (self.codex_client is None or not self.codex_client.is_running()):
             try:
                 self.ensure_codex_client()
             except Exception as exc:
@@ -1873,6 +1878,37 @@ class ReviewWorkerV1:
                 if command.get("type") == "cancel_run" and str(command.get("run_id") or "") == active.run_id:
                     self.request_cancel(active, reason=str(command.get("reason") or "server_cancelled"))
         return response if isinstance(response, dict) else {}
+
+    def active_job_heartbeat_interval_seconds(self) -> float:
+        return max(1.0, float(getattr(self.config, "poll_seconds", 5) or 5))
+
+    def start_active_job_supervisor(self, active: ActiveJob) -> tuple[threading.Event, threading.Thread]:
+        stop = threading.Event()
+
+        def supervise() -> None:
+            while not stop.is_set() and self.state.active_job is active:
+                try:
+                    self.heartbeat()
+                except Exception as exc:
+                    if active.run_dir is not None:
+                        append_jsonl(
+                            active.run_dir / "worker.log.jsonl",
+                            {
+                                "event": "active_job_heartbeat_failed",
+                                "error": str(exc),
+                                "time": iso_time(time.time()),
+                            },
+                        )
+                if stop.wait(self.active_job_heartbeat_interval_seconds()):
+                    return
+
+        thread = threading.Thread(
+            target=supervise,
+            name=f"pullwise-heartbeat-{active.run_id}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
 
     def poll_cancel_requested(self) -> bool:
         active = self.state.active_job
@@ -2084,6 +2120,7 @@ class ReviewWorkerV1:
         attempt = int(job.get("attempt") or 1)
         active = ActiveJob(job_id=job_id, run_id=run_id, lease_id=lease_id, attempt_id=f"{self.config.worker_id}-{attempt}")
         self.state.set_active(active)
+        heartbeat_stop, heartbeat_thread = self.start_active_job_supervisor(active)
         terminal_state = "failed"
         codex_client: CodexSdkClient | None = None
         repo_dir: Path | None = None
@@ -2141,6 +2178,8 @@ class ReviewWorkerV1:
                         pass
                     elif phase in SEMANTIC_PHASES:
                         self.run_semantic_phase(codex_client, repo_dir, run_dir, job, phase)
+                        if phase == "validator_disproof":
+                            repair_validation_output_artifact(run_dir / "validated-findings.json")
                         if phase == "final_report_json":
                             repair_agent_report_artifact(run_dir, job)
                     elif phase == "reviewer_json_validation":
@@ -2331,6 +2370,8 @@ class ReviewWorkerV1:
                 terminal_state = "result_submit_failed"
                 return
         finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join()
             if codex_client is not None:
                 codex_client.set_events_path(self.default_codex_events_path())
             if terminal_state in TERMINAL_STATES:
@@ -5925,6 +5966,8 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
 
 
 MAIN_FINDING_VALIDATION_STATUSES = {"confirmed", "plausible", "validated"}
+WEAK_FINDING_VALIDATION_STATUSES = {"weak", "suppressed", "unresolved", "appendix"}
+DISPROVEN_FINDING_VALIDATION_STATUSES = {"disproven", "rejected", "false_positive", "invalid"}
 FINDING_ID_ALIAS_FIELDS = ("id", "finding_id", "cluster_id", "local_id", "source_finding_id", "source_finding_ids")
 VALIDATION_STATUS_ALIAS_FIELDS = ("status", "validator_status", "validation_status", "classification", "disposition")
 
@@ -5962,6 +6005,100 @@ def validation_entry_status(entry: object) -> str:
 
 def validation_entry_is_main_backing(entry: object) -> bool:
     return validation_entry_status(entry) in MAIN_FINDING_VALIDATION_STATUSES
+
+
+def _validation_collection(payload: dict[str, Any], *keys: str) -> list[Any] | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def _normalized_validation_entry(entry: object, *, default_status: str = "") -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+    normalized = dict(entry)
+    status = validation_entry_status(entry) or default_status
+    if status:
+        normalized["status"] = status
+    return normalized
+
+
+def repair_validation_output_artifact(path: Path) -> None:
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        return
+    payload["schema_version"] = "validation-output/v1"
+    raw_main = _validation_collection(
+        payload,
+        "validated_findings",
+        "validated",
+        "findings",
+        "results",
+        "validation_results",
+    ) or []
+    raw_weak = _validation_collection(payload, "weak_findings", "weak") or []
+    raw_disproven = _validation_collection(payload, "disproven_findings", "disproven", "rejected_findings") or []
+
+    main: list[dict[str, Any]] = []
+    weak: list[dict[str, Any]] = []
+    disproven: list[dict[str, Any]] = []
+    for raw_entry in raw_main:
+        entry = _normalized_validation_entry(raw_entry)
+        if entry is None:
+            continue
+        status = validation_entry_status(entry)
+        if status in WEAK_FINDING_VALIDATION_STATUSES:
+            weak.append(entry)
+        elif status in DISPROVEN_FINDING_VALIDATION_STATUSES:
+            disproven.append(entry)
+        else:
+            # Preserve missing or unknown dispositions in the canonical main
+            # collection so strict validation requests a semantic repair instead
+            # of silently treating them as confirmed or dropping them.
+            main.append(entry)
+    weak.extend(
+        entry
+        for raw_entry in raw_weak
+        if (entry := _normalized_validation_entry(raw_entry, default_status="weak")) is not None
+    )
+    disproven.extend(
+        entry
+        for raw_entry in raw_disproven
+        if (entry := _normalized_validation_entry(raw_entry, default_status="disproven")) is not None
+    )
+    payload["validated_findings"] = main
+    payload["weak_findings"] = weak
+    payload["disproven_findings"] = disproven
+    write_json(path, payload)
+
+
+def validation_output_errors(payload: object) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["validated-findings.json must be an object"]
+    errors: list[str] = []
+    if payload.get("schema_version") != "validation-output/v1":
+        errors.append("validated-findings.json must use schema_version validation-output/v1")
+    for collection_name, allowed_statuses in (
+        ("validated_findings", MAIN_FINDING_VALIDATION_STATUSES),
+        ("weak_findings", WEAK_FINDING_VALIDATION_STATUSES),
+        ("disproven_findings", DISPROVEN_FINDING_VALIDATION_STATUSES),
+    ):
+        entries = payload.get(collection_name)
+        if not isinstance(entries, list):
+            errors.append(f"validated-findings.json {collection_name} must be a list")
+            continue
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                errors.append(f"validated-findings.json {collection_name}[{index}] must be an object")
+                continue
+            status = validation_entry_status(entry)
+            if status not in allowed_statuses:
+                errors.append(
+                    f"validated-findings.json {collection_name}[{index}] has unsupported disposition {status or 'missing'}"
+                )
+    return errors
 
 
 def finding_validation_status(finding: object) -> str:
@@ -6490,6 +6627,10 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
             errors = agent_report_contract_errors(payload)
             if errors:
                 raise RuntimeError(errors[0])
+        if rel == "validated-findings.json":
+            errors = validation_output_errors(payload)
+            if errors:
+                raise RuntimeError(errors[0])
         if rel == "json-errors.json":
             errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
             if errors:
@@ -6637,10 +6778,20 @@ def phase_completion_data(run_dir: Path, phase: str, artifact_dir: Path | None =
             validation_input,
             ("candidates", "candidate_findings", "findings", "clusters", "validation_candidates"),
         )
-        completed = first_list_size(
-            validation_output,
-            ("validated_findings", "findings", "results", "validation_results"),
-        )
+        canonical_collections = (
+            validation_output.get("validated_findings"),
+            validation_output.get("weak_findings"),
+            validation_output.get("disproven_findings"),
+        ) if isinstance(validation_output, dict) else ()
+        if canonical_collections and all(isinstance(collection, list) for collection in canonical_collections):
+            completed = sum(len(collection) for collection in canonical_collections)
+        else:
+            completed = first_list_size(
+                validation_output,
+                ("validated", "findings", "results", "validation_results", "validated_findings"),
+            )
+            completed += first_list_size(validation_output, ("weak", "weak_findings"))
+            completed += first_list_size(validation_output, ("disproven", "disproven_findings"))
         return {
             "validator_candidates_total": max(total, completed),
             "validator_candidates_completed": completed,
@@ -6805,8 +6956,19 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
             repair_intent_test_results_artifact(intent_results_path, run_dir)
         else:
             write_json(intent_results_path, fallback_intent_test_results(run_dir))
-    elif phase == "validator_disproof" and not (run_dir / "validated-findings.json").exists():
-        write_json(run_dir / "validated-findings.json", {"schema_version": "validation-output/v1", "validated_findings": [], "disproven_findings": []})
+    elif phase == "validator_disproof":
+        validation_path = run_dir / "validated-findings.json"
+        if not validation_path.exists():
+            write_json(
+                validation_path,
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [],
+                    "weak_findings": [],
+                    "disproven_findings": [],
+                },
+            )
+        repair_validation_output_artifact(validation_path)
     elif phase == "final_report_json":
         if not (run_dir / "report.agent.json").exists():
             write_json(run_dir / "report.agent.json", agent_report_payload(run_dir, job))

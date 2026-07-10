@@ -189,7 +189,17 @@ def binding_ids(record: object) -> set[str]:
     if not isinstance(record, dict):
         return set()
     result: set[str] = set()
-    for key in ("id", "finding_id", "cluster_id", "candidate_id", "local_id", "source_finding_id"):
+    for key in (
+        "id",
+        "finding_id",
+        "finding_ids",
+        "cluster_id",
+        "candidate_id",
+        "canonical_finding_id",
+        "local_id",
+        "source_finding_id",
+        "source_finding_ids",
+    ):
         value = record.get(key)
         values = value if isinstance(value, list) else [value]
         result.update(str(item).strip() for item in values if str(item or "").strip())
@@ -214,6 +224,22 @@ def validation_status(record: object) -> str:
             if value:
                 return value
     return ""
+
+
+MAIN_VALIDATION_STATUSES = {"confirmed", "plausible", "validated"}
+
+
+def finding_binding_key(record: object) -> tuple[str, str, int] | None:
+    if not isinstance(record, dict):
+        return None
+    title = " ".join(str(record.get("title") or "").strip().lower().split())
+    locations = finding_locations(record)
+    if not title or not locations:
+        return None
+    location = locations[0]
+    path = str(location.get("path") or "").strip().replace("\\", "/")
+    start_line = integer(location.get("start_line"))
+    return (title, path, start_line) if path and start_line > 0 else None
 
 
 def json_object(value: object) -> dict[str, Any]:
@@ -347,6 +373,7 @@ class BundleAudit:
         debug_parent = PurePosixPath(self.debug_name).parent.as_posix() if self.debug_name else ""
         self.worker_prefix = "" if debug_parent == "." else debug_parent
         self.run_prefix = f"{self.worker_prefix}/run".strip("/")
+        self._report_findings_cache: list[tuple[dict[str, Any], str]] | None = None
 
     def issue(self, severity: str, code: str, message: str, path: str = "", **details: Any) -> None:
         self.issues.append(Issue(severity, code, message, path, details or None))
@@ -466,24 +493,49 @@ class BundleAudit:
             )
 
     def report_findings_with_status(self) -> list[tuple[dict[str, Any], str]]:
+        if self._report_findings_cache is not None:
+            return self._report_findings_cache
         report = self.json_at(self.run_name("report.agent.json"))
         findings = [
             finding
             for finding in list_value(report, "findings", "main_findings", "mainFindings")
             if isinstance(finding, dict)
         ]
-        validation = self.json_at(self.run_name("validated-findings.json"))
-        entries = [
-            entry
-            for entry in list_value(validation, "validated_findings", "findings", "results")
-            if isinstance(entry, dict)
-        ]
+        validation_name = self.run_name("validated-findings.json")
+        validation = self.json_at(validation_name)
+        canonical_entries = validation.get("validated_findings") if isinstance(validation, dict) else None
+        if not isinstance(canonical_entries, list):
+            alias_entries = list_value(validation, "validated", "findings", "results", "validation_results")
+            if alias_entries:
+                self.issue(
+                    "error",
+                    "validation_findings_collection_noncanonical",
+                    "Validator output has findings but does not use the canonical validated_findings collection",
+                    validation_name,
+                )
+            canonical_entries = []
+        entries = [entry for entry in canonical_entries if isinstance(entry, dict)]
+        accepted_entries = [entry for entry in entries if validation_status(entry) in MAIN_VALIDATION_STATUSES]
         result: list[tuple[dict[str, Any], str]] = []
         for finding in findings:
             ids = binding_ids(finding)
-            matches = [entry for entry in entries if ids and ids.intersection(binding_ids(entry))]
-            status = validation_status(matches[0]) if len(matches) == 1 else validation_status(finding)
-            result.append((finding, status or "confirmed"))
+            matches = [entry for entry in accepted_entries if ids and ids.intersection(binding_ids(entry))]
+            if not matches:
+                key = finding_binding_key(finding)
+                matches = [entry for entry in accepted_entries if key is not None and finding_binding_key(entry) == key]
+            if len(matches) != 1:
+                finding_id = str(finding.get("id") or next(iter(ids), "unknown"))
+                self.issue(
+                    "error",
+                    "main_finding_validation_missing",
+                    f"Main finding {finding_id} does not have one unique confirmed/plausible validator backing entry",
+                    validation_name,
+                    matching_entries=len(matches),
+                )
+                result.append((finding, ""))
+                continue
+            result.append((finding, validation_status(matches[0])))
+        self._report_findings_cache = result
         return result
 
     def audit_report(self, inventory: Any) -> None:
@@ -579,7 +631,7 @@ class BundleAudit:
                 verification_name,
             )
         statuses = [status for _finding, status in self.report_findings_with_status()]
-        self.facts["confirmed_findings"] = sum(1 for status in statuses if status != "plausible")
+        self.facts["confirmed_findings"] = sum(1 for status in statuses if status in {"confirmed", "validated"})
         self.facts["plausible_findings"] = sum(1 for status in statuses if status == "plausible")
 
     def audit_reviewer_coverage(self) -> dict[str, int]:
@@ -820,7 +872,19 @@ class BundleAudit:
             "findings",
             "clusters",
         )
-        validated = list_value(validation_output, "validated_findings", "findings", "results")
+        canonical_validation_collections = (
+            validation_output.get("validated_findings"),
+            validation_output.get("weak_findings"),
+            validation_output.get("disproven_findings"),
+        ) if isinstance(validation_output, dict) else ()
+        if canonical_validation_collections and all(
+            isinstance(collection, list) for collection in canonical_validation_collections
+        ):
+            validated_count = sum(len(collection) for collection in canonical_validation_collections)
+        else:
+            validated_count = len(list_value(validation_output, "validated", "findings", "results", "validated_findings"))
+            validated_count += len(list_value(validation_output, "weak", "weak_findings"))
+            validated_count += len(list_value(validation_output, "disproven", "disproven_findings"))
         expected = {
             "source_like_files_total": len(source_paths),
             "source_like_files_classified": len(source_paths.intersection(route_paths)) if route_paths else 0,
@@ -831,8 +895,8 @@ class BundleAudit:
             "intent_tests_total": intent_counts["total"],
             "intent_tests_written": intent_counts["written"],
             "intent_tests_run": intent_counts["run"],
-            "validator_candidates_total": max(len(candidates), len(validated)),
-            "validator_candidates_completed": len(validated),
+            "validator_candidates_total": max(len(candidates), validated_count),
+            "validator_candidates_completed": validated_count,
         }
         mismatches = {
             key: {"recorded": integer(counters.get(key)), "expected": value}
@@ -866,6 +930,8 @@ class BundleAudit:
         for finding, status in findings_with_status:
             if status == "plausible":
                 expected_counts["plausible"] += 1
+                continue
+            if status not in {"confirmed", "validated"}:
                 continue
             severity = finding_severity(finding.get("severity"))
             key = f"confirmed_{severity}"

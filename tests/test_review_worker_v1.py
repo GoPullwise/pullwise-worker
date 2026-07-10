@@ -224,6 +224,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     ["disproven"] if label == "validated" else [],
                 )
                 validate_phase_outputs(run_dir, "validator_disproof")
+                if label == "validated":
+                    self.assertEqual(
+                        phase_completion_data(run_dir, "validator_disproof")["validator_candidates_completed"],
+                        4,
+                    )
 
     def test_worker_state_allows_lease_only_when_idle_without_active_job(self) -> None:
         state = WorkerState()
@@ -1961,7 +1966,75 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(raw["test_runs"][0]["target_test_ids"], target_ids)
         self.assertEqual(
             raw["test_runs"][0]["command"],
-            "python3 -m unittest .codex-review/generated-tests/intent/test_protocol.py",
+            "python3 -m unittest discover -s .codex-review/generated-tests/intent -p test_protocol.py",
+        )
+        run.assert_called_once()
+
+    def test_run_intent_tests_groups_duplicate_generated_file_and_uses_unittest_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            generated_test = validation_repo / "intent" / "generated-tests" / "test_regressions.py"
+            generated_test.parent.mkdir(parents=True)
+            generated_test.write_text("import unittest\n", encoding="utf-8")
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {"schema_version": "validation-workspace/v1", "validation_repo_root": str(validation_repo)},
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                intent_dir / "intent-test-plan.json",
+                {
+                    "schema_version": "intent-test-plan/v1",
+                    "test_targets": [{"test_id": "IT-001"}, {"test_id": "IT-002"}],
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "IT-001",
+                            "path": "intent/generated-tests/test_regressions.py",
+                            "test_framework": "unittest",
+                            "method": "test_first",
+                            "artifact_refs": ["art_intent_test_source"],
+                        },
+                        {
+                            "test_id": "IT-002",
+                            "path": "intent/generated-tests/test_regressions.py",
+                            "test_framework": "unittest",
+                            "method": "test_second",
+                            "artifact_refs": ["art_intent_test_source"],
+                        },
+                    ],
+                    "test_commands": [
+                        {"command": "python -m unittest intent/generated-tests/test_regressions.py"}
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="python",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run:
+                raw = run_intent_tests(run_dir)
+
+        self.assertEqual(len(raw["test_runs"]), 1)
+        self.assertEqual(raw["test_runs"][0]["target_test_ids"], ["IT-001", "IT-002"])
+        self.assertEqual(
+            raw["test_runs"][0]["command"],
+            "python -m unittest discover -s intent/generated-tests -p test_regressions.py",
         )
         run.assert_called_once()
 
@@ -6693,6 +6766,56 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(payload["test_results"][0]["classification"], "dependency_missing")
         self.assertEqual(payload["test_results"][0]["confidence"], 0.0)
         self.assertEqual(payload["test_results"][0]["finding_confidence_impact"], "none")
+
+    def test_repair_intent_results_keeps_generated_path_import_failure_as_harness_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            output_dir = run_dir / "intent" / "test-output"
+            output_dir.mkdir(parents=True)
+            stderr_path = output_dir / "IT-001.stderr.log"
+            stderr_path.write_text(
+                "ImportError: Failed to import test module: intent/generated-tests/test_regressions\n"
+                "ModuleNotFoundError: No module named 'intent/generated-tests/test_regressions'\n",
+                encoding="utf-8",
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [
+                        {
+                            "test_id": "IT-001",
+                            "status": "failed",
+                            "exit_code": 1,
+                            "command": "python -m unittest intent/generated-tests/test_regressions.py",
+                            "stderr_path": str(stderr_path),
+                        }
+                    ],
+                },
+            )
+            result_path = run_dir / "intent" / "intent-test-results.json"
+            write_json(
+                result_path,
+                {
+                    "schema_version": "intent-test-result/v1",
+                    "summary": {"classification_counts": {"dependency_missing": 1}},
+                    "test_results": [
+                        {
+                            "test_id": "IT-001",
+                            "status": "failed",
+                            "classification": "test_harness_error",
+                            "confidence": 0.0,
+                            "evidence": ["unittest could not import the generated filesystem path"],
+                        }
+                    ],
+                },
+            )
+
+            repair_intent_test_results_artifact(result_path, run_dir)
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["test_results"][0]["classification"], "test_harness_error")
+        self.assertEqual(payload["summary"]["classification_counts"], {"test_harness_error": 1})
 
     def test_validate_phase_outputs_rejects_malformed_intent_test_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
