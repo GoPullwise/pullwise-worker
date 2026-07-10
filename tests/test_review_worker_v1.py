@@ -3949,6 +3949,37 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(artifact_report["summary"]["result_status"], "incomplete")
         self.assertIn("report.agent", {item["kind"] for item in manifest})
 
+    def test_failed_envelope_keeps_failed_status_in_debug_bundle_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            run_dir.mkdir(parents=True)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+
+            worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "failed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+                error="codex runtime too old",
+                phase="check_codex_auth",
+            )
+
+            with zipfile.ZipFile(artifact_dir / "debug-bundle.zip") as archive:
+                summary = json.loads(archive.read("debug-summary.json").decode("utf-8"))
+
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["error"], "codex runtime too old")
+
     def test_upload_log_artifacts_refreshes_and_reuploads_final_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -6680,6 +6711,108 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
         self.assertEqual(qa["status"], "pass")
         self.assertEqual(qa["errors"], [])
+
+    def test_agent_report_repair_normalizes_recommended_fix_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [
+                        {
+                            "id": "finding-001",
+                            "title": "Required artifacts can be skipped",
+                            "severity": "P1",
+                            "confidence": 0.9,
+                            "locations": [
+                                {
+                                    "path": "pullwise_server/worker_results.py",
+                                    "start_line": 437,
+                                    "end_line": 571,
+                                }
+                            ],
+                            "evidence": ["required=false entries bypass upload checks"],
+                            "impact": "Completed results can omit required artifacts.",
+                            "recommended_fix": "Require mandatory kinds to use required=true.",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(
+                    validation_entry(
+                        "finding-001",
+                        status="confirmed",
+                        title="Required artifacts can be skipped",
+                        path="pullwise_server/worker_results.py",
+                        line=437,
+                    )
+                ),
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            repaired = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            repaired["findings"][0]["recommendation"],
+            "Require mandatory kinds to use required=true.",
+        )
+
+    def test_agent_report_repair_orders_reversed_location_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [
+                        {
+                            "id": "finding-001",
+                            "title": "Unsafe debug bundle URL",
+                            "severity": "high",
+                            "confidence": 0.9,
+                            "locations": [
+                                {
+                                    "path": "src/screens/flow.jsx",
+                                    "start_line": 110,
+                                    "end_line": 83,
+                                }
+                            ],
+                            "evidence": ["The URL scheme is not filtered."],
+                            "impact": "An unsafe link can be rendered.",
+                            "recommendation": "Allow only server artifact URLs.",
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(
+                    validation_entry(
+                        "finding-001",
+                        status="confirmed",
+                        title="Unsafe debug bundle URL",
+                        path="src/screens/flow.jsx",
+                        line=83,
+                    )
+                ),
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            repaired = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            repaired["findings"][0]["locations"],
+            [{"path": "src/screens/flow.jsx", "start_line": 83, "end_line": 110}],
+        )
 
     def test_agent_report_repair_uses_line_range_for_result_envelope_locations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

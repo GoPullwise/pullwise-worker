@@ -2537,7 +2537,7 @@ class ReviewWorkerV1:
             materialize_terminal_artifacts(run_dir, artifact_dir, status, error=error)
         refresh_terminal_run_snapshot(run_dir, run_id, status)
         if status != "completed":
-            refresh_log_artifacts(run_dir, artifact_dir)
+            refresh_log_artifacts(run_dir, artifact_dir, status=status, error=error)
         manifest = result_artifact_manifest_items(artifact_dir)
         now = time.time()
         error_payload = failure_payload_for_error(error, status=status, phase=phase) if error else None
@@ -6464,6 +6464,14 @@ def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
                 break
     normalized["locations"] = agent_report_locations(finding)
     normalized["confidence"] = agent_report_confidence(finding.get("confidence"))
+    if not str(normalized.get("recommendation") or "").strip():
+        for key in ("recommended_fix", "recommended_action", "remediation"):
+            recommendation = str(finding.get(key) or "").strip()
+            if recommendation:
+                normalized["recommendation"] = recommendation
+                break
+    for key in ("recommended_fix", "recommended_action", "remediation"):
+        normalized.pop(key, None)
     if "evidence" not in normalized:
         normalized["evidence"] = []
     return normalized
