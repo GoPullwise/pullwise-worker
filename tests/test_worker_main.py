@@ -232,5 +232,38 @@ class WorkerMainContractsTest(unittest.TestCase):
         self.assertIn(f"append env PULLWISE_CODEX_COMMAND={worker_root}/.local/bin/codex", output)
         self.assertLess(output.index("CODEX_RELEASE=latest"), output.index("pip install"))
 
+    def test_codex_cli_update_settings_default_to_latest_worker_local_command(self) -> None:
+        worker_root = "/var/lib/pullwise-worker/wk_test/workers/wk_test"
+        config = argparse.Namespace(provider_chain=["codex"], worker_root=worker_root)
+
+        with patch.dict(lifecycle.os.environ, {}, clear=True):
+            settings = lifecycle.codex_cli_update_settings(config)
+
+        self.assertIsNotNone(settings)
+        self.assertEqual(settings["command"], f"{worker_root}/.local/bin/codex")
+        self.assertEqual(settings["install_dir"], f"{worker_root}/.local/bin")
+        self.assertEqual(settings["release"], "latest")
+        self.assertEqual(settings["installer_url"], "https://chatgpt.com/codex/install.sh")
+
+    def test_codex_cli_update_settings_reject_unscoped_command_and_insecure_installer(self) -> None:
+        worker_root = "/var/lib/pullwise-worker/wk_test/workers/wk_test"
+        config = argparse.Namespace(provider_chain=["codex"], worker_root=worker_root)
+
+        with patch.dict(
+            lifecycle.os.environ,
+            {"PULLWISE_CODEX_COMMAND": "/usr/bin/codex"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "inside worker_root"):
+                lifecycle.codex_cli_update_settings(config)
+
+        with patch.dict(
+            lifecycle.os.environ,
+            {"PULLWISE_CODEX_INSTALLER_URL": "http://example.com/codex/install.sh"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "HTTPS URL"):
+                lifecycle.codex_cli_update_settings(config)
+
 if __name__ == "__main__":
     unittest.main()

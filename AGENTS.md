@@ -49,7 +49,7 @@ worker instance's config.
   install, or another worker.
 
 Multiple workers on the same server are supported only if each worker uses its
-own `service_home` for Codex binaries, config, cache, and auth state.
+own `worker_root` for Codex binaries, config, cache, and auth state.
 
 ## Codex Review Worker Architecture
 
@@ -97,9 +97,11 @@ Hard invariants:
 
 Codex execution rules:
 
-- Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Omit `CodexConfig.codex_bin` by default so the SDK uses its pinned runtime; pass it only for an explicit worker-local `PULLWISE_CODEX_COMMAND` override, while keeping `cwd` and `env` instance-scoped.
+- Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Managed workers must refresh OpenAI's official standalone CLI under the current `worker_root` (default release `latest`) and pass its absolute `PULLWISE_CODEX_COMMAND` as `CodexConfig.codex_bin`, while keeping `cwd` and `env` instance-scoped. The SDK-bundled CLI is only a compatibility fallback when no managed command is configured.
 - For the `openai-codex` SDK approval mode, use `ApprovalMode.deny_all` when Pullwise wants no escalations; current SDKs expose `deny_all`/`auto_review`, not `ApprovalMode.never`.
 - Worker Python package dependencies such as `pullwise-worker`, `openai-codex`, `openai-codex-cli-bin`, and transitive runtime packages must run from the worker instance venv under `$worker_root/.venv`; do not rely on global/system Python packages or console scripts for worker execution.
+- Installer/update code must accept only an HTTPS Codex installer URL without credentials or fragments, a `latest` or validated semantic release, and an absolute `.../codex` command contained by `worker_root`. Download through a secure temporary file, install as the worker service user, probe `codex --version`, then migrate env state; failed updates must leave the prior command usable.
+- Persist `codex-runtime.json` and include it in debug bundles so the worker version, Python SDK version, SDK-bundled CLI version, configured CLI path/version, and runtime mode are available when model compatibility fails.
 - The Python SDK owns Codex runtime/app-server lifecycle for worker automation. Do not reintroduce worker-managed app-server process lifetime knobs such as `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` or `PULLWISE_CODEX_APP_SERVER_MAX_TURNS`.
 - Use one instance-scoped Codex App Server per worker through the SDK runtime; prefer stdio transport or
   a worker-unique Unix socket.
@@ -155,6 +157,7 @@ Review pipeline rules:
   `.codex-review/runs/**`, and perform mechanical tasks only.
 - Codex performs semantic judgment. Helper scripts must not decide whether a
   finding is real, severe, exploitable, or worth fixing.
+- Security findings must demonstrate an end-to-end attacker-controlled path through the actual producer and its validation/containment before claiming exploitability. A dangerous-looking consumer or URL sink alone is defense-in-depth evidence, not proof of a high/critical issue; merge a test-gap observation into the same finding when it shares the contract, sink, and fix.
 - Reviewer JSON validation must reject malformed reviewer outputs and use a
   Codex repair turn before retrying validation; never silently default missing
   schemas or `findings` arrays into verified reviewer artifacts. The phase
@@ -196,6 +199,11 @@ Review pipeline rules:
   When `intent_test_validation.enabled` is false in the canonical job policy,
   the worker must skip the intent child phases without Codex turns or local test
   execution after writing the parent intent validation config artifact.
+  Execute generated test files, not plan rows: one generated file linked to
+  multiple plan target ids runs once and preserves those ids in
+  `target_test_ids`. Top-level command arrays must be mapped against the full
+  executable generated-test set before `max_tests_per_run` truncation; infer
+  declared Python `unittest` sources with `python -m unittest`, never pytest.
   The worker must record stdout/stderr under `intent/test-output/`, include
   those logs in artifact manifests with unique artifact ids, and report
   skipped/error/timeout cases as degraded intent-test evidence, not as direct
@@ -219,6 +227,12 @@ Review pipeline rules:
   `bootstrap_helper_scripts.summary.json` with
   `bootstrap-helper-scripts-summary/v1` must be rewritten to canonical
   `bootstrap-helper-summary/v1` before strict phase validation is retried.
+- Report repair must normalize `recommended_fix`/`recommended_action`/
+  `remediation` into `recommendation`; accept singular `location`, plural
+  `affected_locations`, and top-level path/line aliases; and swap reversed
+  line bounds before strict validation. Location verification must resolve the
+  same aliases and finding-id variants instead of silently emitting an empty
+  result.
 - Intent test result repair must classify missing local test runners or missing
   project dependencies, such as exit code 127 or `vitest: not found`, as
   `dependency_missing` with zero confidence and no finding confidence impact.
@@ -267,6 +281,9 @@ Review pipeline rules:
   skipped once listed.
 - Artifact storage URLs must exactly reference the active artifact run directory:
   `/v1/review-runs/<run_id>/artifacts/<artifact_id>`.
+- A terminal debug bundle's `debug-summary.json` status and error must match
+  the actual terminal envelope (`failed`, `cancelled`, or
+  `partial_completed` included), never a default completed value.
 - `artifact-manifest.json` must use `artifact-manifest/v1` and its `run_id`
   must match the active artifact directory/run before QA or upload can pass.
 - Post run progress through `POST /v1/review-runs/{run_id}/events`, upload
@@ -282,6 +299,10 @@ Review pipeline rules:
   (`source_like_files_*`, `bundles_*`, `reviewer_runs_*`,
   `intent_tests_*`, `validator_candidates_*`, and `artifacts_*`) plus
   `active_unit`, even when counters are zero.
+- Terminal progress must reconcile artifact-backed source, bundle, intent-test,
+  validator, and artifact counters immediately before envelope/debug-bundle
+  creation; do not preserve placeholder zeros after the corresponding artifacts
+  exist, and never report a completed count above its total.
 - The worker is the source of truth for jobscan detail flow shape. Keep phase
   definitions, ordering, labels, and step counts on the worker side, report them
   through progress events and heartbeat snapshots, and do not rely on web or

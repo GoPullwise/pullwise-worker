@@ -1820,6 +1820,52 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         )
         run.assert_called_once()
 
+    def test_run_intent_tests_maps_top_level_commands_before_max_test_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir()
+            for name in ("test_first.py", "test_second.py"):
+                (validation_repo / name).write_text("import unittest\n", encoding="utf-8")
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {"schema_version": "validation-workspace/v1", "validation_repo_root": str(validation_repo)},
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True, "max_tests_per_run": 1},
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {"test_id": "ITV-001", "path": "test_first.py"},
+                        {"test_id": "ITV-002", "path": "test_second.py"},
+                    ],
+                    "test_commands": [
+                        {"command": "python -m unittest test_first.py"},
+                        {"command": "python -m unittest test_second.py"},
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="python",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run:
+                raw = run_intent_tests(run_dir)
+
+        self.assertEqual(len(raw["test_runs"]), 1)
+        self.assertEqual(raw["test_runs"][0]["command"], "python -m unittest test_first.py")
+        run.assert_called_once()
+
     def test_repair_intent_test_source_maps_single_top_level_test_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -4194,6 +4240,37 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(summary["status"], "failed")
         self.assertEqual(summary["error"], "codex runtime too old")
         self.assertEqual(summary["codex_runtime"]["configured_cli_version"], "codex-cli 0.144.1")
+
+    def test_partial_envelope_keeps_partial_status_in_debug_bundle_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            run_dir.mkdir(parents=True)
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
+
+            worker.build_envelope(
+                {
+                    "job_id": "job_1",
+                    "run_id": "run_1",
+                    "lease_id": "lease_1",
+                    "repo": "acme/api",
+                    "commit": "abc123",
+                },
+                "run_1",
+                "partial_completed",
+                1000.0,
+                artifact_dir,
+                run_dir,
+                error="report quality gate failed",
+                phase="qa_gate",
+            )
+
+            with zipfile.ZipFile(artifact_dir / "debug-bundle.zip") as archive:
+                summary = json.loads(archive.read("debug-summary.json").decode("utf-8"))
+
+        self.assertEqual(summary["status"], "partial_completed")
+        self.assertEqual(summary["error"], "report quality gate failed")
 
     def test_upload_log_artifacts_refreshes_and_reuploads_final_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

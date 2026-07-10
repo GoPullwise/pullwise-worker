@@ -4456,7 +4456,7 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             validation_repo,
             source=source,
             generated_index=generated_index,
-            generated_total=len(limited_records),
+            generated_total=len(execution_records),
         )
         base_result = {"schema_version": "project-test-run/v1", "test_id": test_id}
         related_ids = _intent_related_test_ids(generated)
