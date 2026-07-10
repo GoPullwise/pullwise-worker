@@ -1506,6 +1506,77 @@ def package_json_has_test_script(package_json_path: Path, command: list[str] | N
     return False
 
 
+def package_json_test_script(package_json_path: Path, command: list[str]) -> str:
+    try:
+        payload = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    scripts = payload.get("scripts") if isinstance(payload, dict) and isinstance(payload.get("scripts"), dict) else {}
+    lowered = [str(part).lower() for part in command]
+    script_name = ""
+    if len(lowered) >= 2 and lowered[1] == "test":
+        script_name = "test"
+    elif "run" in lowered:
+        run_index = lowered.index("run")
+        if len(command) > run_index + 1:
+            script_name = str(command[run_index + 1])
+    if not script_name:
+        script_name = next(
+            (
+                str(part)
+                for part in command[1:]
+                if str(part) in scripts and (str(part) == "test" or str(part).startswith("test:"))
+            ),
+            "",
+        )
+    value = scripts.get(script_name)
+    return str(value or "").strip()
+
+
+def node_package_script_dependency_error(package_json_path: Path, command: list[str]) -> str:
+    script = package_json_test_script(package_json_path, command)
+    if not script:
+        return ""
+    try:
+        tokens = shlex.split(script, posix=True)
+    except ValueError:
+        return ""
+    executable = ""
+    for token in tokens:
+        text = str(token).strip()
+        if not text or text in {"&&", "||", ";", "|"} or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", text):
+            continue
+        executable = text
+        break
+    if not executable:
+        return ""
+    executable_name = Path(executable).name
+    allowed_runtime_commands = {
+        "bash",
+        "bun",
+        "echo",
+        "node",
+        "npm",
+        "pnpm",
+        "python",
+        "python3",
+        "sh",
+        "true",
+        "yarn",
+    }
+    if executable_name in allowed_runtime_commands:
+        return ""
+    if "/" in executable or "\\" in executable:
+        candidate = (package_json_path.parent / executable).resolve(strict=False)
+        if candidate.is_file():
+            return ""
+    else:
+        local_bin = package_json_path.parent / "node_modules" / ".bin" / executable_name
+        if local_bin.is_file():
+            return ""
+    return f"dependency_missing: package test script requires unavailable local executable {executable_name}"
+
+
 def _command_executable_available(command: list[str]) -> tuple[bool, str]:
     if not command:
         return False, "command is empty"
@@ -1544,6 +1615,9 @@ def intent_command_is_runnable_for_repo(command: list[str], cwd: Path, validatio
             return False, "skipped_not_runnable: package.json is missing"
         if not package_json_has_test_script(package_json, argv):
             return False, "skipped_not_runnable: package.json has no test script"
+        dependency_error = node_package_script_dependency_error(package_json, argv)
+        if dependency_error:
+            return False, dependency_error
     if executable in {"terraform", "helm", "kubectl"}:
         return False, "skipped_not_runnable: external provider or cluster initialization is not allowed"
     available, reason = _command_executable_available(argv)
@@ -2117,9 +2191,6 @@ class ReviewWorkerV1:
                             terminal_state = "result_submit_failed"
                             return
                         terminal_state = "completed"
-                        if any(next_phase == "cleanup_active_job" for next_phase, _ in PIPELINE_PHASES):
-                            self.start_phase(active, run_dir, "cleanup_active_job", 100)
-                            self.complete_phase(active, run_dir, "cleanup_active_job", 100, data=phase_completion_data(run_dir, "cleanup_active_job", artifact_dir))
                         self.emit_event(
                             active,
                             run_dir,
@@ -3996,6 +4067,7 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
     verified_dir.mkdir(parents=True, exist_ok=True)
     errors = []
     valid_outputs = 0
+    validated_payloads: list[tuple[Path, dict[str, Any]]] = []
     raw_files = sorted(raw_dir.glob("*.json"))
     if not raw_files:
         errors.append({"file": "raw-reviewers", "error": "no reviewer JSON outputs were produced"})
@@ -4015,7 +4087,31 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
             errors.append({"file": path.name, "error": "findings must be a list"})
             continue
         valid_outputs += 1
+        validated_payloads.append((path, payload))
         write_json(verified_dir / path.name, payload)
+    expected_assignments = _planned_reviewer_assignments(run_dir)
+    if expected_assignments:
+        covered_assignments: set[tuple[str, str]] = set()
+        for path, payload in validated_payloads:
+            covered_assignments.update(_reviewer_output_assignments(payload, path, expected_assignments))
+        missing_assignments = sorted(expected_assignments - covered_assignments)
+        if missing_assignments:
+            missing_text = ", ".join(f"{bundle_id}:{reviewer_id}" for bundle_id, reviewer_id in missing_assignments)
+            errors.append(
+                {
+                    "file": "raw-reviewers",
+                    "error": f"missing planned reviewer assignments: {missing_text}",
+                }
+            )
+        unexpected_assignments = sorted(covered_assignments - expected_assignments)
+        if unexpected_assignments:
+            unexpected_text = ", ".join(f"{bundle_id}:{reviewer_id}" for bundle_id, reviewer_id in unexpected_assignments)
+            errors.append(
+                {
+                    "file": "raw-reviewers",
+                    "error": f"reviewer outputs contain unplanned assignments: {unexpected_text}",
+                }
+            )
     write_json(run_dir / "json-errors.json", {"schema_version": "reviewer-json-validation/v1", "errors": errors})
     if errors or valid_outputs == 0:
         first = errors[0] if errors else {"file": "raw-reviewers", "error": "no valid reviewer JSON outputs were produced"}
@@ -4524,31 +4620,20 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             stdout_path.write_text(completed.stdout or "", encoding="utf-8")
             stderr_path.write_text(completed.stderr or "", encoding="utf-8")
             if _intent_sandbox_setup_failed(sandbox_command, completed):
-                completed = subprocess.run(
-                    command,
-                    cwd=str(cwd),
-                    env=_intent_test_env(validation_repo, sandboxed=False),
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout_seconds,
-                    check=False,
-                )
-                duration_ms = int((time.monotonic() - started) * 1000)
-                stdout_path.write_text(completed.stdout or "", encoding="utf-8")
-                stderr_path.write_text(completed.stderr or "", encoding="utf-8")
                 raw_results.append(
                     {
                         **base_result,
-                        "status": "passed" if completed.returncode == 0 else "failed",
+                        "status": "skipped",
+                        "classification": "environment_error",
                         "command": " ".join(shlex.quote(part) for part in command),
                         "sandbox_command": " ".join(shlex.quote(part) for part in sandbox_command),
-                        "cwd": str(cwd),
+                        "cwd": sandbox_cwd or str(cwd),
                         "exit_code": int(completed.returncode),
                         "duration_ms": duration_ms,
                         "timed_out": False,
                         "stdout_path": str(stdout_path),
                         "stderr_path": str(stderr_path),
-                        "sandbox_fallback_reason": "intent test sandbox runner failed to initialize",
+                        "skip_reason": "intent test sandbox runner failed to initialize; unsandboxed fallback is prohibited",
                     }
                 )
                 continue
@@ -5861,6 +5946,29 @@ def validation_entry_is_main_backing(entry: object) -> bool:
     return validation_entry_status(entry) in MAIN_FINDING_VALIDATION_STATUSES
 
 
+def finding_validation_status(finding: object) -> str:
+    if not isinstance(finding, dict):
+        return ""
+    direct = str(
+        finding.get("validator_status")
+        or finding.get("validation_status")
+        or finding.get("classification")
+        or ""
+    ).strip().lower()
+    if direct:
+        return direct
+    validation_sources = finding.get("validation_sources")
+    if not isinstance(validation_sources, dict):
+        validation_sources = finding.get("validation") if isinstance(finding.get("validation"), dict) else {}
+    return str(
+        validation_sources.get("validator_status")
+        or validation_sources.get("validation_status")
+        or validation_sources.get("status")
+        or validation_sources.get("verdict")
+        or ""
+    ).strip().lower()
+
+
 def _binding_title(record: object) -> str:
     if not isinstance(record, dict):
         return ""
@@ -5931,17 +6039,28 @@ def validation_binding_entries(run_dir: Path) -> tuple[bool, list[dict[str, Any]
     return (True, accepted)
 
 
-def finding_is_backed_by_validation(finding: object, accepted_entries: list[dict[str, Any]]) -> bool:
+def matching_validation_entry(
+    finding: object,
+    accepted_entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
     if not isinstance(finding, dict):
-        return False
+        return None
     ids = finding_binding_ids(finding)
-    if ids and any(ids & finding_binding_ids(entry) for entry in accepted_entries):
-        return True
+    if ids:
+        id_matches = [entry for entry in accepted_entries if ids & finding_binding_ids(entry)]
+        if len(id_matches) == 1:
+            return id_matches[0]
+        if len(id_matches) > 1:
+            return None
     key = finding_fallback_binding_key(finding)
     if key is None:
-        return False
+        return None
     matches = [entry for entry in accepted_entries if finding_fallback_binding_key(entry) == key]
-    return len(matches) == 1
+    return matches[0] if len(matches) == 1 else None
+
+
+def finding_is_backed_by_validation(finding: object, accepted_entries: list[dict[str, Any]]) -> bool:
+    return matching_validation_entry(finding, accepted_entries) is not None
 
 def validate_source_unmodified_for_qa(repo_dir: Path, run_dir: Path, errors: list[str]) -> None:
     inventory_payload = read_json(run_dir / "inventory.json", {})
@@ -6093,6 +6212,115 @@ def _planned_bundle_ids(run_dir: Path) -> set[str]:
     return bundle_ids
 
 
+def _normalized_reviewer_id(value: object) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "correctnesslite": "correctness_lite",
+        "testgap": "test_gap",
+    }
+    return aliases.get(text, text)
+
+
+def _normalized_review_bundle_id(value: object) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    name = PurePosixPath(text).name
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    return name.strip()
+
+
+def _planned_reviewer_assignments(run_dir: Path) -> set[tuple[str, str]]:
+    bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
+    if not isinstance(bundles, list):
+        return set()
+    assignments: set[tuple[str, str]] = set()
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        bundle_id = _normalized_review_bundle_id(bundle.get("bundle_id") or bundle.get("id"))
+        reviewers = bundle.get("reviewers")
+        if not bundle_id or not isinstance(reviewers, list):
+            continue
+        for reviewer in reviewers:
+            reviewer_id = _normalized_reviewer_id(reviewer)
+            if reviewer_id:
+                assignments.add((bundle_id, reviewer_id))
+    return assignments
+
+
+def _reviewer_output_assignments(
+    payload: object,
+    path: Path,
+    expected_assignments: set[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    if not isinstance(payload, dict):
+        return set()
+    expected_bundle_ids = {bundle_id for bundle_id, _reviewer_id in expected_assignments}
+    expected_reviewer_ids = {reviewer_id for _bundle_id, reviewer_id in expected_assignments}
+    reviewer_id = _normalized_reviewer_id(
+        payload.get("reviewer_id")
+        or payload.get("reviewer")
+        or payload.get("perspective")
+    )
+    file_key = path.stem.lower().replace("-", "_")
+    if not reviewer_id:
+        reviewer_id = next(
+            (candidate for candidate in sorted(expected_reviewer_ids, key=len, reverse=True) if candidate in file_key),
+            "",
+        )
+    raw_bundle_values: list[object] = []
+    for key in ("bundle_id", "bundle"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            raw_bundle_values.append(value)
+    for key in (
+        "bundles_reviewed",
+        "reviewed_bundles",
+        "bundle_ids",
+        "target_bundle_ids",
+    ):
+        value = payload.get(key)
+        if isinstance(value, list):
+            raw_bundle_values.extend(value)
+    bundle_ids = {
+        bundle_id
+        for bundle_id in (_normalized_review_bundle_id(value) for value in raw_bundle_values)
+        if bundle_id
+    }
+    if not bundle_ids:
+        bundle_ids = {
+            bundle_id
+            for bundle_id in expected_bundle_ids
+            if bundle_id.lower().replace("-", "_") in file_key
+        }
+    if not reviewer_id:
+        return set()
+    return {(bundle_id, reviewer_id) for bundle_id in bundle_ids}
+
+
+def _reviewer_assignments_from_outputs(
+    run_dir: Path,
+    expected_assignments: set[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    raw_dir = run_dir / "raw-reviewers"
+    verified_dir = run_dir / "verified-reviewers"
+    output_dir = raw_dir if raw_dir.is_dir() and any(raw_dir.glob("*.json")) else verified_dir
+    assignments: set[tuple[str, str]] = set()
+    if not output_dir.is_dir():
+        return assignments
+    for output_path in output_dir.glob("*.json"):
+        assignments.update(
+            _reviewer_output_assignments(
+                read_json(output_path, {}),
+                output_path,
+                expected_assignments,
+            )
+        )
+    return assignments
+
+
 def _reviewed_bundle_ids_from_reviewer_outputs(run_dir: Path) -> set[str]:
     reviewed: set[str] = set()
     for output_dir in (run_dir / "raw-reviewers", run_dir / "verified-reviewers"):
@@ -6102,14 +6330,25 @@ def _reviewed_bundle_ids_from_reviewer_outputs(run_dir: Path) -> set[str]:
             payload = read_json(output_path, {})
             if not isinstance(payload, dict):
                 continue
-            for key in ("reviewed_bundles", "bundle_ids", "target_bundle_ids"):
+            for key in ("bundles_reviewed", "reviewed_bundles", "bundle_ids", "target_bundle_ids"):
                 values = payload.get(key)
                 if isinstance(values, list):
-                    reviewed.update(str(value).strip() for value in values if str(value).strip())
+                    reviewed.update(
+                        bundle_id
+                        for bundle_id in (_normalized_review_bundle_id(value) for value in values)
+                        if bundle_id
+                    )
     return reviewed
 
 
 def reviewer_fanout_artifact_counts(run_dir: Path) -> dict[str, int]:
+    expected_assignments = _planned_reviewer_assignments(run_dir)
+    if expected_assignments:
+        covered_assignments = _reviewer_assignments_from_outputs(run_dir, expected_assignments)
+        return {
+            "reviewer_runs_total": len(expected_assignments),
+            "reviewer_runs_completed": len(expected_assignments & covered_assignments),
+        }
     planned_bundle_ids = _planned_bundle_ids(run_dir)
     planned = len(planned_bundle_ids)
     raw_count = _json_file_count(run_dir / "raw-reviewers")
@@ -6775,6 +7014,7 @@ def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
     normalized["locations"] = agent_report_locations(finding)
     normalized.pop("affected_locations", None)
     normalized.pop("affectedLocations", None)
+    normalized["severity"] = normalized_finding_severity(finding.get("severity"))
     normalized["confidence"] = agent_report_confidence(finding.get("confidence"))
     if not str(normalized.get("recommendation") or "").strip():
         for key in ("recommended_fix", "recommended_action", "remediation"):
@@ -6844,9 +7084,11 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
         finding = normalized_agent_report_finding(raw_finding)
         if finding is None:
             continue
-        if finding_is_backed_by_validation(finding, accepted_validation):
+        validation_entry = matching_validation_entry(finding, accepted_validation)
+        if validation_entry is not None:
             if not str(finding.get("id") or "").strip():
                 finding["id"] = f"finding-{len(findings) + 1:03d}"
+            finding["validator_status"] = validation_entry_status(validation_entry)
             findings.append(finding)
             continue
         demoted = dict(finding)
@@ -6868,6 +7110,9 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
         )
     )
     summary["overall_risk"] = highest_finding_risk(findings)
+    summary["main_finding_count"] = len(findings)
+    summary["confirmed_count"] = sum(1 for finding in findings if finding_validation_status(finding) != "plausible")
+    summary["plausible_count"] = sum(1 for finding in findings if finding_validation_status(finding) == "plausible")
     report["summary"] = summary
     write_json(path, report)
 
@@ -6958,6 +7203,16 @@ def _coverage_summary(coverage: object) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    confirmed_findings = [
+        finding
+        for finding in findings
+        if isinstance(finding, dict) and finding_validation_status(finding) != "plausible"
+    ]
+    plausible_findings = [
+        finding
+        for finding in findings
+        if isinstance(finding, dict) and finding_validation_status(finding) == "plausible"
+    ]
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     intent = report.get("intent_test_validation") if isinstance(report.get("intent_test_validation"), dict) else {}
     tests = intent.get("test_results") if isinstance(intent.get("test_results"), list) else []
@@ -6970,16 +7225,30 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Commit: {_markdown_text(report.get('commit_sha'), 'pending')}",
         f"- Result status: {_markdown_text(summary.get('result_status'), 'unknown')}",
         f"- Overall risk: {_markdown_text(summary.get('overall_risk'), 'unknown')}",
-        f"- Confirmed findings: {len(findings)} ({_markdown_counts(findings, 'severity')})",
+        f"- Confirmed findings: {len(confirmed_findings)} ({_markdown_counts(confirmed_findings, 'severity')})",
+        f"- Plausible findings: {len(plausible_findings)} ({_markdown_counts(plausible_findings, 'severity')})",
         f"- Intent tests run: {len(tests)} ({_markdown_counts(tests, 'status')})",
         f"- Coverage: {_coverage_summary(report.get('coverage'))}",
         "",
     ]
-    if findings:
+    if confirmed_findings:
         highest = _markdown_text(findings[0].get("severity") if isinstance(findings[0], dict) else "", "unknown")
+        finding_sentence = (
+            f"This review completed with {len(confirmed_findings)} confirmed and {len(plausible_findings)} plausible actionable finding(s)."
+            if plausible_findings
+            else f"This review completed with {len(confirmed_findings)} confirmed finding(s)."
+        )
         lines.extend(
             [
-                f"This review completed with {len(findings)} confirmed finding(s). The highest-priority finding in the report is {highest}. Each finding below includes the observed impact, supporting evidence, and the recommended next fix or validation step.",
+                f"{finding_sentence} The highest-priority finding in the report is {highest}. Each finding below includes the observed impact, supporting evidence, and the recommended next fix or validation step.",
+                "",
+            ]
+        )
+    elif plausible_findings:
+        highest = _markdown_text(plausible_findings[0].get("severity"), "unknown")
+        lines.extend(
+            [
+                f"This review completed with {len(plausible_findings)} plausible actionable finding(s) and no confirmed findings. The highest-priority plausible finding is {highest}; validate it in the target environment before treating it as confirmed.",
                 "",
             ]
         )
@@ -7000,7 +7269,8 @@ def render_markdown(report: dict[str, Any]) -> str:
                 continue
             title = _markdown_text(finding.get("title"), "Untitled finding")
             severity = _markdown_text(finding.get("severity"), "unknown")
-            lines.extend([f"### {index}. [{severity}] {title}", ""])
+            validation_label = "[plausible] " if finding_validation_status(finding) == "plausible" else ""
+            lines.extend([f"### {index}. {validation_label}[{severity}] {title}", ""])
             finding_id = _markdown_text(finding.get("id") or finding.get("cluster_id"))
             category = _markdown_text(finding.get("category"))
             if finding_id:
@@ -7040,7 +7310,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                             lines.append(f"  - {detail}")
             lines.append("")
         if len(findings) > 10:
-            lines.extend([f"Showing 10 of {len(findings)} confirmed findings. See `report.agent.json` for the full machine-readable list.", ""])
+            lines.extend([f"Showing 10 of {len(findings)} main findings. See `report.agent.json` for the full machine-readable list.", ""])
 
     lines.extend(["## Intent Test Validation Summary", ""])
     if not tests:
@@ -7085,7 +7355,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         if len(task_texts) > 10:
             lines.append(f"- See `report.agent.json` for {len(task_texts) - 10} additional follow-up task(s).")
     elif findings:
-        lines.append("Use the recommendations in the confirmed findings above to plan the next fix pass.")
+        lines.append("Use the recommendations in the validated main findings above to plan the next fix pass.")
     else:
         lines.append("No immediate follow-up task was generated by this review. If this run was meant to verify a specific risky change, inspect the coverage and intent test artifacts before treating the result as complete assurance.")
     lines.append("")
@@ -7416,6 +7686,16 @@ def summary_payload(run_dir: Path, status: str) -> dict[str, Any]:
     agent = read_json(run_dir / "report.agent.json", {})
     coverage = read_json(run_dir / "coverage.json", {})
     findings = agent.get("findings") if isinstance(agent.get("findings"), list) else []
+    confirmed_findings = [
+        finding
+        for finding in findings
+        if isinstance(finding, dict) and finding_validation_status(finding) != "plausible"
+    ]
+    plausible_findings = [
+        finding
+        for finding in findings
+        if isinstance(finding, dict) and finding_validation_status(finding) == "plausible"
+    ]
     agent_summary = agent.get("summary") if isinstance(agent.get("summary"), dict) else {}
     overall_risk = str((agent_summary or {}).get("overall_risk") or "unknown").strip().lower() or "unknown"
     if overall_risk in {"unknown", "none"}:
@@ -7424,14 +7704,14 @@ def summary_payload(run_dir: Path, status: str) -> dict[str, Any]:
         "overall_risk": overall_risk,
         "result_status": "complete" if status == "completed" else "incomplete",
         "finding_counts": {
-            "confirmed_critical": count_findings(findings, "critical"),
-            "confirmed_high": count_findings(findings, "high"),
-            "confirmed_medium": count_findings(findings, "medium"),
-            "confirmed_low": count_findings(findings, "low"),
-            "plausible": 0,
-            "weak_appendix": 0,
-            "disproven": 0,
-            "suppressed": 0,
+            "confirmed_critical": count_findings(confirmed_findings, "critical"),
+            "confirmed_high": count_findings(confirmed_findings, "high"),
+            "confirmed_medium": count_findings(confirmed_findings, "medium"),
+            "confirmed_low": count_findings(confirmed_findings, "low"),
+            "plausible": len(plausible_findings),
+            "weak_appendix": _json_list_len(agent.get("appendix_findings")),
+            "disproven": _json_list_len(agent.get("disproven_findings")),
+            "suppressed": _qa_int(agent_summary.get("suppressed_count") or agent_summary.get("suppressed")),
         },
         "coverage": coverage if isinstance(coverage, dict) else {},
         "top_findings": findings[:10],

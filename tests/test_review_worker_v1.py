@@ -4990,11 +4990,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             def __init__(self) -> None:
                 self.uploaded = {}
                 self.result_payload = None
+                self.timeline = []
 
             def heartbeat(self, **_payload: dict) -> dict:
                 return {}
 
-            def event(self, _run_id: str, _payload: dict) -> dict:
+            def event(self, _run_id: str, payload: dict) -> dict:
+                self.timeline.append(("event", payload.get("event_type"), payload.get("phase")))
                 return {"accepted": True}
 
             def artifact(self, _job_id: str, artifact_id: str, payload: dict) -> dict:
@@ -5002,6 +5004,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 return {"accepted": True}
 
             def result(self, _job_id: str, payload: dict) -> None:
+                self.timeline.append(("result", payload.get("status"), ""))
                 self.result_payload = payload
                 manifest = {
                     item["artifact_id"]: item
@@ -5066,6 +5069,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         run_completed = [event for event in progress_events if event.get("event_type") == "run_completed"][-1]
         run_completed_cleanup = next(step for step in run_completed["progress"]["steps"] if step["id"] == "cleanup_active_job")
         self.assertEqual(run_completed_cleanup["status"], "completed")
+        result_index = next(index for index, item in enumerate(client.timeline) if item[0] == "result")
+        self.assertEqual(client.timeline[result_index + 1 :], [("event", "run_completed", "cleanup_active_job")])
 
     def test_partial_completed_qa_gate_tail_keeps_uploaded_qa_and_worker_log_manifest(self) -> None:
         class ValidatingClient:
@@ -5603,29 +5608,73 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 json.dumps(
                     {
                         "bundles": [
-                            {"bundle_id": "p0-bundle-001"},
-                            {"bundle_id": "p0-bundle-002"},
-                            {"bundle_id": "p1-bundle-003"},
-                            {"bundle_id": "p1-bundle-004"},
-                            {"bundle_id": "p2-bundle-005"},
+                            {"bundle_id": "p0-bundle-001", "reviewers": ["security", "correctness", "test_gap"]},
+                            {"bundle_id": "p0-bundle-002", "reviewers": ["security", "correctness", "test_gap"]},
+                            {"bundle_id": "p1-bundle-003", "reviewers": ["correctness", "test_gap"]},
+                            {"bundle_id": "p1-bundle-004", "reviewers": ["correctness", "test_gap"]},
+                            {"bundle_id": "p2-bundle-005", "reviewers": ["correctness_lite"]},
                         ]
                     }
                 ),
                 encoding="utf-8",
             )
             outputs = {
-                "security.json": ["p0-bundle-001", "p0-bundle-002"],
-                "correctness.json": ["p0-bundle-001", "p0-bundle-002", "p1-bundle-003", "p1-bundle-004"],
-                "test-gap.json": ["p0-bundle-001", "p0-bundle-002", "p1-bundle-003", "p1-bundle-004"],
-                "correctness-lite.json": ["p2-bundle-005"],
+                "security.json": ("security", ["bundles/p0-bundle-001.md", "bundles/p0-bundle-002.md"]),
+                "correctness.json": (
+                    "correctness",
+                    ["bundles/p0-bundle-001.md", "bundles/p0-bundle-002.md", "bundles/p1-bundle-003.md", "bundles/p1-bundle-004.md"],
+                ),
+                "test-gap.json": (
+                    "test_gap",
+                    ["bundles/p0-bundle-001.md", "bundles/p0-bundle-002.md", "bundles/p1-bundle-003.md", "bundles/p1-bundle-004.md"],
+                ),
+                "correctness-lite.json": ("correctness_lite", ["bundles/p2-bundle-005.md"]),
             }
-            for name, reviewed_bundles in outputs.items():
-                (raw_dir / name).write_text(json.dumps({"reviewed_bundles": reviewed_bundles}), encoding="utf-8")
+            for name, (reviewer, bundles_reviewed) in outputs.items():
+                (raw_dir / name).write_text(
+                    json.dumps({"reviewer": reviewer, "bundles_reviewed": bundles_reviewed}),
+                    encoding="utf-8",
+                )
 
             reviewer = phase_progress_data(run_dir, "reviewer_fanout")
 
-        self.assertEqual(reviewer["reviewer_runs_total"], 4)
-        self.assertEqual(reviewer["reviewer_runs_completed"], 4)
+        self.assertEqual(reviewer["reviewer_runs_total"], 11)
+        self.assertEqual(reviewer["reviewer_runs_completed"], 11)
+
+    def test_validate_reviewer_outputs_rejects_missing_planned_reviewer_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {
+                            "bundle_id": "p0-bundle-001",
+                            "reviewers": ["security", "correctness", "test_gap"],
+                        }
+                    ],
+                },
+            )
+            write_json(
+                raw_dir / "correctness.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "reviewer": "correctness",
+                    "bundles_reviewed": ["p0-bundle-001"],
+                    "findings": [],
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "missing planned reviewer assignments"):
+                validate_reviewer_outputs(run_dir)
+
+            validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(any("security" in item["error"] for item in validation["errors"]))
+        self.assertTrue(any("test_gap" in item["error"] for item in validation["errors"]))
 
     def test_reviewer_fanout_counts_multiple_reviewer_outputs_per_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
