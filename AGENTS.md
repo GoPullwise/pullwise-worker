@@ -117,6 +117,10 @@ Codex execution rules:
   null.
 - Capture Codex events to `codex-events.jsonl` and treat completion/error events
   as authoritative for terminal handling.
+- Codex App Server `error` notifications are turn-scoped. Keep waiting when
+  `willRetry = true`; when `willRetry = false`, terminate that turn immediately
+  and preserve current camelCase `codexErrorInfo` values such as
+  `usageLimitExceeded` when mapping the worker's stable public error code.
 - Implement a fixed approval handler even when approval policy is `never`:
   allow writes only under `.codex-review/**` in the main repo or the disposable
   validation workspace, allow Python standard-library helper scripts under

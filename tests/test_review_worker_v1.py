@@ -4058,6 +4058,94 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(codex_error_code('{"codexErrorInfo":"ContextWindowExceeded"}'), "CODEX_CONTEXT_WINDOW_EXCEEDED")
         self.assertEqual(codex_error_code("unexpected"), "CODEX_UNKNOWN_ERROR")
 
+    def test_quota_exhausted_job_submits_terminal_failure_and_releases_active_slot(self) -> None:
+        results = []
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, _run_id: str, _event: dict) -> dict:
+                return {}
+
+            def artifact(self, _job_id: str, _artifact_id: str, _payload: dict) -> dict:
+                return {"accepted": True}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                results.append(payload)
+
+        class FakeCodexClient:
+            def is_running(self) -> bool:
+                return True
+
+        class Worker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                run_dir.mkdir(parents=True)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+            def run_semantic_phase(
+                self,
+                _codex_client: object,
+                _repo_dir: Path,
+                _run_dir: Path,
+                _job: dict,
+                _phase: str,
+            ) -> None:
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "message": "You have no Codex usage remaining",
+                            "codexErrorInfo": "usageLimitExceeded",
+                        }
+                    )
+                )
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {"default_model": "gpt-5.5", "core_effort": "high", "non_core_effort": "medium"},
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = Worker(
+                SimpleNamespace(
+                    worker_id="wk_1",
+                    service_home=str(root),
+                    codex_quota_degraded_check_seconds=10,
+                    codex_quota_min_remaining_percent=5,
+                ),
+                client=Client(),
+            )
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", (("repo_map", 20),)):
+                worker.run_job(job)
+
+        self.assertIsNone(worker.state.active_job)
+        self.assertFalse(worker.state.provider_ready)
+        self.assertEqual(worker.quota_monitor.snapshot["status"], "exhausted")
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertEqual(results[0]["error_code"], "CODEX_QUOTA_EXHAUSTED")
+        self.assertEqual(results[0]["reviewWorkerProtocol"]["error"]["failure_action"], "fail_job_terminal")
+
     def test_quota_probe_auth_error_is_not_exhaustion(self) -> None:
         self.assertFalse(
             quota_refresh_error_is_exhaustion("codex account authentication required to read rate limits")
