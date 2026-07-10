@@ -609,10 +609,61 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_scoped_codex_command_rejects_global_or_relative_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service_home = Path(tmp_dir) / "service"
+            worker_root = service_home / "workers" / "wk_1"
             with self.assertRaisesRegex(RuntimeError, "inside worker_root"):
                 scoped_codex_command(SimpleNamespace(service_home=str(service_home), codex_command="/usr/bin/codex"))
             with self.assertRaisesRegex(RuntimeError, "absolute path"):
                 scoped_codex_command(SimpleNamespace(service_home=str(service_home), codex_command="codex"))
+            with self.assertRaisesRegex(RuntimeError, "inside worker_root"):
+                scoped_codex_command(
+                    SimpleNamespace(
+                        service_home=str(service_home),
+                        worker_root=str(worker_root),
+                        codex_command=str(service_home / ".local" / "bin" / "codex"),
+                    )
+                )
+
+    def test_worker_readiness_rejects_codex_command_outside_worker_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service_home = "/var/lib/pullwise-worker/wk_scope_test"
+            worker_root = f"{service_home}/workers/wk_1"
+            config = SimpleNamespace(
+                server_url="http://127.0.0.1:18080",
+                allow_insecure_server_url=False,
+                worker_token="pww_test",
+                provider="codex",
+                provider_chain=["codex"],
+                service_home=service_home,
+                worker_id="wk_1",
+                worker_root=worker_root,
+                codex_command=f"{service_home}/.local/bin/codex",
+                work_dir=Path(tmp_dir) / "work",
+                log_dir=Path(tmp_dir) / "log",
+            )
+            agent_configs = {
+                "agentConfigs": {
+                    plan: {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "medium"}}
+                    for plan in ("free", "pro", "max")
+                }
+            }
+
+            with patch(
+                "pullwise_worker._main_part_07_readiness_doctor.worker_agent_configs_check",
+                return_value=(True, "loaded", agent_configs),
+            ), patch(
+                "pullwise_worker._main_part_07_readiness_doctor.command_ok",
+                return_value=(True, "available"),
+            ) as command_ok, patch(
+                "pullwise_worker._main_part_07_readiness_doctor.codex_ready_check",
+                return_value=(True, "ready"),
+            ) as codex_ready_check:
+                checks, provider_ready, ready_providers = worker_readiness_state(config)
+
+        self.assertFalse(provider_ready)
+        self.assertEqual(ready_providers, [])
+        self.assertTrue(any(label == "codex" and not ok and "worker_root" in detail for label, ok, detail in checks))
+        self.assertEqual([call.args[0] for call in command_ok.call_args_list], [["git", "--version"]])
+        codex_ready_check.assert_not_called()
 
     def test_codex_quota_refresh_rejects_unscoped_codex_command_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -604,14 +604,12 @@ def scoped_codex_command(config: Any) -> str:
     if not command_path.is_absolute():
         raise RuntimeError(f"Codex command must be an absolute path inside worker_root: {command}")
     resolved_command = command_path.resolve(strict=False)
-    allowed_roots = [worker_root.resolve(strict=False), service_home.resolve(strict=False)]
-    for root in allowed_roots:
-        try:
-            resolved_command.relative_to(root)
-            return str(command_path)
-        except ValueError:
-            continue
-    raise RuntimeError(f"Codex command must be inside worker_root {worker_root}: {command}")
+    resolved_worker_root = worker_root.resolve(strict=False)
+    try:
+        resolved_command.relative_to(resolved_worker_root)
+    except ValueError as exc:
+        raise RuntimeError(f"Codex command must be inside worker_root {worker_root}: {command}") from exc
+    return str(command_path)
 
 @dataclass(frozen=True)
 class CodexSdkRuntime:

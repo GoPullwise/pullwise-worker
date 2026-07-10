@@ -122,16 +122,15 @@ def provider_command_scope_check(command: str, config: WorkerConfig, label: str)
     raw = str(command or "").strip()
     if not raw:
         return False, f"{label} command missing"
-    home_raw = str(config.service_home or "").strip()
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
-        return False, f"{label} command must be an absolute path inside worker home {config.service_home}: {raw}"
+        return False, f"{label} command must be an absolute path inside worker_root {provider_worker_root_path(config)}: {raw}"
     try:
-        home = Path(config.service_home).expanduser().resolve(strict=False)
+        worker_root = Path(provider_worker_root_path(config)).expanduser().resolve(strict=False)
         resolved = candidate.resolve(strict=False)
-        resolved.relative_to(home)
+        resolved.relative_to(worker_root)
     except ValueError:
-        return False, f"{label} command outside worker home {home}: {raw}"
+        return False, f"{label} command outside worker_root {worker_root}: {raw}"
     except Exception as exc:
         return False, str(exc)
     return True, str(resolved)
