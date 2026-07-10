@@ -355,6 +355,42 @@ class DebugBundleAuditTest(unittest.TestCase):
         self.assertIn("server_issue_count_mismatch", codes)
         self.assertIn("human_report_validation_mismatch", codes)
 
+    def test_unbacked_main_finding_is_not_defaulted_to_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/run/validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [{"candidate_id": "different", "status": "rejected"}],
+                },
+            )
+
+            result = audit_bundle(root)
+
+        issues = {str(issue.get("code")): issue for issue in result["issues"]}
+        self.assertIn("main_finding_validation_missing", issues)
+        self.assertEqual(result["facts"]["confirmed_findings"], 0)
+
+    def test_noncanonical_validation_collection_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/run/validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated": [{"candidate_id": "candidate-1", "validation_status": "confirmed"}],
+                },
+            )
+
+            result = audit_bundle(root)
+
+        self.assertIn("validation_findings_collection_noncanonical", issue_codes(result))
+
     def test_reviewer_assignment_progress_and_post_failures_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir) / "bundle"

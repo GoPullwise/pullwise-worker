@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -78,6 +79,7 @@ from pullwise_worker.review_worker_v1 import (
     repair_agent_report_artifact,
     repair_intent_test_results_artifact,
     repair_intent_test_source_artifact,
+    repair_validation_output_artifact,
     run_intent_tests,
     safe_id,
     scoped_codex_command,
@@ -170,6 +172,59 @@ def write_basic_qa_inputs(repo: Path, run_dir: Path) -> None:
     write_json(run_dir / "intent" / "intent-test-validation.json", {"schema_version": "intent-test-validation/v1", "enabled": False})
 
 class ReviewWorkerV1ContractsTest(unittest.TestCase):
+    def test_validator_output_repair_normalizes_common_collection_aliases(self) -> None:
+        variants = (
+            (
+                "validated",
+                {
+                    "validated": [
+                        {"id": "CL-001", "validation_status": "confirmed"},
+                        {"id": "CL-002", "validation_status": "plausible"},
+                    ],
+                    "weak": [{"id": "CL-003", "validation_status": "weak"}],
+                    "disproven": [{"id": "CL-004", "validation_status": "disproven"}],
+                },
+            ),
+            (
+                "findings",
+                {
+                    "findings": [
+                        {"candidate_id": "CL-001", "classification": "plausible"},
+                        {"candidate_id": "CL-002", "classification": "confirmed"},
+                    ],
+                    "weak": [],
+                    "disproven": [],
+                },
+            ),
+        )
+        for label, variant in variants:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp_dir:
+                run_dir = Path(tmp_dir)
+                write_json(
+                    run_dir / "validated-findings.json",
+                    {"schema_version": "validation-output/v1", **variant},
+                )
+
+                repair_validation_output_artifact(run_dir / "validated-findings.json")
+                repaired = json.loads((run_dir / "validated-findings.json").read_text(encoding="utf-8"))
+
+                self.assertEqual(len(repaired["validated_findings"]), 2)
+                self.assertTrue(
+                    all(
+                        entry.get("status") in {"confirmed", "plausible", "validated"}
+                        for entry in repaired["validated_findings"]
+                    )
+                )
+                self.assertEqual(
+                    [entry.get("status") for entry in repaired["weak_findings"]],
+                    ["weak"] if label == "validated" else [],
+                )
+                self.assertEqual(
+                    [entry.get("status") for entry in repaired["disproven_findings"]],
+                    ["disproven"] if label == "validated" else [],
+                )
+                validate_phase_outputs(run_dir, "validator_disproof")
+
     def test_worker_state_allows_lease_only_when_idle_without_active_job(self) -> None:
         state = WorkerState()
         state.state = "idle"
@@ -3397,6 +3452,91 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(run_qa_bytes, artifact_qa_bytes)
         self.assertEqual(qa_item["sha256"], hashlib.sha256(artifact_qa_bytes).hexdigest())
         self.assertEqual(qa_item["size_bytes"], len(artifact_qa_bytes))
+
+    def test_blocked_workspace_preparation_keeps_busy_heartbeat_and_honors_cancellation(self) -> None:
+        prepare_started = threading.Event()
+        release_prepare = threading.Event()
+        busy_heartbeats: list[dict] = []
+        results: list[dict] = []
+
+        class Client:
+            def heartbeat(self, **payload: dict) -> dict:
+                if payload.get("active_run_id") == "run_1":
+                    busy_heartbeats.append(payload)
+                    if len(busy_heartbeats) >= 2:
+                        return {
+                            "commands": [
+                                {"type": "cancel_run", "run_id": "run_1", "reason": "user_requested"}
+                            ]
+                        }
+                return {}
+
+            def event(self, _run_id: str, _event: dict) -> dict:
+                return {}
+
+            def artifact(self, _job_id: str, _artifact_id: str, _payload: dict) -> dict:
+                return {}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                results.append(payload)
+
+        class BlockingWorker(ReviewWorkerV1):
+            def active_job_heartbeat_interval_seconds(self) -> float:
+                return 0.01
+
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                prepare_started.set()
+                if not release_prepare.wait(2):
+                    raise RuntimeError("test did not release workspace preparation")
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                run_dir.mkdir(parents=True)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "repo": "acme/api",
+            "commit": "abc123",
+            "model_profile": {
+                "default_model": "gpt-5.5",
+                "core_effort": "high",
+                "non_core_effort": "medium",
+            },
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = BlockingWorker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            run_thread = threading.Thread(target=worker.run_job, args=(job,))
+            run_thread.start()
+            self.assertTrue(prepare_started.wait(1))
+            deadline = time.monotonic() + 1
+            while len(busy_heartbeats) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            release_prepare.set()
+            run_thread.join(3)
+
+        self.assertFalse(run_thread.is_alive())
+        self.assertGreaterEqual(len(busy_heartbeats), 2)
+        self.assertTrue(all(payload["status"] in {"leased", "busy", "cancelling"} for payload in busy_heartbeats))
+        self.assertTrue(all(payload["concurrency"]["available_job_slots"] == 0 for payload in busy_heartbeats))
+        self.assertEqual(results[0]["status"], "cancelled")
 
     def test_heartbeat_includes_progress_snapshot_when_busy(self) -> None:
         calls = []
