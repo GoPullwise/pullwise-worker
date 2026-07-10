@@ -2006,6 +2006,38 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(summary["finding_counts"]["confirmed_medium"], 1)
         self.assertEqual(summary["finding_counts"]["confirmed_low"], 0)
 
+    def test_report_repair_preserves_plausible_validation_in_summary_and_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "medium", "result_status": "complete"},
+                    "findings": [finding_payload("CL-001", title="Plausible containment gap", severity="P1")],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(validation_entry("CL-001", status="plausible", title="Plausible containment gap")),
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+            summary = summary_payload(run_dir, "completed")
+            markdown = render_markdown(report)
+
+        self.assertEqual(report["findings"][0]["severity"], "high")
+        self.assertEqual(report["findings"][0]["validator_status"], "plausible")
+        self.assertEqual(summary["finding_counts"]["confirmed_high"], 0)
+        self.assertEqual(summary["finding_counts"]["plausible"], 1)
+        self.assertIn("Confirmed findings: 0", markdown)
+        self.assertIn("Plausible findings: 1", markdown)
+        self.assertIn("[plausible]", markdown)
+
     def test_agent_report_repair_derives_unknown_overall_risk_from_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run_1"
@@ -2635,6 +2667,51 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertEqual(result["test_runs"][0]["classification"], "dependency_missing")
         self.assertIn("npm executable is not available", result["test_runs"][0]["skip_reason"])
+
+    def test_intent_tests_skip_when_package_test_runner_is_not_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (validation_repo / "package.json").write_text(
+                json.dumps({"scripts": {"test": "vitest run"}}),
+                encoding="utf-8",
+            )
+            (run_dir / "intent").mkdir(parents=True)
+            write_json(run_dir / "intent" / "validation-workspace.json", {"validation_repo_root": str(validation_repo)})
+            write_json(
+                run_dir / "intent" / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-plan.json",
+                {"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-node"}]},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-node",
+                            "command": ["npm", "test"],
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                side_effect=lambda executable: "/usr/bin/npm" if executable == "npm" else None,
+            ), patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_not_called()
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertEqual(result["test_runs"][0]["classification"], "dependency_missing")
+        self.assertIn("vitest", result["test_runs"][0]["skip_reason"])
     def test_intent_tests_run_with_sanitized_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2736,6 +2813,50 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertIn("sandbox runner is unavailable", result["test_runs"][0]["skip_reason"])
+
+    def test_intent_tests_do_not_rerun_without_sandbox_after_bubblewrap_setup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir(parents=True)
+            (run_dir / "intent").mkdir(parents=True)
+            write_json(run_dir / "intent" / "validation-workspace.json", {"validation_repo_root": str(validation_repo)})
+            write_json(
+                run_dir / "intent" / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-plan.json",
+                {"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-sandbox"}]},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-sandbox",
+                            "command": [sys.executable, "-m", "unittest", "test_env_marker"],
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="/usr/bin/bwrap",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=1, stdout="", stderr="bwrap: creating new namespace failed"),
+            ) as run:
+                result = run_intent_tests(run_dir)
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertEqual(result["test_runs"][0]["classification"], "environment_error")
+        self.assertIn("sandbox runner failed to initialize", result["test_runs"][0]["skip_reason"])
     def test_intent_failure_analysis_fallback_classifies_raw_runs_conservatively(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
