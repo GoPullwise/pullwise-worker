@@ -4,6 +4,7 @@ import base64
 import copy
 import fnmatch
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -673,6 +674,44 @@ class CodexSdkClient:
 
     def is_running(self) -> bool:
         return self._codex is not None
+
+    def runtime_metadata(self) -> dict[str, Any]:
+        def distribution_version(name: str) -> str:
+            try:
+                return importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                return "not_installed"
+
+        payload: dict[str, Any] = {
+            "schema_version": "codex-runtime/v1",
+            "mode": "managed_standalone" if self.command else "sdk_pinned",
+            "worker_version": WORKER_VERSION,
+            "python_sdk_version": distribution_version("openai-codex"),
+            "sdk_bundled_cli_version": distribution_version("openai-codex-cli-bin"),
+            "configured_cli_command": self.command or None,
+            "configured_cli_version": None,
+        }
+        if not self.command:
+            return payload
+        try:
+            completed = subprocess.run(
+                [self.command, "--version"],
+                cwd=str(self.cwd),
+                env=self.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            payload["configured_cli_probe_error"] = type(exc).__name__
+            return payload
+        version_line = str(completed.stdout or "").replace("\x00", "").splitlines()
+        if completed.returncode == 0 and version_line:
+            payload["configured_cli_version"] = version_line[0].strip()[:200]
+        else:
+            payload["configured_cli_probe_error"] = f"exit_code_{completed.returncode}"
+        return payload
 
     def set_events_path(self, events_path: Path) -> None:
         self.events_path = events_path
@@ -1991,6 +2030,9 @@ class ReviewWorkerV1:
                         pass
                     elif phase == "start_codex_app_server":
                         codex_client = self.ensure_codex_client(events_path)
+                        runtime_metadata = getattr(codex_client, "runtime_metadata", None)
+                        if callable(runtime_metadata):
+                            write_json(run_dir / "codex-runtime.json", runtime_metadata())
                     elif phase == "initialize_codex_connection":
                         thread_id = codex_client.start_thread(repo_dir, model_for_job(job)) if codex_client else ""
                         active.thread_id = thread_id
@@ -7155,6 +7197,9 @@ def write_debug_bundle(run_dir: Path, artifact_dir: Path, *, status: str = "", e
             "Repository source files are not included; run artifacts, phase outputs, and logs are included.",
         ],
     }
+    runtime = read_json(run_dir / "codex-runtime.json", {})
+    if isinstance(runtime, dict) and runtime.get("schema_version") == "codex-runtime/v1":
+        summary["codex_runtime"] = runtime
     with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("debug-summary.json", json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
         seen: set[str] = {"debug-summary.json"}

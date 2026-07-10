@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -341,6 +342,69 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 server.start()
 
         self.assertEqual(created_configs[0]["codex_bin"], "/opt/pullwise/codex")
+
+    def test_codex_sdk_runtime_metadata_records_sdk_bundled_and_managed_cli_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            env = {"CODEX_HOME": str(workspace / "codex-home")}
+            server = CodexSdkClient(
+                "/var/lib/pullwise-worker/wk_1/workers/wk_1/.local/bin/codex",
+                env,
+                workspace,
+                workspace / "events.jsonl",
+            )
+
+            def distribution_version(name: str) -> str:
+                return {
+                    "openai-codex": "0.1.0b3",
+                    "openai-codex-cli-bin": "0.137.0a4",
+                }[name]
+
+            with patch(
+                "pullwise_worker.review_worker_v1.importlib.metadata.version",
+                side_effect=distribution_version,
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="codex-cli 0.144.1\n", stderr=""),
+            ) as run:
+                metadata = server.runtime_metadata()
+
+        self.assertEqual(metadata["mode"], "managed_standalone")
+        self.assertEqual(metadata["python_sdk_version"], "0.1.0b3")
+        self.assertEqual(metadata["sdk_bundled_cli_version"], "0.137.0a4")
+        self.assertEqual(metadata["configured_cli_version"], "codex-cli 0.144.1")
+        self.assertEqual(metadata["worker_version"], __version__)
+        run.assert_called_once()
+
+    def test_installed_python_sdk_can_start_gpt_56_thread_with_external_codex_cli(self) -> None:
+        codex_command = shutil.which("codex")
+        if not codex_command:
+            self.skipTest("standalone Codex CLI is not available on PATH")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            codex_home = workspace / "codex-home"
+            codex_home.mkdir()
+            safe_env = {
+                key: value
+                for key, value in os.environ.items()
+                if key.upper() in {"PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "LANG", "LC_ALL"}
+            }
+            safe_env.update(
+                {
+                    "HOME": str(workspace),
+                    "USERPROFILE": str(workspace),
+                    "CODEX_HOME": str(codex_home),
+                    "CODEX_SQLITE_HOME": str(workspace / "codex-sqlite"),
+                }
+            )
+            server = CodexSdkClient(codex_command, safe_env, workspace, workspace / "events.jsonl")
+            try:
+                server.start()
+                thread_id = server.start_thread(workspace, "gpt-5.6-sol")
+            finally:
+                server.close()
+
+        self.assertTrue(thread_id)
 
     def test_codex_sdk_start_thread_uses_sdk_deny_all_approval_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4093,6 +4157,16 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             artifact_dir = root / "artifacts" / "run_1"
             run_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "codex-runtime.json",
+                {
+                    "schema_version": "codex-runtime/v1",
+                    "mode": "managed_standalone",
+                    "python_sdk_version": "0.1.0b3",
+                    "sdk_bundled_cli_version": "0.137.0a4",
+                    "configured_cli_version": "codex-cli 0.144.1",
+                },
+            )
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=None)
 
             worker.build_envelope(
@@ -4117,6 +4191,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(summary["status"], "failed")
         self.assertEqual(summary["error"], "codex runtime too old")
+        self.assertEqual(summary["codex_runtime"]["configured_cli_version"], "codex-cli 0.144.1")
 
     def test_upload_log_artifacts_refreshes_and_reuploads_final_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

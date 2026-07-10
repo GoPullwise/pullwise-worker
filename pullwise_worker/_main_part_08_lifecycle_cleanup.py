@@ -888,6 +888,157 @@ def append_missing_env_values(env_path: Path, values: dict[str, str], *, dry_run
     append_no_follow_text_file(env_path, "".join(f"{key}={value}\n" for key, value in missing))
 
 
+DEFAULT_CODEX_INSTALLER_URL = "https://chatgpt.com/codex/install.sh"
+_CODEX_RELEASE_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta)(?:\.[0-9]+)?)?$")
+
+
+def worker_provider_chain(config: WorkerConfig) -> list[str]:
+    raw = getattr(config, "provider_chain", None)
+    if isinstance(raw, (list, tuple)):
+        values = raw
+    else:
+        values = str(raw or getattr(config, "provider", "") or "").split(",")
+    return list(dict.fromkeys(str(value or "").strip().lower() for value in values if str(value or "").strip()))
+
+
+def codex_cli_update_settings(config: WorkerConfig) -> dict[str, str] | None:
+    if "codex" not in worker_provider_chain(config):
+        return None
+    worker_root_text = str(getattr(config, "worker_root", "") or "").strip().replace("\\", "/")
+    if not worker_root_text or any(char in worker_root_text for char in "\r\n\x00"):
+        raise ValueError("worker root is required to update Codex CLI")
+    worker_root = PurePosixPath(worker_root_text)
+    if not worker_root.is_absolute() or worker_root == PurePosixPath("/"):
+        raise ValueError("worker root must be an absolute non-root path")
+    command_text = str(
+        os.environ.get("PULLWISE_CODEX_COMMAND")
+        or getattr(config, "codex_command", "")
+        or f"{worker_root.as_posix()}/.local/bin/codex"
+    ).strip().replace("\\", "/")
+    if any(char in command_text for char in "\r\n\x00"):
+        raise ValueError("Codex command must be single-line")
+    command_path = PurePosixPath(command_text)
+    if not command_path.is_absolute() or command_path.name != "codex":
+        raise ValueError("Codex command must be an absolute worker-local path ending in /codex")
+    try:
+        command_path.relative_to(worker_root)
+    except ValueError as exc:
+        raise ValueError(f"Codex command must be inside worker_root {worker_root.as_posix()}") from exc
+    raw_release = str(os.environ.get("PULLWISE_CODEX_RELEASE") or "latest").strip()
+    release = raw_release.removeprefix("rust-v").removeprefix("v")
+    if release != "latest" and not _CODEX_RELEASE_RE.fullmatch(release):
+        raise ValueError("Codex release must be latest or x.y.z[-alpha[.N]|-beta[.N]]")
+    installer_url = str(os.environ.get("PULLWISE_CODEX_INSTALLER_URL") or DEFAULT_CODEX_INSTALLER_URL).strip()
+    parsed_url = urllib.parse.urlparse(installer_url)
+    if (
+        parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.fragment
+    ):
+        raise ValueError("Codex installer URL must be an HTTPS URL without credentials or a fragment")
+    return {
+        "command": command_path.as_posix(),
+        "install_dir": command_path.parent.as_posix(),
+        "release": release,
+        "installer_url": installer_url,
+    }
+
+
+def service_user_codex_command(
+    config: WorkerConfig,
+    settings: dict[str, str],
+    command: list[str],
+    *,
+    install: bool = False,
+) -> list[str]:
+    worker_root = str(getattr(config, "worker_root", "") or "").strip()
+    codex_home = str(getattr(config, "codex_home", "") or f"{worker_root}/codex-home").strip()
+    codex_sqlite_home = str(getattr(config, "codex_sqlite_home", "") or f"{worker_root}/codex-sqlite").strip()
+    environment = [
+        f"HOME={worker_root}",
+        f"USERPROFILE={worker_root}",
+        f"CODEX_HOME={codex_home}",
+        f"CODEX_SQLITE_HOME={codex_sqlite_home}",
+        f"XDG_CONFIG_HOME={worker_root}/.config",
+        f"XDG_CACHE_HOME={worker_root}/.cache",
+        f"XDG_DATA_HOME={worker_root}/.local/share",
+        f"PATH={provider_tool_path(config)}",
+    ]
+    if install:
+        environment.extend(
+            [
+                f"CODEX_RELEASE={settings['release']}",
+                f"CODEX_INSTALL_DIR={settings['install_dir']}",
+                "CODEX_NON_INTERACTIVE=1",
+            ]
+        )
+    return [
+        "runuser",
+        "-u",
+        safe_worker_service_user(getattr(config, "service_user", None) or DEFAULT_SERVICE_USER),
+        "--",
+        "env",
+        *environment,
+        *command,
+    ]
+
+
+def refresh_codex_cli(
+    config: WorkerConfig,
+    settings: dict[str, str],
+    *,
+    dry_run: bool = False,
+) -> int:
+    dry_installer = "/tmp/pullwise-codex-install.sh"
+    if dry_run:
+        print(f"curl -fsSL {shlex.quote(settings['installer_url'])} -o {dry_installer}")
+        install_command = service_user_codex_command(
+            config,
+            settings,
+            [dry_installer, "--release", settings["release"]],
+            install=True,
+        )
+        print(" ".join(shlex.quote(part) for part in install_command))
+        version_command = service_user_codex_command(
+            config,
+            settings,
+            [settings["command"], "--version"],
+        )
+        print(" ".join(shlex.quote(part) for part in version_command))
+        return 0
+    descriptor, installer_path = tempfile.mkstemp(prefix="pullwise-codex-install-", suffix=".sh")
+    os.close(descriptor)
+    try:
+        downloaded = subprocess.run(["curl", "-fsSL", settings["installer_url"], "-o", installer_path])
+        if downloaded.returncode != 0:
+            return downloaded.returncode
+        os.chmod(installer_path, 0o755)
+        installed = subprocess.run(
+            service_user_codex_command(
+                config,
+                settings,
+                [installer_path, "--release", settings["release"]],
+                install=True,
+            )
+        )
+        if installed.returncode != 0:
+            return installed.returncode
+        return subprocess.run(
+            service_user_codex_command(
+                config,
+                settings,
+                [settings["command"], "--version"],
+            )
+        ).returncode
+    finally:
+        try:
+            os.unlink(installer_path)
+        except OSError:
+            pass
+
+
 def copy_text_file_no_follow(source: Path, destination: Path) -> None:
     write_no_follow_text_file(destination, read_no_follow_text_file(source))
 
@@ -959,7 +1110,7 @@ def ensure_lifecycle_watcher(
 def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     service_name = safe_worker_service_name(os.environ.get("PULLWISE_SERVICE_NAME", "").strip() or config.service_name)
     dependency_ok, dependency_detail = install_ubuntu_2204_dependencies(
-        ["python3.10", "python3-pip", "systemctl", "runuser"],
+        ["python3.10", "python3-pip", "systemctl", "runuser", "curl"],
         dry_run=dry_run,
     )
     if not dependency_ok:
@@ -974,6 +1125,7 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     try:
         worker_env_target_paths(env_path, backup_path)
         worker_wrapper_target_path(bin_path, service_name)
+        codex_settings = codex_cli_update_settings(config)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -1005,6 +1157,17 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
     for command in commands:
         if dry_run:
             print(" ".join(command))
+            if command[0:2] == ["systemctl", "stop"] and codex_settings is not None:
+                refresh_codex_cli(config, codex_settings, dry_run=True)
+                append_missing_env_values(
+                    env_path,
+                    {
+                        "PULLWISE_CODEX_COMMAND": codex_settings["command"],
+                        "PULLWISE_CODEX_RELEASE": codex_settings["release"],
+                        "PULLWISE_CODEX_INSTALLER_URL": codex_settings["installer_url"],
+                    },
+                    dry_run=True,
+                )
             if command is install_command:
                 print(f"write env-loading wrapper {bin_path}")
                 ensure_lifecycle_watcher(config, env_path=env_path, bin_path=bin_path, dry_run=True)
@@ -1014,6 +1177,26 @@ def update_worker(config: WorkerConfig, *, dry_run: bool = False) -> int:
             restore_worker_env_backup(backup_path, env_path)
             subprocess.run(["systemctl", "restart", service_name])
             return completed.returncode
+        if command[0:2] == ["systemctl", "stop"] and codex_settings is not None:
+            codex_code = refresh_codex_cli(config, codex_settings, dry_run=False)
+            if codex_code != 0:
+                restore_worker_env_backup(backup_path, env_path)
+                subprocess.run(["systemctl", "restart", service_name])
+                return codex_code
+            try:
+                append_missing_env_values(
+                    env_path,
+                    {
+                        "PULLWISE_CODEX_COMMAND": codex_settings["command"],
+                        "PULLWISE_CODEX_RELEASE": codex_settings["release"],
+                        "PULLWISE_CODEX_INSTALLER_URL": codex_settings["installer_url"],
+                    },
+                )
+            except (OSError, ValueError) as exc:
+                print(f"failed to update Codex worker environment: {exc}", file=sys.stderr)
+                restore_worker_env_backup(backup_path, env_path)
+                subprocess.run(["systemctl", "restart", service_name])
+                return 1
         if command is install_command:
             try:
                 write_worker_wrapper(bin_path, env_path)

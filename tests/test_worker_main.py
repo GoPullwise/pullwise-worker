@@ -191,5 +191,46 @@ class WorkerMainContractsTest(unittest.TestCase):
         self.assertLess(output.index("userdel pw-worker-wk-test"), watcher_disable)
         self.assertLess(watcher_disable, output.index(f"remove {watcher_file}"))
 
+    def test_worker_update_refreshes_latest_scoped_codex_cli_before_python_package(self) -> None:
+        worker_root = "/var/lib/pullwise-worker/wk_test/workers/wk_test"
+        config = argparse.Namespace(
+            service_name="pullwise-worker-wk_test",
+            service_user="pw-worker-wk-test",
+            service_home="/var/lib/pullwise-worker/wk_test",
+            worker_id="wk_test",
+            worker_root=worker_root,
+            provider_chain=["codex"],
+            codex_command=f"{worker_root}/.local/bin/codex",
+            codex_home=f"{worker_root}/codex-home",
+            codex_sqlite_home=f"{worker_root}/codex-sqlite",
+            service_path="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin",
+            worker_env_file="/etc/pullwise-worker/wk_test/worker.env",
+            worker_env_backup_file="/etc/pullwise-worker/wk_test/worker.env.bak",
+            worker_bin_path="/usr/local/bin/pullwise-worker-wk_test",
+            watcher_service_name="pullwise-worker-wk_test-watcher",
+            watcher_service_file="/etc/systemd/system/pullwise-worker-wk_test-watcher.service",
+            watcher_poll_seconds=5,
+        )
+        stdout = io.StringIO()
+
+        with patch.object(lifecycle, "install_ubuntu_2204_dependencies", return_value=(True, "")), patch.dict(
+            lifecycle.os.environ,
+            {
+                "PULLWISE_CODEX_RELEASE": "latest",
+                "PULLWISE_CODEX_INSTALLER_URL": "https://chatgpt.com/codex/install.sh",
+            },
+            clear=False,
+        ), redirect_stdout(stdout):
+            code = lifecycle.update_worker(config, dry_run=True)
+
+        output = stdout.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("https://chatgpt.com/codex/install.sh", output)
+        self.assertIn(f"CODEX_INSTALL_DIR={worker_root}/.local/bin", output)
+        self.assertIn("CODEX_RELEASE=latest", output)
+        self.assertIn("--release latest", output)
+        self.assertIn(f"append env PULLWISE_CODEX_COMMAND={worker_root}/.local/bin/codex", output)
+        self.assertLess(output.index("CODEX_RELEASE=latest"), output.index("pip install"))
+
 if __name__ == "__main__":
     unittest.main()
