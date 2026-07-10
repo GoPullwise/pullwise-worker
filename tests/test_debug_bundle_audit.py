@@ -288,6 +288,136 @@ class DebugBundleAuditTest(unittest.TestCase):
             result["issues"],
         )
 
+    def test_cross_artifact_plausible_and_severity_mismatches_are_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            report = json.loads((root / "worker/run/report.agent.json").read_text(encoding="utf-8"))
+            report["findings"][0].update(
+                {
+                    "severity": "P1",
+                    "validator_status": "plausible",
+                }
+            )
+            write_json(root, "worker/run/report.agent.json", report)
+            write_json(
+                root,
+                "worker/run/validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [
+                        {
+                            "id": "finding-1",
+                            "title": "Example",
+                            "status": "plausible",
+                            "locations": [{"path": "src/a.py", "start_line": 1, "end_line": 2}],
+                        }
+                    ],
+                },
+            )
+            write_json(
+                root,
+                "server/server-debug-evidence.json",
+                {
+                    "review_run": {
+                        "summary_json": json.dumps(
+                            {
+                                "finding_counts": {
+                                    "confirmed_critical": 0,
+                                    "confirmed_high": 1,
+                                    "confirmed_medium": 0,
+                                    "confirmed_low": 0,
+                                    "plausible": 0,
+                                },
+                                "top_findings": [
+                                    {
+                                        "id": "finding-1",
+                                        "title": "Example",
+                                        "severity": "P1",
+                                        "validator_status": "plausible",
+                                    }
+                                ],
+                            }
+                        )
+                    },
+                    "scan": {
+                        "issues": {"critical": 0, "high": 0, "medium": 1, "low": 0, "info": 0},
+                        "humanReport": {"summaryMarkdown": "- Confirmed findings: 1 (P1 1)"},
+                    },
+                },
+            )
+
+            result = audit_bundle(root)
+
+        codes = issue_codes(result)
+        self.assertIn("noncanonical_finding_severity", codes)
+        self.assertIn("result_validation_count_mismatch", codes)
+        self.assertIn("server_issue_count_mismatch", codes)
+        self.assertIn("human_report_validation_mismatch", codes)
+
+    def test_reviewer_assignment_progress_and_post_failures_are_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/run/bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {"bundle_id": "b1", "paths": ["src/a.py", "src/b.py"], "reviewers": ["correctness", "test_gap"]}
+                    ],
+                },
+            )
+            write_json(
+                root,
+                "worker/run/raw-reviewers/correctness.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "reviewer": "correctness",
+                    "bundles_reviewed": ["bundles/b1.md"],
+                    "findings": [],
+                },
+            )
+            progress = json.loads((root / "worker/run/progress.json").read_text(encoding="utf-8"))
+            progress["counters"].update({"reviewer_runs_total": 1, "reviewer_runs_completed": 1})
+            write_json(root, "worker/run/progress.json", progress)
+            (root / "worker/run/worker.log.jsonl").write_text(
+                json.dumps({"event": "progress_event_post_failed", "phase": "cleanup_active_job"}) + "\n",
+                encoding="utf-8",
+            )
+
+            result = audit_bundle(root)
+
+        codes = issue_codes(result)
+        self.assertIn("reviewer_coverage_incomplete", codes)
+        self.assertIn("progress_counter_mismatch", codes)
+        self.assertIn("progress_event_post_failed", codes)
+
+    def test_fully_degraded_intent_evidence_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/run/intent/intent-test-results.json",
+                {
+                    "schema_version": "intent-test-result/v1",
+                    "test_results": [
+                        {
+                            "test_id": "intent-1",
+                            "status": "skipped",
+                            "classification": "dependency_missing",
+                            "confidence": 0.0,
+                        }
+                    ],
+                },
+            )
+
+            result = audit_bundle(root)
+
+        self.assertIn("intent_evidence_fully_degraded", issue_codes(result))
+
 
 if __name__ == "__main__":
     unittest.main()

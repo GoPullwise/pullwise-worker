@@ -29,6 +29,31 @@ SECRET_PATTERNS = {
     "pullwise_worker_token": re.compile(r"\bpww_[A-Za-z0-9_-]{24,}\b"),
     "github_token": re.compile(r"\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b"),
 }
+FINDING_SEVERITY_ALIASES = {
+    "p0": "critical",
+    "blocker": "critical",
+    "critical": "critical",
+    "p1": "high",
+    "high": "high",
+    "p2": "medium",
+    "moderate": "medium",
+    "medium": "medium",
+    "p3": "low",
+    "low": "low",
+    "p4": "info",
+    "informational": "info",
+    "info": "info",
+}
+CANONICAL_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+DEGRADED_INTENT_CLASSIFICATIONS = {
+    "dependency_missing",
+    "environment_error",
+    "flaky_or_nondeterministic",
+    "skipped_not_runnable",
+    "test_harness_error",
+    "test_oracle_wrong",
+    "unclear_requirement",
+}
 
 
 def normalized_name(value: object) -> str:
@@ -140,6 +165,67 @@ def integer(value: object, default: int = 0) -> int:
 def status_name(value: object) -> str:
     text = str(value or "").strip().lower()
     return TERMINAL_STATUS_ALIASES.get(text, text)
+
+
+def finding_severity(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return FINDING_SEVERITY_ALIASES.get(text, text)
+
+
+def reviewer_id(value: object) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return {"correctnesslite": "correctness_lite", "testgap": "test_gap"}.get(text, text)
+
+
+def review_bundle_id(value: object) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    name = PurePosixPath(text).name
+    return name[:-3] if name.lower().endswith(".md") else name
+
+
+def binding_ids(record: object) -> set[str]:
+    if not isinstance(record, dict):
+        return set()
+    result: set[str] = set()
+    for key in ("id", "finding_id", "cluster_id", "candidate_id", "local_id", "source_finding_id"):
+        value = record.get(key)
+        values = value if isinstance(value, list) else [value]
+        result.update(str(item).strip() for item in values if str(item or "").strip())
+    validation_sources = record.get("validation_sources")
+    if isinstance(validation_sources, dict):
+        for value in validation_sources.values():
+            result.update(binding_ids(value))
+    return result
+
+
+def validation_status(record: object) -> str:
+    if not isinstance(record, dict):
+        return ""
+    for key in ("validator_status", "validation_status", "status", "classification", "disposition", "verdict"):
+        value = str(record.get(key) or "").strip().lower()
+        if value:
+            return value
+    for key in ("validation_sources", "validation"):
+        nested = record.get(key)
+        if isinstance(nested, dict):
+            value = validation_status(nested)
+            if value:
+                return value
+    return ""
+
+
+def json_object(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def list_value(payload: Any, *keys: str) -> list[Any]:
@@ -297,8 +383,10 @@ class BundleAudit:
         coverage = self.json_at(self.run_name("coverage.json"))
         self.audit_coverage(inventory, coverage)
         self.audit_report(inventory)
+        reviewer_counts = self.audit_reviewer_coverage()
         intent_counts = self.audit_intent()
-        self.audit_progress(inventory, progress, progress_name, intent_counts)
+        self.audit_progress(inventory, progress, progress_name, intent_counts, reviewer_counts)
+        self.audit_result_consistency()
         self.audit_artifacts()
         self.audit_runtime()
         self.audit_events()
@@ -377,6 +465,27 @@ class BundleAudit:
                 self.run_name("coverage.json"),
             )
 
+    def report_findings_with_status(self) -> list[tuple[dict[str, Any], str]]:
+        report = self.json_at(self.run_name("report.agent.json"))
+        findings = [
+            finding
+            for finding in list_value(report, "findings", "main_findings", "mainFindings")
+            if isinstance(finding, dict)
+        ]
+        validation = self.json_at(self.run_name("validated-findings.json"))
+        entries = [
+            entry
+            for entry in list_value(validation, "validated_findings", "findings", "results")
+            if isinstance(entry, dict)
+        ]
+        result: list[tuple[dict[str, Any], str]] = []
+        for finding in findings:
+            ids = binding_ids(finding)
+            matches = [entry for entry in entries if ids and ids.intersection(binding_ids(entry))]
+            status = validation_status(matches[0]) if len(matches) == 1 else validation_status(finding)
+            result.append((finding, status or "confirmed"))
+        return result
+
     def audit_report(self, inventory: Any) -> None:
         report_name = self.run_name("report.agent.json")
         report = self.json_at(report_name)
@@ -390,6 +499,22 @@ class BundleAudit:
         location_count = 0
         for index, finding in enumerate(findings):
             finding_id = str((finding if isinstance(finding, dict) else {}).get("id") or f"finding-{index + 1}")
+            raw_severity = str((finding if isinstance(finding, dict) else {}).get("severity") or "").strip().lower()
+            canonical_severity = finding_severity(raw_severity)
+            if raw_severity and canonical_severity != raw_severity:
+                self.issue(
+                    "warning",
+                    "noncanonical_finding_severity",
+                    f"Finding {finding_id} uses {raw_severity}; canonical severity is {canonical_severity}",
+                    report_name,
+                )
+            elif canonical_severity and canonical_severity not in CANONICAL_FINDING_SEVERITIES:
+                self.issue(
+                    "error",
+                    "invalid_finding_severity",
+                    f"Finding {finding_id} uses unsupported severity {raw_severity}",
+                    report_name,
+                )
             locations = finding_locations(finding)
             if not locations:
                 self.issue("error", "finding_location_missing", f"Finding {finding_id} has no usable source location", report_name)
@@ -453,6 +578,91 @@ class BundleAudit:
                 f"Only {verified_total} of {location_count} report locations were mechanically verified",
                 verification_name,
             )
+        statuses = [status for _finding, status in self.report_findings_with_status()]
+        self.facts["confirmed_findings"] = sum(1 for status in statuses if status != "plausible")
+        self.facts["plausible_findings"] = sum(1 for status in statuses if status == "plausible")
+
+    def audit_reviewer_coverage(self) -> dict[str, int]:
+        plan = self.json_at(self.run_name("bundle-plan.json"))
+        expected: set[tuple[str, str]] = set()
+        for bundle in list_value(plan, "bundles"):
+            if not isinstance(bundle, dict):
+                continue
+            bundle_id = review_bundle_id(bundle.get("bundle_id") or bundle.get("id"))
+            reviewers = bundle.get("reviewers")
+            if not bundle_id or not isinstance(reviewers, list):
+                continue
+            expected.update(
+                (bundle_id, normalized_reviewer)
+                for normalized_reviewer in (reviewer_id(value) for value in reviewers)
+                if normalized_reviewer
+            )
+        if not expected:
+            return {"total": 0, "completed": 0}
+
+        raw_prefix = f"{self.run_prefix}/raw-reviewers/"
+        output_names = [
+            name
+            for name in self.files.names
+            if name.startswith(raw_prefix) and name.endswith(".json")
+        ]
+        covered: set[tuple[str, str]] = set()
+        expected_bundles = {bundle_id for bundle_id, _reviewer in expected}
+        expected_reviewers = {reviewer for _bundle_id, reviewer in expected}
+        for name in output_names:
+            payload = self.json_at(name)
+            if not isinstance(payload, dict):
+                continue
+            normalized_reviewer = reviewer_id(
+                payload.get("reviewer_id")
+                or payload.get("reviewer")
+                or payload.get("perspective")
+            )
+            file_key = PurePosixPath(name).stem.lower().replace("-", "_")
+            if not normalized_reviewer:
+                normalized_reviewer = next(
+                    (
+                        candidate
+                        for candidate in sorted(expected_reviewers, key=len, reverse=True)
+                        if candidate in file_key
+                    ),
+                    "",
+                )
+            raw_bundles: list[object] = []
+            for key in ("bundle_id", "bundle"):
+                if payload.get(key) not in (None, ""):
+                    raw_bundles.append(payload[key])
+            for key in ("bundles_reviewed", "reviewed_bundles", "bundle_ids", "target_bundle_ids"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    raw_bundles.extend(value)
+            bundle_ids = {
+                normalized_bundle
+                for normalized_bundle in (review_bundle_id(value) for value in raw_bundles)
+                if normalized_bundle
+            }
+            if not bundle_ids:
+                bundle_ids = {
+                    bundle_id
+                    for bundle_id in expected_bundles
+                    if bundle_id.lower().replace("-", "_") in file_key
+                }
+            if normalized_reviewer:
+                covered.update((bundle_id, normalized_reviewer) for bundle_id in bundle_ids)
+
+        completed = len(expected.intersection(covered))
+        missing = sorted(expected - covered)
+        if missing:
+            self.issue(
+                "error",
+                "reviewer_coverage_incomplete",
+                f"{len(missing)} planned bundle-reviewer assignment(s) have no reviewer output",
+                self.run_name("bundle-plan.json"),
+                assignments=[f"{bundle_id}:{reviewer}" for bundle_id, reviewer in missing],
+            )
+        counts = {"total": len(expected), "completed": completed}
+        self.facts["reviewer_assignments"] = counts
+        return counts
 
     def audit_intent(self) -> dict[str, int]:
         plan_name = self.run_name("intent/intent-test-plan.json")
@@ -536,6 +746,26 @@ class BundleAudit:
                     f"Generated unittest {record_id(generated_record)} was routed through pytest",
                     raw_name,
                 )
+        analyzed_name = self.run_name("intent/intent-test-results.json")
+        analyzed = self.json_at(analyzed_name)
+        analyzed_results = [
+            result
+            for result in list_value(analyzed, "test_results", "results")
+            if isinstance(result, dict)
+        ]
+        classifications = [
+            str(result.get("classification") or "").strip().lower()
+            for result in analyzed_results
+            if str(result.get("classification") or "").strip()
+        ]
+        if classifications and all(value in DEGRADED_INTENT_CLASSIFICATIONS for value in classifications):
+            self.issue(
+                "warning",
+                "intent_evidence_fully_degraded",
+                f"All {len(classifications)} analyzed intent test result(s) are degraded evidence",
+                analyzed_name,
+                classifications=sorted(classifications),
+            )
         counts = {
             "total": len(planned_ids | written_ids | run_ids),
             "written": len(written_ids),
@@ -550,6 +780,7 @@ class BundleAudit:
         progress: Any,
         progress_name: str,
         intent_counts: dict[str, int],
+        reviewer_counts: dict[str, int],
     ) -> None:
         if not isinstance(progress, dict):
             return
@@ -595,6 +826,8 @@ class BundleAudit:
             "source_like_files_classified": len(source_paths.intersection(route_paths)) if route_paths else 0,
             "bundles_total": len(bundles),
             "bundles_packed": len(bundle_ids.intersection(packed_names)),
+            "reviewer_runs_total": reviewer_counts["total"],
+            "reviewer_runs_completed": reviewer_counts["completed"],
             "intent_tests_total": intent_counts["total"],
             "intent_tests_written": intent_counts["written"],
             "intent_tests_run": intent_counts["run"],
@@ -613,6 +846,85 @@ class BundleAudit:
                 f"{len(mismatches)} progress counter(s) disagree with persisted artifacts",
                 progress_name,
                 counters=mismatches,
+            )
+
+    def audit_result_consistency(self) -> None:
+        server_name = self.files.find("server/server-debug-evidence.json", "server-debug-evidence.json")
+        if not server_name:
+            return
+        server = self.json_at(server_name)
+        if not isinstance(server, dict):
+            return
+        findings_with_status = self.report_findings_with_status()
+        expected_counts = {
+            "confirmed_critical": 0,
+            "confirmed_high": 0,
+            "confirmed_medium": 0,
+            "confirmed_low": 0,
+            "plausible": 0,
+        }
+        for finding, status in findings_with_status:
+            if status == "plausible":
+                expected_counts["plausible"] += 1
+                continue
+            severity = finding_severity(finding.get("severity"))
+            key = f"confirmed_{severity}"
+            if key in expected_counts:
+                expected_counts[key] += 1
+
+        review_run = server.get("review_run") if isinstance(server.get("review_run"), dict) else {}
+        run_summary = json_object(review_run.get("summary_json") or review_run.get("summary"))
+        recorded_counts = run_summary.get("finding_counts") if isinstance(run_summary.get("finding_counts"), dict) else {}
+        validation_mismatches = {
+            key: {"recorded": integer(recorded_counts.get(key)), "expected": value}
+            for key, value in expected_counts.items()
+            if integer(recorded_counts.get(key)) != value
+        }
+        if recorded_counts and validation_mismatches:
+            self.issue(
+                "error",
+                "result_validation_count_mismatch",
+                "Stable result summary does not preserve confirmed versus plausible finding counts",
+                server_name,
+                counts=validation_mismatches,
+            )
+
+        top_findings = list_value(run_summary, "top_findings")
+        expected_issue_counts = {severity: 0 for severity in ("critical", "high", "medium", "low", "info")}
+        for finding in top_findings:
+            if not isinstance(finding, dict):
+                continue
+            severity = finding_severity(finding.get("severity"))
+            if severity in expected_issue_counts:
+                expected_issue_counts[severity] += 1
+        scan = server.get("scan") if isinstance(server.get("scan"), dict) else {}
+        scan_issue_counts = scan.get("issues") if isinstance(scan.get("issues"), dict) else {}
+        issue_mismatches = {
+            key: {"recorded": integer(scan_issue_counts.get(key)), "expected": value}
+            for key, value in expected_issue_counts.items()
+            if integer(scan_issue_counts.get(key)) != value
+        }
+        if top_findings and scan_issue_counts and issue_mismatches:
+            self.issue(
+                "error",
+                "server_issue_count_mismatch",
+                "Server scan issue counts disagree with normalized stable top-finding severities",
+                server_name,
+                counts=issue_mismatches,
+            )
+
+        human_report = scan.get("humanReport") if isinstance(scan.get("humanReport"), dict) else {}
+        markdown = str(human_report.get("summaryMarkdown") or "")
+        confirmed_match = re.search(r"Confirmed findings:\s*(\d+)", markdown, flags=re.IGNORECASE)
+        expected_confirmed = sum(value for key, value in expected_counts.items() if key.startswith("confirmed_"))
+        if confirmed_match and integer(confirmed_match.group(1), -1) != expected_confirmed:
+            self.issue(
+                "error",
+                "human_report_validation_mismatch",
+                "Human report confirmed-finding count disagrees with validator dispositions",
+                server_name,
+                recorded=integer(confirmed_match.group(1), -1),
+                expected=expected_confirmed,
             )
 
     def audit_artifacts(self) -> None:
@@ -695,6 +1007,23 @@ class BundleAudit:
             )
 
     def audit_events(self) -> None:
+        worker_log = self.run_name("worker.log.jsonl")
+        worker_log_text = self.text_at(worker_log)
+        post_failures = 0
+        for line in worker_log_text.splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("event") == "progress_event_post_failed":
+                post_failures += 1
+        if post_failures:
+            self.issue(
+                "warning",
+                "progress_event_post_failed",
+                f"Worker failed to post {post_failures} progress event(s) to the server",
+                worker_log,
+            )
         progress_log = self.run_name("progress.log.jsonl")
         text = self.text_at(progress_log)
         if not text:
