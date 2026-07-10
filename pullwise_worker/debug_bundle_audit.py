@@ -810,6 +810,33 @@ class BundleAudit:
             for result in analyzed_results
             if str(result.get("classification") or "").strip()
         ]
+        analyzed_summary = analyzed.get("summary") if isinstance(analyzed, dict) and isinstance(analyzed.get("summary"), dict) else {}
+        reported_classification_counts = (
+            analyzed_summary.get("classification_counts")
+            if isinstance(analyzed_summary.get("classification_counts"), dict)
+            else {}
+        )
+        if reported_classification_counts:
+            actual_classification_counts: dict[str, int] = {}
+            for classification in classifications:
+                actual_classification_counts[classification] = actual_classification_counts.get(classification, 0) + 1
+            mismatches = {
+                classification: {
+                    "recorded": integer(reported_classification_counts.get(classification)),
+                    "expected": actual_classification_counts.get(classification, 0),
+                }
+                for classification in sorted(set(reported_classification_counts) | set(actual_classification_counts))
+                if integer(reported_classification_counts.get(classification))
+                != actual_classification_counts.get(classification, 0)
+            }
+            if mismatches:
+                self.issue(
+                    "error",
+                    "intent_classification_summary_mismatch",
+                    "Intent-test summary classification counts disagree with analyzed test records",
+                    analyzed_name,
+                    classifications=mismatches,
+                )
         if classifications and all(value in DEGRADED_INTENT_CLASSIFICATIONS for value in classifications):
             self.issue(
                 "warning",

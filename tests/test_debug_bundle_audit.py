@@ -391,6 +391,26 @@ class DebugBundleAuditTest(unittest.TestCase):
 
         self.assertIn("validation_findings_collection_noncanonical", issue_codes(result))
 
+    def test_intent_classification_summary_mismatch_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/run/intent/intent-test-results.json",
+                {
+                    "schema_version": "intent-test-result/v1",
+                    "summary": {"classification_counts": {"test_harness_error": 1}},
+                    "test_results": [
+                        {"test_id": "ITV-001", "status": "failed", "classification": "dependency_missing"}
+                    ],
+                },
+            )
+
+            result = audit_bundle(root)
+
+        self.assertIn("intent_classification_summary_mismatch", issue_codes(result))
+
     def test_reviewer_assignment_progress_and_post_failures_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir) / "bundle"

@@ -4407,13 +4407,57 @@ def _intent_generated_command(
 
 def _intent_generated_execution_records(generated_tests: list[Any]) -> list[dict[str, Any]]:
     records = [item for item in generated_tests if isinstance(item, dict)]
-    executable = []
+    executable: list[dict[str, Any]] = []
     for record in records:
         path_kind = str(record.get("path_kind") or record.get("pathKind") or "").strip().lower()
         if path_kind in {"run_artifact_source_copy", "artifact_source_copy"}:
             continue
-        executable.append(record)
-    return executable or records
+        executable.append(dict(record))
+    executable = executable or [dict(record) for record in records]
+    grouped: list[dict[str, Any]] = []
+    grouped_by_path: dict[str, dict[str, Any]] = {}
+    for record in executable:
+        path_key = _path_key(_intent_source_path_from_entry(record))
+        if not path_key:
+            grouped.append(record)
+            continue
+        existing = grouped_by_path.get(path_key)
+        if existing is None:
+            grouped_by_path[path_key] = record
+            grouped.append(record)
+            continue
+        related_ids = _intent_related_test_ids(existing)
+        for candidate_id in (
+            _intent_test_id(existing, ""),
+            _intent_test_id(record, ""),
+            *_intent_related_test_ids(record),
+        ):
+            if candidate_id and candidate_id not in related_ids:
+                related_ids.append(candidate_id)
+        existing["test_ids"] = related_ids
+    return grouped
+
+
+def _intent_normalized_execution_command(command: list[str]) -> list[str]:
+    if len(command) != 4:
+        return command
+    executable, module_flag, framework, raw_path = command
+    if module_flag != "-m" or framework != "unittest" or not raw_path.lower().endswith(".py"):
+        return command
+    path = PurePosixPath(raw_path.replace("\\", "/"))
+    start_dir = path.parent.as_posix()
+    if start_dir in {"", "."}:
+        return command
+    return [
+        executable,
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        start_dir,
+        "-p",
+        path.name,
+    ]
 
 
 def _intent_source_execution_skip(run_dir: Path) -> tuple[str, str]:
@@ -4613,6 +4657,7 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             generated_index=generated_index,
             generated_total=len(execution_records),
         )
+        command = _intent_normalized_execution_command(command)
         base_result = {"schema_version": "project-test-run/v1", "test_id": test_id}
         related_ids = _intent_related_test_ids(generated)
         if related_ids:
@@ -5049,6 +5094,13 @@ def _intent_dependency_missing(raw_result: dict[str, Any]) -> bool:
     if raw_result.get("exit_code") == 127:
         return True
     output = _intent_raw_output_text(raw_result)
+    command = str(raw_result.get("command") or "").lower().replace("\\", "/")
+    if (
+        " -m unittest " in f" {command} "
+        and ("failed to import test module" in output or "modulenotfounderror" in output)
+        and ("generated-tests" in output or re.search(r"no module named ['\"]?[^'\"\n]*/", output))
+    ):
+        return False
     dependency_markers = (
         "command not found",
         ": not found",
@@ -5170,6 +5222,15 @@ def repair_intent_test_results_artifact(path: Path, run_dir: Path) -> None:
         return
     payload["schema_version"] = "intent-test-result/v1"
     payload["test_results"] = repaired
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    classification_counts: dict[str, int] = {}
+    for result in repaired:
+        classification = str(result.get("classification") or "").strip()
+        if classification:
+            classification_counts[classification] = classification_counts.get(classification, 0) + 1
+    summary["classification_counts"] = classification_counts
+    summary["analyzed_results"] = len(repaired)
+    payload["summary"] = summary
     write_json(path, payload)
 
 def _qa_int(value: object, default: int = 0) -> int:
