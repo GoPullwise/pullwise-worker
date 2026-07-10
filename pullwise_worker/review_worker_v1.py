@@ -1609,6 +1609,9 @@ def intent_command_is_runnable_for_repo(command: list[str], cwd: Path, validatio
         return False, "skipped_not_runnable: command is empty"
     executable = normalized_executable_name(argv[0])
     lowered = [part.lower() for part in argv]
+    available, reason = _command_executable_available(argv)
+    if not available:
+        return False, reason
     if executable in {"npm", "pnpm", "yarn"}:
         package_json = _node_package_json_for_cwd(cwd, validation_repo)
         if not package_json.is_file():
@@ -1620,9 +1623,6 @@ def intent_command_is_runnable_for_repo(command: list[str], cwd: Path, validatio
             return False, dependency_error
     if executable in {"terraform", "helm", "kubectl"}:
         return False, "skipped_not_runnable: external provider or cluster initialization is not allowed"
-    available, reason = _command_executable_available(argv)
-    if not available:
-        return False, reason
     if executable in {"python", "python3", "py"} and len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] == "pytest":
         try:
             import importlib.util
