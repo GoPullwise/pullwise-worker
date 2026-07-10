@@ -254,6 +254,96 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertIn(("turn_interrupt", "thread_1", "turn_1"), calls)
 
+    def test_codex_sdk_turn_stops_on_non_retrying_error_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            calls = []
+
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn_1"))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    calls.append(("next_turn_notification", turn_id))
+                    if len(calls) > 1:
+                        raise AssertionError("terminal error notification was ignored")
+                    return SimpleNamespace(
+                        method="error",
+                        payload=SimpleNamespace(
+                            thread_id="thread_1",
+                            turn_id=turn_id,
+                            will_retry=False,
+                            error=SimpleNamespace(
+                                message="You have no Codex usage remaining",
+                                codex_error_info="usageLimitExceeded",
+                            ),
+                        ),
+                    )
+
+                def unregister_turn_notifications(self, turn_id: str) -> None:
+                    calls.append(("unregister_turn_notifications", turn_id))
+
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._threads["thread_1"] = SimpleNamespace(id="thread_1")
+
+            with self.assertRaisesRegex(RuntimeError, "usageLimitExceeded"):
+                server.run_turn(
+                    thread_id="thread_1",
+                    repo_dir=workspace,
+                    prompt="review",
+                    effort="medium",
+                    read_only=True,
+                    timeout_seconds=2,
+                )
+
+        self.assertEqual(calls.count(("next_turn_notification", "turn_1")), 1)
+        self.assertIn(("unregister_turn_notifications", "turn_1"), calls)
+
+    def test_codex_sdk_turn_keeps_waiting_for_retrying_error_notification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            notifications = []
+
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn_1"))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    notifications.append(turn_id)
+                    if len(notifications) == 1:
+                        return SimpleNamespace(
+                            method="error",
+                            payload=SimpleNamespace(
+                                thread_id="thread_1",
+                                turn_id=turn_id,
+                                will_retry=True,
+                                error=SimpleNamespace(message="temporary upstream failure"),
+                            ),
+                        )
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)),
+                    )
+
+                def unregister_turn_notifications(self, turn_id: str) -> None:
+                    return
+
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._threads["thread_1"] = SimpleNamespace(id="thread_1")
+
+            server.run_turn(
+                thread_id="thread_1",
+                repo_dir=workspace,
+                prompt="review",
+                effort="medium",
+                read_only=True,
+                timeout_seconds=2,
+            )
+
+        self.assertEqual(notifications, ["turn_1", "turn_1"])
+
     def test_codex_sdk_turn_uses_restricted_workspace_write_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -3964,6 +4054,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
     def test_codex_error_mapper_returns_stable_protocol_codes(self) -> None:
         self.assertEqual(codex_error_code({"codexErrorInfo": "UsageLimitExceeded"}), "CODEX_QUOTA_EXHAUSTED")
+        self.assertEqual(codex_error_code({"codexErrorInfo": "usageLimitExceeded"}), "CODEX_QUOTA_EXHAUSTED")
         self.assertEqual(codex_error_code('{"codexErrorInfo":"ContextWindowExceeded"}'), "CODEX_CONTEXT_WINDOW_EXCEEDED")
         self.assertEqual(codex_error_code("unexpected"), "CODEX_UNKNOWN_ERROR")
 

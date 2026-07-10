@@ -201,6 +201,7 @@ INTENT_TEST_CLASSIFICATIONS = {
 INTENT_TEST_STATUSES = {"passed", "failed", "skipped", "timeout", "error"}
 CODEX_ERROR_CODES = {
     "UsageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
+    "usageLimitExceeded": "CODEX_QUOTA_EXHAUSTED",
     "RateLimitReached": "CODEX_QUOTA_EXHAUSTED",
     "rate_limit_reached": "CODEX_QUOTA_EXHAUSTED",
     "workspace_owner_credits_depleted": "CODEX_QUOTA_EXHAUSTED",
@@ -208,10 +209,14 @@ CODEX_ERROR_CODES = {
     "workspace_owner_usage_limit_reached": "CODEX_QUOTA_EXHAUSTED",
     "workspace_member_usage_limit_reached": "CODEX_QUOTA_EXHAUSTED",
     "ContextWindowExceeded": "CODEX_CONTEXT_WINDOW_EXCEEDED",
+    "contextWindowExceeded": "CODEX_CONTEXT_WINDOW_EXCEEDED",
     "Unauthorized": "CODEX_UNAUTHORIZED",
+    "unauthorized": "CODEX_UNAUTHORIZED",
     "SandboxError": "CODEX_SANDBOX_ERROR",
+    "sandboxError": "CODEX_SANDBOX_ERROR",
     "HttpConnectionFailed": "CODEX_UPSTREAM_CONNECTION_FAILED",
     "InternalServerError": "CODEX_INTERNAL_SERVER_ERROR",
+    "internalServerError": "CODEX_INTERNAL_SERVER_ERROR",
 }
 CODEX_QUOTA_ERROR_MARKERS = (
     "insufficient_quota",
@@ -774,6 +779,19 @@ class CodexSdkClient:
                     if method == "account/rateLimits/updated" and self.rate_limit_callback is not None:
                         params = self._model_to_dict(payload)
                         self.rate_limit_callback(params)
+                    if method == "error":
+                        params = self._model_to_dict(payload)
+                        notification_turn_id = str(params.get("turnId") or params.get("turn_id") or "")
+                        if notification_turn_id and notification_turn_id != turn_id:
+                            continue
+                        will_retry = params.get("willRetry")
+                        if will_retry is None:
+                            will_retry = params.get("will_retry")
+                        if bool(will_retry):
+                            continue
+                        turn_error = params.get("error") or getattr(payload, "error", None) or params
+                        error["message"] = self._json_text(turn_error)
+                        break
                     if method != "turn/completed":
                         continue
                     completed_turn = getattr(payload, "turn", None)
