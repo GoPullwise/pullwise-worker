@@ -1930,6 +1930,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="python",
+            ), patch(
                 "pullwise_worker.review_worker_v1.subprocess.run",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ):

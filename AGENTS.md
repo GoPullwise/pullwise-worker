@@ -448,6 +448,8 @@ server-provided subscription plan agent configs attached to the claimed job.
   `review_request.policy`, and `review_request.budget`; do not fall back to
   `agentConfig.codex` or `agentConfig.reviewWorker` for model, effort, timeout,
   deadline, or intent-test validation-limit decisions.
+- Worker env templates and installers must not declare local reasoning-effort
+  or turn-timeout defaults; those are server-owned claimed-job policy.
 - Reject jobs whose `review_request.policy` allows source modification,
   dependency install, network access, or non-standard-library helper scripts.
 - Repository size limits used by worker preflight come from the job's
