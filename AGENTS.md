@@ -146,6 +146,7 @@ Codex execution rules:
 - Keep reviewer ids limited to `security`, `correctness`, `test_gap`, and `correctness_lite` unless a future migration updates fanout, validation, clustering, reporting, QA, and backward compatibility together.
 - Adaptive prompt context may be appended only when `repo-profile.json` is valid. It must not request extra required artifacts, change required outputs, or introduce reviewer ids.
 - Intent command policy remains the first gate and must not be loosened. Runnable preflight may only skip unsafe/not-runnable commands with explicit reasons; it must not permit installs, `npx`, network calls, provider initialization, external scanners, or dependency setup.
+- Intent-test preflight must verify the command executable before inspecting a package script, then verify that package-local script runners such as `node_modules/.bin/vitest` exist. Missing executables are `dependency_missing` evidence and must be skipped before subprocess launch. A Linux sandbox setup failure is `environment_error`; never retry the generated test command unsandboxed.
 - A generated intent-test failure is evidence only. It must not automatically classify a finding as `confirmed_bug` or increase confidence before the allowed failure-analysis classification step.
 - Worker-side adaptation may tilt internal emphasis within server-owned job policy, but must not invent or raise repository limits, wall-time limits, token budgets, model policy, or reasoning effort.
 Review pipeline rules:
@@ -316,6 +317,8 @@ Review pipeline rules:
   `intent_tests_written`, and `intent_tests_run`; `upload_artifacts` progress
   data must include `artifacts_total` and `artifacts_uploaded` and update after
   each successfully uploaded artifact.
+- Reviewer progress counts logical `(bundle_id, reviewer_id)` assignments, not reviewer-output files. Grouped outputs must declare every covered bundle through `bundles_reviewed`; validation must reject missing planned assignments and unexpected assignments before a run can complete.
+- Once the terminal result request has been submitted, do not post non-terminal cleanup phase events. Only the terminal event matching the submitted status may follow result acceptance.
 - V1 `cancel_run` commands must mark the active job `cancelling`, keep
   available job slots at zero, emit exactly one `run_cancel_requested` event
   before the terminal `run_cancelled` event, interrupt the active Codex turn,
@@ -402,6 +405,7 @@ actionable recommendation. Weak or uncertain observations belong in appendix or
 internal artifacts, not as confirmed findings.
 
 Main `report.agent.json.findings` are a mechanically validated surface. Each main finding must be backed by `validated-findings.json.validated_findings` with status `confirmed`, `plausible`, or `validated`. Report repair must demote unbacked findings into `appendix_findings` with `demoted_from_main_findings = true`, recompute `summary.overall_risk` from retained main findings, and rebuild `next_agent_tasks` only from retained main findings. QA must fail non-empty main findings when `validated-findings.json` is missing, malformed, or lacks a matching accepted validation entry.
+- Preserve the accepted validator disposition across `validator_status`, stable summary counts, and `report.md`: a `plausible` finding must never be counted or rendered as confirmed. Normalize priority-style severity aliases such as `P0`-`P4` to canonical `critical`/`high`/`medium`/`low`/`info` before report, summary, and server-facing result construction.
 Accepted validation status may arrive through common alias fields including
 `status`, `validator_status`, `validation_status`, `classification`, or
 `disposition`; keep QA/report repair binding logic aligned across those aliases.
