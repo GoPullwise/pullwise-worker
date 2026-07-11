@@ -456,12 +456,20 @@ server-provided subscription plan agent configs attached to the claimed job.
   `review_request.policy`, and `review_request.budget`; do not fall back to
   `agentConfig.codex` or `agentConfig.reviewWorker` for model, effort, timeout,
   deadline, or intent-test validation-limit decisions.
+- Treat server-provided reasoning effort as a safe lowercase identifier, not a
+  worker-owned enum. The server validates model/effort compatibility from the
+  Codex model capability catalog; this lets a current worker pass newly
+  catalogued efforts to the SDK without another enum update.
 - Worker env templates and installers must not declare local reasoning-effort
   or turn-timeout defaults; those are server-owned claimed-job policy.
 - Reject jobs whose `review_request.policy` allows source modification,
   dependency install, network access, or non-standard-library helper scripts.
 - Repository size limits used by worker preflight come from the job's
   `repositoryLimits`, not from local plan assumptions.
+- Older installed workers may still lack a newly supported model or effort
+  until operators replace them. Do not implement worker self-upgrade, fleet
+  intersection, or old-worker compatibility as part of plan capability changes
+  unless that deployment work is explicitly requested.
 
 ## Readiness Semantics
 
