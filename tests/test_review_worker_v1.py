@@ -4266,6 +4266,48 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             ],
         )
 
+    def test_busy_worker_defers_quota_refresh_command(self) -> None:
+        events = []
+
+        class Client:
+            def heartbeat(self, **payload: dict) -> dict:
+                events.append(("heartbeat", payload["status"]))
+                return {
+                    "command": {
+                        "id": "cmd_quota_refresh",
+                        "command": "refresh_codex_quota",
+                        "status": "pending",
+                    }
+                }
+
+            def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:
+                events.append(("command_status", command_id, status, error))
+
+        class FakeCodexClient:
+            def is_running(self) -> bool:
+                return True
+
+            def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as root:
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root), client=Client())
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
+            worker.machine_metrics_payload = lambda: None  # type: ignore[method-assign]
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {  # type: ignore[method-assign]
+                "provider": "codex",
+                "status": "ok",
+                "ready": True,
+                "checkedAt": 100,
+            }
+            worker.quota_monitor.refresh = lambda current_time=None: events.append(("refresh",))  # type: ignore[method-assign]
+            worker.state.active_job = ActiveJob("job_1", "run_1", "lease_1", "attempt_1", state="busy")
+            worker.state.state = "busy"
+
+            worker.heartbeat()
+
+        self.assertEqual(events, [("heartbeat", "busy")])
+
     def test_worker_closes_codex_client_when_control_plane_stops_accepting_heartbeat(self) -> None:
         events = []
 
