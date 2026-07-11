@@ -3388,7 +3388,7 @@ def _job_review_budget(job: dict[str, Any]) -> dict[str, Any]:
 
 def _clean_effort(value: object, *, field: str) -> str:
     effort = str(value or "").strip().lower()
-    if effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+    if re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", effort) is None:
         raise ValueError(f"claimed job must include valid {field}")
     return effort
 
@@ -5168,6 +5168,60 @@ def _intent_sandbox_setup_failed(command: list[str], completed: subprocess.Compl
     )
     return completed.returncode != 0 and any(marker in stderr for marker in markers)
 
+
+def materialize_generated_intent_test_sources(
+    validation_repo: Path | None,
+    validation: dict[str, Any],
+    source: dict[str, Any],
+) -> dict[str, str]:
+    generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
+    if validation_repo is None:
+        return {}
+    source_root_value = str(validation.get("source_repo_root") or "").strip()
+    source_root = Path(source_root_value) if source_root_value else None
+    source_generation_root = source_root / ".codex-review" / "generated-tests" if source_root is not None else None
+    errors: dict[str, str] = {}
+    for index, generated in enumerate(generated_tests):
+        if not isinstance(generated, dict):
+            continue
+        test_id = _intent_test_id(generated, f"ITV-{index + 1:03d}")
+        raw_path = str(
+            generated.get("path")
+            or generated.get("artifact_path")
+            or generated.get("artifactPath")
+            or ""
+        ).strip()
+        if not raw_path:
+            errors[test_id] = "generated test source path is missing"
+            continue
+        declared_path = Path(raw_path)
+        validation_candidate = declared_path if declared_path.is_absolute() else validation_repo / declared_path
+        if path_is_under(validation_candidate, validation_repo) and validation_candidate.is_file():
+            continue
+        if source_root is None or source_generation_root is None:
+            errors[test_id] = "generated test source is absent from the validation workspace"
+            continue
+        source_candidate = declared_path if declared_path.is_absolute() else source_root / declared_path
+        if source_candidate.is_symlink() or not source_candidate.is_file() or not path_is_under(source_candidate, source_generation_root):
+            errors[test_id] = "generated test source is missing or outside .codex-review/generated-tests"
+            continue
+        try:
+            relative_path = source_candidate.resolve(strict=True).relative_to(source_root.resolve(strict=True))
+        except (OSError, ValueError):
+            errors[test_id] = "generated test source escapes the source repository"
+            continue
+        destination = validation_repo / relative_path
+        if not path_is_under(destination, validation_repo):
+            errors[test_id] = "generated test destination escapes the validation workspace"
+            continue
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_candidate, destination, follow_symlinks=False)
+        except OSError as exc:
+            errors[test_id] = f"generated test source could not be materialized: {exc}"
+    return errors
+
+
 def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
     validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
@@ -5182,6 +5236,11 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     targets = plan.get("test_targets") if isinstance(plan.get("test_targets"), list) else []
     source = read_json(run_dir / "intent" / "intent-test-source.json", {})
     generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
+    materialization_errors = materialize_generated_intent_test_sources(
+        validation_repo,
+        validation if isinstance(validation, dict) else {},
+        source if isinstance(source, dict) else {},
+    )
     target_by_id = {
         _intent_test_id(target, f"ITV-{index + 1:03d}"): target
         for index, target in enumerate(targets)
@@ -5226,6 +5285,19 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             base_result["target_test_ids"] = related_ids
         if not validation_repo:
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "validation workspace was not prepared"})
+            continue
+        if materialization_errors.get(test_id):
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "skipped",
+                    "classification": "test_harness_error",
+                    "exit_code": None,
+                    "duration_ms": 0,
+                    "timed_out": False,
+                    "skip_reason": materialization_errors[test_id],
+                }
+            )
             continue
         source_skip_reason, source_skip_classification = _intent_source_execution_skip(run_dir)
         if source_skip_reason:

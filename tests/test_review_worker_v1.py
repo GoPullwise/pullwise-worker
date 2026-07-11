@@ -824,7 +824,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(subscription_plan_agent_configs_validation_error(plan_configs), "")
 
     def test_subscription_plan_agent_config_validation_accepts_new_reasoning_levels(self) -> None:
-        for effort in ("max", "ultra"):
+        for effort in ("max", "ultra", "future_level"):
             with self.subTest(effort=effort):
                 plan_configs = {
                     plan: {
@@ -842,7 +842,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             for plan in ("free", "pro", "max")
         }
         bad_effort = {
-            plan: {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "extreme"}}
+            plan: {"provider": "codex", "codex": {"model": "gpt-5.5", "reasoningEffort": "bad effort"}}
             for plan in ("free", "pro", "max")
         }
 
@@ -1404,7 +1404,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(fallback_policy["max_test_run_seconds_per_test"], 60)
 
     def test_job_policy_accepts_max_and_ultra_reasoning_effort(self) -> None:
-        for effort in ("max", "ultra"):
+        for effort in ("max", "ultra", "future_level"):
             with self.subTest(effort=effort):
                 job = {
                     "model_profile": {
@@ -2231,6 +2231,70 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             raw["test_runs"][0]["command"],
             "python3 -m unittest discover -s .codex-review/generated-tests/intent -p test_protocol.py",
         )
+        run.assert_called_once()
+
+    def test_run_intent_tests_materializes_main_review_generated_source_in_validation_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            validation_repo = root / "validation-repo"
+            generated_relative = Path(".codex-review/generated-tests/test_intent_redirect.py")
+            generated_source = repo / generated_relative
+            generated_source.parent.mkdir(parents=True)
+            generated_source.write_text("import unittest\n", encoding="utf-8")
+            validation_repo.mkdir()
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {
+                    "schema_version": "validation-workspace/v1",
+                    "validation_repo_root": str(validation_repo),
+                    "source_repo_root": str(repo),
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True, "max_tests_per_run": 1},
+            )
+            write_json(
+                intent_dir / "intent-test-plan.json",
+                {"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-001"}]},
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generation_root": ".codex-review/generated-tests",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": generated_relative.as_posix(),
+                            "test_framework": "unittest",
+                            "command": ["python3", generated_relative.as_posix()],
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="python3",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as run:
+                raw = run_intent_tests(run_dir)
+
+            materialized = validation_repo / generated_relative
+            materialized_exists = materialized.exists()
+            materialized_content = materialized.read_text(encoding="utf-8") if materialized_exists else ""
+
+        self.assertTrue(materialized_exists)
+        self.assertEqual(materialized_content, "import unittest\n")
+        self.assertEqual(raw["test_runs"][0]["status"], "passed")
         run.assert_called_once()
 
     def test_run_intent_tests_groups_duplicate_generated_file_and_uses_unittest_discovery(self) -> None:

@@ -10,9 +10,6 @@ from .review_worker_v1 import CodexSdkClient
 
 
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
-AGENT_REASONING_LEVELS = {"low", "medium", "high", "xhigh", "max", "ultra"}
-
-
 def normalized_agent_config_text(value: object) -> str:
     if not isinstance(value, str):
         return ""
@@ -28,7 +25,7 @@ def normalized_agent_config_text(value: object) -> str:
 
 def normalized_agent_reasoning_level(value: object) -> str:
     level = normalized_agent_config_text(value).lower()
-    return level if level in AGENT_REASONING_LEVELS else ""
+    return level if re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", level) else ""
 
 
 def result_checksum(payload: dict) -> str:
@@ -548,5 +545,4 @@ def run_codex_device_login(config: WorkerConfig) -> bool:
             server.close()
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
-
 
