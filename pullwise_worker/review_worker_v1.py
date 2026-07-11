@@ -1415,6 +1415,7 @@ DENIED_INTENT_EXECUTABLES = {
     "sh",
     "wget",
 }
+SHELL_CONTROL_TOKENS = {"|", "||", "&&", ";", "&", ">", ">>", "<", "<<", "<<<"}
 CODEX_APPROVAL_RESPONSE_METHODS = {
     "item/commandExecution/requestApproval",
     "item/fileChange/requestApproval",
@@ -1490,12 +1491,15 @@ def path_is_under_allowed_write_root(workspace: Path, raw_path: object) -> bool:
 
 
 def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None) -> bool:
-    argv = [str(part) for part in command] if isinstance(command, list) else shlex.split(str(command or ""))
+    try:
+        argv = [str(part) for part in command] if isinstance(command, list) else shlex.split(str(command or ""))
+    except ValueError:
+        return False
     if not argv:
         return False
     executable = normalized_executable_name(argv[0])
     lowered = {part.lower() for part in argv}
-    if lowered.intersection(DENIED_COMMAND_TOKENS):
+    if lowered.intersection(DENIED_COMMAND_TOKENS) or command_has_shell_control(argv):
         return False
     cwd = Path(str(raw_cwd)) if raw_cwd else workspace
     if not cwd.is_absolute():
@@ -1510,19 +1514,261 @@ def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None)
     if not cwd_in_workspace and not cwd_in_validation:
         return False
     if executable in {"python", "python3"} and len(argv) >= 2:
-        if path_is_under_codex_review(workspace, argv[1]) and "/tools/" in Path(argv[1]).as_posix():
+        if (
+            path_is_under_codex_review(workspace, argv[1])
+            and "/tools/" in Path(argv[1]).as_posix()
+            and helper_command_arguments_are_contained(argv[2:], workspace, cwd)
+        ):
             return True
     if executable in PROJECT_TEST_COMMANDS and cwd_in_validation:
         allowed, _reason = intent_test_command_policy(argv, cwd, workspace.parent / "validation-repo")
         return allowed
     if executable == "git":
         return git_command_is_read_only(argv, workspace, cwd)
-    if executable == "find":
-        return find_command_is_read_only(argv)
-    return executable in READ_ONLY_COMMANDS
+    if executable in READ_ONLY_COMMANDS:
+        return read_command_operands_are_contained(executable, argv, workspace, cwd)
+    return False
+
+
+def command_has_shell_control(argv: list[str]) -> bool:
+    for part in argv:
+        if part in SHELL_CONTROL_TOKENS or "\n" in part or "\r" in part or "`" in part or "$(" in part:
+            return True
+    return False
+
+
+def read_operand_is_contained(raw_path: object, workspace: Path, cwd: Path) -> bool:
+    value = str(raw_path or "").strip()
+    if not value or value == "-":
+        return False
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    return path_is_under(candidate, workspace) or path_is_under_validation_workspace(workspace, candidate)
+
+
+def helper_command_arguments_are_contained(argv: list[str], workspace: Path, cwd: Path) -> bool:
+    for part in argv:
+        value = str(part)
+        candidate_value = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
+        candidate = Path(candidate_value)
+        looks_like_path = candidate.is_absolute() or candidate_value.startswith(".") or "/" in candidate_value or "\\" in candidate_value
+        if not looks_like_path:
+            local_candidate = cwd / candidate
+            looks_like_path = local_candidate.exists() or local_candidate.is_symlink()
+        if looks_like_path and not read_operand_is_contained(candidate_value, workspace, cwd):
+            return False
+    return True
+
+
+def simple_read_file_operands(
+    argv: list[str],
+    *,
+    safe_short_options: set[str],
+    safe_long_options: set[str],
+) -> list[str] | None:
+    operands: list[str] = []
+    options_finished = False
+    for part in argv[1:]:
+        if not options_finished and part == "--":
+            options_finished = True
+            continue
+        if not options_finished and part.startswith("-"):
+            if part == "-":
+                return None
+            if part.startswith("--"):
+                if part not in safe_long_options:
+                    return None
+            elif not set(part[1:]).issubset(safe_short_options):
+                return None
+            continue
+        operands.append(part)
+    return operands or None
+
+
+def grep_read_operands(argv: list[str]) -> list[str] | None:
+    safe_short = set("EFGHhILlnoqrsvwxyZ")
+    safe_long = {
+        "--basic-regexp",
+        "--extended-regexp",
+        "--fixed-strings",
+        "--ignore-case",
+        "--invert-match",
+        "--line-number",
+        "--files-with-matches",
+        "--files-without-match",
+        "--only-matching",
+        "--quiet",
+        "--recursive",
+        "--no-messages",
+        "--word-regexp",
+        "--line-regexp",
+        "--text",
+        "--binary",
+    }
+    positionals: list[str] = []
+    options_finished = False
+    for part in argv[1:]:
+        if not options_finished and part == "--":
+            options_finished = True
+            continue
+        if not options_finished and part.startswith("-"):
+            if part == "-" or (part.startswith("--") and part not in safe_long):
+                return None
+            if not part.startswith("--") and not set(part[1:]).issubset(safe_short):
+                return None
+            continue
+        positionals.append(part)
+    if len(positionals) < 2:
+        return None
+    return positionals[1:]
+
+
+def rg_read_operands(argv: list[str]) -> list[str] | None:
+    safe_short_flags = set("0aFHhilLnoqSsvwxyNPU")
+    safe_long_flags = {
+        "--files",
+        "--hidden",
+        "--ignore-case",
+        "--invert-match",
+        "--line-number",
+        "--files-with-matches",
+        "--files-without-match",
+        "--fixed-strings",
+        "--only-matching",
+        "--quiet",
+        "--no-messages",
+        "--smart-case",
+        "--text",
+        "--unrestricted",
+        "--word-regexp",
+        "--line-regexp",
+        "--pcre2",
+        "--multiline",
+    }
+    value_options = {"-g", "--glob", "-t", "--type", "-T", "--type-not", "-A", "-B", "-C", "--max-depth"}
+    pattern_options = {"-e", "--regexp"}
+    positionals: list[str] = []
+    options_finished = False
+    pattern_from_option = False
+    files_mode = False
+    index = 1
+    while index < len(argv):
+        part = argv[index]
+        if not options_finished and part == "--":
+            options_finished = True
+            index += 1
+            continue
+        if not options_finished and part in value_options | pattern_options:
+            if index + 1 >= len(argv):
+                return None
+            pattern_from_option = pattern_from_option or part in pattern_options
+            index += 2
+            continue
+        if not options_finished and any(part.startswith(f"{option}=") for option in value_options | pattern_options if option.startswith("--")):
+            pattern_from_option = pattern_from_option or part.startswith("--regexp=")
+            index += 1
+            continue
+        if not options_finished and (part.startswith("-g") or part.startswith("-t") or part.startswith("-T") or part.startswith("-e")) and len(part) > 2:
+            pattern_from_option = pattern_from_option or part.startswith("-e")
+            index += 1
+            continue
+        if not options_finished and part.startswith("-"):
+            if part == "-" or (part.startswith("--") and part not in safe_long_flags):
+                return None
+            if not part.startswith("--") and not set(part[1:]).issubset(safe_short_flags):
+                return None
+            files_mode = files_mode or part == "--files"
+            index += 1
+            continue
+        positionals.append(part)
+        index += 1
+    if files_mode or pattern_from_option:
+        return positionals
+    if not positionals:
+        return None
+    return positionals[1:]
+
+
+def find_read_roots(argv: list[str]) -> list[str] | None:
+    unsafe = {
+        "-delete",
+        "-exec",
+        "-execdir",
+        "-ok",
+        "-okdir",
+        "-fprint",
+        "-fprint0",
+        "-fprintf",
+        "-fls",
+        "-files0-from",
+        "-follow",
+        "-newer",
+        "-anewer",
+        "-cnewer",
+        "-samefile",
+        "-l",
+        "-h",
+    }
+    lowered = {str(part).lower() for part in argv[1:]}
+    if lowered.intersection(unsafe):
+        return None
+    roots: list[str] = []
+    for part in argv[1:]:
+        if part == "-P" and not roots:
+            continue
+        if part.startswith("-") or part in {"!", "(", ")", ","}:
+            break
+        roots.append(part)
+    return roots
+
+
+def read_command_operands_are_contained(executable: str, argv: list[str], workspace: Path, cwd: Path) -> bool:
+    operands: list[str] | None
+    if executable == "cat":
+        operands = simple_read_file_operands(
+            argv,
+            safe_short_options=set("AbEeEnstTuv"),
+            safe_long_options={
+                "--show-all",
+                "--number-nonblank",
+                "--show-ends",
+                "--number",
+                "--squeeze-blank",
+                "--show-tabs",
+                "--show-nonprinting",
+            },
+        )
+    elif executable == "wc":
+        operands = simple_read_file_operands(
+            argv,
+            safe_short_options=set("cLlmw"),
+            safe_long_options={"--bytes", "--chars", "--lines", "--max-line-length", "--words"},
+        )
+    elif executable == "grep":
+        operands = grep_read_operands(argv)
+    elif executable == "rg":
+        operands = rg_read_operands(argv)
+        if operands == []:
+            operands = [str(cwd)]
+    elif executable == "find":
+        operands = find_read_roots(argv)
+        if operands == []:
+            operands = [str(cwd)]
+    else:
+        return False
+    return operands is not None and all(read_operand_is_contained(part, workspace, cwd) for part in operands)
 
 
 def git_command_is_read_only(argv: list[str], workspace: Path, cwd: Path) -> bool:
+    unsafe_options = {"--no-index", "--ext-diff", "--textconv", "--open-files-in-pager"}
+    lowered = {str(part).lower() for part in argv[1:]}
+    if lowered.intersection(unsafe_options) or any(str(part).lower().startswith("--output=") for part in argv[1:]):
+        return False
+    if "--" in argv:
+        separator = argv.index("--")
+        if not all(read_operand_is_contained(part, workspace, cwd) for part in argv[separator + 1 :]):
+            return False
     index = 1
     while index < len(argv):
         part = argv[index]
@@ -1543,11 +1789,6 @@ def git_command_is_read_only(argv: list[str], workspace: Path, cwd: Path) -> boo
             return False
         return part.lower() in GIT_READ_ONLY_SUBCOMMANDS
     return False
-
-
-def find_command_is_read_only(argv: list[str]) -> bool:
-    mutating_actions = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
-    return not any(str(part).lower() in mutating_actions for part in argv[1:])
 
 
 def normalized_executable_name(value: object) -> str:
@@ -1809,6 +2050,7 @@ class ReviewWorkerV1:
         self._machine_metrics_payload: dict[str, Any] | None = None
         self._machine_metrics_collected_at = 0.0
         self._heartbeat_lock = threading.RLock()
+        self._progress_lock = threading.RLock()
 
     def default_codex_events_path(self) -> Path:
         return self.isolation.logs / "codex-sdk-events.jsonl"
@@ -1929,7 +2171,8 @@ class ReviewWorkerV1:
         if machine_metrics is not None:
             heartbeat_payload["machine_metrics"] = machine_metrics
         if active is not None:
-            heartbeat_payload["progress"] = active.progress_snapshot()
+            with self._progress_lock:
+                heartbeat_payload["progress"] = active.progress_snapshot()
         response = self.client.heartbeat(**heartbeat_payload)
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
         if active and active.job_id in (cancelled or []):
@@ -2031,89 +2274,104 @@ class ReviewWorkerV1:
         message: str = "",
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        active.last_event_sequence += 1
-        if progress is not None:
-            active.overall_percent = round(float(progress), 2)
-        active.current_phase = phase
-        active.current_phase_status = status
-        active.current_phase_percent = round(float(current_phase_percent), 2)
-        active.message = message
-        active.apply_progress_data(data)
-        event = {
-            "protocol_version": PROTOCOL_VERSION,
-            "run_id": active.run_id,
-            "worker_id": str(self.config.worker_id),
-            "sequence": active.last_event_sequence,
-            "timestamp": iso_time(time.time()),
-            "event_type": event_type,
-            "phase": phase,
-            "severity": "info" if status not in {"failed", "cancelled"} else "error",
-            "message": message,
-            "progress": {
-                "overall_percent": active.overall_percent,
-                "current_phase_percent": active.current_phase_percent,
-                "status": status,
-                "steps": active.progress_steps(),
-            },
-            "data": data or {},
-        }
-        append_jsonl(run_dir / "progress.log.jsonl", event)
-        snapshot = active.progress_snapshot()
-        write_json(run_dir / "progress.json", snapshot)
-        run_state = read_json(run_dir / "run-state.json", {})
-        if not isinstance(run_state, dict):
-            run_state = {}
-        run_state.update({"active_job": active.heartbeat_payload(), "progress": snapshot})
-        write_json(run_dir / "run-state.json", run_state)
-        if hasattr(self.client, "event"):
-            try:
-                self.client.event(active.run_id, event)
-            except Exception:
-                append_jsonl(run_dir / "worker.log.jsonl", {"event": "progress_event_post_failed", "phase": phase, "time": iso_time(time.time())})
-        return event
+        with self._progress_lock:
+            active.last_event_sequence += 1
+            if progress is not None:
+                active.overall_percent = round(float(progress), 2)
+            active.current_phase = phase
+            active.current_phase_status = status
+            active.current_phase_percent = round(float(current_phase_percent), 2)
+            active.message = message
+            active.apply_progress_data(data)
+            event = {
+                "protocol_version": PROTOCOL_VERSION,
+                "run_id": active.run_id,
+                "worker_id": str(self.config.worker_id),
+                "sequence": active.last_event_sequence,
+                "timestamp": iso_time(time.time()),
+                "event_type": event_type,
+                "phase": phase,
+                "severity": "info" if status not in {"failed", "cancelled"} else "error",
+                "message": message,
+                "progress": {
+                    "overall_percent": active.overall_percent,
+                    "current_phase_percent": active.current_phase_percent,
+                    "status": status,
+                    "steps": active.progress_steps(),
+                },
+                "data": data or {},
+            }
+            append_jsonl(run_dir / "progress.log.jsonl", event)
+            snapshot = active.progress_snapshot()
+            write_json(run_dir / "progress.json", snapshot)
+            run_state = read_json(run_dir / "run-state.json", {})
+            if not isinstance(run_state, dict):
+                run_state = {}
+            run_state.update({"active_job": active.heartbeat_payload(), "progress": snapshot})
+            write_json(run_dir / "run-state.json", run_state)
+            if hasattr(self.client, "event"):
+                try:
+                    self.client.event(active.run_id, event)
+                except Exception:
+                    append_jsonl(
+                        run_dir / "worker.log.jsonl",
+                        {"event": "progress_event_post_failed", "phase": phase, "time": iso_time(time.time())},
+                    )
+            return event
 
     def request_cancel(self, active: ActiveJob, *, reason: str = "server_cancelled") -> None:
-        reason_text = str(reason or "server_cancelled").strip() or "server_cancelled"
-        active.cancel_requested = True
-        active.cancel_reason = reason_text
-        active.state = "cancelling"
-        active.message = "Cancellation requested."
-        if active.run_dir is not None:
-            self.emit_cancel_requested(active, active.run_dir)
+        with self._progress_lock:
+            reason_text = str(reason or "server_cancelled").strip() or "server_cancelled"
+            active.cancel_requested = True
+            active.cancel_reason = reason_text
+            active.state = "cancelling"
+            active.message = "Cancellation requested."
+            if active.run_dir is not None:
+                self.emit_cancel_requested(active, active.run_dir)
 
     def emit_cancel_requested(self, active: ActiveJob, run_dir: Path) -> None:
-        if active.cancel_requested_reported:
-            return
-        reason = active.cancel_reason or "server_cancelled"
-        active.cancel_requested = True
-        active.state = "cancelling"
-        active.cancel_requested_reported = True
-        append_jsonl(run_dir / "worker.log.jsonl", {"event": "run_cancel_requested", "reason": reason, "time": iso_time(time.time())})
-        self.emit_event(
-            active,
-            run_dir,
-            "run_cancel_requested",
-            active.current_phase,
-            status="running",
-            progress=active.overall_percent,
-            current_phase_percent=active.current_phase_percent,
-            message="Cancellation requested.",
-            data={"reason": reason, "cancel_requested": True},
-        )
+        with self._progress_lock:
+            if active.cancel_requested_reported:
+                return
+            reason = active.cancel_reason or "server_cancelled"
+            active.cancel_requested = True
+            active.state = "cancelling"
+            active.cancel_requested_reported = True
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {"event": "run_cancel_requested", "reason": reason, "time": iso_time(time.time())},
+            )
+            self.emit_event(
+                active,
+                run_dir,
+                "run_cancel_requested",
+                active.current_phase,
+                status="running",
+                progress=active.overall_percent,
+                current_phase_percent=active.current_phase_percent,
+                message="Cancellation requested.",
+                data={"reason": reason, "cancel_requested": True},
+            )
 
     def start_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int) -> None:
-        active.state = "finishing" if phase in {"upload_artifacts", "submit_result_envelope", "cleanup_active_job"} else "busy"
-        append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_started", "phase": phase, "progress": progress, "time": iso_time(time.time())})
-        self.emit_event(
-            active,
-            run_dir,
-            "phase_started",
-            phase,
-            status="running",
-            progress=progress,
-            current_phase_percent=0.0,
-            message=phase.replace("_", " "),
-        )
+        with self._progress_lock:
+            if active.cancel_requested:
+                return
+            active.state = "finishing" if phase in {"upload_artifacts", "submit_result_envelope", "cleanup_active_job"} else "busy"
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {"event": "phase_started", "phase": phase, "progress": progress, "time": iso_time(time.time())},
+            )
+            self.emit_event(
+                active,
+                run_dir,
+                "phase_started",
+                phase,
+                status="running",
+                progress=progress,
+                current_phase_percent=0.0,
+                message=phase.replace("_", " "),
+            )
 
     def complete_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int, *, data: dict[str, Any] | None = None) -> None:
         append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_completed", "phase": phase, "progress": progress, "time": iso_time(time.time())})
@@ -2181,37 +2439,38 @@ class ReviewWorkerV1:
         )
 
     def fail_phase(self, active: ActiveJob, run_dir: Path, phase: str, error: object) -> None:
-        failure = failure_payload_for_error(error, status="failed", phase=phase)
-        failure_record = {
-            "event": "phase_failed",
-            "phase": phase,
-            "error": str(error),
-            "time": iso_time(time.time()),
-            "failure_category": failure.get("category"),
-            "failure_action": failure.get("failure_action"),
-        }
-        append_jsonl(run_dir / "worker.log.jsonl", failure_record)
-        run_state = read_json(run_dir / "run-state.json", {})
-        if not isinstance(run_state, dict):
-            run_state = {}
-        run_state["failure"] = {
-            "phase": phase,
-            "message": str(error),
-            "category": failure.get("category"),
-            "failure_action": failure.get("failure_action"),
-            "updated_at": iso_time(time.time()),
-        }
-        write_json(run_dir / "run-state.json", run_state)
-        self.emit_event(
-            active,
-            run_dir,
-            "phase_failed",
-            phase,
-            status="failed",
-            progress=active.overall_percent,
-            current_phase_percent=active.current_phase_percent,
-            message=str(error),
-        )
+        with self._progress_lock:
+            failure = failure_payload_for_error(error, status="failed", phase=phase)
+            failure_record = {
+                "event": "phase_failed",
+                "phase": phase,
+                "error": str(error),
+                "time": iso_time(time.time()),
+                "failure_category": failure.get("category"),
+                "failure_action": failure.get("failure_action"),
+            }
+            append_jsonl(run_dir / "worker.log.jsonl", failure_record)
+            run_state = read_json(run_dir / "run-state.json", {})
+            if not isinstance(run_state, dict):
+                run_state = {}
+            run_state["failure"] = {
+                "phase": phase,
+                "message": str(error),
+                "category": failure.get("category"),
+                "failure_action": failure.get("failure_action"),
+                "updated_at": iso_time(time.time()),
+            }
+            write_json(run_dir / "run-state.json", run_state)
+            self.emit_event(
+                active,
+                run_dir,
+                "phase_failed",
+                phase,
+                status="failed",
+                progress=active.overall_percent,
+                current_phase_percent=active.current_phase_percent,
+                message=str(error),
+            )
 
 
     def run_job(self, job: dict[str, Any]) -> None:
@@ -3129,7 +3388,7 @@ def _job_review_budget(job: dict[str, Any]) -> dict[str, Any]:
 
 def _clean_effort(value: object, *, field: str) -> str:
     effort = str(value or "").strip().lower()
-    if effort not in {"low", "medium", "high", "xhigh"}:
+    if effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
         raise ValueError(f"claimed job must include valid {field}")
     return effort
 
@@ -8962,7 +9221,13 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_json_atomic(path: Path, value: Any) -> None:

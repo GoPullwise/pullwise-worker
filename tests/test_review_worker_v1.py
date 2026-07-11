@@ -281,6 +281,69 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(repo_step["percent"], 40)
         self.assertEqual(events[0]["progress"]["steps"], event["progress"]["steps"])
 
+    def test_concurrent_progress_events_cannot_overwrite_newer_snapshot_with_stale_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=tmp_dir), client=object())
+            first_progress_write_started = threading.Event()
+            release_first_progress_write = threading.Event()
+            second_finished = threading.Event()
+            original_write_json = write_json
+
+            def controlled_write_json(path: Path, value: object) -> None:
+                if (
+                    path.name == "progress.json"
+                    and isinstance(value, dict)
+                    and value.get("current_phase") == "repo_map"
+                    and not first_progress_write_started.is_set()
+                ):
+                    first_progress_write_started.set()
+                    release_first_progress_write.wait(2)
+                original_write_json(path, value)
+
+            first = threading.Thread(
+                target=lambda: worker.emit_event(
+                    active,
+                    run_dir,
+                    "progress_updated",
+                    "repo_map",
+                    progress=33,
+                    current_phase_percent=50,
+                    message="first",
+                ),
+                daemon=True,
+            )
+
+            def emit_second() -> None:
+                worker.emit_event(
+                    active,
+                    run_dir,
+                    "progress_updated",
+                    "risk_routing",
+                    progress=39,
+                    current_phase_percent=60,
+                    message="second",
+                )
+                second_finished.set()
+
+            second = threading.Thread(target=emit_second, daemon=True)
+            with patch("pullwise_worker.review_worker_v1.write_json", side_effect=controlled_write_json):
+                first.start()
+                self.assertTrue(first_progress_write_started.wait(1))
+                second.start()
+                second_finished.wait(0.1)
+                release_first_progress_write.set()
+                first.join(2)
+                second.join(2)
+
+            snapshot = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
+            events = [json.loads(line) for line in (run_dir / "progress.log.jsonl").read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(snapshot["current_phase"], "risk_routing")
+        self.assertEqual(snapshot["message"], "second")
+        self.assertEqual([event["sequence"] for event in events], [1, 2])
+
     def test_codex_sdk_turn_interrupts_when_cancel_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -760,6 +823,19 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(subscription_plan_agent_configs_validation_error(plan_configs), "")
 
+    def test_subscription_plan_agent_config_validation_accepts_new_reasoning_levels(self) -> None:
+        for effort in ("max", "ultra"):
+            with self.subTest(effort=effort):
+                plan_configs = {
+                    plan: {
+                        "provider": "codex",
+                        "codex": {"model": "gpt-5.6-sol", "reasoningEffort": effort},
+                    }
+                    for plan in ("free", "pro", "max")
+                }
+
+                self.assertEqual(subscription_plan_agent_configs_validation_error(plan_configs), "")
+
     def test_subscription_plan_agent_config_validation_rejects_bad_codex_config(self) -> None:
         missing_model = {
             plan: {"provider": "codex", "codex": {"reasoningEffort": "medium"}}
@@ -1086,6 +1162,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 ["cat", "linked-secret"],
                 ["wc", "-l", "/proc/self/environ"],
                 ["grep", "needle", "/etc/passwd"],
+                ["grep", "-R", "needle", "."],
                 ["rg", "needle", "/var/lib/pullwise-worker"],
                 ["find", "/", "-name", "*.env"],
                 ["find", "-L", ".", "-name", "*.py"],
@@ -1325,6 +1402,34 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(fallback_policy["only_tiers"], ["P0", "P1"])
         self.assertEqual(fallback_policy["max_tests_per_run"], 20)
         self.assertEqual(fallback_policy["max_test_run_seconds_per_test"], 60)
+
+    def test_job_policy_accepts_max_and_ultra_reasoning_effort(self) -> None:
+        for effort in ("max", "ultra"):
+            with self.subTest(effort=effort):
+                job = {
+                    "model_profile": {
+                        "default_model": "gpt-5.6-sol",
+                        "core_effort": effort,
+                        "reviewer_effort": effort,
+                        "validator_effort": effort,
+                        "reporter_effort": effort,
+                        "intent_test_effort": effort,
+                        "non_core_effort": "medium",
+                    },
+                    "review_request": {
+                        "budget": {"max_wall_time_seconds": 14400},
+                        "policy": {
+                            "allow_source_modification": False,
+                            "allow_dependency_install": False,
+                            "allow_network": False,
+                            "helper_scripts_standard_library_only": True,
+                            "turn_timeout_seconds": 1800,
+                        },
+                    },
+                    "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+                }
+
+                self.assertEqual(validate_job_policy(job)["reasoning_effort"], effort)
 
     def test_disabled_intent_validation_skips_child_phases_without_codex_turns(self) -> None:
         events = []
