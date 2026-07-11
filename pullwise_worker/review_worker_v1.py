@@ -762,7 +762,56 @@ class CodexSdkClient:
             "effort": effort,
             "summary": "concise",
         }
-        started = client.turn_start(thread_id, [{"type": "text", "text": prompt}], params=params)
+        deadline = time.monotonic() + max(1, int(timeout_seconds))
+        start_completed = threading.Event()
+        start_lock = threading.Lock()
+        start_state: dict[str, Any] = {"abandoned": False}
+
+        def start_turn() -> None:
+            try:
+                started_turn = client.turn_start(thread_id, [{"type": "text", "text": prompt}], params=params)
+                with start_lock:
+                    start_state["started"] = started_turn
+                    abandoned = bool(start_state["abandoned"])
+                if abandoned:
+                    orphaned_turn = getattr(started_turn, "turn", None)
+                    orphaned_turn_id = str(
+                        getattr(orphaned_turn, "id", "") or getattr(started_turn, "turn_id", "") or ""
+                    )
+                    if orphaned_turn_id:
+                        self.interrupt(thread_id, orphaned_turn_id)
+            except BaseException as exc:  # noqa: BLE001 - surfaced to the worker phase as a Codex turn failure.
+                with start_lock:
+                    start_state["error"] = exc
+            finally:
+                start_completed.set()
+
+        def abandon_start() -> None:
+            with start_lock:
+                start_state["abandoned"] = True
+                started_turn = start_state.get("started")
+            orphaned_turn = getattr(started_turn, "turn", None)
+            orphaned_turn_id = str(
+                getattr(orphaned_turn, "id", "") or getattr(started_turn, "turn_id", "") or ""
+            )
+            if orphaned_turn_id:
+                self.interrupt(thread_id, orphaned_turn_id)
+
+        threading.Thread(target=start_turn, name=f"pullwise-codex-turn-start-{thread_id}", daemon=True).start()
+        while not start_completed.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                abandon_start()
+                raise TimeoutError("codex turn start timed out")
+            if start_completed.wait(min(0.5, remaining)):
+                break
+            if cancel_requested is not None and cancel_requested():
+                abandon_start()
+                raise JobCancelled("cancel requested")
+        start_error = start_state.get("error")
+        if isinstance(start_error, BaseException):
+            raise start_error
+        started = start_state.get("started")
         turn = getattr(started, "turn", None)
         turn_id = str(getattr(turn, "id", "") or getattr(started, "turn_id", "") or "")
         if not turn_id:
@@ -815,7 +864,6 @@ class CodexSdkClient:
 
         consumer = threading.Thread(target=consume_turn, daemon=True)
         consumer.start()
-        deadline = time.monotonic() + max(1, int(timeout_seconds))
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -840,10 +888,24 @@ class CodexSdkClient:
         }
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
-        try:
-            self._sdk_client().turn_interrupt(thread_id, turn_id)
-        except Exception:
-            pass
+        completed = threading.Event()
+
+        def send_interrupt() -> None:
+            try:
+                self._sdk_client().turn_interrupt(thread_id, turn_id)
+            except Exception:
+                pass
+            finally:
+                completed.set()
+
+        threading.Thread(
+            target=send_interrupt,
+            name=f"pullwise-codex-turn-interrupt-{turn_id}",
+            daemon=True,
+        ).start()
+        # A wedged App Server must not turn timeout/cancellation into another
+        # unbounded RPC wait. Preserve fast-path ordering for responsive SDKs.
+        completed.wait(0.1)
 
     def request(self, method: str, params: dict[str, Any] | None = None, timeout_seconds: int = 30) -> dict[str, Any]:
         del timeout_seconds

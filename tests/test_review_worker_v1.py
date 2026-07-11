@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from types import SimpleNamespace
 from pathlib import Path
@@ -20,9 +21,11 @@ from pullwise_worker import __version__
 from pullwise_worker._main_part_01_bootstrap import (
     PULLWISE_WORKER_USER_AGENT,
     PullwiseClient,
+    PullwiseRequestError,
     PullwiseResponse,
     WorkerConfig,
     provider_tool_path,
+    server_url_allowed,
     worker_registration_payload,
 )
 from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscription_plan_agent_configs_validation_error, worker_readiness_state, writable_path_check
@@ -314,6 +317,106 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 )
 
         self.assertIn(("turn_interrupt", "thread_1", "turn_1"), calls)
+
+    def test_codex_sdk_turn_timeout_does_not_wait_for_blocked_interrupt_rpc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            notification_release = threading.Event()
+            interrupt_started = threading.Event()
+            interrupt_release = threading.Event()
+            outcome: list[BaseException | None] = []
+
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn_1"))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    notification_release.wait(5)
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)),
+                    )
+
+                def unregister_turn_notifications(self, turn_id: str) -> None:
+                    return
+
+                def turn_interrupt(self, thread_id: str, turn_id: str) -> None:
+                    interrupt_started.set()
+                    interrupt_release.wait(5)
+
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._threads["thread_1"] = SimpleNamespace(id="thread_1")
+
+            def run_turn() -> None:
+                try:
+                    server.run_turn(
+                        thread_id="thread_1",
+                        repo_dir=workspace,
+                        prompt="review",
+                        effort="medium",
+                        read_only=True,
+                        timeout_seconds=1,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - captured for the caller thread.
+                    outcome.append(exc)
+                else:
+                    outcome.append(None)
+
+            runner = threading.Thread(target=run_turn, daemon=True)
+            runner.start()
+            try:
+                self.assertTrue(interrupt_started.wait(2), "turn timeout never attempted interruption")
+                runner.join(0.25)
+                self.assertFalse(runner.is_alive(), "blocked turn_interrupt kept run_turn alive past its timeout")
+                self.assertIsInstance(outcome[0], TimeoutError)
+            finally:
+                interrupt_release.set()
+                notification_release.set()
+                runner.join(2)
+
+    def test_codex_sdk_turn_timeout_includes_blocked_turn_start_rpc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            start_entered = threading.Event()
+            start_release = threading.Event()
+            outcome: list[BaseException | None] = []
+
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    start_entered.set()
+                    start_release.wait(5)
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn_1"))
+
+            server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._threads["thread_1"] = SimpleNamespace(id="thread_1")
+
+            def run_turn() -> None:
+                try:
+                    server.run_turn(
+                        thread_id="thread_1",
+                        repo_dir=workspace,
+                        prompt="review",
+                        effort="medium",
+                        read_only=True,
+                        timeout_seconds=1,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - captured for the caller thread.
+                    outcome.append(exc)
+                else:
+                    outcome.append(None)
+
+            runner = threading.Thread(target=run_turn, daemon=True)
+            runner.start()
+            try:
+                self.assertTrue(start_entered.wait(1), "turn_start was never called")
+                runner.join(1.25)
+                self.assertFalse(runner.is_alive(), "turn_start was not covered by the turn timeout")
+                self.assertIsInstance(outcome[0], TimeoutError)
+            finally:
+                start_release.set()
+                runner.join(2)
 
     def test_codex_sdk_turn_stops_on_non_retrying_error_notification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3830,6 +3933,65 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(client.headers["X-Pullwise-Worker-Id"], "wk_1")
         self.assertEqual(client.headers["X-Pullwise-Worker-Version"], __version__)
         self.assertEqual(client.headers["Accept"], "application/json")
+
+    def test_server_url_rejects_components_that_corrupt_worker_api_paths(self) -> None:
+        self.assertTrue(server_url_allowed("https://api.pullwise.dev/base/path"))
+        self.assertTrue(server_url_allowed("http://127.0.0.1:8080/base/path"))
+        self.assertFalse(server_url_allowed("https://user:secret@api.pullwise.dev"))
+        self.assertFalse(server_url_allowed("https://api.pullwise.dev/base?tenant=other"))
+        self.assertFalse(server_url_allowed("https://api.pullwise.dev/base#fragment"))
+
+    def test_pullwise_client_blocks_cross_origin_redirect_before_sending_worker_token(self) -> None:
+        target_authorizations: list[str] = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract.
+                target_authorizations.append(self.headers.get("Authorization", ""))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+        target_thread.start()
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract.
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/capture")
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+        redirect_thread.start()
+        try:
+            client = PullwiseClient(
+                SimpleNamespace(
+                    worker_id="wk_1",
+                    worker_token="secret",
+                    server_url=f"http://127.0.0.1:{redirect.server_port}",
+                    result_upload_compress_min_bytes=1024,
+                )
+            )
+
+            with self.assertRaisesRegex(PullwiseRequestError, "redirect"):
+                client.post("/redirect", {"ok": True})
+
+            self.assertEqual(target_authorizations, [])
+        finally:
+            redirect.shutdown()
+            target.shutdown()
+            redirect.server_close()
+            target.server_close()
+            redirect_thread.join(2)
+            target_thread.join(2)
 
     def test_pullwise_client_has_no_legacy_review_progress_route(self) -> None:
         bootstrap_source = (Path(__file__).resolve().parents[1] / "pullwise_worker" / "_main_part_01_bootstrap.py").read_text(
