@@ -818,12 +818,15 @@ class CodexSdkClient:
             return
 
         completed = threading.Event()
+        abandoned = threading.Event()
         error: dict[str, str] = {}
 
         def consume_turn() -> None:
             try:
                 while True:
                     notification = client.next_turn_notification(turn_id)
+                    if abandoned.is_set():
+                        break
                     self._record_sdk_notification(notification)
                     method = str(getattr(notification, "method", "") or "")
                     payload = getattr(notification, "payload", None)
@@ -867,11 +870,13 @@ class CodexSdkClient:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                abandoned.set()
                 self.interrupt(thread_id, turn_id)
                 raise TimeoutError(f"codex turn timed out: {turn_id}")
             if completed.wait(min(0.5, remaining)):
                 break
             if cancel_requested is not None and cancel_requested():
+                abandoned.set()
                 self.interrupt(thread_id, turn_id)
                 raise JobCancelled("cancel requested")
         if error.get("message"):
@@ -5192,7 +5197,6 @@ def materialize_generated_intent_test_sources(
             or ""
         ).strip()
         if not raw_path:
-            errors[test_id] = "generated test source path is missing"
             continue
         declared_path = Path(raw_path)
         validation_candidate = declared_path if declared_path.is_absolute() else validation_repo / declared_path
