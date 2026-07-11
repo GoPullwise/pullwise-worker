@@ -2678,11 +2678,6 @@ class ReviewWorkerV1:
                 },
             )
 
-        if completed != len(assignments):
-            raise RuntimeError(
-                f"reviewer_fanout completed {completed} of {len(assignments)} exact reviewer assignments"
-            )
-
     def repair_semantic_phase_outputs(
         self,
         codex_client: CodexSdkClient | None,
@@ -3264,6 +3259,8 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Try to disprove each candidate finding using reviewer evidence, location verification, related code, existing tests, and intent-test evidence.",
             "Check producer invariants and the complete trust boundary before confirming exploitability. Treat an unknown cross-service producer as unresolved controllability, not proof of attacker control, and lower confidence or severity accordingly.",
+            "dependency_missing is absence of dynamic evidence, not disproof; do not downgrade an otherwise well-supported correctness finding solely because the cloned workspace lacks a local test runner or dependencies.",
+            "When no evidence contradicts the failure scenario, concrete static source and contract evidence can still support plausible even if the intent test could not execute.",
             "Classify confirmed, plausible, weak, or disproven; do not add unrelated findings.",
             "Write JSON only using validation-output/v1.",
         ],
@@ -6954,6 +6951,27 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
             for raw_file in raw_files:
                 if not raw_file.is_file() or raw_file.stat().st_size == 0:
                     raise RuntimeError(f"raw reviewer output {raw_file.name} is empty")
+            expected_assignments = _planned_reviewer_assignments(run_dir)
+            if expected_assignments:
+                covered_assignments = _reviewer_assignments_from_outputs(run_dir, expected_assignments)
+                missing_assignments = sorted(expected_assignments - covered_assignments)
+                if missing_assignments:
+                    missing_text = ", ".join(
+                        f"{bundle_id}:{reviewer_id}"
+                        for bundle_id, reviewer_id in missing_assignments
+                    )
+                    raise RuntimeError(
+                        f"reviewer_fanout missing planned reviewer assignments: {missing_text}"
+                    )
+                unexpected_assignments = sorted(covered_assignments - expected_assignments)
+                if unexpected_assignments:
+                    unexpected_text = ", ".join(
+                        f"{bundle_id}:{reviewer_id}"
+                        for bundle_id, reviewer_id in unexpected_assignments
+                    )
+                    raise RuntimeError(
+                        f"reviewer_fanout produced unplanned reviewer assignments: {unexpected_text}"
+                    )
         if path.is_file() and path.name == "artifact-manifest.json":
             try:
                 manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -7160,7 +7178,7 @@ def prompt_template_for_name(name: str) -> str:
         "intent/05_intent_test_planner.md": "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return JSON only using intent-test-plan/v1.\n",
         "intent/06_intent_test_writer.md": "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**. Do not modify the main repo workspace. Return JSON describing created test files.\n",
         "intent/07_intent_test_failure_analyzer.md": "You are the Test Failure Analyzer. A failing test is not automatically a bug. Classify each result using intent-test-result/v1. Return JSON only.\n",
-        "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. Return JSON only.\n",
+        "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. dependency_missing is absence of dynamic evidence, not disproof; static source and contract evidence can still support plausible. Return JSON only.\n",
         "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to appendix. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",
     }
     discipline = (

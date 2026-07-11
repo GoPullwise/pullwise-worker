@@ -6435,6 +6435,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("defense-in-depth", reviewer_prompt)
         self.assertIn("Merge test-gap evidence into the underlying defect", cluster_prompt)
         self.assertIn("unknown cross-service producer", validator_prompt)
+        self.assertIn("dependency_missing is absence of dynamic evidence, not disproof", validator_prompt)
+        self.assertIn("static source and contract evidence can still support plausible", validator_prompt)
         self.assertIn("Do not inherit reviewer severity", reporter_prompt)
 
     def test_phase_prompt_omits_adaptive_context_when_profile_missing_or_invalid(self) -> None:
@@ -6536,6 +6538,36 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             validate_phase_outputs(run_dir, "reviewer_fanout")
+
+    def test_validate_phase_outputs_rejects_missing_planned_reviewer_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {
+                            "bundle_id": "p0-bundle-001",
+                            "reviewers": ["correctness", "security"],
+                        }
+                    ],
+                },
+            )
+            write_json(
+                raw_dir / "p0-bundle-001.correctness.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "bundle_id": "p0-bundle-001",
+                    "reviewer": "correctness",
+                    "findings": [],
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "p0-bundle-001:security"):
+                validate_phase_outputs(run_dir, "reviewer_fanout")
 
     def test_intent_test_plan_links_raw_reviewer_finding_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
