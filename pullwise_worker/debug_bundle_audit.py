@@ -406,6 +406,7 @@ class BundleAudit:
         progress_name = self.run_name("progress.json")
         progress = self.json_at(progress_name)
         self.audit_status(debug, progress, progress_name)
+        self.audit_pipeline_diagnostics(debug)
         inventory = self.json_at(self.run_name("inventory.json"))
         coverage = self.json_at(self.run_name("coverage.json"))
         self.audit_coverage(inventory, coverage)
@@ -459,6 +460,74 @@ class BundleAudit:
         self.facts["qa_status"] = qa_status or "missing"
         if terminal_status == "completed" and qa_status in {"fail", "failed", "error"}:
             self.issue("error", "completed_with_failed_qa", "Completed run has a failed QA gate", qa_name)
+
+    def audit_pipeline_diagnostics(self, debug: Any) -> None:
+        diagnostics = debug.get("pipeline_diagnostics") if isinstance(debug, dict) else None
+        if diagnostics is None:
+            return
+        if not isinstance(diagnostics, dict) or diagnostics.get("schema_version") != "pipeline-diagnostics/v1":
+            self.issue(
+                "warning",
+                "pipeline_diagnostics_invalid",
+                "Debug summary pipeline diagnostics are malformed or use an unsupported schema",
+                self.debug_name,
+            )
+            return
+        reviewer = diagnostics.get("reviewer") if isinstance(diagnostics.get("reviewer"), dict) else {}
+        validation = diagnostics.get("validation") if isinstance(diagnostics.get("validation"), dict) else {}
+        intent_tests = diagnostics.get("intent_tests") if isinstance(diagnostics.get("intent_tests"), dict) else {}
+        report = diagnostics.get("report") if isinstance(diagnostics.get("report"), dict) else {}
+        blocker_codes = [
+            str(code).strip()
+            for code in diagnostics.get("blocker_codes", [])
+            if str(code).strip()
+        ] if isinstance(diagnostics.get("blocker_codes"), list) else []
+        self.facts["pipeline_diagnostics"] = {
+            "reviewer_strategy": str(reviewer.get("strategy") or "unknown"),
+            "raw_findings": integer(reviewer.get("raw_findings")),
+            "validated_main": integer(validation.get("main")),
+            "validated_weak": integer(validation.get("weak")),
+            "intent_tests_executed": integer(intent_tests.get("executed")),
+            "report_main": integer(report.get("main")),
+            "report_appendix": integer(report.get("appendix")),
+            "blocker_codes": blocker_codes,
+        }
+        issue_specs = {
+            "reviewer_assignments_batched": (
+                "warning",
+                "Multiple logical reviewer assignments were handled by a batched turn, reducing review independence and depth",
+            ),
+            "reviewer_execution_untracked": (
+                "warning",
+                "Reviewer assignment execution strategy was not recorded",
+            ),
+            "all_reviewer_outputs_empty": (
+                "info",
+                "Every raw reviewer output contained an empty findings list",
+            ),
+            "intent_tests_not_executed": (
+                "warning",
+                "Intent tests were planned but none executed; validation evidence is degraded",
+            ),
+            "weak_findings_excluded_from_main": (
+                "info",
+                "Validator weak findings were excluded from the issue-eligible main report by policy",
+            ),
+            "weak_findings_missing_from_report_appendix": (
+                "error",
+                "Validator weak findings are missing from the canonical report appendix",
+            ),
+            "semantic_output_repairs_required": (
+                "warning",
+                "One or more semantic phase outputs required repair before the run could continue",
+            ),
+        }
+        for code in blocker_codes:
+            spec = issue_specs.get(code)
+            if spec is None:
+                continue
+            severity, message = spec
+            self.issue(severity, code, message, self.debug_name)
 
     def audit_coverage(self, inventory: Any, coverage: Any) -> None:
         files = list_value(inventory, "files")

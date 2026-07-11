@@ -191,6 +191,54 @@ class DebugBundleAuditTest(unittest.TestCase):
         self.assertEqual(directory_result["facts"]["terminal_status"], "completed")
         self.assertEqual(directory_result["facts"]["findings"], 1)
 
+    def test_pipeline_diagnostics_surface_review_quality_and_disposition_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/debug-summary.json",
+                {
+                    "schema_version": "pullwise-debug-bundle/v1",
+                    "run_id": "run_1",
+                    "status": "completed",
+                    "error": "",
+                    "pipeline_diagnostics": {
+                        "schema_version": "pipeline-diagnostics/v1",
+                        "reviewer": {
+                            "strategy": "single_bulk_turn",
+                            "assignments_planned": 12,
+                            "assignments_completed": 12,
+                            "raw_findings": 2,
+                        },
+                        "validation": {"main": 0, "weak": 1, "disproven": 1},
+                        "intent_tests": {
+                            "planned": 1,
+                            "executed": 0,
+                            "classifications": {"dependency_missing": 1},
+                        },
+                        "report": {"main": 0, "appendix": 0},
+                        "semantic_output_repairs": 4,
+                        "blocker_codes": [
+                            "reviewer_assignments_batched",
+                            "intent_tests_not_executed",
+                            "weak_findings_excluded_from_main",
+                            "weak_findings_missing_from_report_appendix",
+                            "semantic_output_repairs_required",
+                        ],
+                    },
+                },
+            )
+
+            result = audit_bundle(root)
+
+        codes = issue_codes(result)
+        self.assertIn("reviewer_assignments_batched", codes)
+        self.assertIn("intent_tests_not_executed", codes)
+        self.assertIn("weak_findings_excluded_from_main", codes)
+        self.assertIn("weak_findings_missing_from_report_appendix", codes)
+        self.assertIn("semantic_output_repairs_required", codes)
+
     def test_live_failure_shapes_are_reported_with_actionable_codes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir) / "broken"
