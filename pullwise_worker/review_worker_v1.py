@@ -2176,6 +2176,15 @@ class ReviewWorkerV1:
                         pass
                     elif phase == "cleanup_active_job":
                         pass
+                    elif phase == "reviewer_fanout":
+                        self.run_reviewer_fanout_phase(
+                            codex_client,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            active=active,
+                            progress=progress,
+                        )
                     elif phase in SEMANTIC_PHASES:
                         self.run_semantic_phase(codex_client, repo_dir, run_dir, job, phase)
                         if phase == "validator_disproof":
@@ -2525,6 +2534,154 @@ class ReviewWorkerV1:
             timeout_seconds=turn_timeout_for_job(job),
             cancel_requested=self.poll_cancel_requested,
         )
+
+    def run_reviewer_fanout_phase(
+        self,
+        codex_client: CodexSdkClient | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        *,
+        active: ActiveJob,
+        progress: int,
+    ) -> None:
+        if codex_client is None:
+            raise RuntimeError("Codex SDK client is missing")
+        state = read_json(run_dir / "run-state.json")
+        thread_id = str(state.get("thread_id") or "")
+        if not thread_id:
+            raise RuntimeError("Codex thread is missing")
+        assignments = planned_reviewer_assignment_sequence(run_dir)
+        if not assignments:
+            raise RuntimeError("reviewer_fanout has no planned reviewer assignments")
+
+        raw_dir = run_dir / "raw-reviewers"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        execution_path = run_dir / "reviewer-execution.json"
+        expected_assignments = set(assignments)
+        records: list[dict[str, Any]] = []
+        completed = 0
+        execution = {
+            "schema_version": "reviewer-execution/v1",
+            "strategy": "one_turn_per_assignment",
+            "root_thread_id": thread_id,
+            "assignments_total": len(assignments),
+            "assignments_completed": 0,
+            "assignments": records,
+        }
+        write_json(execution_path, execution)
+
+        for index, (bundle_id, reviewer_id) in enumerate(assignments, start=1):
+            output_name = reviewer_assignment_output_name(bundle_id, reviewer_id)
+            output_path = raw_dir / output_name
+            if output_path.exists():
+                output_path.unlink()
+            record = {
+                "bundle_id": bundle_id,
+                "reviewer_id": reviewer_id,
+                "output": f"raw-reviewers/{output_name}",
+                "status": "running",
+                "started_at": iso_time(time.time()),
+            }
+            records.append(record)
+            write_json(execution_path, execution)
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "reviewer_assignment_started",
+                    "bundle_id": bundle_id,
+                    "reviewer_id": reviewer_id,
+                    "assignment_index": index,
+                    "assignments_total": len(assignments),
+                    "time": iso_time(time.time()),
+                },
+            )
+            try:
+                codex_client.run_turn(
+                    thread_id=thread_id,
+                    repo_dir=repo_dir,
+                    prompt=reviewer_assignment_prompt(run_dir, bundle_id, reviewer_id),
+                    effort=effort_for_phase(job, "reviewer_fanout"),
+                    read_only=False,
+                    timeout_seconds=turn_timeout_for_job(job),
+                    cancel_requested=self.poll_cancel_requested,
+                )
+            except BaseException as exc:
+                record.update(
+                    {
+                        "status": "failed",
+                        "completed_at": iso_time(time.time()),
+                        "error": quota_text(exc, 500),
+                    }
+                )
+                write_json(execution_path, execution)
+                append_jsonl(
+                    run_dir / "worker.log.jsonl",
+                    {
+                        "event": "reviewer_assignment_failed",
+                        "bundle_id": bundle_id,
+                        "reviewer_id": reviewer_id,
+                        "error": quota_text(exc, 500),
+                        "time": iso_time(time.time()),
+                    },
+                )
+                raise
+
+            payload = read_json(output_path, None)
+            covered = _reviewer_output_assignments(payload, output_path, expected_assignments)
+            valid_output = (
+                isinstance(payload, dict)
+                and isinstance(payload.get("findings"), list)
+                and covered == {(bundle_id, reviewer_id)}
+            )
+            finding_count = len(payload.get("findings") or []) if isinstance(payload, dict) else 0
+            record.update(
+                {
+                    "status": "completed" if valid_output else "invalid_output",
+                    "completed_at": iso_time(time.time()),
+                    "finding_count": finding_count,
+                }
+            )
+            if valid_output:
+                completed += 1
+            else:
+                record["error"] = "exact assignment output is missing, malformed, or covers a different assignment"
+            execution["assignments_completed"] = completed
+            write_json(execution_path, execution)
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "reviewer_assignment_completed" if valid_output else "reviewer_assignment_invalid_output",
+                    "bundle_id": bundle_id,
+                    "reviewer_id": reviewer_id,
+                    "finding_count": finding_count,
+                    "assignment_index": index,
+                    "assignments_total": len(assignments),
+                    "time": iso_time(time.time()),
+                },
+            )
+            self.progress_phase(
+                active,
+                run_dir,
+                "reviewer_fanout",
+                progress,
+                current_phase_percent=min(90.0, (index / len(assignments)) * 90.0),
+                message=f"Completed reviewer assignment {index} of {len(assignments)}.",
+                data={
+                    "reviewer_runs_total": len(assignments),
+                    "reviewer_runs_completed": completed,
+                    "active_unit": {
+                        "bundle_id": bundle_id,
+                        "reviewer_id": reviewer_id,
+                        "assignment_index": index,
+                    },
+                },
+            )
+
+        if completed != len(assignments):
+            raise RuntimeError(
+                f"reviewer_fanout completed {completed} of {len(assignments)} exact reviewer assignments"
+            )
 
     def repair_semantic_phase_outputs(
         self,
@@ -3233,6 +3390,50 @@ def phase_prompt(phase: str, run_dir: Path) -> str:
     lines.append("- Produce the required output file(s); do not rely on prose in the turn response.")
     lines.append("- For schema-bound outputs, return/write JSON only with no Markdown wrapper.")
     lines.append("- If required evidence is missing, record the uncertainty in the phase output rather than inventing facts.")
+    return "\n".join(lines) + "\n"
+
+
+def reviewer_assignment_output_name(bundle_id: str, reviewer_id: str) -> str:
+    return f"{bundle_id}.{reviewer_id.replace('_', '-')}.json"
+
+
+def reviewer_assignment_prompt(run_dir: Path, bundle_id: str, reviewer_id: str) -> str:
+    reviewer_template_names = {
+        "security": "reviewers/security.md",
+        "correctness": "reviewers/correctness.md",
+        "test_gap": "reviewers/test_gap.md",
+        "correctness_lite": "reviewers/correctness_lite.md",
+    }
+    template_name = reviewer_template_names.get(reviewer_id)
+    if template_name is None:
+        raise RuntimeError(f"unsupported reviewer assignment: {reviewer_id}")
+    output_name = reviewer_assignment_output_name(bundle_id, reviewer_id)
+    lines = [
+        "Phase: reviewer_fanout",
+        "Role: Independent Bundle Reviewer",
+        "Perform exactly one logical reviewer assignment in this turn.",
+        f"Bundle assignment: {bundle_id}",
+        f"Reviewer assignment: {reviewer_id}",
+        f"Read the packed bundle at: {run_dir / 'bundles' / f'{bundle_id}.md'}",
+        f"Exact output path: {run_dir / 'raw-reviewers' / output_name}",
+        f"Output path relative to the run artifact directory: raw-reviewers/{output_name}",
+        "Do not review or emit output for any other bundle or reviewer assignment in this turn.",
+        "Treat this assignment as an independent review; do not inherit an earlier reviewer's empty conclusion.",
+        "Inspect the concrete source in the packed bundle and follow referenced repository call sites when needed.",
+        "Existing tests are contract evidence, not proof that the implementation is correct.",
+        "Actively look for concrete failure scenarios before concluding that findings is empty.",
+        "Every finding must include id, title, severity, confidence, path/line evidence, impact, recommendation, false_positive_risk, and next_agent_task.",
+        "If findings is empty, review_summary must document concrete areas examined, checks performed, and rejected candidates with source-backed reasons.",
+        "Write one JSON object only using schema_version codex-reviewer-output/v1.",
+        "The object must include bundle_id, reviewer, reviewed_paths, findings, review_summary, and uncertainties.",
+        "Do not modify application source files, install dependencies, use network, or call external scanning services.",
+        "Write only the exact output file under the active .codex-review tree; do not rely on prose in the turn response.",
+        f"--- {template_name} ---",
+        prompt_template_text(run_dir, template_name),
+    ]
+    adaptive_context = _adaptive_prompt_context(run_dir)
+    if adaptive_context:
+        lines.extend(adaptive_context)
     return "\n".join(lines) + "\n"
 
 

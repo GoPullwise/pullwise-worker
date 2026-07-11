@@ -90,6 +90,7 @@ from pullwise_worker.review_worker_v1 import (
     validate_job_policy,
     validate_phase_outputs,
     validate_reviewer_outputs,
+    write_debug_bundle,
     write_json,
 )
 
@@ -2255,6 +2256,58 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("Confirmed findings: 0", markdown)
         self.assertIn("Plausible findings: 1", markdown)
         self.assertIn("[plausible]", markdown)
+
+    def test_report_repair_preserves_nested_weak_findings_in_canonical_appendix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            weak_finding = finding_payload(
+                "WEAK-001",
+                title="Dependency-limited candidate",
+                severity="P2",
+                path="src/app.jsx",
+                line=17,
+            )
+            weak_finding["validation_status"] = "weak"
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "unknown", "result_status": "complete"},
+                    "findings": [],
+                    "appendix_findings": [],
+                    "appendix": {"weak_findings": [weak_finding]},
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [],
+                    "weak_findings": [
+                        {
+                            "finding_id": "WEAK-001",
+                            "classification": "weak",
+                            "title": "Dependency-limited candidate",
+                            "path": "src/app.jsx",
+                            "line_start": 17,
+                            "line_end": 17,
+                        }
+                    ],
+                    "disproven_findings": [],
+                },
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+            summary = summary_payload(run_dir, "completed")
+
+        self.assertEqual([finding["id"] for finding in report["appendix_findings"]], ["WEAK-001"])
+        self.assertEqual(report["appendix_findings"][0]["severity"], "medium")
+        self.assertEqual(report["summary"]["weak_count"], 1)
+        self.assertEqual(summary["finding_counts"]["weak_appendix"], 1)
 
     def test_agent_report_repair_derives_unknown_overall_risk_from_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -7251,6 +7304,205 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertFalse((run_dir / "repo-map.json").exists())
             with self.assertRaisesRegex(RuntimeError, "repo-map"):
                 validate_phase_outputs(run_dir, "repo_map")
+
+    def test_reviewer_fanout_runs_one_scoped_turn_per_planned_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            bundles_dir = run_dir / "bundles"
+            prompts_dir = repo / ".codex-review" / "prompts" / "reviewers"
+            bundles_dir.mkdir(parents=True)
+            prompts_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {
+                            "bundle_id": "p0-bundle-001",
+                            "tier": "P0",
+                            "reviewers": ["security", "correctness"],
+                        },
+                        {
+                            "bundle_id": "p2-bundle-002",
+                            "tier": "P2",
+                            "reviewers": ["correctness_lite"],
+                        },
+                    ],
+                },
+            )
+            for bundle_id in ("p0-bundle-001", "p2-bundle-002"):
+                (bundles_dir / f"{bundle_id}.md").write_text(f"# {bundle_id}\n", encoding="utf-8")
+            for reviewer in ("security", "correctness", "correctness_lite"):
+                (prompts_dir / f"{reviewer}.md").write_text(
+                    f"UNIQUE {reviewer.upper()} REVIEW TEMPLATE\n",
+                    encoding="utf-8",
+                )
+
+            assignments = [
+                ("p0-bundle-001", "security"),
+                ("p0-bundle-001", "correctness"),
+                ("p2-bundle-002", "correctness_lite"),
+            ]
+            turn_calls: list[dict] = []
+
+            class FakeCodexClient:
+                def run_turn(self, **kwargs: object) -> None:
+                    turn_calls.append(dict(kwargs))
+                    bundle_id, reviewer = assignments[len(turn_calls) - 1]
+                    output_name = f"{bundle_id}.{reviewer.replace('_', '-')}.json"
+                    write_json(
+                        run_dir / "raw-reviewers" / output_name,
+                        {
+                            "schema_version": "codex-reviewer-output/v1",
+                            "bundle_id": bundle_id,
+                            "reviewer": reviewer,
+                            "reviewed_paths": ["src/app.py"],
+                            "findings": [],
+                            "uncertainties": [],
+                        },
+                    )
+
+            progress_updates: list[dict] = []
+
+            class Worker(ReviewWorkerV1):
+                def progress_phase(self, *args: object, **kwargs: object) -> None:
+                    progress_updates.append(dict(kwargs.get("data") or {}))
+
+            job = {
+                "job_id": "job_1",
+                "model_profile": {
+                    "default_model": "gpt-5.5",
+                    "core_effort": "high",
+                    "non_core_effort": "medium",
+                },
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                    },
+                    "budget": {"max_wall_time_seconds": 14400},
+                },
+                "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+            }
+            worker = Worker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+            active = ActiveJob("job_1", "run_1", "lease_1", "attempt_1", thread_id="thread_1")
+
+            worker.run_reviewer_fanout_phase(
+                FakeCodexClient(),
+                repo,
+                run_dir,
+                job,
+                active=active,
+                progress=70,
+            )
+            execution = json.loads((run_dir / "reviewer-execution.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(len(turn_calls), 3)
+        for call, (bundle_id, reviewer) in zip(turn_calls, assignments, strict=True):
+            prompt = str(call["prompt"])
+            self.assertIn(f"Bundle assignment: {bundle_id}", prompt)
+            self.assertIn(f"Reviewer assignment: {reviewer}", prompt)
+            self.assertIn(f"UNIQUE {reviewer.upper()} REVIEW TEMPLATE", prompt)
+            self.assertIn(f"raw-reviewers/{bundle_id}.{reviewer.replace('_', '-')}.json", prompt)
+            other_bundles = {value for value, _reviewer in assignments if value != bundle_id}
+            self.assertTrue(all(other not in prompt for other in other_bundles))
+            self.assertFalse(call["read_only"])
+        self.assertEqual(execution["strategy"], "one_turn_per_assignment")
+        self.assertEqual(execution["assignments_total"], 3)
+        self.assertEqual(execution["assignments_completed"], 3)
+        self.assertEqual([update["reviewer_runs_completed"] for update in progress_updates], [1, 2, 3])
+
+    def test_debug_summary_explains_candidate_disposition_and_degraded_intent_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            verified_dir = run_dir / "verified-reviewers"
+            raw_dir.mkdir(parents=True)
+            verified_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [{"bundle_id": "p0-bundle-001", "reviewers": ["correctness"]}],
+                },
+            )
+            reviewer_output = {
+                "schema_version": "codex-reviewer-output/v1",
+                "bundle_id": "p0-bundle-001",
+                "reviewer": "correctness",
+                "findings": [finding_payload("WEAK-001")],
+            }
+            write_json(raw_dir / "p0-bundle-001.correctness.json", reviewer_output)
+            write_json(verified_dir / "p0-bundle-001.correctness.json", reviewer_output)
+            write_json(
+                run_dir / "clusters.json",
+                {"schema_version": "cluster-output/v1", "clusters": [{"cluster_id": "cluster-1"}]},
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [],
+                    "weak_findings": [{"finding_id": "WEAK-001", "classification": "weak"}],
+                    "disproven_findings": [],
+                },
+            )
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [],
+                    "appendix_findings": [finding_payload("WEAK-001")],
+                },
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-plan.json",
+                {"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "test-1"}]},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-results.json",
+                {
+                    "schema_version": "intent-test-result/v1",
+                    "test_results": [{"test_id": "test-1", "status": "skipped", "classification": "dependency_missing"}],
+                },
+            )
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {"event": "semantic_phase_output_repair", "phase": "intent_test_planning"},
+            )
+            write_json(
+                run_dir / "reviewer-execution.json",
+                {
+                    "schema_version": "reviewer-execution/v1",
+                    "strategy": "one_turn_per_assignment",
+                    "assignments_total": 1,
+                    "assignments_completed": 1,
+                },
+            )
+
+            bundle_path = write_debug_bundle(run_dir, artifact_dir, status="completed")
+            with zipfile.ZipFile(bundle_path, "r") as archive:
+                debug_summary = json.loads(archive.read("debug-summary.json").decode("utf-8"))
+
+        diagnostics = debug_summary["pipeline_diagnostics"]
+        self.assertEqual(diagnostics["reviewer"]["raw_findings"], 1)
+        self.assertEqual(diagnostics["validation"]["weak"], 1)
+        self.assertEqual(diagnostics["report"]["main"], 0)
+        self.assertEqual(diagnostics["report"]["appendix"], 1)
+        self.assertEqual(diagnostics["intent_tests"]["executed"], 0)
+        self.assertEqual(diagnostics["intent_tests"]["classifications"], {"dependency_missing": 1})
+        self.assertEqual(diagnostics["semantic_output_repairs"], 1)
+        self.assertIn("intent_tests_not_executed", diagnostics["blocker_codes"])
+        self.assertIn("weak_findings_excluded_from_main", diagnostics["blocker_codes"])
 
     def test_repair_semantic_phase_requires_codex_sdk_client(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
