@@ -6667,6 +6667,29 @@ def _planned_reviewer_assignments(run_dir: Path) -> set[tuple[str, str]]:
     return assignments
 
 
+def planned_reviewer_assignment_sequence(run_dir: Path) -> list[tuple[str, str]]:
+    bundles = read_json(run_dir / "bundle-plan.json", {}).get("bundles", [])
+    if not isinstance(bundles, list):
+        return []
+    assignments: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        bundle_id = _normalized_review_bundle_id(bundle.get("bundle_id") or bundle.get("id"))
+        reviewers = bundle.get("reviewers")
+        if not bundle_id or not isinstance(reviewers, list):
+            continue
+        for reviewer in reviewers:
+            reviewer_id = _normalized_reviewer_id(reviewer)
+            assignment = (bundle_id, reviewer_id)
+            if not reviewer_id or assignment in seen:
+                continue
+            seen.add(assignment)
+            assignments.append(assignment)
+    return assignments
+
+
 def _reviewer_output_assignments(
     payload: object,
     path: Path,
@@ -7471,6 +7494,49 @@ def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
     return normalized
 
 
+def appendix_finding_identity(finding: dict[str, Any]) -> tuple[Any, ...]:
+    ids = finding_binding_ids(finding)
+    if ids:
+        return ("ids", *sorted(ids))
+    fallback = finding_fallback_binding_key(finding)
+    if fallback is not None:
+        return ("location", *fallback)
+    return (
+        "content",
+        str(finding.get("title") or "").strip().lower(),
+        json.dumps(finding.get("locations") or [], ensure_ascii=False, sort_keys=True, default=str),
+    )
+
+
+def canonical_appendix_findings(report: dict[str, Any], validation: object) -> list[dict[str, Any]]:
+    sources: list[tuple[object, bool]] = []
+    for value in report.get("appendix_findings") if isinstance(report.get("appendix_findings"), list) else []:
+        sources.append((value, False))
+    appendix = report.get("appendix") if isinstance(report.get("appendix"), dict) else {}
+    for value in appendix.get("weak_findings") if isinstance(appendix.get("weak_findings"), list) else []:
+        sources.append((value, True))
+    for value in report.get("weak_findings") if isinstance(report.get("weak_findings"), list) else []:
+        sources.append((value, True))
+    if isinstance(validation, dict):
+        for value in validation.get("weak_findings") if isinstance(validation.get("weak_findings"), list) else []:
+            sources.append((value, True))
+
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for raw_finding, force_weak in sources:
+        finding = normalized_agent_report_finding(raw_finding)
+        if finding is None:
+            continue
+        if force_weak and not finding_validation_status(finding):
+            finding["validator_status"] = "weak"
+        identity = appendix_finding_identity(finding)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        findings.append(finding)
+    return findings
+
+
 
 def _non_pending_text(value: object) -> str:
     text = str(value or "").strip()
@@ -7538,8 +7604,16 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
         demoted["demoted_reason"] = "missing_confirmed_or_plausible_validation"
         demoted_findings.append(demoted)
 
-    appendix_findings = report.get("appendix_findings") if isinstance(report.get("appendix_findings"), list) else []
-    report["appendix_findings"] = [*appendix_findings, *demoted_findings]
+    validation = read_json(run_dir / "validated-findings.json", {})
+    appendix_findings = canonical_appendix_findings(report, validation)
+    seen_appendix = {appendix_finding_identity(finding) for finding in appendix_findings}
+    for demoted in demoted_findings:
+        identity = appendix_finding_identity(demoted)
+        if identity in seen_appendix:
+            continue
+        seen_appendix.add(identity)
+        appendix_findings.append(demoted)
+    report["appendix_findings"] = appendix_findings
     report["findings"] = findings
     for key in ("disproven_findings", "raw_artifact_refs"):
         if not isinstance(report.get(key), list):
@@ -7555,6 +7629,8 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     summary["main_finding_count"] = len(findings)
     summary["confirmed_count"] = sum(1 for finding in findings if finding_validation_status(finding) != "plausible")
     summary["plausible_count"] = sum(1 for finding in findings if finding_validation_status(finding) == "plausible")
+    summary["weak_count"] = sum(1 for finding in appendix_findings if finding_validation_status(finding) == "weak")
+    summary["appendix_finding_count"] = len(appendix_findings)
     report["summary"] = summary
     write_json(path, report)
 
@@ -7898,6 +7974,173 @@ def _debug_bundle_files(directory: Path, prefix: str) -> list[tuple[Path, str]]:
     return files
 
 
+def _diagnostic_list(payload: object, *keys: str) -> list[Any]:
+    if not isinstance(payload, dict):
+        return []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _semantic_output_repair_count(run_dir: Path) -> int:
+    path = run_dir / "worker.log.jsonl"
+    if not path.is_file():
+        return 0
+    count = 0
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(event, dict) and event.get("event") in {
+            "semantic_phase_output_repair",
+            "reviewer_json_output_repair",
+        }:
+            count += 1
+    return count
+
+
+def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
+    raw_files = sorted((run_dir / "raw-reviewers").glob("*.json"))
+    verified_files = sorted((run_dir / "verified-reviewers").glob("*.json"))
+
+    def reviewer_finding_count(paths: list[Path]) -> tuple[int, int]:
+        findings = 0
+        empty_outputs = 0
+        for path in paths:
+            payload = read_json(path, {})
+            output_findings = _diagnostic_list(payload, "findings")
+            findings += len(output_findings)
+            if not output_findings:
+                empty_outputs += 1
+        return findings, empty_outputs
+
+    raw_findings, empty_raw_outputs = reviewer_finding_count(raw_files)
+    verified_findings, _empty_verified_outputs = reviewer_finding_count(verified_files)
+    planned_assignments = _planned_reviewer_assignments(run_dir)
+    reviewer_execution = read_json(run_dir / "reviewer-execution.json", {})
+    if not isinstance(reviewer_execution, dict):
+        reviewer_execution = {}
+
+    locations = read_json(run_dir / "location-verification.json", {})
+    location_items = _diagnostic_list(locations, "items", "locations", "results", "verified_locations")
+    location_summary = locations.get("summary") if isinstance(locations, dict) and isinstance(locations.get("summary"), dict) else {}
+    locations_total = max(
+        len(location_items),
+        _qa_int(location_summary.get("locations_total") or location_summary.get("total_locations")),
+    )
+
+    clusters = read_json(run_dir / "clusters.json", {})
+    cluster_items = _diagnostic_list(clusters, "clusters", "candidate_findings", "candidates")
+    validation_input = read_json(run_dir / "validation-input.json", {})
+    validation_candidates = _diagnostic_list(validation_input, "candidates", "candidate_findings")
+
+    validation = read_json(run_dir / "validated-findings.json", {})
+    validated_main = _diagnostic_list(validation, "validated_findings", "validated")
+    weak_findings = _diagnostic_list(validation, "weak_findings")
+    disproven_findings = _diagnostic_list(validation, "disproven_findings")
+    if isinstance(validation, dict) and not weak_findings:
+        weak_findings = [
+            finding
+            for finding in _diagnostic_list(validation, "findings", "results")
+            if validation_entry_status(finding) == "weak"
+        ]
+    if isinstance(validation, dict) and not validated_main:
+        validated_main = [
+            finding
+            for finding in _diagnostic_list(validation, "findings", "results")
+            if validation_entry_status(finding) in MAIN_FINDING_VALIDATION_STATUSES
+        ]
+
+    report = read_json(run_dir / "report.agent.json", {})
+    report_main = _diagnostic_list(report, "findings", "main_findings", "mainFindings")
+    report_appendix = _diagnostic_list(report, "appendix_findings", "weak_findings")
+    if not report_appendix and isinstance(report, dict) and isinstance(report.get("appendix"), dict):
+        report_appendix = _diagnostic_list(report["appendix"], "weak_findings", "findings")
+    report_disproven = _diagnostic_list(report, "disproven_findings")
+
+    intent_plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
+    intent_targets = _diagnostic_list(intent_plan, "test_targets", "targets", "tests")
+    intent_results = read_json(run_dir / "intent" / "intent-test-results.json", {})
+    analyzed_results = _diagnostic_list(intent_results, "test_results", "results")
+    classifications: dict[str, int] = {}
+    executed = 0
+    skipped = 0
+    for result in analyzed_results:
+        if not isinstance(result, dict):
+            continue
+        classification = str(result.get("classification") or "unknown").strip().lower() or "unknown"
+        classifications[classification] = classifications.get(classification, 0) + 1
+        raw_result = result.get("raw_result") if isinstance(result.get("raw_result"), dict) else {}
+        result_status = str(result.get("status") or raw_result.get("status") or "").strip().lower()
+        if result_status in {"passed", "failed", "completed", "error", "timeout", "timed_out"}:
+            executed += 1
+        else:
+            skipped += 1
+
+    repair_count = _semantic_output_repair_count(run_dir)
+    blocker_codes: list[str] = []
+    if raw_files and raw_findings == 0:
+        blocker_codes.append("all_reviewer_outputs_empty")
+    if len(planned_assignments) > 1 and not reviewer_execution:
+        blocker_codes.append("reviewer_execution_untracked")
+    elif reviewer_execution and reviewer_execution.get("strategy") != "one_turn_per_assignment":
+        blocker_codes.append("reviewer_assignments_batched")
+    if intent_targets and executed == 0:
+        blocker_codes.append("intent_tests_not_executed")
+    if weak_findings and not report_main:
+        blocker_codes.append("weak_findings_excluded_from_main")
+    if len(weak_findings) > len(report_appendix):
+        blocker_codes.append("weak_findings_missing_from_report_appendix")
+    if repair_count:
+        blocker_codes.append("semantic_output_repairs_required")
+
+    return {
+        "schema_version": "pipeline-diagnostics/v1",
+        "reviewer": {
+            "strategy": str(reviewer_execution.get("strategy") or "unknown"),
+            "assignments_planned": len(planned_assignments),
+            "assignments_completed": _qa_int(reviewer_execution.get("assignments_completed")),
+            "raw_outputs": len(raw_files),
+            "empty_raw_outputs": empty_raw_outputs,
+            "raw_findings": raw_findings,
+            "verified_outputs": len(verified_files),
+            "verified_findings": verified_findings,
+            "execution_artifact": "run/reviewer-execution.json" if reviewer_execution else "",
+        },
+        "location_verification": {"locations_total": locations_total},
+        "clustering": {
+            "clusters": len(cluster_items),
+            "validation_candidates": len(validation_candidates),
+        },
+        "validation": {
+            "main": len(validated_main),
+            "weak": len(weak_findings),
+            "disproven": len(disproven_findings),
+        },
+        "intent_tests": {
+            "planned": len(intent_targets),
+            "analyzed": len(analyzed_results),
+            "executed": executed,
+            "skipped": skipped,
+            "classifications": dict(sorted(classifications.items())),
+        },
+        "report": {
+            "main": len(report_main),
+            "appendix": len(report_appendix),
+            "disproven": len(report_disproven),
+        },
+        "semantic_output_repairs": repair_count,
+        "blocker_codes": blocker_codes,
+    }
+
+
 def write_debug_bundle(run_dir: Path, artifact_dir: Path, *, status: str = "", error: str = "") -> Path:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     bundle_path = artifact_dir / DEBUG_BUNDLE_NAME
@@ -7908,6 +8151,7 @@ def write_debug_bundle(run_dir: Path, artifact_dir: Path, *, status: str = "", e
         "status": status,
         "error": error,
         "included_roots": ["run", "artifacts"],
+        "pipeline_diagnostics": pipeline_diagnostics_payload(run_dir),
         "notes": [
             "This bundle is uploaded by the worker for live-environment debugging.",
             "Repository source files are not included; run artifacts, phase outputs, and logs are included.",
