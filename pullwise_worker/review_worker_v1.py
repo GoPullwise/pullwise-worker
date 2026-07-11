@@ -34,6 +34,8 @@ PROTOCOL_VERSION = "review-worker-protocol/v1"
 WORKER_VERSION = __version__
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
+WORKER_COMMAND_ACTIVE_STATUSES = {"pending", "running"}
+REFRESH_CODEX_QUOTA_COMMAND = "refresh_codex_quota"
 PIPELINE_PHASES = (
     ("prepare_workspace", 3),
     ("start_codex_app_server", 7),
@@ -1815,7 +1817,7 @@ class ReviewWorkerV1:
         with self._heartbeat_lock:
             return self._heartbeat_once()
 
-    def _heartbeat_once(self) -> dict[str, Any]:
+    def _heartbeat_once(self, *, process_worker_command: bool = True) -> dict[str, Any]:
         active = self.state.active_job
         codex_client_error = ""
         if active is None and (self.codex_client is None or not self.codex_client.is_running()):
@@ -1877,7 +1879,44 @@ class ReviewWorkerV1:
                     continue
                 if command.get("type") == "cancel_run" and str(command.get("run_id") or "") == active.run_id:
                     self.request_cancel(active, reason=str(command.get("reason") or "server_cancelled"))
+        if process_worker_command:
+            self.handle_worker_command(response, active=active)
         return response if isinstance(response, dict) else {}
+
+    def handle_worker_command(self, response: object, *, active: ActiveJob | None) -> bool:
+        if not isinstance(response, dict):
+            return False
+        command = response.get("command")
+        if not isinstance(command, dict):
+            return False
+        command_id = quota_text(command.get("id"), 128)
+        command_name = quota_text(command.get("command"), 80).lower()
+        command_status = quota_text(command.get("status"), 40).lower()
+        if (
+            not command_id
+            or command_name != REFRESH_CODEX_QUOTA_COMMAND
+            or command_status not in WORKER_COMMAND_ACTIVE_STATUSES
+            or active is not None
+        ):
+            return False
+        report_status = getattr(self.client, "command_status", None)
+        if not callable(report_status):
+            return False
+        try:
+            if command_status == "pending":
+                report_status(command_id, "running")
+            self.quota_monitor.refresh()
+            # Persist the new snapshot before the command becomes terminal so
+            # Admin never observes success alongside the previous quota value.
+            self._heartbeat_once(process_worker_command=False)
+            report_status(command_id, "succeeded")
+        except Exception as exc:
+            try:
+                report_status(command_id, "failed", error=quota_text(exc, 500))
+            except Exception:
+                pass
+            return False
+        return True
 
     def active_job_heartbeat_interval_seconds(self) -> float:
         return max(1.0, float(getattr(self.config, "poll_seconds", 5) or 5))
