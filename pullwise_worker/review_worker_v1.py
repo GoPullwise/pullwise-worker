@@ -2606,7 +2606,7 @@ class ReviewWorkerV1:
                     timeout_seconds=turn_timeout_for_job(job),
                     cancel_requested=self.poll_cancel_requested,
                 )
-            except BaseException as exc:
+            except Exception as exc:
                 record.update(
                     {
                         "status": "failed",
@@ -3148,10 +3148,14 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
     "bootstrap_helper_scripts": {
         "role": "Bootstrap Helper Script Maintainer",
         "prompt_files": [],
-        "inputs": ["v1.2 worker spec", ".codex-review/AGENTS.review.md"],
+        "inputs": [
+            ".codex-review/AGENTS.review.md",
+            "self-contained required helper, schema, and prompt files already materialized under .codex-review",
+        ],
         "outputs": [".codex-review/tools/*.py", ".codex-review/schemas/*.schema.json", ".codex-review/prompts/*.md"],
         "instructions": [
             "Create or repair only review helper tools, schemas, and prompt templates.",
+            "Use only the self-contained .codex-review contract in this checkout; do not search for or depend on a parent-workspace specification file.",
             "Helper scripts must use Python 3 standard library only and perform mechanical tasks only.",
             "Return a concise implementation summary; do not include secrets.",
         ],
@@ -3273,7 +3277,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Include only confirmed or plausible actionable findings in the main list.",
             "Do not inherit reviewer severity without re-calibrating it to demonstrated reachability, attacker control, user impact, and existing containment.",
-            "Weak findings go to appendix; disproven findings are excluded from main findings.",
+            "Weak findings go to the top-level appendix_findings list; disproven findings are excluded from main findings.",
             "Preserve coverage, skipped scope, validation sources, and next_agent_task.",
             "Write JSON only using codex-full-repo-review/v1.",
         ],
@@ -7179,7 +7183,7 @@ def prompt_template_for_name(name: str) -> str:
         "intent/06_intent_test_writer.md": "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**. Do not modify the main repo workspace. Return JSON describing created test files.\n",
         "intent/07_intent_test_failure_analyzer.md": "You are the Test Failure Analyzer. A failing test is not automatically a bug. Classify each result using intent-test-result/v1. Return JSON only.\n",
         "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. dependency_missing is absence of dynamic evidence, not disproof; static source and contract evidence can still support plausible. Return JSON only.\n",
-        "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to appendix. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",
+        "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to the top-level appendix_findings list. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",
     }
     discipline = (
         "\nRequired discipline:\n"

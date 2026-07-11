@@ -403,6 +403,67 @@ class DebugBundleAuditTest(unittest.TestCase):
         self.assertIn("server_issue_count_mismatch", codes)
         self.assertIn("human_report_validation_mismatch", codes)
 
+    def test_server_summary_must_preserve_worker_weak_appendix_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            report = json.loads((root / "worker/run/report.agent.json").read_text(encoding="utf-8"))
+            report["appendix_findings"] = [
+                {
+                    "id": "weak-1",
+                    "title": "Dependency-limited candidate",
+                    "severity": "low",
+                    "validator_status": "weak",
+                    "locations": [{"path": "src/b.py", "start_line": 1, "end_line": 1}],
+                }
+            ]
+            write_json(root, "worker/run/report.agent.json", report)
+            write_json(
+                root,
+                "worker/run/validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [
+                        {
+                            "candidate_id": "candidate-1",
+                            "status": "confirmed",
+                            "title": "Example",
+                            "locations": [{"path": "src/a.py", "start_line": 1, "end_line": 2}],
+                        }
+                    ],
+                    "weak_findings": [{"finding_id": "weak-1", "classification": "weak"}],
+                    "disproven_findings": [],
+                },
+            )
+            write_json(
+                root,
+                "server/server-debug-evidence.json",
+                {
+                    "review_run": {
+                        "summary_json": json.dumps(
+                            {
+                                "finding_counts": {
+                                    "confirmed_critical": 0,
+                                    "confirmed_high": 0,
+                                    "confirmed_medium": 1,
+                                    "confirmed_low": 0,
+                                    "plausible": 0,
+                                    "weak_appendix": 0,
+                                },
+                                "top_findings": report["findings"],
+                            }
+                        )
+                    },
+                    "scan": {
+                        "issues": {"critical": 0, "high": 0, "medium": 1, "low": 0, "info": 0},
+                    },
+                },
+            )
+
+            result = audit_bundle(root)
+
+        self.assertIn("result_weak_appendix_count_mismatch", issue_codes(result))
+
     def test_unbacked_main_finding_is_not_defaulted_to_confirmed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir) / "bundle"

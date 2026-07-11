@@ -1051,6 +1051,26 @@ class BundleAudit:
                 counts=validation_mismatches,
             )
 
+        report = self.json_at(self.run_name("report.agent.json"))
+        appendix_findings = (
+            report.get("appendix_findings")
+            if isinstance(report, dict) and isinstance(report.get("appendix_findings"), list)
+            else []
+        )
+        if not appendix_findings and isinstance(report, dict) and isinstance(report.get("appendix"), dict):
+            appendix_findings = list_value(report["appendix"], "weak_findings", "findings")
+        expected_weak_appendix = len(appendix_findings)
+        recorded_weak_appendix = integer(recorded_counts.get("weak_appendix"))
+        if recorded_counts and recorded_weak_appendix != expected_weak_appendix:
+            self.issue(
+                "error",
+                "result_weak_appendix_count_mismatch",
+                "Stable result summary does not preserve the worker report appendix count",
+                server_name,
+                recorded=recorded_weak_appendix,
+                expected=expected_weak_appendix,
+            )
+
         top_findings = list_value(run_summary, "top_findings")
         expected_issue_counts = {severity: 0 for severity in ("critical", "high", "medium", "low", "info")}
         for finding in top_findings:

@@ -6498,6 +6498,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             reviewer_prompt = phase_prompt("reviewer_fanout", run_dir)
             failure_prompt = phase_prompt("intent_test_failure_analysis", run_dir)
+            reporter_prompt = phase_prompt("final_report_json", run_dir)
+            bootstrap_prompt = phase_prompt("bootstrap_helper_scripts", run_dir)
 
         self.assertIn("raw-reviewers/*.json", reviewer_prompt)
         self.assertIn("reviewers/security.md", reviewer_prompt)
@@ -6508,6 +6510,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("passed_no_bug_reproduced", failure_prompt)
         self.assertIn("skipped_not_runnable", failure_prompt)
         self.assertNotIn("flaky_nondeterministic", failure_prompt)
+        self.assertIn("top-level appendix_findings", reporter_prompt)
+        self.assertIn("self-contained", bootstrap_prompt)
+        self.assertNotIn("v1.2 worker spec", bootstrap_prompt)
 
     def test_validate_phase_outputs_rejects_missing_or_wrong_schema_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
