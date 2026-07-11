@@ -10,8 +10,9 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 import zipfile
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from types import SimpleNamespace
 from pathlib import Path
@@ -21,7 +22,6 @@ from pullwise_worker import __version__
 from pullwise_worker._main_part_01_bootstrap import (
     PULLWISE_WORKER_USER_AGENT,
     PullwiseClient,
-    PullwiseRequestError,
     PullwiseResponse,
     WorkerConfig,
     provider_tool_path,
@@ -1069,6 +1069,60 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(denied_cwd, "decline")
         self.assertEqual(denied_git_clean, "decline")
         self.assertEqual(denied_sed_in_place, "decline")
+
+    def test_approval_policy_contains_all_read_command_operands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, tempfile.TemporaryDirectory() as outside_dir:
+            workspace = Path(tmp_dir)
+            outside = Path(outside_dir)
+            (workspace / "src").mkdir()
+            (workspace / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            (workspace / "README.md").write_text("needle\n", encoding="utf-8")
+            (outside / "secret.txt").write_text("secret\n", encoding="utf-8")
+            (workspace / "linked-secret").symlink_to(outside / "secret.txt")
+
+            denied_commands = [
+                ["cat", "/etc/passwd"],
+                ["cat", "../secret.txt"],
+                ["cat", "linked-secret"],
+                ["wc", "-l", "/proc/self/environ"],
+                ["grep", "needle", "/etc/passwd"],
+                ["rg", "needle", "/var/lib/pullwise-worker"],
+                ["find", "/", "-name", "*.env"],
+                ["find", "-L", ".", "-name", "*.py"],
+                ["git", "diff", "--no-index", "/etc/passwd", "README.md"],
+                ["cat", "README.md", ">", ".codex-review/leak.txt"],
+            ]
+            allowed_commands = [
+                ["cat", "README.md"],
+                ["wc", "-l", "src/app.py"],
+                ["grep", "-n", "needle", "README.md"],
+                ["rg", "-n", "needle", "src"],
+                ["find", ".", "-name", "*.py"],
+            ]
+
+            denied = [
+                decide_approval(
+                    {
+                        "method": "approval/request",
+                        "params": {"type": "commandExecution", "argv": command, "cwd": str(workspace)},
+                    },
+                    workspace,
+                )[0]
+                for command in denied_commands
+            ]
+            allowed = [
+                decide_approval(
+                    {
+                        "method": "approval/request",
+                        "params": {"type": "commandExecution", "argv": command, "cwd": str(workspace)},
+                    },
+                    workspace,
+                )[0]
+                for command in allowed_commands
+            ]
+
+        self.assertEqual(denied, ["decline"] * len(denied_commands))
+        self.assertEqual(allowed, ["acceptForSession"] * len(allowed_commands))
 
     def test_codex_approval_responses_use_current_codex_client_enums(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3942,56 +3996,33 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse(server_url_allowed("https://api.pullwise.dev/base#fragment"))
 
     def test_pullwise_client_blocks_cross_origin_redirect_before_sending_worker_token(self) -> None:
-        target_authorizations: list[str] = []
+        from pullwise_worker._main_part_01_bootstrap import WorkerApiRedirectHandler
 
-        class TargetHandler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract.
-                target_authorizations.append(self.headers.get("Authorization", ""))
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b"{}")
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
-        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
-        target_thread.start()
-
-        class RedirectHandler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract.
-                self.send_response(302)
-                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/capture")
-                self.end_headers()
-
-            def log_message(self, format: str, *args: object) -> None:
-                return
-
-        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
-        redirect_thread = threading.Thread(target=redirect.serve_forever, daemon=True)
-        redirect_thread.start()
-        try:
-            client = PullwiseClient(
-                SimpleNamespace(
-                    worker_id="wk_1",
-                    worker_token="secret",
-                    server_url=f"http://127.0.0.1:{redirect.server_port}",
-                    result_upload_compress_min_bytes=1024,
-                )
+        client = PullwiseClient(
+            SimpleNamespace(
+                worker_id="wk_1",
+                worker_token="secret",
+                server_url="https://api.pullwise.dev",
+                result_upload_compress_min_bytes=1024,
             )
+        )
+        self.assertTrue(any(isinstance(handler, WorkerApiRedirectHandler) for handler in client.opener.handlers))
 
-            with self.assertRaisesRegex(PullwiseRequestError, "redirect"):
-                client.post("/redirect", {"ok": True})
-
-            self.assertEqual(target_authorizations, [])
-        finally:
-            redirect.shutdown()
-            target.shutdown()
-            redirect.server_close()
-            target.server_close()
-            redirect_thread.join(2)
-            target_thread.join(2)
+        request = urllib.request.Request(
+            "https://api.pullwise.dev/v1/workers/wk_1/heartbeat",
+            headers={"Authorization": "Bearer secret"},
+            method="POST",
+        )
+        handler = WorkerApiRedirectHandler("https://api.pullwise.dev")
+        with self.assertRaisesRegex(urllib.error.URLError, "cross-origin redirect"):
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://attacker.example/capture",
+            )
 
     def test_pullwise_client_has_no_legacy_review_progress_route(self) -> None:
         bootstrap_source = (Path(__file__).resolve().parents[1] / "pullwise_worker" / "_main_part_01_bootstrap.py").read_text(

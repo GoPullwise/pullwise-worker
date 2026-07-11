@@ -763,14 +763,57 @@ def worker_machine_metrics_payload(*, storage_path: str, timestamp: int | None =
 
 
 def server_url_allowed(server_url: str, *, allow_insecure: bool = False) -> bool:
-    parsed = urllib.parse.urlparse(server_url)
-    if parsed.scheme == "https" and parsed.netloc:
+    try:
+        parsed = urllib.parse.urlparse(server_url)
+        hostname = parsed.hostname or ""
+        parsed.port
+    except ValueError:
+        return False
+    if (
+        not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    if parsed.scheme == "https":
         return True
-    if parsed.scheme != "http" or not parsed.netloc:
+    if parsed.scheme != "http":
         return False
     if allow_insecure:
         return True
-    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+    return hostname.lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def worker_api_url_origin(url: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if not hostname or scheme not in {"http", "https"}:
+        return None
+    return scheme, hostname, int(port or (443 if scheme == "https" else 80))
+
+
+class WorkerApiRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, server_url: str) -> None:
+        super().__init__()
+        self.allowed_origin = worker_api_url_origin(server_url)
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target_url = urllib.parse.urljoin(req.full_url, newurl)
+        if (
+            self.allowed_origin is None
+            or worker_api_url_origin(req.full_url) != self.allowed_origin
+            or worker_api_url_origin(target_url) != self.allowed_origin
+        ):
+            raise urllib.error.URLError("cross-origin redirect blocked for authenticated worker request")
+        return super().redirect_request(req, fp, code, msg, headers, target_url)
 
 
 class WorkerConfig:
@@ -1051,6 +1094,7 @@ def worker_registration_payload(config: WorkerConfig) -> dict:
 class PullwiseClient:
     def __init__(self, config: WorkerConfig) -> None:
         self.config = config
+        self.opener = urllib.request.build_opener(WorkerApiRedirectHandler(config.server_url))
         self.headers = {
             "Authorization": f"Bearer {config.worker_token}",
             "Content-Type": "application/json",
@@ -1075,7 +1119,7 @@ class PullwiseClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
+            with self.opener.open(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(read_pullwise_response_body(response))
         except urllib.error.HTTPError as exc:
             raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
@@ -1089,7 +1133,7 @@ class PullwiseClient:
             method="DELETE",
         )
         try:
-            with urllib.request.urlopen(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
+            with self.opener.open(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(read_pullwise_response_body(response))
         except urllib.error.HTTPError as exc:
             raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
@@ -1341,6 +1385,5 @@ def main() -> None:
     worker.run(once=args.once)
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
-
 
 
