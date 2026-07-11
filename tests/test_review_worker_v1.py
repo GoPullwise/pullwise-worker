@@ -4206,6 +4206,66 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(heartbeat_payloads[0]["codex_quota"]["status"], "unavailable")
         self.assertEqual(heartbeat_payloads[0]["codex_quota"]["reason"], "codex_quota_unavailable")
 
+    def test_idle_worker_forces_quota_refresh_command_before_reporting_success(self) -> None:
+        events = []
+        command = {
+            "id": "cmd_quota_refresh",
+            "command": "refresh_codex_quota",
+            "status": "pending",
+        }
+
+        class Client:
+            def heartbeat(self, **payload: dict) -> dict:
+                events.append(("heartbeat", payload["codex_quota"]["checkedAt"]))
+                return {
+                    "command": {
+                        **command,
+                        "status": "pending" if len([event for event in events if event[0] == "heartbeat"]) == 1 else "running",
+                    }
+                }
+
+            def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:
+                events.append(("command_status", command_id, status, error))
+
+        class FakeCodexClient:
+            def is_running(self) -> bool:
+                return True
+
+            def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as root:
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root), client=Client())
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
+            worker.machine_metrics_payload = lambda: None  # type: ignore[method-assign]
+            worker.quota_monitor.snapshot = {"provider": "codex", "status": "ok", "ready": True, "checkedAt": 100}
+            worker.quota_monitor.snapshot_if_due = lambda active=False: worker.quota_monitor.snapshot  # type: ignore[method-assign]
+
+            def refresh_quota(current_time=None):
+                events.append(("refresh",))
+                worker.quota_monitor.snapshot = {
+                    "provider": "codex",
+                    "status": "low",
+                    "ready": False,
+                    "checkedAt": 200,
+                }
+                return worker.quota_monitor.snapshot
+
+            worker.quota_monitor.refresh = refresh_quota  # type: ignore[method-assign]
+
+            worker.heartbeat()
+
+        self.assertEqual(
+            events,
+            [
+                ("heartbeat", 100),
+                ("command_status", "cmd_quota_refresh", "running", None),
+                ("refresh",),
+                ("heartbeat", 200),
+                ("command_status", "cmd_quota_refresh", "succeeded", None),
+            ],
+        )
+
     def test_worker_closes_codex_client_when_control_plane_stops_accepting_heartbeat(self) -> None:
         events = []
 
