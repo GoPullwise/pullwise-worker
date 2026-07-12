@@ -321,13 +321,12 @@ def logical_test_ids(records: Any, prefix: str, *, use_related: bool = True) -> 
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             continue
+        test_id = record_id(record, f"{prefix}-{index + 1:03d}")
+        if test_id:
+            result.add(test_id)
         related = related_test_ids(record) if use_related else []
         if related:
             result.update(related)
-        else:
-            test_id = record_id(record, f"{prefix}-{index + 1:03d}")
-            if test_id:
-                result.add(test_id)
     return result
 
 
@@ -1014,12 +1013,32 @@ class BundleAudit:
             if isinstance(item, dict) and item.get("is_source_like") is True
         }
         effective_routing_name = self.run_name("effective-risk-routing.json")
-        routing = self.json_at(effective_routing_name) if effective_routing_name else self.json_at(self.run_name("risk-routing.json"))
+        semantic_routing_name = self.run_name("risk-routing.json")
+        semantic_routing = self.json_at(semantic_routing_name)
+        routing = self.json_at(effective_routing_name) if effective_routing_name else semantic_routing
         route_paths = {
             str(route.get("path") or "").strip()
             for route in list_value(routing, "routes")
             if isinstance(route, dict)
         }
+        semantic_routes = list_value(semantic_routing, "routes")
+        effective_sources = routing.get("sources") if isinstance(routing, dict) and isinstance(routing.get("sources"), dict) else {}
+        if source_paths and isinstance(semantic_routing, dict) and not semantic_routes and any(
+            key in semantic_routing for key in ("tiers", "files")
+        ):
+            self.issue(
+                "error",
+                "semantic_routing_noncanonical",
+                "Semantic risk routing used a noncanonical shape and could be ignored downstream",
+                semantic_routing_name,
+            )
+        if semantic_routes and effective_routing_name and integer(effective_sources.get("semantic_routes")) == 0:
+            self.issue(
+                "error",
+                "semantic_routing_ignored",
+                "Canonical semantic routes exist but none were applied to effective routing",
+                effective_routing_name,
+            )
         plan = self.json_at(self.run_name("bundle-plan.json"))
         bundles = list_value(plan, "bundles")
         bundle_ids = {

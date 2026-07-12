@@ -4747,7 +4747,18 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     }
     bundles = []
     for tier in ("P0", "P1", "P2"):
-        tier_files = sorted(grouped[tier], key=lambda item: (_bundle_component_key(str(item.get("path") or "")), str(item.get("path") or "")))
+        tier_files = sorted(
+            (
+                segment
+                for item in grouped[tier]
+                for segment in split_oversized_bundle_item(item)
+            ),
+            key=lambda item: (
+                _bundle_component_key(str(item.get("path") or "")),
+                str(item.get("path") or ""),
+                int(item.get("_segment_start_line") or 0),
+            ),
+        )
         chunk: list[dict[str, Any]] = []
         token_count = 0
         for item in tier_files:
@@ -4791,6 +4802,34 @@ def _bundle_component_key(path: str) -> str:
     return normalized
 
 
+def split_oversized_bundle_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+    estimated_tokens = max(0, int(item.get("estimated_tokens") or 0))
+    line_count = max(0, int(item.get("line_count") or 0))
+    if estimated_tokens <= MAX_BUNDLE_ESTIMATED_TOKENS or line_count <= 1:
+        return [item]
+    segment_count = max(2, math.ceil(estimated_tokens / MAX_BUNDLE_ESTIMATED_TOKENS))
+    segment_count = min(segment_count, line_count)
+    lines_per_segment = math.ceil(line_count / segment_count)
+    segments: list[dict[str, Any]] = []
+    for index in range(segment_count):
+        start_line = index * lines_per_segment + 1
+        if start_line > line_count:
+            break
+        end_line = min(line_count, (index + 1) * lines_per_segment)
+        line_fraction = (end_line - start_line + 1) / line_count
+        segment_tokens = max(1, math.ceil(estimated_tokens * line_fraction))
+        if segment_tokens > MAX_BUNDLE_ESTIMATED_TOKENS:
+            raise RuntimeError(
+                f"source segment exceeds hard bundle limit: {item.get('path')}:{start_line}-{end_line}"
+            )
+        segment = dict(item)
+        segment["estimated_tokens"] = segment_tokens
+        segment["_segment_start_line"] = start_line
+        segment["_segment_end_line"] = end_line
+        segments.append(segment)
+    return segments
+
+
 def _bundle_metadata(files: list[dict[str, Any]]) -> dict[str, Any]:
     paths = [str(item.get("path") or "") for item in files if item.get("path")]
     component_keys = sorted({_bundle_component_key(path) for path in paths if _bundle_component_key(path)})
@@ -4827,12 +4866,25 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
         "tier": tier,
         "title": f"{tier} review bundle {index}",
         "estimated_tokens": estimated_tokens,
-        "paths": [str(item.get("path")) for item in files if item.get("path")],
+        "paths": list(dict.fromkeys(str(item.get("path")) for item in files if item.get("path"))),
         "reviewers": reviewers,
         "validator_required": tier == "P0",
         "intent_test_eligible": tier in {"P0", "P1"},
         "risk_reasons": sorted({hint for item in files for hint in item.get("risk_hints", [])})[:12],
     }
+    file_ranges = [
+        {
+            "path": str(item.get("path")),
+            "start_line": int(item.get("_segment_start_line")),
+            "end_line": int(item.get("_segment_end_line")),
+        }
+        for item in files
+        if item.get("path")
+        and int(item.get("_segment_start_line") or 0) > 0
+        and int(item.get("_segment_end_line") or 0) > 0
+    ]
+    if file_ranges:
+        payload["file_ranges"] = file_ranges
     payload.update(_bundle_metadata(files))
     return payload
 
@@ -4858,9 +4910,17 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
             "## Files",
             "",
         ]
-        for rel in bundle.get("paths") or []:
+        file_ranges = bundle.get("file_ranges") if isinstance(bundle.get("file_ranges"), list) else []
+        entries = file_ranges or [{"path": rel} for rel in bundle.get("paths") or []]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            rel = str(entry.get("path") or "")
             path = repo_dir / str(rel)
-            lines.append(f"### {rel}")
+            start_line = max(1, int(entry.get("start_line") or 1))
+            end_line = max(start_line, int(entry.get("end_line") or 0)) if entry.get("end_line") else 0
+            range_label = f":{start_line}-{end_line}" if end_line else ""
+            lines.append(f"### {rel}{range_label}")
             lines.append("")
             if not path.is_file():
                 lines.append("```text")
@@ -4870,7 +4930,9 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
                 continue
             suffix = path.suffix.lstrip(".") or "text"
             lines.append(f"```{suffix}")
-            for index, source_line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            selected_lines = source_lines[start_line - 1 : end_line or None]
+            for index, source_line in enumerate(selected_lines, start=start_line):
                 lines.append(f"{index} | {source_line}")
             lines.append("```")
             lines.append("")
@@ -4904,8 +4966,35 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
         if not isinstance(payload.get("findings"), list):
             errors.append({"file": path.name, "error": "findings must be a list"})
             continue
+        normalized_findings: list[dict[str, Any]] = []
+        finding_error = ""
+        for index, raw_finding in enumerate(payload["findings"]):
+            if not isinstance(raw_finding, dict):
+                finding_error = f"findings[{index}] must be an object"
+                break
+            locations = agent_report_locations(raw_finding)
+            if not locations:
+                finding_error = f"findings[{index}].locations is missing or invalid"
+                break
+            finding = dict(raw_finding)
+            finding["locations"] = locations
+            for alias in (
+                "location",
+                "affected_locations",
+                "affectedLocations",
+                "line_evidence",
+                "lineEvidence",
+            ):
+                finding.pop(alias, None)
+            normalized_findings.append(finding)
+        if finding_error:
+            errors.append({"file": path.name, "error": finding_error})
+            continue
+        payload = dict(payload)
+        payload["findings"] = normalized_findings
         valid_outputs += 1
         validated_payloads.append((path, payload))
+        write_json(path, payload)
         write_json(verified_dir / path.name, payload)
     expected_assignments = _planned_reviewer_assignments(run_dir)
     if expected_assignments:
@@ -5055,8 +5144,10 @@ def _intent_inferred_command(generated: dict[str, Any], target: dict[str, Any], 
         return ["npm", "test", "--", rel_path]
     if framework in {"unittest", "python-unittest"}:
         return ["python", "-m", "unittest", rel_path]
-    if framework in {"pytest", "python"} or suffix == ".py":
+    if framework == "pytest":
         return ["python", "-m", "pytest", rel_path]
+    if framework in {"unittest", "python-unittest", "python"} or suffix == ".py":
+        return ["python", "-m", "unittest", rel_path]
     if framework == "go" or suffix == ".go":
         return ["go", "test", "./..."]
     return []
@@ -7527,38 +7618,60 @@ def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
     raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
     analyzed_runs = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
 
-    def logical_ids(records: Any, prefix: str, use_related: bool = True) -> set[str]:
+    def logical_ids(
+        records: Any,
+        prefix: str,
+        *,
+        planned: set[str] | None = None,
+        include_record: Any = None,
+    ) -> set[str]:
         ids: set[str] = set()
         if not isinstance(records, list):
             return ids
         for index, record in enumerate(records):
             if not isinstance(record, dict):
                 continue
-            related = _intent_related_test_ids(record) if use_related else []
-            if related:
-                ids.update(related)
+            if include_record is not None and not include_record(record):
                 continue
             test_id = _intent_test_id(record, f"{prefix}-{index + 1:03d}")
-            if test_id:
+            candidates = [test_id, *_intent_related_test_ids(record)]
+            candidates = list(dict.fromkeys(candidate for candidate in candidates if candidate))
+            planned_matches = [candidate for candidate in candidates if planned and candidate in planned]
+            if planned_matches:
+                ids.update(planned_matches)
+            elif test_id:
                 ids.add(test_id)
         return ids
 
     executable_generated = _intent_generated_execution_records(generated if isinstance(generated, list) else [])
-    planned_ids = logical_ids(plan_targets, "ITP", use_related=False)
-    written_ids = logical_ids(executable_generated, "ITV")
-    raw_ids = logical_ids(raw_runs, "ITR")
-    analyzed_ids = logical_ids(analyzed_runs, "ITA")
-    all_ids = planned_ids | written_ids | raw_ids | analyzed_ids
+    planned_ids = logical_ids(plan_targets, "ITP")
+    written_ids = logical_ids(executable_generated, "ITV", planned=planned_ids)
+    attempted_ids = logical_ids(raw_runs, "ITR", planned=planned_ids)
+    run_ids = logical_ids(
+        raw_runs,
+        "ITR",
+        planned=planned_ids,
+        include_record=lambda record: str(record.get("status") or "").strip().lower() != "skipped"
+        and bool(str(record.get("command") or record.get("sandbox_command") or "").strip()),
+    )
+    analyzed_ids = logical_ids(analyzed_runs, "ITA", planned=planned_ids)
+    assertion_ids = logical_ids(
+        analyzed_runs,
+        "ITA",
+        planned=planned_ids,
+        include_record=lambda record: str(record.get("classification") or "").strip()
+        in {"confirmed_bug", "plausible_bug", "test_oracle_wrong", "passed_no_bug_reproduced"},
+    )
+    all_ids = planned_ids or (written_ids | attempted_ids | analyzed_ids)
     total = len(all_ids)
-    written = len(written_ids)
-    run = len(raw_ids)
-    analyzed = len(analyzed_ids)
     return {
         "intent_tests_total": total,
-        "intent_tests_planned": total,
-        "intent_tests_written": written,
-        "intent_tests_run": min(run if run else analyzed, total) if total else 0,
-        "intent_tests_analyzed": min(analyzed, total) if total else 0,
+        "intent_tests_planned": len(planned_ids),
+        "intent_tests_written": min(len(written_ids), total) if total else 0,
+        "intent_tests_attempted": min(len(attempted_ids), total) if total else 0,
+        "intent_tests_run": min(len(run_ids), total) if total else 0,
+        "intent_tests_asserted": min(len(assertion_ids), total) if total else 0,
+        "intent_tests_analyzed": min(len(analyzed_ids), total) if total else 0,
     }
 
 
@@ -7586,7 +7699,9 @@ def refresh_coverage_intent_counters(run_dir: Path) -> None:
     counts = intent_test_artifact_counts(run_dir)
     analyzed_results = read_json(run_dir / "intent" / "intent-test-results.json", {}).get("test_results", [])
     coverage["intent_tests_planned"] = counts["intent_tests_planned"]
+    coverage["intent_tests_attempted"] = counts["intent_tests_attempted"]
     coverage["intent_tests_run"] = counts["intent_tests_run"]
+    coverage["intent_tests_asserted"] = counts["intent_tests_asserted"]
     supporting_ids: set[str] = set()
     if isinstance(analyzed_results, list):
         for result in analyzed_results:
@@ -8896,6 +9011,24 @@ def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
     report_disproven = _diagnostic_list(report, "disproven_findings")
     report_weak = [finding for finding in report_appendix if validation_entry_status(finding) == "weak"]
 
+    def weak_report_matches(entry: dict[str, Any]) -> list[dict[str, Any]]:
+        ids = finding_binding_ids(entry)
+        matches = [
+            finding
+            for finding in report_weak
+            if ids and ids.intersection(finding_binding_ids(finding))
+        ]
+        if matches:
+            return matches
+        key = finding_fallback_binding_key(entry)
+        return [
+            finding
+            for finding in report_weak
+            if key is not None and finding_fallback_binding_key(finding) == key
+        ]
+
+    weak_match_counts = [len(weak_report_matches(entry)) for entry in weak_findings if isinstance(entry, dict)]
+
     intent_plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
     intent_targets = _diagnostic_list(intent_plan, "test_targets", "targets", "tests")
     intent_results = read_json(run_dir / "intent" / "intent-test-results.json", {})
@@ -8929,9 +9062,9 @@ def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
         blocker_codes.append("validated_main_missing_from_report")
     if weak_findings and not report_main:
         blocker_codes.append("weak_findings_excluded_from_main")
-    if len(weak_findings) > len(report_appendix):
+    if any(count == 0 for count in weak_match_counts):
         blocker_codes.append("weak_findings_missing_from_report_appendix")
-    if len(report_weak) > len(weak_findings):
+    if any(count > 1 for count in weak_match_counts):
         blocker_codes.append("weak_findings_duplicated_in_report_appendix")
     if repair_count:
         blocker_codes.append("semantic_output_repairs_required")
