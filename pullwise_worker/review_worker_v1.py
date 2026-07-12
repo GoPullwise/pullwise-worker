@@ -2893,7 +2893,7 @@ class ReviewWorkerV1:
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
         effort = effort_for_phase(job, phase)
-        prompt = phase_prompt(phase, run_dir)
+        prompt = phase_prompt(phase, run_dir, job)
         codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
@@ -2969,7 +2969,7 @@ class ReviewWorkerV1:
                 codex_client.run_turn(
                     thread_id=thread_id,
                     repo_dir=repo_dir,
-                    prompt=reviewer_assignment_prompt(run_dir, bundle_id, reviewer_id),
+                    prompt=reviewer_assignment_prompt(run_dir, bundle_id, reviewer_id, job),
                     effort=effort_for_phase(job, "reviewer_fanout"),
                     read_only=False,
                     timeout_seconds=turn_timeout_for_job(job),
@@ -3074,7 +3074,7 @@ class ReviewWorkerV1:
         codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
-            prompt=phase_repair_prompt(phase, run_dir, validation_error),
+            prompt=phase_repair_prompt(phase, run_dir, validation_error, job),
             effort=effort_for_phase(job, phase),
             read_only=False,
             timeout_seconds=turn_timeout_for_job(job),
@@ -3115,7 +3115,7 @@ class ReviewWorkerV1:
         codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
-            prompt=reviewer_json_repair_prompt(run_dir, validation_error),
+            prompt=reviewer_json_repair_prompt(run_dir, validation_error, job),
             effort=effort_for_phase(job, "reviewer_json_validation"),
             read_only=False,
             timeout_seconds=turn_timeout_for_job(job),
@@ -3171,13 +3171,28 @@ class ReviewWorkerV1:
             refresh_coverage_intent_counters(run_dir)
         elif phase == "render_markdown_report":
             report = read_json(run_dir / "report.agent.json", default_agent_report(job))
-            (run_dir / "report.md").write_text(render_markdown(report), encoding="utf-8")
+            (run_dir / "report.md").write_text(
+                render_markdown(report, output_language=output_language_for_job(job)),
+                encoding="utf-8",
+            )
         elif phase == "qa_gate":
             artifact_dir = self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run")
-            write_json(run_dir / "qa.json", qa_gate_payload(repo_dir, run_dir))
+            expected_language = output_language_for_job(job)
+            write_json(
+                run_dir / "qa.json",
+                qa_gate_payload(repo_dir, run_dir, expected_output_language=expected_language),
+            )
             for _attempt in range(2):
                 materialize_artifacts(run_dir, artifact_dir)
-                write_json(run_dir / "qa.json", qa_gate_payload(repo_dir, run_dir, artifact_dir))
+                write_json(
+                    run_dir / "qa.json",
+                    qa_gate_payload(
+                        repo_dir,
+                        run_dir,
+                        artifact_dir,
+                        expected_output_language=expected_language,
+                    ),
+                )
             materialize_artifacts(run_dir, artifact_dir)
         elif phase == "upload_artifacts":
             artifact_dir = self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run")
@@ -3383,6 +3398,37 @@ def _job_model_profile(job: dict[str, Any]) -> dict[str, Any]:
 
 def _job_review_request(job: dict[str, Any]) -> dict[str, Any]:
     return job.get("review_request") if isinstance(job.get("review_request"), dict) else {}
+
+
+def output_language_for_job(job: dict[str, Any] | None) -> str:
+    source = job if isinstance(job, dict) else {}
+    request = _job_review_request(source)
+    language = str(
+        request.get("output_language")
+        or source.get("review_output_language")
+        or source.get("reviewOutputLanguage")
+        or "en"
+    ).strip()
+    return language if re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?", language) else "en"
+
+
+def output_language_prompt_lines(job: dict[str, Any] | None) -> list[str]:
+    language = output_language_for_job(job)
+    if language == "en":
+        return [
+            "Output language: en.",
+            "Write every natural-language title, explanation, evidence summary, recommendation, and report passage in English.",
+            "Keep JSON keys, schema identifiers, code, paths, commands, and quoted source text unchanged.",
+        ]
+    if language == "zh-CN":
+        instruction = "所有自然语言标题、说明、证据摘要、建议和报告正文都必须使用简体中文。"
+    else:
+        instruction = f"Write every natural-language title, explanation, evidence summary, recommendation, and report passage in {language}."
+    return [
+        f"Output language: {language}.",
+        instruction,
+        "Keep JSON keys, schema identifiers, code, paths, commands, and quoted source text unchanged.",
+    ]
 
 
 def _job_review_policy(job: dict[str, Any]) -> dict[str, Any]:
@@ -3724,7 +3770,7 @@ def _adaptive_prompt_context(run_dir: Path) -> list[str]:
         lines.extend(f"  - {item}" for item in dict.fromkeys(emphasis))
     return lines
 
-def phase_prompt(phase: str, run_dir: Path) -> str:
+def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -> str:
     spec = SEMANTIC_PHASE_PROMPT_SPECS.get(phase, {})
     role = str(spec.get("role") or phase.replace("_", " ").title())
     inputs = [str(item) for item in spec.get("inputs", []) if str(item).strip()]
@@ -3741,6 +3787,7 @@ def phase_prompt(phase: str, run_dir: Path) -> str:
         "Write phase outputs only under the active .codex-review tree.",
         f"Run artifact directory: {run_dir}",
     ]
+    lines.extend(output_language_prompt_lines(job))
     if inputs:
         lines.append("Inputs:")
         lines.extend(f"- {item}" for item in inputs)
@@ -3770,7 +3817,12 @@ def reviewer_assignment_output_name(bundle_id: str, reviewer_id: str) -> str:
     return f"{bundle_id}.{reviewer_id.replace('_', '-')}.json"
 
 
-def reviewer_assignment_prompt(run_dir: Path, bundle_id: str, reviewer_id: str) -> str:
+def reviewer_assignment_prompt(
+    run_dir: Path,
+    bundle_id: str,
+    reviewer_id: str,
+    job: dict[str, Any] | None = None,
+) -> str:
     reviewer_template_names = {
         "security": "reviewers/security.md",
         "correctness": "reviewers/correctness.md",
@@ -3804,13 +3856,19 @@ def reviewer_assignment_prompt(run_dir: Path, bundle_id: str, reviewer_id: str) 
         f"--- {template_name} ---",
         prompt_template_text(run_dir, template_name),
     ]
+    lines.extend(output_language_prompt_lines(job))
     adaptive_context = _adaptive_prompt_context(run_dir)
     if adaptive_context:
         lines.extend(adaptive_context)
     return "\n".join(lines) + "\n"
 
 
-def phase_repair_prompt(phase: str, run_dir: Path, validation_error: object) -> str:
+def phase_repair_prompt(
+    phase: str,
+    run_dir: Path,
+    validation_error: object,
+    job: dict[str, Any] | None = None,
+) -> str:
     return "\n".join(
         [
             f"Phase output repair: {phase}",
@@ -3821,14 +3879,17 @@ def phase_repair_prompt(phase: str, run_dir: Path, validation_error: object) -> 
             "Do not call external review/scanning services.",
             "Preserve valid existing evidence and fields; fix malformed or missing JSON/output files.",
             "",
-            phase_prompt(phase, run_dir).rstrip(),
+            phase_prompt(phase, run_dir, job).rstrip(),
         ]
     ) + "\n"
 
 
-def reviewer_json_repair_prompt(run_dir: Path, validation_error: object) -> str:
-    return "\n".join(
-        [
+def reviewer_json_repair_prompt(
+    run_dir: Path,
+    validation_error: object,
+    job: dict[str, Any] | None = None,
+) -> str:
+    lines = [
             "Reviewer JSON output repair",
             f"Local validation failed: {validation_error}",
             "Repair only malformed files under .codex-review/runs/*/raw-reviewers/.",
@@ -3840,7 +3901,8 @@ def reviewer_json_repair_prompt(run_dir: Path, validation_error: object) -> str:
             "",
             f"Run artifact directory: {run_dir}",
         ]
-    ) + "\n"
+    lines.extend(output_language_prompt_lines(job))
+    return "\n".join(lines) + "\n"
 
 
 RISK_HINT_KEYWORDS = {
@@ -4373,6 +4435,129 @@ def route_patterns(route: dict[str, Any]) -> list[str]:
         if isinstance(value, list):
             patterns.extend(str(item).strip() for item in value if str(item).strip())
     return patterns
+
+
+def _canonical_risk_route(value: object, *, tier_hint: str = "") -> dict[str, Any] | None:
+    if isinstance(value, str):
+        path = value.strip()
+        tier = canonical_review_file_tier(tier_hint)
+        return {"path": path, "tier": tier} if path and tier else None
+    if not isinstance(value, dict):
+        return None
+    tier = canonical_review_file_tier(
+        value.get("tier")
+        or value.get("priority")
+        or value.get("risk_tier")
+        or value.get("riskTier")
+        or tier_hint
+    )
+    patterns = route_patterns(value)
+    if not tier or not patterns:
+        return None
+    route: dict[str, Any] = {
+        "path": patterns[0],
+        "tier": tier,
+    }
+    if len(patterns) > 1:
+        route.pop("path", None)
+        route["paths"] = list(dict.fromkeys(patterns))
+    raw_reasons = value.get("reasons")
+    reasons = (
+        [str(reason).strip() for reason in raw_reasons if str(reason).strip()]
+        if isinstance(raw_reasons, list)
+        else []
+    )
+    single_reason = str(value.get("reason") or value.get("rationale") or "").strip()
+    if single_reason and single_reason not in reasons:
+        reasons.append(single_reason)
+    if reasons:
+        route["reasons"] = reasons
+    return route
+
+
+def normalize_risk_routing_artifact(path: Path) -> None:
+    payload = read_json(path, {})
+    if not isinstance(payload, dict) or isinstance(payload.get("routes"), list):
+        return
+    routes: list[dict[str, Any]] = []
+    tiers = payload.get("tiers") if isinstance(payload.get("tiers"), dict) else {}
+    for tier in ("P0", "P1", "P2", "P3", "SKIP"):
+        tier_payload = tiers.get(tier)
+        if isinstance(tier_payload, dict):
+            values = tier_payload.get("files")
+            if not isinstance(values, list):
+                values = tier_payload.get("paths")
+        else:
+            values = tier_payload
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            route = _canonical_risk_route(value, tier_hint=tier)
+            if route is not None:
+                routes.append(route)
+    if not routes and isinstance(payload.get("files"), list):
+        for value in payload["files"]:
+            route = _canonical_risk_route(value)
+            if route is not None:
+                routes.append(route)
+    if not routes:
+        return
+    normalized = dict(payload)
+    normalized["routes"] = routes
+    normalized.pop("tiers", None)
+    normalized.pop("files", None)
+    write_json(path, normalized)
+
+
+def risk_routing_contract_errors(payload: dict[str, Any], run_dir: Path) -> list[str]:
+    routes = payload.get("routes")
+    if not isinstance(routes, list):
+        return ["risk-routing.json routes must be a list"]
+    errors: list[str] = []
+    for index, raw_route in enumerate(routes):
+        if not isinstance(raw_route, dict):
+            errors.append(f"risk-routing.json routes[{index}] must be an object")
+            continue
+        if not risk_route_tier(raw_route):
+            errors.append(f"risk-routing.json routes[{index}] has an invalid tier")
+        if not route_patterns(raw_route):
+            errors.append(f"risk-routing.json routes[{index}] has no path pattern")
+    inventory = read_json(run_dir / "inventory.json", {})
+    source_like = [
+        item
+        for item in inventory.get("files", [])
+        if isinstance(item, dict) and item.get("is_source_like") is True
+    ] if isinstance(inventory, dict) else []
+    if source_like and not routes:
+        errors.append("risk-routing.json routes must not be empty for a non-empty source inventory")
+    return errors
+
+
+def normalize_cluster_output_artifact(path: Path) -> None:
+    payload = read_json(path, {})
+    if not isinstance(payload, dict) or isinstance(payload.get("clusters"), list):
+        return
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        return
+    normalized = dict(payload)
+    normalized["clusters"] = findings
+    normalized.pop("findings", None)
+    write_json(path, normalized)
+
+
+def cluster_output_contract_errors(payload: dict[str, Any]) -> list[str]:
+    clusters = payload.get("clusters")
+    if not isinstance(clusters, list):
+        return ["clusters.json clusters must be a list"]
+    errors: list[str] = []
+    for index, cluster in enumerate(clusters):
+        if not isinstance(cluster, dict):
+            errors.append(f"clusters.json clusters[{index}] must be an object")
+            continue
+        if not str(cluster.get("cluster_id") or cluster.get("id") or "").strip():
+            errors.append(f"clusters.json clusters[{index}] is missing cluster_id")
+    return errors
 
 
 def route_matches_path(pattern: str, path: str) -> bool:
@@ -7008,7 +7193,13 @@ def validate_source_unmodified_for_qa(repo_dir: Path, run_dir: Path, errors: lis
             errors.append(f"source file modified since inventory: {rel}")
 
 
-def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = None) -> dict[str, Any]:
+def qa_gate_payload(
+    repo_dir: Path,
+    run_dir: Path,
+    artifact_dir: Path | None = None,
+    *,
+    expected_output_language: str = "",
+) -> dict[str, Any]:
     errors = []
     warnings = []
     for name in ("report.agent.json", "report.md", "coverage.json", "token-budget.json"):
@@ -7019,6 +7210,20 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
     report = read_json(run_dir / "report.agent.json", {})
     if not isinstance(report, dict) or report.get("schema_id") != "codex-full-repo-review":
         errors.append("report.agent.json is not a codex-full-repo-review object")
+    if expected_output_language:
+        actual_output_language = str(report.get("output_language") or "").strip()
+        if actual_output_language != expected_output_language:
+            errors.append(
+                "report.agent.json output_language does not match the claimed review request"
+            )
+        try:
+            markdown_text = (run_dir / "report.md").read_text(encoding="utf-8")
+        except OSError:
+            markdown_text = ""
+        if expected_output_language == "zh-CN" and markdown_text and not markdown_text.startswith(
+            "# Codex 全仓库审查报告"
+        ):
+            errors.append("report.md does not use the requested zh-CN output language")
     findings = report.get("findings") if isinstance(report.get("findings"), list) else []
     for index, finding in enumerate(findings):
         if not isinstance(finding, dict):
@@ -7416,11 +7621,23 @@ def parse_required_json_output(path: Path) -> dict[str, Any]:
 def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None = None) -> None:
     for rel, expected_schema in PHASE_JSON_OUTPUTS.get(phase, ()):
         path = phase_output_path(run_dir, artifact_dir, rel)
+        if rel == "risk-routing.json" and path.is_file():
+            normalize_risk_routing_artifact(path)
+        if rel == "clusters.json" and path.is_file():
+            normalize_cluster_output_artifact(path)
         payload = parse_required_json_output(path)
         if expected_schema and str(payload.get("schema_version") or "").strip() != expected_schema:
             raise RuntimeError(f"required phase output {path.name} must use schema_version {expected_schema}")
         if rel == "report.agent.json":
             errors = agent_report_contract_errors(payload)
+            if errors:
+                raise RuntimeError(errors[0])
+        if rel == "risk-routing.json":
+            errors = risk_routing_contract_errors(payload, run_dir)
+            if errors:
+                raise RuntimeError(errors[0])
+        if rel == "clusters.json":
+            errors = cluster_output_contract_errors(payload)
             if errors:
                 raise RuntimeError(errors[0])
         if rel == "validated-findings.json":
@@ -7798,6 +8015,7 @@ def default_agent_report(job: dict[str, Any]) -> dict[str, Any]:
         "schema_version": "v1",
         "run_id": safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"),
         "commit_sha": str(job.get("commit") or "pending"),
+        "output_language": output_language_for_job(job),
         "summary": {"overall_risk": "unknown", "result_status": "complete"},
         "coverage": {},
         "findings": [],
@@ -7859,12 +8077,14 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
         or value.get("line")
         or value.get("line_number")
         or value.get("lineNumber")
+        or value.get("start")
     )
     end = _qa_int(
         value.get("end_line")
         or value.get("line_end")
         or value.get("endLine")
         or value.get("lineEnd")
+        or value.get("end")
         or start
     )
     if start <= 0:
@@ -7892,6 +8112,8 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
         "endLine",
         "line_number",
         "lineNumber",
+        "start",
+        "end",
         "line_range",
         "lineRange",
         "range",
@@ -7939,6 +8161,20 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(finding.get(key), list):
                 raw_locations = finding[key]
                 break
+    if not raw_locations and isinstance(finding.get("line_evidence"), dict):
+        raw_locations = [
+            {
+                **finding["line_evidence"],
+                "path": finding.get("path") or finding.get("file") or finding.get("filename"),
+            }
+        ]
+    if not raw_locations and isinstance(finding.get("lineEvidence"), dict):
+        raw_locations = [
+            {
+                **finding["lineEvidence"],
+                "path": finding.get("path") or finding.get("file") or finding.get("filename"),
+            }
+        ]
     if not raw_locations:
         finding_location = agent_report_finding_location(finding)
         if finding_location is not None:
@@ -8105,6 +8341,7 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     report["schema_version"] = "v1"
     report["run_id"] = str(report.get("run_id") or default_agent_report(job)["run_id"])
     report["commit_sha"] = resolved_report_commit_sha(run_dir, report, job)
+    report["output_language"] = output_language_for_job(job)
     summary = report.get("summary")
     if not isinstance(summary, dict):
         summary = {"overall_risk": "unknown", "result_status": "complete"}
@@ -8257,7 +8494,59 @@ def _coverage_summary(coverage: object) -> str:
     return "; ".join(parts) if parts else "recorded without file counts"
 
 
-def render_markdown(report: dict[str, Any]) -> str:
+def _zh_cn_markdown(lines: list[str]) -> list[str]:
+    exact = {
+        "# Codex Full Repository Review Report": "# Codex 全仓库审查报告",
+        "## Summary": "## 摘要",
+        "## Top Findings": "## 主要问题",
+        "## Intent Test Validation Summary": "## 意图测试验证摘要",
+        "## Recommended Follow-up": "## 建议后续工作",
+        "## Machine-readable Sources": "## 机器可读来源",
+        "No confirmed findings.": "没有已确认的问题。",
+        "No intent tests were run or recorded for this review.": "本次审查没有运行或记录意图测试。",
+        "Use the recommendations in the validated main findings above to plan the next fix pass.": "请根据以上已验证主要问题中的建议安排下一轮修复。",
+        "No immediate follow-up task was generated by this review. If this run was meant to verify a specific risky change, inspect the coverage and intent test artifacts before treating the result as complete assurance.": "本次审查没有生成需要立即执行的后续任务。如果本次运行用于验证特定高风险变更，请先检查覆盖率和意图测试产物，再将结果视为完整保障。",
+        "- `report.agent.json` contains the normalized findings and follow-up task list.": "- `report.agent.json` 包含规范化问题和后续任务列表。",
+        "- `intent-test-results.json` contains the detailed intent-test validation records when tests were generated.": "- 生成测试时，`intent-test-results.json` 包含详细的意图测试验证记录。",
+        "- `artifact-manifest.json` lists the complete set of uploaded worker artifacts.": "- `artifact-manifest.json` 列出所有已上传的 worker 产物。",
+        "This review completed without confirmed findings in the validated report. That means the worker did not confirm an actionable issue from this run; it is not a proof that the repository has no defects.": "本次审查的验证报告中没有已确认问题。这表示 worker 在本次运行中没有确认可行动问题，但不代表仓库不存在缺陷。",
+    }
+    prefixes = {
+        "- Mode: ": "- 模式：",
+        "- Commit: ": "- 提交：",
+        "- Result status: ": "- 结果状态：",
+        "- Overall risk: ": "- 总体风险：",
+        "- Confirmed findings: ": "- 已确认问题：",
+        "- Plausible findings: ": "- 可能问题：",
+        "- Intent tests run: ": "- 已运行意图测试：",
+        "- Coverage: ": "- 覆盖率：",
+        "- ID: ": "- ID：",
+        "- Category: ": "- 类别：",
+        "- Confidence: ": "- 置信度：",
+        "- Location: ": "- 位置：",
+        "- Impact: ": "- 影响：",
+        "- Recommendation: ": "- 建议：",
+        "- Next agent task: ": "- 下一项 agent 任务：",
+        "- Evidence:": "- 证据：",
+        "- Status counts: ": "- 状态统计：",
+        "- Classification counts: ": "- 分类统计：",
+    }
+    localized: list[str] = []
+    for line in lines:
+        if line in exact:
+            localized.append(exact[line])
+            continue
+        replacement = line
+        for prefix, translated in prefixes.items():
+            if line.startswith(prefix):
+                replacement = translated + line[len(prefix) :]
+                break
+        replacement = replacement.replace("[plausible]", "[可能]")
+        localized.append(replacement)
+    return localized
+
+
+def render_markdown(report: dict[str, Any], *, output_language: str = "") -> str:
     findings = report.get("findings") if isinstance(report.get("findings"), list) else []
     confirmed_findings = [
         finding
@@ -8425,6 +8714,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
         ]
     )
+    language = output_language or str(report.get("output_language") or "en").strip() or "en"
+    if language == "zh-CN":
+        lines = _zh_cn_markdown(lines)
     return "\n".join(lines)
 
 def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: str, *, error: str = "") -> None:
