@@ -2015,6 +2015,18 @@ def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: P
         if any(part == "test" or part.startswith("test:") for part in lowered[1:]):
             return True, f"{executable} test command is allowed"
         return False, f"{executable} command must run a test script"
+    if executable == "node":
+        if len(argv) < 3 or lowered[1] != "--test":
+            return False, "node command must use --test with a contained test file"
+        for raw_path in argv[2:]:
+            if raw_path.startswith("-"):
+                return False, "node --test options are not allowed"
+            test_path = Path(raw_path)
+            if not test_path.is_absolute():
+                test_path = cwd / test_path
+            if not path_is_under(test_path, validation_repo) or test_path.suffix.lower() not in {".js", ".mjs", ".cjs"}:
+                return False, "node --test path must be a contained JavaScript test file"
+        return True, "node --test is allowed"
     if executable == "go":
         return (len(lowered) >= 2 and lowered[1] == "test", "go command must be go test")
     if executable == "cargo":
@@ -3657,6 +3669,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**.",
             "Every generated test must include target_test_ids linking it to the intent-test-plan target(s) it implements.",
+            "Prefer the repository's existing runnable test framework. If a JavaScript target is dependency-free and the package-local runner is unavailable, use Node's built-in node --test runner; otherwise record the dependency limitation instead of inventing a runnable command.",
             "Do not modify the main repo workspace, install dependencies, use production secrets, or use network.",
             "Return JSON describing created test files.",
         ],
@@ -5182,7 +5195,9 @@ def _intent_inferred_command(generated: dict[str, Any], target: dict[str, Any], 
             or framework
             or ""
         ).strip().lower()
-    if framework in {"vitest", "jest", "node", "npm"} or suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+    if framework == "node" and suffix in {".js", ".mjs", ".cjs"}:
+        return ["node", "--test", rel_path]
+    if framework in {"vitest", "jest", "npm"} or suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
         return ["npm", "test", "--", rel_path]
     if framework in {"unittest", "python-unittest"}:
         return ["python", "-m", "unittest", rel_path]

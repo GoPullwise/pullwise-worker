@@ -2292,6 +2292,27 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertIn("does not compile on worker Python", error)
 
+    def test_intent_policy_allows_only_contained_node_builtin_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            test_path = validation_repo / "tests" / "intent.test.mjs"
+            test_path.parent.mkdir()
+            test_path.write_text("import test from 'node:test';\n", encoding="utf-8")
+
+            allowed = intent_test_command_policy(
+                ["node", "--test", "tests/intent.test.mjs"],
+                validation_repo,
+                validation_repo,
+            )
+            escaped = intent_test_command_policy(
+                ["node", "--test", "../outside.test.mjs"],
+                validation_repo,
+                validation_repo,
+            )
+
+        self.assertEqual(allowed, (True, "node --test is allowed"))
+        self.assertEqual(escaped[0], False)
+
     def test_refresh_coverage_intent_counters_uses_actual_intent_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
