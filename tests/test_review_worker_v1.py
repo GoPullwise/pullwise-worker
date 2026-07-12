@@ -7034,6 +7034,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("dependency_missing is absence of dynamic evidence, not disproof", validator_prompt)
         self.assertIn("static source and contract evidence can still support plausible", validator_prompt)
         self.assertIn("Do not inherit reviewer severity", reporter_prompt)
+        self.assertIn("Operator-only UI stale-state races without durable server-side data loss", reporter_prompt)
 
     def test_phase_prompt_omits_adaptive_context_when_profile_missing_or_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

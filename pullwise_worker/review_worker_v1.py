@@ -3647,6 +3647,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Include only confirmed or plausible actionable findings in the main list.",
             "Do not inherit reviewer severity without re-calibrating it to demonstrated reachability, attacker control, user impact, and existing containment.",
+            "Operator-only UI stale-state races without durable server-side data loss, privilege bypass, or service outage are normally medium or lower, not high.",
             "Weak findings go to the top-level appendix_findings list; disproven findings are excluded from main findings.",
             "Preserve coverage, skipped scope, validation sources, and next_agent_task.",
             "Write JSON only using codex-full-repo-review/v1.",
