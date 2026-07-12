@@ -188,6 +188,8 @@ class DebugBundleAuditTest(unittest.TestCase):
 
         self.assertEqual(directory_result["summary"]["errors"], 0, directory_result["issues"])
         self.assertEqual(zip_result["summary"]["errors"], 0, zip_result["issues"])
+        self.assertEqual(directory_result["facts"]["terminal_status"], "completed")
+        self.assertEqual(directory_result["facts"]["findings"], 1)
 
     def test_generated_test_own_id_prevents_false_uncovered_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -231,8 +233,6 @@ class DebugBundleAuditTest(unittest.TestCase):
             result = audit_bundle(root)
 
         self.assertIn("semantic_routing_noncanonical", issue_codes(result))
-        self.assertEqual(directory_result["facts"]["terminal_status"], "completed")
-        self.assertEqual(directory_result["facts"]["findings"], 1)
 
     def test_pipeline_diagnostics_surface_review_quality_and_disposition_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -3611,6 +3611,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Review bundles in tier order using security, correctness, test-gap, and correctness-lite perspectives as applicable.",
             "Every finding must be concrete, located, evidenced, actionable, and include false-positive risk.",
             "For security severity, demonstrate an end-to-end attacker-controlled path to the sink and account for producer-side validation, generated server values, and browser/process isolation. If controllability is unproven, label the issue defense-in-depth and do not rate it high or critical.",
+            "Before reporting an async UI race or duplicate mutation, inspect disabled state, synchronous ref/lock guards, event ordering, and server idempotency; demonstrate that a second user action reaches a harmful non-idempotent operation.",
             "Write JSON only using codex-reviewer-output/v1.",
         ],
     },
@@ -3681,6 +3682,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Check producer invariants and the complete trust boundary before confirming exploitability. Treat an unknown cross-service producer as unresolved controllability, not proof of attacker control, and lower confidence or severity accordingly.",
             "Do not transfer a payload shape from one endpoint to another. If the failure depends solely on an uninspected producer using the assumed shape, classify the candidate weak rather than plausible or confirmed.",
             "dependency_missing is absence of dynamic evidence, not disproof; do not downgrade an otherwise well-supported correctness finding solely because the cloned workspace lacks a local test runner or dependencies.",
+            "Disprove UI race candidates when disabled controls or synchronous in-flight locks prevent the second user event. Treat duplicate requests to a demonstrated idempotent endpoint as informational unless concrete user-visible harm remains.",
             "When no evidence contradicts the failure scenario, concrete static source and contract evidence can still support plausible even if the intent test could not execute.",
             "Classify confirmed, plausible, weak, or disproven; do not add unrelated findings.",
             "Write JSON only using validation-output/v1.",
@@ -3695,6 +3697,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Include only confirmed or plausible actionable findings in the main list.",
             "Do not inherit reviewer severity without re-calibrating it to demonstrated reachability, attacker control, user impact, and existing containment.",
             "Operator-only UI stale-state races without durable server-side data loss, privilege bypass, or service outage are normally medium or lower, not high.",
+            "Exclude harmless duplicate requests when the receiving endpoint is idempotent and no user-visible incorrect state, privilege impact, data loss, or material load is demonstrated.",
             "Weak findings go to the top-level appendix_findings list; disproven findings are excluded from main findings.",
             "Preserve coverage, skipped scope, validation sources, and next_agent_task.",
             "Write JSON only using codex-full-repo-review/v1.",
@@ -3853,6 +3856,7 @@ def reviewer_assignment_prompt(
         "Inspect the concrete source in the packed bundle and follow referenced repository call sites when needed.",
         "Existing tests are contract evidence, not proof that the implementation is correct.",
         "Actively look for concrete failure scenarios before concluding that findings is empty.",
+        "Before reporting an async UI race or duplicate mutation, inspect disabled state, synchronous ref/lock guards, event ordering, and server idempotency; prove that the second action reaches a harmful non-idempotent operation.",
         "Every finding must include id, title, severity, confidence, path/line evidence, impact, recommendation, false_positive_risk, and next_agent_task.",
         "If findings is empty, review_summary must document concrete areas examined, checks performed, and rejected candidates with source-backed reasons.",
         "Write one JSON object only using schema_version codex-reviewer-output/v1.",
@@ -4811,9 +4815,26 @@ def _bundle_component_key(path: str) -> str:
 def split_oversized_bundle_item(item: dict[str, Any]) -> list[dict[str, Any]]:
     estimated_tokens = max(0, int(item.get("estimated_tokens") or 0))
     line_count = max(0, int(item.get("line_count") or 0))
-    if estimated_tokens <= MAX_BUNDLE_ESTIMATED_TOKENS or line_count <= 1:
+    if estimated_tokens <= MAX_BUNDLE_ESTIMATED_TOKENS:
         return [item]
     segment_count = max(2, math.ceil(estimated_tokens / MAX_BUNDLE_ESTIMATED_TOKENS))
+    if line_count <= 1:
+        estimated_characters = max(1, estimated_tokens * 4)
+        characters_per_segment = math.ceil(estimated_characters / segment_count)
+        segments: list[dict[str, Any]] = []
+        for index in range(segment_count):
+            start_char = index * characters_per_segment
+            if start_char >= estimated_characters:
+                break
+            end_char = min(estimated_characters, (index + 1) * characters_per_segment)
+            segment = dict(item)
+            segment["estimated_tokens"] = math.ceil((end_char - start_char) / 4)
+            segment["_segment_start_line"] = 1
+            segment["_segment_end_line"] = 1
+            segment["_segment_start_char"] = start_char
+            segment["_segment_end_char"] = end_char
+            segments.append(segment)
+        return segments
     segment_count = min(segment_count, line_count)
     lines_per_segment = math.ceil(line_count / segment_count)
     segments: list[dict[str, Any]] = []
@@ -4883,6 +4904,15 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
             "path": str(item.get("path")),
             "start_line": int(item.get("_segment_start_line")),
             "end_line": int(item.get("_segment_end_line")),
+            **(
+                {
+                    "start_char": int(item.get("_segment_start_char")),
+                    "end_char": int(item.get("_segment_end_char")),
+                }
+                if item.get("_segment_start_char") is not None
+                and item.get("_segment_end_char") is not None
+                else {}
+            ),
         }
         for item in files
         if item.get("path")
@@ -4925,7 +4955,11 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
             path = repo_dir / str(rel)
             start_line = max(1, int(entry.get("start_line") or 1))
             end_line = max(start_line, int(entry.get("end_line") or 0)) if entry.get("end_line") else 0
+            start_char = max(0, int(entry.get("start_char") or 0))
+            end_char = max(start_char, int(entry.get("end_char") or 0)) if entry.get("end_char") is not None else 0
             range_label = f":{start_line}-{end_line}" if end_line else ""
+            if entry.get("start_char") is not None and entry.get("end_char") is not None:
+                range_label += f" chars {start_char}-{end_char}"
             lines.append(f"### {rel}{range_label}")
             lines.append("")
             if not path.is_file():
@@ -4938,6 +4972,8 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
             lines.append(f"```{suffix}")
             source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             selected_lines = source_lines[start_line - 1 : end_line or None]
+            if entry.get("start_char") is not None and entry.get("end_char") is not None and selected_lines:
+                selected_lines = [selected_lines[0][start_char:end_char]]
             for index, source_line in enumerate(selected_lines, start=start_line):
                 lines.append(f"{index} | {source_line}")
             lines.append("```")
