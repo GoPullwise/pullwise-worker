@@ -3788,6 +3788,12 @@ def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -
         f"Run artifact directory: {run_dir}",
     ]
     lines.extend(output_language_prompt_lines(job))
+    if phase == "intent_test_writing":
+        lines.append(
+            "Worker Python runtime: "
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}; "
+            "generated Python tests must compile and import on this exact runtime."
+        )
     if inputs:
         lines.append("Inputs:")
         lines.extend(f"- {item}" for item in inputs)
@@ -8446,6 +8452,109 @@ def resolved_report_commit_sha(run_dir: Path, report: dict[str, Any] | None, job
             return commit
     return "pending"
 
+def enrich_finding_intent_evidence(run_dir: Path, finding: dict[str, Any]) -> None:
+    validation_sources = (
+        dict(finding.get("validation_sources"))
+        if isinstance(finding.get("validation_sources"), dict)
+        else {}
+    )
+    intent_signal = (
+        dict(validation_sources.get("intent_test"))
+        if isinstance(validation_sources.get("intent_test"), dict)
+        else {}
+    )
+    test_id = str(intent_signal.get("test_id") or intent_signal.get("id") or "").strip()
+    if not test_id:
+        return
+    analyzed_payload = read_json(run_dir / "intent" / "intent-test-results.json", {})
+    raw_payload = read_json(run_dir / "intent" / "intent-test-results.raw.json", {})
+    source_payload = read_json(run_dir / "intent" / "intent-test-source.json", {})
+    analyzed = next(
+        (
+            item
+            for item in analyzed_payload.get("test_results", [])
+            if isinstance(item, dict)
+            and test_id in {_intent_test_id(item, ""), *_intent_related_test_ids(item)}
+        ),
+        {},
+    ) if isinstance(analyzed_payload, dict) else {}
+    raw_result = next(
+        (
+            item
+            for item in raw_payload.get("test_runs", [])
+            if isinstance(item, dict)
+            and test_id in {_intent_test_id(item, ""), *_intent_related_test_ids(item)}
+        ),
+        {},
+    ) if isinstance(raw_payload, dict) else {}
+    generated = next(
+        (
+            item
+            for item in source_payload.get("generated_tests", [])
+            if isinstance(item, dict)
+            and test_id in {_intent_test_id(item, ""), *_intent_related_test_ids(item)}
+        ),
+        {},
+    ) if isinstance(source_payload, dict) else {}
+    if isinstance(analyzed, dict):
+        for key in ("classification", "status", "confidence", "finding_confidence_impact"):
+            if analyzed.get(key) is not None:
+                intent_signal[key] = analyzed.get(key)
+        artifact_refs = analyzed.get("artifact_refs") or analyzed.get("artifacts")
+        if isinstance(artifact_refs, list):
+            intent_signal["artifact_refs"] = artifact_refs
+    command = str(raw_result.get("command") or "").strip() if isinstance(raw_result, dict) else ""
+    if command:
+        intent_signal["command"] = command
+    output_texts: list[str] = []
+    log_paths: list[str] = []
+    for key in ("stdout_path", "stderr_path"):
+        raw_path = str(raw_result.get(key) or "").strip() if isinstance(raw_result, dict) else ""
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        log_paths.append(f"intent/test-output/{path.name}")
+        try:
+            output = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            output = ""
+        if output:
+            output_texts.append(output[-4000:])
+    if log_paths:
+        intent_signal["log_path"] = log_paths[-1]
+    if output_texts:
+        intent_signal["output"] = "\n".join(output_texts)[-4000:]
+    validation_sources["intent_test"] = intent_signal
+    finding["validation_sources"] = validation_sources
+
+    reproduction = dict(finding.get("reproduction")) if isinstance(finding.get("reproduction"), dict) else {}
+    if command and not reproduction.get("commands"):
+        reproduction["commands"] = [command]
+    generated_path = _intent_source_path_from_entry(generated) if isinstance(generated, dict) else ""
+    if generated_path and not reproduction.get("testFile"):
+        reproduction["testFile"] = generated_path
+    if log_paths and not reproduction.get("logPath"):
+        reproduction["logPath"] = log_paths[-1]
+    if output_texts and not reproduction.get("actual"):
+        reproduction["actual"] = output_texts[-1]
+    if reproduction:
+        finding["reproduction"] = reproduction
+
+    if command or log_paths or output_texts:
+        evidence = list(finding.get("evidence")) if isinstance(finding.get("evidence"), list) else []
+        evidence.append(
+            {
+                "type": "test",
+                "label": f"Intent test {test_id}",
+                "summary": f"Intent-test classification: {intent_signal.get('classification') or 'unknown'}.",
+                "command": command,
+                "logPath": log_paths[-1] if log_paths else "",
+                "output": output_texts[-1] if output_texts else "",
+            }
+        )
+        finding["evidence"] = evidence
+
+
 def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     path = run_dir / "report.agent.json"
     raw = read_json(path, {}) if path.exists() else {}
@@ -8487,6 +8596,7 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
             if not str(finding.get("id") or "").strip():
                 finding["id"] = f"finding-{len(findings) + 1:03d}"
             finding["validator_status"] = validation_entry_status(validation_entry)
+            enrich_finding_intent_evidence(run_dir, finding)
             findings.append(finding)
             continue
         demoted = dict(finding)

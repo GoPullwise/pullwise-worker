@@ -314,7 +314,13 @@ def related_test_ids(record: Any) -> list[str]:
     return result
 
 
-def logical_test_ids(records: Any, prefix: str, *, use_related: bool = True) -> set[str]:
+def logical_test_ids(
+    records: Any,
+    prefix: str,
+    *,
+    use_related: bool = True,
+    target_ids: set[str] | None = None,
+) -> set[str]:
     result: set[str] = set()
     if not isinstance(records, list):
         return result
@@ -322,11 +328,12 @@ def logical_test_ids(records: Any, prefix: str, *, use_related: bool = True) -> 
         if not isinstance(record, dict):
             continue
         test_id = record_id(record, f"{prefix}-{index + 1:03d}")
-        if test_id:
-            result.add(test_id)
         related = related_test_ids(record) if use_related else []
-        if related:
-            result.update(related)
+        candidates = ([test_id] if test_id else []) + related
+        if target_ids is not None:
+            result.update(candidate for candidate in candidates if candidate in target_ids)
+        else:
+            result.update(candidates)
     return result
 
 
@@ -874,25 +881,35 @@ class BundleAudit:
         ]
         generated = executable_generated_tests(all_generated)
         runs = list_value(raw, "test_runs", "results")
+        started_runs = [
+            run
+            for run in runs
+            if isinstance(run, dict)
+            and str(run.get("status") or "").strip().lower() != "skipped"
+            and bool(str(run.get("command") or run.get("sandbox_command") or "").strip())
+        ]
         planned_ids = logical_test_ids(targets, "ITP", use_related=False)
-        written_ids = logical_test_ids(generated, "ITV")
+        written_ids = logical_test_ids(generated, "ITV", target_ids=planned_ids or None)
         generated_id_map = {
             record_id(record): set(related_test_ids(record) or [record_id(record)])
             for record in all_generated
             if record_id(record)
         }
         run_ids: set[str] = set()
-        for index, run in enumerate(runs):
+        for index, run in enumerate(started_runs):
             if not isinstance(run, dict):
                 continue
             related = related_test_ids(run)
             raw_id = record_id(run, f"ITR-{index + 1:03d}")
             if related:
-                run_ids.update(related)
+                candidates = set(related)
             elif raw_id in generated_id_map:
-                run_ids.update(generated_id_map[raw_id])
+                candidates = generated_id_map[raw_id]
             elif raw_id:
-                run_ids.add(raw_id)
+                candidates = {raw_id}
+            else:
+                candidates = set()
+            run_ids.update(candidates.intersection(planned_ids) if planned_ids else candidates)
         uncovered = planned_ids - written_ids
         if uncovered:
             self.issue(
@@ -989,7 +1006,7 @@ class BundleAudit:
                 classifications=sorted(classifications),
             )
         counts = {
-            "total": len(planned_ids | written_ids | run_ids),
+            "total": len(planned_ids) if planned_ids else len(written_ids | run_ids),
             "written": len(written_ids),
             "run": len(run_ids),
         }

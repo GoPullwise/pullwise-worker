@@ -79,6 +79,7 @@ from pullwise_worker.review_worker_v1 import (
     materialize_artifacts,
     materialize_terminal_artifacts,
     pack_bundles,
+    pipeline_diagnostics_payload,
     prepare_validation_workspace,
     qa_gate_payload,
     repair_agent_report_artifact,
@@ -104,7 +105,14 @@ def write_completed_artifact_inputs(run_dir: Path) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "report.md").write_text("# Codex Full Repository Review Report\n", encoding="utf-8")
     (run_dir / "report.agent.json").write_text(
-        json.dumps({"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": []}),
+        json.dumps(
+            {
+                "schema_id": "codex-full-repo-review",
+                "schema_version": "v1",
+                "output_language": "en",
+                "findings": [],
+            }
+        ),
         encoding="utf-8",
     )
     (run_dir / "coverage.json").write_text(
@@ -2263,7 +2271,18 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             intent_dir.mkdir(parents=True)
             (run_dir / "coverage.json").write_text(json.dumps({"schema_version": "coverage/v1", "intent_tests_planned": 0, "intent_tests_run": 0, "intent_tests_supporting_findings": 0}), encoding="utf-8")
             (intent_dir / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-001"}, {"test_id": "ITV-002"}]}), encoding="utf-8")
-            (intent_dir / "intent-test-results.raw.json").write_text(json.dumps({"schema_version": "intent-test-run-results/v1", "test_runs": [{"test_id": "ITV-001"}, {"test_id": "ITV-002"}]}), encoding="utf-8")
+            (intent_dir / "intent-test-results.raw.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-run-results/v1",
+                        "test_runs": [
+                            {"test_id": "ITV-001", "status": "failed", "command": "python -m unittest tests/a.py"},
+                            {"test_id": "ITV-002", "status": "passed", "command": "python -m unittest tests/b.py"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             (intent_dir / "intent-test-results.json").write_text(json.dumps({"schema_version": "intent-test-result/v1", "test_results": [{"test_id": "ITV-001", "linked_finding_ids": ["finding-1"]}, {"test_id": "ITV-002", "linked_finding_ids": ["finding-1", "finding-2"]}]}), encoding="utf-8")
 
             refresh_coverage_intent_counters(run_dir)
@@ -2741,7 +2760,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": "intent-test-run-results/v1",
-                        "test_runs": [{"test_id": "ITP-001", "status": "failed"}, {"test_id": "ITV-002", "status": "skipped"}],
+                        "test_runs": [
+                            {
+                                "test_id": "ITP-001",
+                                "status": "failed",
+                                "command": "python -m unittest a.test",
+                            },
+                            {"test_id": "ITV-002", "status": "skipped"},
+                        ],
                     }
                 ),
                 encoding="utf-8",
@@ -2751,10 +2777,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             refresh_coverage_intent_counters(run_dir)
             coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(running_data["intent_tests_total"], 2)
-        self.assertEqual(running_data["intent_tests_run"], 2)
-        self.assertEqual(coverage["intent_tests_planned"], 2)
-        self.assertEqual(coverage["intent_tests_run"], 2)
+        self.assertEqual(running_data["intent_tests_total"], 1)
+        self.assertEqual(running_data["intent_tests_run"], 1)
+        self.assertEqual(coverage["intent_tests_planned"], 1)
+        self.assertEqual(coverage["intent_tests_run"], 1)
 
     def test_summary_payload_normalizes_priority_style_finding_severities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -6757,7 +6783,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "intent" / "intent-test-results.raw.json").write_text(
-                json.dumps({"test_runs": [{"id": "itv_1"}]}),
+                json.dumps({"test_runs": [{"id": "itv_1", "status": "passed", "command": "python -m unittest test_one.py"}]}),
                 encoding="utf-8",
             )
             materialize_artifacts(run_dir, artifact_dir)
@@ -6832,7 +6858,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 run_dir / "intent" / "intent-test-results.raw.json",
                 {
                     "schema_version": "intent-test-run-results/v1",
-                    "test_runs": [{"test_id": "ITV-001", "target_test_ids": target_ids, "status": "passed"}],
+                    "test_runs": [{"test_id": "ITV-001", "target_test_ids": target_ids, "status": "passed", "command": "python -m unittest tests/test_intent.py"}],
                 },
             )
             write_json(
@@ -9208,6 +9234,115 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(report["schema_id"], "codex-full-repo-review")
         self.assertEqual(report["schema_version"], "v1")
         self.assertIn("next_agent_tasks", report)
+
+    def test_report_repair_carries_dynamic_intent_evidence_into_top_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            intent_dir = run_dir / "intent"
+            output_dir = intent_dir / "test-output"
+            output_dir.mkdir(parents=True)
+            stdout_path = output_dir / "ITV-001.stdout.log"
+            stderr_path = output_dir / "ITV-001.stderr.log"
+            stdout_path.write_text("", encoding="utf-8")
+            stderr_path.write_text("AssertionError: expected unittest routing", encoding="utf-8")
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [
+                        {
+                            **finding_payload("CL-001"),
+                            "validation_sources": {"intent_test": {"test_id": "ITV-001"}},
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(validation_entry("CL-001", status="confirmed")),
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [{"test_id": "ITV-001", "path": "tests/test_intent.py"}],
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [
+                        {
+                            "test_id": "ITV-001",
+                            "status": "failed",
+                            "command": "python -m unittest tests/test_intent.py",
+                            "stdout_path": str(stdout_path),
+                            "stderr_path": str(stderr_path),
+                        }
+                    ],
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-results.json",
+                {
+                    "schema_version": "intent-test-result/v1",
+                    "test_results": [
+                        {"test_id": "ITV-001", "status": "failed", "classification": "confirmed_bug"}
+                    ],
+                },
+            )
+
+            repair_agent_report_artifact(
+                run_dir,
+                {"job_id": "job_1", "run_id": "run_1", "commit": "abc1234"},
+            )
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+            finding = report["findings"][0]
+
+        self.assertEqual(finding["validation_sources"]["intent_test"]["classification"], "confirmed_bug")
+        self.assertEqual(finding["reproduction"]["commands"], ["python -m unittest tests/test_intent.py"])
+        self.assertEqual(finding["reproduction"]["logPath"], "intent/test-output/ITV-001.stderr.log")
+        self.assertTrue(any(item.get("type") == "test" for item in finding["evidence"]))
+
+    def test_pipeline_diagnostics_does_not_treat_standalone_weak_appendix_as_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(
+                run_dir / "validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [],
+                    "weak_findings": [],
+                    "disproven_findings": [],
+                },
+            )
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "findings": [],
+                    "appendix_findings": [
+                        {
+                            "id": "test-gap-1",
+                            "validator_status": "weak",
+                            "title": "Standalone coverage gap",
+                            "locations": [{"path": "app.py", "start_line": 1, "end_line": 1}],
+                        }
+                    ],
+                },
+            )
+
+            diagnostics = pipeline_diagnostics_payload(run_dir)
+
+        self.assertNotIn(
+            "weak_findings_duplicated_in_report_appendix",
+            diagnostics["blocker_codes"],
+        )
 
 
 if __name__ == "__main__":

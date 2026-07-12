@@ -188,6 +188,49 @@ class DebugBundleAuditTest(unittest.TestCase):
 
         self.assertEqual(directory_result["summary"]["errors"], 0, directory_result["issues"])
         self.assertEqual(zip_result["summary"]["errors"], 0, zip_result["issues"])
+
+    def test_generated_test_own_id_prevents_false_uncovered_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            source_path = root / "worker/run/intent/intent-test-source.json"
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+            source["generated_tests"][0]["test_ids"] = ["descriptive-contract-id"]
+            source["generated_tests"][0]["test_id"] = "intent-1"
+            write_json(root, "worker/run/intent/intent-test-source.json", source)
+
+            result = audit_bundle(root)
+
+        self.assertNotIn("intent_targets_uncovered", issue_codes(result))
+
+    def test_noncanonical_semantic_routing_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/run/risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "tiers": {"P0": {"files": ["src/a.py"]}},
+                },
+            )
+            write_json(
+                root,
+                "worker/run/effective-risk-routing.json",
+                {
+                    "schema_version": "effective-risk-routing/v1",
+                    "sources": {"semantic_routes": 0},
+                    "routes": [
+                        {"path": "src/a.py", "tier": "P1", "source": "generic"},
+                        {"path": "src/b.py", "tier": "P1", "source": "generic"},
+                    ],
+                },
+            )
+
+            result = audit_bundle(root)
+
+        self.assertIn("semantic_routing_noncanonical", issue_codes(result))
         self.assertEqual(directory_result["facts"]["terminal_status"], "completed")
         self.assertEqual(directory_result["facts"]["findings"], 1)
 
@@ -322,7 +365,7 @@ class DebugBundleAuditTest(unittest.TestCase):
             result = audit_bundle(root)
 
         codes = issue_codes(result)
-        self.assertEqual(result["facts"]["intent_tests"], {"total": 2, "written": 2, "run": 2})
+        self.assertEqual(result["facts"]["intent_tests"], {"total": 2, "written": 2, "run": 0})
         self.assertTrue(
             {
                 "debug_status_mismatch",
