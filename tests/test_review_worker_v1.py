@@ -2735,6 +2735,46 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(report["summary"]["weak_count"], 1)
         self.assertEqual(summary["finding_counts"]["weak_appendix"], 1)
 
+    def test_report_repair_deduplicates_weak_findings_with_overlapping_source_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+            weak_report = finding_payload("A-001", title="Weak protocol ordering", severity="medium")
+            weak_report["source_finding_ids"] = ["COR-001", "TG-001"]
+            weak_report["validation_status"] = "weak"
+            write_json(
+                run_dir / "report.agent.json",
+                {
+                    "schema_id": "codex-full-repo-review",
+                    "schema_version": "v1",
+                    "summary": {"overall_risk": "unknown", "result_status": "complete"},
+                    "findings": [],
+                    "appendix_findings": [weak_report],
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                {
+                    "schema_version": "validation-output/v1",
+                    "validated_findings": [],
+                    "weak_findings": [
+                        {
+                            "cluster_id": "CL-001",
+                            "finding_ids": ["COR-001", "TG-001"],
+                            "status": "weak",
+                        }
+                    ],
+                    "disproven_findings": [],
+                },
+            )
+
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+            report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+        self.assertEqual([finding["id"] for finding in report["appendix_findings"]], ["A-001"])
+        self.assertEqual(report["summary"]["weak_count"], 1)
+
     def test_agent_report_repair_derives_unknown_overall_risk_from_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run_1"

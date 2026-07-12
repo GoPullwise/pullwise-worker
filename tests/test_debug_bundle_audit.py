@@ -603,6 +603,43 @@ class DebugBundleAuditTest(unittest.TestCase):
         self.assertEqual(issue["severity"], "error")
         self.assertEqual(issue["details"]["validation_ids"], ["candidate-2"])
 
+    def test_duplicate_weak_appendix_entries_are_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            report = json.loads((root / "worker/run/report.agent.json").read_text(encoding="utf-8"))
+            report["appendix_findings"] = [
+                {
+                    "id": "A-001",
+                    "source_finding_ids": ["COR-001", "TG-001"],
+                    "title": "Weak protocol ordering",
+                    "validation_status": "weak",
+                    "severity": "medium",
+                    "locations": [{"path": "src/b.py", "start_line": 1, "end_line": 1}],
+                },
+                {
+                    "cluster_id": "CL-001",
+                    "finding_ids": ["COR-001", "TG-001"],
+                    "status": "weak",
+                    "severity": "medium",
+                    "locations": [],
+                },
+            ]
+            write_json(root, "worker/run/report.agent.json", report)
+            validation = json.loads((root / "worker/run/validated-findings.json").read_text(encoding="utf-8"))
+            validation["weak_findings"] = [
+                {
+                    "cluster_id": "CL-001",
+                    "finding_ids": ["COR-001", "TG-001"],
+                    "status": "weak",
+                }
+            ]
+            write_json(root, "worker/run/validated-findings.json", validation)
+
+            result = audit_bundle(root)
+
+        self.assertIn("weak_findings_duplicated_in_report_appendix", issue_codes(result))
+
 
 if __name__ == "__main__":
     unittest.main()

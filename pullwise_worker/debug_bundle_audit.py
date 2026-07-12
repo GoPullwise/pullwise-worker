@@ -534,6 +534,10 @@ class BundleAudit:
                 "error",
                 "Validator weak findings are missing from the canonical report appendix",
             ),
+            "weak_findings_duplicated_in_report_appendix": (
+                "error",
+                "One or more validator weak findings appear multiple times in the report appendix",
+            ),
             "semantic_output_repairs_required": (
                 "warning",
                 "One or more semantic phase outputs required repair before the run could continue",
@@ -741,6 +745,37 @@ class BundleAudit:
                 f"{len(missing_validation_ids)} confirmed/plausible validator finding(s) are missing from the main report",
                 report_name,
                 validation_ids=missing_validation_ids,
+            )
+        weak_entries = [
+            entry
+            for entry in list_value(validation, "weak_findings")
+            if isinstance(entry, dict) and validation_status(entry) == "weak"
+        ]
+        appendix_findings = [
+            finding
+            for finding in list_value(report, "appendix_findings", "weak_findings")
+            if isinstance(finding, dict) and validation_status(finding) == "weak"
+        ]
+        duplicate_weak_ids: list[str] = []
+        for index, entry in enumerate(weak_entries):
+            ids = binding_ids(entry)
+            matches = [finding for finding in appendix_findings if ids and ids.intersection(binding_ids(finding))]
+            if not matches:
+                key = finding_binding_key(entry)
+                matches = [
+                    finding
+                    for finding in appendix_findings
+                    if key is not None and finding_binding_key(finding) == key
+                ]
+            if len(matches) > 1:
+                duplicate_weak_ids.append(binding_label(entry, index))
+        if duplicate_weak_ids:
+            self.issue(
+                "error",
+                "weak_findings_duplicated_in_report_appendix",
+                f"{len(duplicate_weak_ids)} validator weak finding(s) appear multiple times in the report appendix",
+                report_name,
+                validation_ids=duplicate_weak_ids,
             )
 
     def audit_reviewer_coverage(self) -> dict[str, int]:

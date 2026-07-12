@@ -8034,16 +8034,22 @@ def canonical_appendix_findings(report: dict[str, Any], validation: object) -> l
 
     findings: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
+    seen_id_sets: list[set[str]] = []
     for raw_finding, force_weak in sources:
         finding = normalized_agent_report_finding(raw_finding)
         if finding is None:
             continue
         if force_weak and not finding_validation_status(finding):
             finding["validator_status"] = "weak"
+        ids = finding_binding_ids(finding)
+        if ids and any(ids.intersection(existing_ids) for existing_ids in seen_id_sets):
+            continue
         identity = appendix_finding_identity(finding)
         if identity in seen:
             continue
         seen.add(identity)
+        if ids:
+            seen_id_sets.append(ids)
         findings.append(finding)
     return findings
 
@@ -8575,6 +8581,7 @@ def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
     if not report_appendix and isinstance(report, dict) and isinstance(report.get("appendix"), dict):
         report_appendix = _diagnostic_list(report["appendix"], "weak_findings", "findings")
     report_disproven = _diagnostic_list(report, "disproven_findings")
+    report_weak = [finding for finding in report_appendix if validation_entry_status(finding) == "weak"]
 
     intent_plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
     intent_targets = _diagnostic_list(intent_plan, "test_targets", "targets", "tests")
@@ -8611,6 +8618,8 @@ def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
         blocker_codes.append("weak_findings_excluded_from_main")
     if len(weak_findings) > len(report_appendix):
         blocker_codes.append("weak_findings_missing_from_report_appendix")
+    if len(report_weak) > len(weak_findings):
+        blocker_codes.append("weak_findings_duplicated_in_report_appendix")
     if repair_count:
         blocker_codes.append("semantic_output_repairs_required")
 
