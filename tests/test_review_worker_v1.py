@@ -60,6 +60,7 @@ from pullwise_worker.review_worker_v1 import (
     effort_for_phase,
     effective_routing,
     fallback_semantic_artifact,
+    intent_test_artifact_counts,
     model_for_job,
     review_worker_policy_for_job,
     turn_timeout_for_job,
@@ -2058,7 +2059,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(all(bundle["estimated_tokens"] <= 60000 for bundle in large_bundles))
         self.assertEqual(sorted(path for bundle in large_bundles for path in bundle["paths"]), ["app/large/routes.py", "app/large/service.py"])
 
-    def test_bundle_plan_keeps_oversized_single_file_complete_when_token_baseline_is_exceeded(self) -> None:
+    def test_bundle_plan_splits_oversized_single_file_into_bounded_line_ranges(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
@@ -2083,14 +2084,177 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             plan = bundle_plan_payload(run_dir)
             (run_dir / "bundle-plan.json").write_text(json.dumps(plan), encoding="utf-8")
             pack_bundles(repo_dir, run_dir)
-            review_bundles = [bundle for bundle in plan["bundles"] if bundle["paths"] == ["pullwise_worker/review_worker_v1.py"]]
-            packed = (run_dir / "bundles" / f"{review_bundles[0]['bundle_id']}.md").read_text(encoding="utf-8")
+            review_bundles = [
+                bundle
+                for bundle in plan["bundles"]
+                if bundle["paths"] == ["pullwise_worker/review_worker_v1.py"]
+            ]
+            packed = [
+                (run_dir / "bundles" / f"{bundle['bundle_id']}.md").read_text(encoding="utf-8")
+                for bundle in review_bundles
+            ]
 
-        self.assertEqual(len(review_bundles), 1)
-        self.assertEqual(review_bundles[0]["estimated_tokens"], 77052)
-        self.assertNotIn("file_ranges", review_bundles[0])
-        self.assertIn("1 | line 1", packed)
-        self.assertIn("1200 | line 1200", packed)
+        self.assertEqual(len(review_bundles), 2)
+        self.assertTrue(all(bundle["estimated_tokens"] <= 60000 for bundle in review_bundles))
+        self.assertEqual(
+            [item for bundle in review_bundles for item in bundle["file_ranges"]],
+            [
+                {"path": "pullwise_worker/review_worker_v1.py", "start_line": 1, "end_line": 600},
+                {"path": "pullwise_worker/review_worker_v1.py", "start_line": 601, "end_line": 1200},
+            ],
+        )
+        self.assertIn("1 | line 1", packed[0])
+        self.assertNotIn("601 | line 601", packed[0])
+        self.assertIn("601 | line 601", packed[1])
+        self.assertNotIn("600 | line 600", packed[1])
+        self.assertIn("1200 | line 1200", packed[1])
+
+    def test_phase_validation_normalizes_live_routing_and_cluster_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [
+                        {"path": "server/app.py", "is_source_like": True},
+                        {"path": "server/db.py", "is_source_like": True},
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "tiers": {
+                        "P0": {"files": ["server/app.py"]},
+                        "P1": {"files": [{"path": "server/db.py", "reason": "state"}]},
+                    },
+                },
+            )
+
+            validate_phase_outputs(run_dir, "risk_routing")
+            routing = json.loads((run_dir / "risk-routing.json").read_text(encoding="utf-8"))
+
+            write_json(
+                run_dir / "clusters.json",
+                {
+                    "schema_version": "cluster-output/v1",
+                    "findings": [{"cluster_id": "CL-001", "title": "Candidate"}],
+                },
+            )
+            write_json(
+                run_dir / "validation-input.json",
+                {"schema_version": "validation-input/v1", "candidates": [{"cluster_id": "CL-001"}]},
+            )
+            validate_phase_outputs(run_dir, "clustering_and_voting")
+            clusters = json.loads((run_dir / "clusters.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            routing["routes"],
+            [
+                {"path": "server/app.py", "tier": "P0"},
+                {"path": "server/db.py", "tier": "P1", "reasons": ["state"]},
+            ],
+        )
+        self.assertEqual(clusters["clusters"], [{"cluster_id": "CL-001", "title": "Candidate"}])
+        self.assertNotIn("findings", clusters)
+
+    def test_reviewer_validation_canonicalizes_line_evidence_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            write_json(
+                raw_dir / "p1-bundle-001.correctness.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "bundle_id": "p1-bundle-001",
+                    "reviewer": "correctness",
+                    "findings": [
+                        {
+                            "id": "F-001",
+                            "title": "Located candidate",
+                            "path": "src/settings.jsx",
+                            "line_evidence": {"start": 12, "end": 18},
+                        }
+                    ],
+                },
+            )
+
+            validate_reviewer_outputs(run_dir)
+            verified = json.loads(
+                (run_dir / "verified-reviewers" / "p1-bundle-001.correctness.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            verified["findings"][0]["locations"],
+            [{"path": "src/settings.jsx", "start_line": 12, "end_line": 18}],
+        )
+        self.assertNotIn("line_evidence", verified["findings"][0])
+
+    def test_output_language_is_enforced_in_semantic_reviewer_and_markdown_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            run_dir.mkdir()
+            job = {"review_request": {"output_language": "zh-CN"}}
+
+            semantic_prompt = phase_prompt("final_report_json", run_dir, job)
+            reviewer_prompt = phase_prompt("reviewer_fanout", run_dir, job)
+            markdown = render_markdown(
+                {
+                    "output_language": "zh-CN",
+                    "summary": {"result_status": "complete", "overall_risk": "low"},
+                    "findings": [],
+                },
+                output_language="zh-CN",
+            )
+
+        self.assertIn("zh-CN", semantic_prompt)
+        self.assertIn("所有自然语言", semantic_prompt)
+        self.assertIn("zh-CN", reviewer_prompt)
+        self.assertTrue(markdown.startswith("# Codex 全仓库审查报告"))
+        self.assertIn("## 摘要", markdown)
+
+    def test_intent_run_counter_excludes_skipped_and_unstarted_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "intent-test-plan.json",
+                {
+                    "schema_version": "intent-test-plan/v1",
+                    "test_targets": [{"test_id": "ITV-001"}, {"test_id": "ITV-002"}],
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {"test_id": "ITV-001", "path": "tests/a.py"},
+                        {"test_id": "ITV-002", "path": "tests/b.py"},
+                    ],
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [
+                        {"test_id": "ITV-001", "status": "skipped", "skip_reason": "pytest is missing"},
+                        {"test_id": "ITV-002", "status": "failed", "command": "python -m unittest tests/b.py"},
+                    ],
+                },
+            )
+
+            counts = intent_test_artifact_counts(run_dir)
+
+        self.assertEqual(counts["intent_tests_planned"], 2)
+        self.assertEqual(counts["intent_tests_attempted"], 2)
+        self.assertEqual(counts["intent_tests_run"], 1)
 
     def test_refresh_coverage_intent_counters_uses_actual_intent_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
