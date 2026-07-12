@@ -7391,6 +7391,13 @@ def qa_gate_payload(
         intent_classification = str(intent_signal.get("classification") or "").strip()
         if intent_classification in {"confirmed_bug", "plausible_bug"} and validator_status not in {"confirmed", "plausible", "validated"}:
             errors.append(f"finding[{index}] uses bug-supporting intent test signal without validator_status")
+        if expected_output_language == "zh-CN":
+            for field in ("title", "impact", "recommendation"):
+                value = str(finding.get(field) or "")
+                if value and re.search(r"[\u3400-\u9fff]", value) is None:
+                    errors.append(
+                        f"finding[{index}].{field} does not use the requested zh-CN output language"
+                    )
     validation_ok, accepted_validation = validation_binding_entries(run_dir)
     matched_validation_entries: set[int] = set()
     if findings:
@@ -8794,6 +8801,15 @@ def _zh_cn_markdown(lines: list[str]) -> list[str]:
     }
     localized: list[str] = []
     for line in lines:
+        if line.startswith("This review completed with"):
+            localized.append("本次审查已完成；已确认和可能问题的数量及最高风险见上方摘要。")
+            continue
+        if line.startswith("Showing ") or line.startswith("- Showing "):
+            localized.append("完整列表请查看对应的机器可读 JSON 产物。")
+            continue
+        if line.startswith("- See `report.agent.json` for "):
+            localized.append("- 其他后续任务请查看 `report.agent.json`。")
+            continue
         if line in exact:
             localized.append(exact[line])
             continue
@@ -8803,6 +8819,18 @@ def _zh_cn_markdown(lines: list[str]) -> list[str]:
                 replacement = translated + line[len(prefix) :]
                 break
         replacement = replacement.replace("[plausible]", "[可能]")
+        replacement = replacement.replace("full repository scan", "全仓库扫描")
+        replacement = replacement.replace("source-like files", "个类源代码文件")
+        replacement = replacement.replace("reviewed ", "已审查 ")
+        replacement = replacement.replace(" deep", " 深度")
+        replacement = replacement.replace(" standard", " 标准")
+        replacement = replacement.replace(" light", " 轻量")
+        replacement = replacement.replace(" skipped", " 跳过")
+        if replacement.startswith("- `"):
+            replacement = replacement.replace(": status ", "：状态 ")
+            replacement = replacement.replace("; classification ", "；分类 ")
+            replacement = replacement.replace("; finding impact ", "；问题置信度影响 ")
+            replacement = replacement.replace("; skip reason ", "；跳过原因 ")
         localized.append(replacement)
     return localized
 
