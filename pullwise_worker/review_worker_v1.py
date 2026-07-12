@@ -7440,6 +7440,15 @@ def qa_gate_payload(
     else:
         payload = read_json(intent_results, {})
         errors.extend(intent_test_result_errors(payload, run_dir))
+        intent_counts = intent_test_artifact_counts(run_dir)
+        if intent_counts["intent_tests_planned"] > 0 and intent_counts["intent_tests_run"] == 0:
+            warnings.append(
+                "intent-test validation was planned but no generated test process started; dynamic evidence is unavailable"
+            )
+        elif intent_counts["intent_tests_run"] > 0 and intent_counts["intent_tests_asserted"] == 0:
+            warnings.append(
+                "intent-test processes started but no assertion-level result was established; dynamic evidence is degraded"
+            )
     source_path = run_dir / "intent" / "intent-test-source.json"
     if source_path.exists():
         source_payload = read_json(source_path, {})

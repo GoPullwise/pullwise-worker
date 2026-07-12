@@ -550,11 +550,44 @@ class BundleAudit:
             ),
         }
         for code in blocker_codes:
+            if code == "weak_findings_duplicated_in_report_appendix" and not self.weak_appendix_duplicates_present():
+                continue
             spec = issue_specs.get(code)
             if spec is None:
                 continue
             severity, message = spec
             self.issue(severity, code, message, self.debug_name)
+
+    def weak_appendix_duplicates_present(self) -> bool:
+        validation = self.json_at(self.run_name("validated-findings.json"))
+        report = self.json_at(self.run_name("report.agent.json"))
+        weak_entries = [
+            entry
+            for entry in list_value(validation, "weak_findings")
+            if isinstance(entry, dict) and validation_status(entry) == "weak"
+        ]
+        appendix_findings = [
+            finding
+            for finding in list_value(report, "appendix_findings", "weak_findings")
+            if isinstance(finding, dict) and validation_status(finding) == "weak"
+        ]
+        for entry in weak_entries:
+            ids = binding_ids(entry)
+            matches = [
+                finding
+                for finding in appendix_findings
+                if ids and ids.intersection(binding_ids(finding))
+            ]
+            if not matches:
+                key = finding_binding_key(entry)
+                matches = [
+                    finding
+                    for finding in appendix_findings
+                    if key is not None and finding_binding_key(finding) == key
+                ]
+            if len(matches) > 1:
+                return True
+        return False
 
     def audit_coverage(self, inventory: Any, coverage: Any) -> None:
         files = list_value(inventory, "files")
