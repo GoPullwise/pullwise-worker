@@ -5394,6 +5394,26 @@ def _intent_test_timeout(config: dict[str, Any], generated: dict[str, Any], targ
     return int(config.get("max_test_run_seconds_per_test") or 60)
 
 
+def _intent_generated_python_compile_error(
+    validation_repo: Path,
+    generated: dict[str, Any],
+    target: dict[str, Any],
+) -> str:
+    raw_path = _intent_source_path_from_entry(generated) or _intent_source_path_from_entry(target)
+    rel_path = _intent_relative_test_path(raw_path, validation_repo)
+    if not rel_path or Path(rel_path).suffix.lower() != ".py":
+        return ""
+    path = (validation_repo / rel_path).resolve(strict=False)
+    if not path_is_under(path, validation_repo) or not path.is_file():
+        return ""
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+        compile(source, str(path), "exec", dont_inherit=True)
+    except (OSError, SyntaxError, ValueError) as exc:
+        return f"generated Python test does not compile on worker Python {sys.version_info.major}.{sys.version_info.minor}: {exc}"
+    return ""
+
+
 def _intent_output_path(run_dir: Path, test_id: str, suffix: str) -> Path:
     safe = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in test_id).strip("._")
     return run_dir / "intent" / "test-output" / f"{safe or 'intent-test'}.{suffix}.log"
@@ -5677,6 +5697,24 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
         runnable, runnable_reason = intent_command_is_runnable_for_repo(command, cwd, validation_repo, profile)
         if not runnable:
             raw_results.append({**base_result, "status": "skipped", "classification": _intent_preflight_classification(runnable_reason), "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": runnable_reason.split(": ", 1)[-1]})
+            continue
+        compile_error = _intent_generated_python_compile_error(validation_repo, generated, target)
+        if compile_error:
+            stderr_path = _intent_output_path(run_dir, test_id, "stderr")
+            stderr_path.write_text(compile_error, encoding="utf-8")
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "skipped",
+                    "classification": "test_harness_error",
+                    "command": " ".join(shlex.quote(part) for part in command),
+                    "exit_code": None,
+                    "duration_ms": 0,
+                    "timed_out": False,
+                    "stderr_path": str(stderr_path),
+                    "skip_reason": compile_error,
+                }
+            )
             continue
         remaining_total = total_deadline - time.monotonic()
         if remaining_total <= 0:
@@ -8844,6 +8882,143 @@ def _zh_cn_markdown(lines: list[str]) -> list[str]:
     return localized
 
 
+LOCALIZED_MARKDOWN_LABELS: dict[str, dict[str, str]] = {
+    "ja": {
+        "title": "Codex 全リポジトリレビュー報告",
+        "summary": "概要",
+        "findings": "主な指摘",
+        "intent": "インテントテスト検証概要",
+        "follow_up": "推奨フォローアップ",
+        "sources": "機械可読ソース",
+        "mode": "モード",
+        "commit": "コミット",
+        "status": "結果ステータス",
+        "risk": "総合リスク",
+        "confirmed": "確認済み指摘",
+        "plausible": "可能性のある指摘",
+        "tests": "実行済みインテントテスト",
+        "coverage": "カバレッジ",
+        "category": "カテゴリ",
+        "confidence": "確信度",
+        "location": "場所",
+        "impact": "影響",
+        "recommendation": "推奨対応",
+        "next_task": "次の agent タスク",
+        "evidence": "証拠",
+        "none": "確認済みの指摘はありません。",
+        "no_tests": "実行または記録されたインテントテストはありません。",
+    },
+    "ko": {
+        "title": "Codex 전체 저장소 검토 보고서", "summary": "요약", "findings": "주요 발견",
+        "intent": "의도 테스트 검증 요약", "follow_up": "권장 후속 작업", "sources": "기계 판독 가능 소스",
+        "mode": "모드", "commit": "커밋", "status": "결과 상태", "risk": "전체 위험", "confirmed": "확인된 발견",
+        "plausible": "가능성 있는 발견", "tests": "실행된 의도 테스트", "coverage": "커버리지", "category": "범주",
+        "confidence": "신뢰도", "location": "위치", "impact": "영향", "recommendation": "권장 사항",
+        "next_task": "다음 agent 작업", "evidence": "증거", "none": "확인된 발견이 없습니다.",
+        "no_tests": "실행되거나 기록된 의도 테스트가 없습니다.",
+    },
+    "es": {
+        "title": "Informe de revisión completa del repositorio de Codex", "summary": "Resumen", "findings": "Hallazgos principales",
+        "intent": "Resumen de validación de pruebas de intención", "follow_up": "Seguimiento recomendado", "sources": "Fuentes legibles por máquina",
+        "mode": "Modo", "commit": "Commit", "status": "Estado del resultado", "risk": "Riesgo general", "confirmed": "Hallazgos confirmados",
+        "plausible": "Hallazgos plausibles", "tests": "Pruebas de intención ejecutadas", "coverage": "Cobertura", "category": "Categoría",
+        "confidence": "Confianza", "location": "Ubicación", "impact": "Impacto", "recommendation": "Recomendación",
+        "next_task": "Siguiente tarea del agent", "evidence": "Evidencia", "none": "No hay hallazgos confirmados.",
+        "no_tests": "No se ejecutaron ni registraron pruebas de intención.",
+    },
+    "fr": {
+        "title": "Rapport de revue complète du dépôt Codex", "summary": "Résumé", "findings": "Principaux constats",
+        "intent": "Résumé de validation des tests d’intention", "follow_up": "Suivi recommandé", "sources": "Sources lisibles par machine",
+        "mode": "Mode", "commit": "Commit", "status": "Statut du résultat", "risk": "Risque global", "confirmed": "Constats confirmés",
+        "plausible": "Constats plausibles", "tests": "Tests d’intention exécutés", "coverage": "Couverture", "category": "Catégorie",
+        "confidence": "Confiance", "location": "Emplacement", "impact": "Impact", "recommendation": "Recommandation",
+        "next_task": "Prochaine tâche de l’agent", "evidence": "Preuves", "none": "Aucun constat confirmé.",
+        "no_tests": "Aucun test d’intention n’a été exécuté ou enregistré.",
+    },
+    "de": {
+        "title": "Codex-Bericht zur vollständigen Repository-Prüfung", "summary": "Zusammenfassung", "findings": "Wichtigste Befunde",
+        "intent": "Zusammenfassung der Intent-Test-Validierung", "follow_up": "Empfohlene Folgemaßnahmen", "sources": "Maschinenlesbare Quellen",
+        "mode": "Modus", "commit": "Commit", "status": "Ergebnisstatus", "risk": "Gesamtrisiko", "confirmed": "Bestätigte Befunde",
+        "plausible": "Plausible Befunde", "tests": "Ausgeführte Intent-Tests", "coverage": "Abdeckung", "category": "Kategorie",
+        "confidence": "Konfidenz", "location": "Ort", "impact": "Auswirkung", "recommendation": "Empfehlung",
+        "next_task": "Nächste Agent-Aufgabe", "evidence": "Nachweise", "none": "Keine bestätigten Befunde.",
+        "no_tests": "Es wurden keine Intent-Tests ausgeführt oder aufgezeichnet.",
+    },
+    "pt-BR": {
+        "title": "Relatório de revisão completa do repositório Codex", "summary": "Resumo", "findings": "Principais achados",
+        "intent": "Resumo da validação de testes de intenção", "follow_up": "Acompanhamento recomendado", "sources": "Fontes legíveis por máquina",
+        "mode": "Modo", "commit": "Commit", "status": "Status do resultado", "risk": "Risco geral", "confirmed": "Achados confirmados",
+        "plausible": "Achados plausíveis", "tests": "Testes de intenção executados", "coverage": "Cobertura", "category": "Categoria",
+        "confidence": "Confiança", "location": "Local", "impact": "Impacto", "recommendation": "Recomendação",
+        "next_task": "Próxima tarefa do agent", "evidence": "Evidências", "none": "Nenhum achado confirmado.",
+        "no_tests": "Nenhum teste de intenção foi executado ou registrado.",
+    },
+    "it": {
+        "title": "Rapporto di revisione completa del repository Codex", "summary": "Riepilogo", "findings": "Risultati principali",
+        "intent": "Riepilogo della validazione dei test di intento", "follow_up": "Azioni successive consigliate", "sources": "Fonti leggibili dalla macchina",
+        "mode": "Modalità", "commit": "Commit", "status": "Stato del risultato", "risk": "Rischio complessivo", "confirmed": "Risultati confermati",
+        "plausible": "Risultati plausibili", "tests": "Test di intento eseguiti", "coverage": "Copertura", "category": "Categoria",
+        "confidence": "Confidenza", "location": "Posizione", "impact": "Impatto", "recommendation": "Raccomandazione",
+        "next_task": "Prossima attività dell’agent", "evidence": "Evidenze", "none": "Nessun risultato confermato.",
+        "no_tests": "Non sono stati eseguiti o registrati test di intento.",
+    },
+}
+
+
+def _localized_markdown(lines: list[str], language: str) -> list[str]:
+    labels = LOCALIZED_MARKDOWN_LABELS.get(language)
+    if labels is None:
+        return lines
+    exact = {
+        "# Codex Full Repository Review Report": f"# {labels['title']}",
+        "## Summary": f"## {labels['summary']}",
+        "## Top Findings": f"## {labels['findings']}",
+        "## Intent Test Validation Summary": f"## {labels['intent']}",
+        "## Recommended Follow-up": f"## {labels['follow_up']}",
+        "## Machine-readable Sources": f"## {labels['sources']}",
+        "No confirmed findings.": labels["none"],
+        "No intent tests were run or recorded for this review.": labels["no_tests"],
+    }
+    prefixes = {
+        "- Mode: ": f"- {labels['mode']}: ", "- Commit: ": f"- {labels['commit']}: ",
+        "- Result status: ": f"- {labels['status']}: ", "- Overall risk: ": f"- {labels['risk']}: ",
+        "- Confirmed findings: ": f"- {labels['confirmed']}: ", "- Plausible findings: ": f"- {labels['plausible']}: ",
+        "- Intent tests run: ": f"- {labels['tests']}: ", "- Coverage: ": f"- {labels['coverage']}: ",
+        "- Category: ": f"- {labels['category']}: ", "- Confidence: ": f"- {labels['confidence']}: ",
+        "- Location: ": f"- {labels['location']}: ", "- Impact: ": f"- {labels['impact']}: ",
+        "- Recommendation: ": f"- {labels['recommendation']}: ", "- Next agent task: ": f"- {labels['next_task']}: ",
+        "- Evidence:": f"- {labels['evidence']}:",
+    }
+    localized: list[str] = []
+    for line in lines:
+        if line.startswith("This review completed") or line.startswith("Showing ") or line.startswith("- Showing "):
+            continue
+        if line.startswith("Use the recommendations") or line.startswith("No immediate follow-up") or line.startswith("- See `report.agent.json` for "):
+            continue
+        if line.startswith("- `report.agent.json` contains"):
+            localized.append("- `report.agent.json`")
+            continue
+        if line.startswith("- `intent-test-results.json` contains"):
+            localized.append("- `intent-test-results.json`")
+            continue
+        if line.startswith("- `artifact-manifest.json` lists"):
+            localized.append("- `artifact-manifest.json`")
+            continue
+        if line in exact:
+            localized.append(exact[line])
+            continue
+        replacement = line
+        for prefix, translated in prefixes.items():
+            if line.startswith(prefix):
+                replacement = translated + line[len(prefix) :]
+                break
+        replacement = replacement.replace("full repository scan", "full_repo")
+        if line.startswith("- Coverage: "):
+            replacement = f"- {labels['coverage']}: `coverage.json`"
+        localized.append(replacement)
+    return localized
+
+
 def render_markdown(report: dict[str, Any], *, output_language: str = "") -> str:
     findings = report.get("findings") if isinstance(report.get("findings"), list) else []
     confirmed_findings = [
@@ -9015,6 +9190,8 @@ def render_markdown(report: dict[str, Any], *, output_language: str = "") -> str
     language = output_language or str(report.get("output_language") or "en").strip() or "en"
     if language == "zh-CN":
         lines = _zh_cn_markdown(lines)
+    elif language != "en":
+        lines = _localized_markdown(lines, language)
     return "\n".join(lines)
 
 def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: str, *, error: str = "") -> None:

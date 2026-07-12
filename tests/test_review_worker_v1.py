@@ -98,6 +98,7 @@ from pullwise_worker.review_worker_v1 import (
     validate_reviewer_outputs,
     write_debug_bundle,
     write_json,
+    _intent_generated_python_compile_error,
 )
 
 
@@ -2225,6 +2226,18 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(markdown.startswith("# Codex 全仓库审查报告"))
         self.assertIn("## 摘要", markdown)
 
+    def test_markdown_renderer_localizes_every_supported_non_english_language(self) -> None:
+        report = {
+            "summary": {"result_status": "complete", "overall_risk": "low"},
+            "findings": [],
+        }
+        for language in ("zh-CN", "ja", "ko", "es", "fr", "de", "pt-BR", "it"):
+            with self.subTest(language=language):
+                markdown = render_markdown(report, output_language=language)
+                self.assertNotIn("## Summary", markdown)
+                self.assertNotIn("## Top Findings", markdown)
+                self.assertFalse(markdown.startswith("# Codex Full Repository Review Report"))
+
     def test_intent_run_counter_excludes_skipped_and_unstarted_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run_1"
@@ -2263,6 +2276,21 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(counts["intent_tests_planned"], 2)
         self.assertEqual(counts["intent_tests_attempted"], 2)
         self.assertEqual(counts["intent_tests_run"], 1)
+
+    def test_generated_python_test_is_compiled_against_the_worker_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            test_path = validation_repo / "tests" / "test_generated.py"
+            test_path.parent.mkdir()
+            test_path.write_text("def broken(:\n    pass\n", encoding="utf-8")
+
+            error = _intent_generated_python_compile_error(
+                validation_repo,
+                {"path": "tests/test_generated.py"},
+                {},
+            )
+
+        self.assertIn("does not compile on worker Python", error)
 
     def test_refresh_coverage_intent_counters_uses_actual_intent_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
