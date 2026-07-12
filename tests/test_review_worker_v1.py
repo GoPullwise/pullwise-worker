@@ -71,6 +71,7 @@ from pullwise_worker.review_worker_v1 import (
     phase_prompt,
     progress_final_payload,
     inventory,
+    intent_test_command_policy,
     location_verification_payload,
     minimal_repo_profile_payload,
     package_json_has_test_script,
@@ -2297,6 +2298,71 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(raw["test_runs"][0]["status"], "passed")
         run.assert_called_once()
 
+    def test_run_intent_tests_materializes_run_local_generated_source_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir()
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            generated_source = intent_dir / "generated-tests" / "async-state.intent.test.jsx"
+            generated_source.parent.mkdir(parents=True)
+            generated_source.write_text("export const generated = true;\n", encoding="utf-8")
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {
+                    "schema_version": "validation-workspace/v1",
+                    "validation_repo_root": str(validation_repo),
+                    "source_repo_root": str(repo),
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                intent_dir / "intent-test-plan.json",
+                {"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-001"}]},
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": "intent/generated-tests/async-state.intent.test.jsx",
+                            "command": ["npm", "test", "--", "intent/generated-tests/async-state.intent.test.jsx"],
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+            (validation_repo / "package.json").write_text(
+                json.dumps({"scripts": {"test": "vitest run"}}),
+                encoding="utf-8",
+            )
+            runner = validation_repo / "node_modules" / ".bin" / "vitest"
+            runner.parent.mkdir(parents=True)
+            runner.write_text("", encoding="utf-8")
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="/usr/bin/npm",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as run:
+                raw = run_intent_tests(run_dir)
+
+            materialized = validation_repo / "intent" / "generated-tests" / "async-state.intent.test.jsx"
+            materialized_exists = materialized.is_file()
+
+        self.assertTrue(materialized_exists)
+        self.assertEqual(raw["test_runs"][0]["status"], "passed")
+        run.assert_called_once()
+
     def test_run_intent_tests_groups_duplicate_generated_file_and_uses_unittest_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -2583,6 +2649,38 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("Plausible findings: 1", markdown)
         self.assertIn("[plausible]", markdown)
 
+    def test_report_repair_binds_report_source_ids_to_validator_ids(self) -> None:
+        cases = (
+            ({"source_finding_ids": ["COR-001", "TG-001"]}, {"finding_ids": ["COR-001", "TG-001"]}),
+            ({"source_cluster_id": "CL-001"}, {"cluster_id": "CL-001"}),
+        )
+        for report_ids, validation_ids in cases:
+            with self.subTest(report_ids=report_ids, validation_ids=validation_ids):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    run_dir = Path(tmp_dir) / "run_1"
+                    run_dir.mkdir()
+                    write_json(run_dir / "coverage.json", {"schema_version": "coverage/v1"})
+                    finding = finding_payload("report-local-id")
+                    finding.update(report_ids)
+                    write_json(
+                        run_dir / "report.agent.json",
+                        {
+                            "schema_id": "codex-full-repo-review",
+                            "schema_version": "v1",
+                            "summary": {"overall_risk": "high", "result_status": "complete"},
+                            "findings": [finding],
+                        },
+                    )
+                    validation = validation_entry("validator-local-id", status="confirmed")
+                    validation.update(validation_ids)
+                    write_json(run_dir / "validated-findings.json", validation_payload(validation))
+
+                    repair_agent_report_artifact(run_dir, {"job_id": "job_1", "run_id": "run_1"})
+                    report = json.loads((run_dir / "report.agent.json").read_text(encoding="utf-8"))
+
+                self.assertEqual([item["id"] for item in report["findings"]], ["report-local-id"])
+                self.assertFalse(any(item.get("demoted_from_main_findings") for item in report["appendix_findings"]))
+
     def test_report_repair_preserves_nested_weak_findings_in_canonical_appendix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run_1"
@@ -2854,6 +2952,25 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             qa = qa_gate_payload(repo, run_dir)
 
         self.assertEqual(qa["status"], "pass")
+
+    def test_qa_gate_rejects_validated_main_findings_missing_from_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            write_json(
+                run_dir / "report.agent.json",
+                {"schema_id": "codex-full-repo-review", "schema_version": "v1", "findings": []},
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(validation_entry("CL-001", status="confirmed")),
+            )
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertIn("validated main finding CL-001 is missing from report.agent.json", qa["errors"])
 
     def test_validation_binding_supports_id_and_status_aliases(self) -> None:
         cases = (
@@ -3365,7 +3482,19 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("HTTPS_PROXY", env)
         self.assertEqual(env["HOME"], str(validation_repo / ".intent-test-home"))
+        self.assertEqual(env["PYTHONPATH"], str(validation_repo))
         self.assertEqual(env["PULLWISE_INTENT_TEST_NETWORK_DISABLED"], "1")
+
+    def test_intent_command_policy_accepts_supported_versioned_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            allowed, reason = intent_test_command_policy(
+                ["/usr/bin/python3.10", "-m", "unittest", "test_generated.py"],
+                validation_repo,
+                validation_repo,
+            )
+
+        self.assertTrue(allowed, reason)
     def test_intent_tests_skip_when_linux_sandbox_runner_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
