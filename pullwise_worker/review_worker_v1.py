@@ -3609,6 +3609,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "outputs": ["intent/intent-test-source.json", "intent/generated-tests/** or disposable validation workspace tests"],
         "instructions": [
             "Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**.",
+            "Every generated test must include target_test_ids linking it to the intent-test-plan target(s) it implements.",
             "Do not modify the main repo workspace, install dependencies, use production secrets, or use network.",
             "Return JSON describing created test files.",
         ],
@@ -5622,6 +5623,11 @@ def _intent_generated_test_candidate_paths(run_dir: Path) -> list[str]:
     return paths
 
 
+def _intent_test_ordinal(value: object) -> int | None:
+    match = re.match(r"(?i)^IT(?:P|V|R)?[-_]?0*(\d+)(?:[-_]|$)", str(value or "").strip())
+    return int(match.group(1)) if match else None
+
+
 def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
     payload = read_json(path, {})
     if not isinstance(payload, dict):
@@ -5657,6 +5663,16 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
     if not isinstance(generated, list):
         generated = tests if tests else payload.get("created_files") or payload.get("createdFiles") or []
     generated_items = generated if isinstance(generated, list) else []
+    plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
+    plan_targets = plan.get("test_targets") if isinstance(plan, dict) and isinstance(plan.get("test_targets"), list) else []
+    plan_ids_by_ordinal: dict[int, list[str]] = {}
+    for index, target in enumerate(plan_targets):
+        if not isinstance(target, dict):
+            continue
+        target_id = _intent_test_id(target, f"ITP-{index + 1:03d}")
+        ordinal = _intent_test_ordinal(target_id)
+        if target_id and ordinal is not None:
+            plan_ids_by_ordinal.setdefault(ordinal, []).append(target_id)
     candidate_paths = _intent_generated_test_candidate_paths(run_dir)
     repaired: list[dict[str, Any]] = []
     for index, item in enumerate(generated_items):
@@ -5696,6 +5712,11 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
                     entry[key] = supporting[key]
         test_id = _intent_test_id(entry, _intent_test_id(supporting, f"ITV-{index + 1:03d}"))
         entry["test_id"] = test_id
+        if not _intent_related_test_ids(entry):
+            ordinal = _intent_test_ordinal(test_id)
+            matching_plan_ids = plan_ids_by_ordinal.get(ordinal, []) if ordinal is not None else []
+            if len(matching_plan_ids) == 1:
+                entry["target_test_ids"] = matching_plan_ids
         has_explicit_command = any(
             _intent_command(entry.get(key))
             for key in ("command", "test_command", "testCommand", "run_command", "runCommand")
@@ -7669,7 +7690,7 @@ def prompt_template_for_name(name: str) -> str:
         "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Merge test-gap evidence into the underlying defect when contract, sink, and fix match. Do not create new findings. Return JSON only.\n",
         "intent/04_intent_miner.md": "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route definitions, and error messages. Do not infer intent only from implementation code. Return JSON only using intent-map/v1.\n",
         "intent/05_intent_test_planner.md": "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return JSON only using intent-test-plan/v1.\n",
-        "intent/06_intent_test_writer.md": "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**. Do not modify the main repo workspace. Return JSON describing created test files.\n",
+        "intent/06_intent_test_writer.md": "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**. Every generated test must include target_test_ids linking it to the intent-test-plan target(s) it implements. Do not modify the main repo workspace. Return JSON describing created test files.\n",
         "intent/07_intent_test_failure_analyzer.md": "You are the Test Failure Analyzer. A failing test is not automatically a bug. Classify each result using intent-test-result/v1. Return JSON only.\n",
         "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. dependency_missing is absence of dynamic evidence, not disproof; static source and contract evidence can still support plausible. Return JSON only.\n",
         "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to the top-level appendix_findings list. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",

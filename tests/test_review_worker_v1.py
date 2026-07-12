@@ -5574,6 +5574,45 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(repaired["generated_tests"][0]["path"], "src/screens/intent.validation.flow.test.jsx")
         self.assertNotIn("..", repaired["generated_tests"][0]["path"])
+
+    def test_intent_test_source_repair_links_generated_tests_to_plan_targets_by_ordinal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            (intent_dir / "intent-test-plan.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-plan/v1",
+                        "test_targets": [
+                            {"test_id": "ITP-001-user-quota-deletion"},
+                            {"test_id": "ITP-002-trusted-proxy-rate-limit"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source_path = intent_dir / "intent-test-source.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {"test_id": "ITV-001", "path": "intent/generated-tests/test_quota.py"},
+                            {"test_id": "ITV-002", "path": "intent/generated-tests/test_proxy.py"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            repair_intent_test_source_artifact(source_path, run_dir)
+            repaired = json.loads(source_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(repaired["generated_tests"][0]["target_test_ids"], ["ITP-001-user-quota-deletion"])
+        self.assertEqual(repaired["generated_tests"][1]["target_test_ids"], ["ITP-002-trusted-proxy-rate-limit"])
     def test_completed_run_uploads_final_logs_after_result_submit(self) -> None:
         calls = []
 
