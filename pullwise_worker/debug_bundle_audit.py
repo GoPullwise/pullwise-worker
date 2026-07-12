@@ -194,6 +194,7 @@ def binding_ids(record: object) -> set[str]:
         "finding_id",
         "finding_ids",
         "cluster_id",
+        "source_cluster_id",
         "candidate_id",
         "canonical_finding_id",
         "local_id",
@@ -208,6 +209,18 @@ def binding_ids(record: object) -> set[str]:
         for value in validation_sources.values():
             result.update(binding_ids(value))
     return result
+
+
+def binding_label(record: object, index: int) -> str:
+    if isinstance(record, dict):
+        for key in ("id", "cluster_id", "candidate_id", "finding_id"):
+            value = record.get(key)
+            if str(value or "").strip():
+                return str(value).strip()
+        ids = sorted(binding_ids(record))
+        if ids:
+            return ids[0]
+    return f"validation[{index}]"
 
 
 def validation_status(record: object) -> str:
@@ -509,6 +522,10 @@ class BundleAudit:
                 "warning",
                 "Intent tests were planned but none executed; validation evidence is degraded",
             ),
+            "validated_main_missing_from_report": (
+                "error",
+                "One or more confirmed/plausible validator findings are missing from the main report",
+            ),
             "weak_findings_excluded_from_main": (
                 "info",
                 "Validator weak findings were excluded from the issue-eligible main report by policy",
@@ -702,6 +719,29 @@ class BundleAudit:
         statuses = [status for _finding, status in self.report_findings_with_status()]
         self.facts["confirmed_findings"] = sum(1 for status in statuses if status in {"confirmed", "validated"})
         self.facts["plausible_findings"] = sum(1 for status in statuses if status == "plausible")
+        validation = self.json_at(self.run_name("validated-findings.json"))
+        entries = validation.get("validated_findings") if isinstance(validation, dict) else None
+        accepted_entries = [
+            entry
+            for entry in entries if isinstance(entry, dict) and validation_status(entry) in MAIN_VALIDATION_STATUSES
+        ] if isinstance(entries, list) else []
+        missing_validation_ids: list[str] = []
+        for index, entry in enumerate(accepted_entries):
+            ids = binding_ids(entry)
+            matches = [finding for finding in findings if ids and ids.intersection(binding_ids(finding))]
+            if not matches:
+                key = finding_binding_key(entry)
+                matches = [finding for finding in findings if key is not None and finding_binding_key(finding) == key]
+            if not matches:
+                missing_validation_ids.append(binding_label(entry, index))
+        if missing_validation_ids:
+            self.issue(
+                "error",
+                "validated_main_missing_from_report",
+                f"{len(missing_validation_ids)} confirmed/plausible validator finding(s) are missing from the main report",
+                report_name,
+                validation_ids=missing_validation_ids,
+            )
 
     def audit_reviewer_coverage(self) -> dict[str, int]:
         plan = self.json_at(self.run_name("bundle-plan.json"))

@@ -1951,7 +1951,7 @@ def intent_command_is_runnable_for_repo(command: list[str], cwd: Path, validatio
             return False, dependency_error
     if executable in {"terraform", "helm", "kubectl"}:
         return False, "skipped_not_runnable: external provider or cluster initialization is not allowed"
-    if executable in {"python", "python3", "py"} and len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] == "pytest":
+    if _is_python_intent_executable(executable) and len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] == "pytest":
         try:
             import importlib.util
 
@@ -1977,6 +1977,10 @@ def _intent_preflight_classification(reason: str) -> str:
         return "environment_error"
     return "skipped_not_runnable"
 
+
+def _is_python_intent_executable(executable: str) -> bool:
+    return executable in {"python", "python3", "py"} or re.fullmatch(r"python3(?:\.\d+)+", executable) is not None
+
 def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: Path) -> tuple[bool, str]:
     argv = [str(part) for part in command if str(part).strip()]
     if not argv:
@@ -1995,7 +1999,7 @@ def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: P
         return False, f"command contains denied token {denied[0]}"
     if executable == "pytest":
         return True, "pytest is allowed"
-    if executable in {"python", "python3", "py"}:
+    if _is_python_intent_executable(executable):
         if len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] in {"pytest", "unittest"}:
             return True, f"python -m {lowered[2]} is allowed"
         if len(argv) >= 2 and not lowered[1].startswith("-"):
@@ -3628,6 +3632,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Try to disprove each candidate finding using reviewer evidence, location verification, related code, existing tests, and intent-test evidence.",
             "Check producer invariants and the complete trust boundary before confirming exploitability. Treat an unknown cross-service producer as unresolved controllability, not proof of attacker control, and lower confidence or severity accordingly.",
+            "Do not transfer a payload shape from one endpoint to another. If the failure depends solely on an uninspected producer using the assumed shape, classify the candidate weak rather than plausible or confirmed.",
             "dependency_missing is absence of dynamic evidence, not disproof; do not downgrade an otherwise well-supported correctness finding solely because the cloned workspace lacks a local test runner or dependencies.",
             "When no evidence contradicts the failure scenario, concrete static source and contract evidence can still support plausible even if the intent test could not execute.",
             "Classify confirmed, plausible, weak, or disproven; do not add unrelated findings.",
@@ -5110,6 +5115,7 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
             "TMP": "/tmp" if sandboxed else str(sandbox_tmp),
             "TEMP": "/tmp" if sandboxed else str(sandbox_tmp),
             "NO_PROXY": "*",
+            "PYTHONPATH": "/workspace" if sandboxed else str(validation_repo),
             "PULLWISE_INTENT_TEST": "1",
             "PULLWISE_INTENT_TEST_NETWORK_DISABLED": "1",
         }
@@ -5175,6 +5181,7 @@ def _intent_sandbox_setup_failed(command: list[str], completed: subprocess.Compl
 
 
 def materialize_generated_intent_test_sources(
+    run_dir: Path,
     validation_repo: Path | None,
     validation: dict[str, Any],
     source: dict[str, Any],
@@ -5185,6 +5192,7 @@ def materialize_generated_intent_test_sources(
     source_root_value = str(validation.get("source_repo_root") or "").strip()
     source_root = Path(source_root_value) if source_root_value else None
     source_generation_root = source_root / ".codex-review" / "generated-tests" if source_root is not None else None
+    run_generation_root = run_dir / "intent" / "generated-tests"
     errors: dict[str, str] = {}
     for index, generated in enumerate(generated_tests):
         if not isinstance(generated, dict):
@@ -5202,18 +5210,31 @@ def materialize_generated_intent_test_sources(
         validation_candidate = declared_path if declared_path.is_absolute() else validation_repo / declared_path
         if path_is_under(validation_candidate, validation_repo) and validation_candidate.is_file():
             continue
-        if source_root is None or source_generation_root is None:
-            errors[test_id] = "generated test source is absent from the validation workspace"
-            continue
-        source_candidate = declared_path if declared_path.is_absolute() else source_root / declared_path
-        if source_candidate.is_symlink() or not source_candidate.is_file() or not path_is_under(source_candidate, source_generation_root):
-            errors[test_id] = "generated test source is missing or outside .codex-review/generated-tests"
-            continue
-        try:
-            relative_path = source_candidate.resolve(strict=True).relative_to(source_root.resolve(strict=True))
-        except (OSError, ValueError):
-            errors[test_id] = "generated test source escapes the source repository"
-            continue
+        source_candidate = declared_path if declared_path.is_absolute() else (source_root / declared_path if source_root is not None else None)
+        source_is_canonical = (
+            source_candidate is not None
+            and source_generation_root is not None
+            and not source_candidate.is_symlink()
+            and source_candidate.is_file()
+            and path_is_under(source_candidate, source_generation_root)
+        )
+        if source_is_canonical:
+            try:
+                relative_path = source_candidate.resolve(strict=True).relative_to(source_root.resolve(strict=True))
+            except (OSError, ValueError):
+                errors[test_id] = "generated test source escapes the source repository"
+                continue
+        else:
+            run_candidate = declared_path if declared_path.is_absolute() else run_dir / declared_path
+            if run_candidate.is_symlink() or not run_candidate.is_file() or not path_is_under(run_candidate, run_generation_root):
+                errors[test_id] = "generated test source is missing or outside .codex-review/generated-tests"
+                continue
+            try:
+                relative_path = run_candidate.resolve(strict=True).relative_to(run_dir.resolve(strict=True))
+            except (OSError, ValueError):
+                errors[test_id] = "generated test source escapes the run intent directory"
+                continue
+            source_candidate = run_candidate
         destination = validation_repo / relative_path
         if not path_is_under(destination, validation_repo):
             errors[test_id] = "generated test destination escapes the validation workspace"
@@ -5241,6 +5262,7 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     source = read_json(run_dir / "intent" / "intent-test-source.json", {})
     generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
     materialization_errors = materialize_generated_intent_test_sources(
+        run_dir,
         validation_repo,
         validation if isinstance(validation, dict) else {},
         source if isinstance(source, dict) else {},
@@ -6667,7 +6689,18 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
 MAIN_FINDING_VALIDATION_STATUSES = {"confirmed", "plausible", "validated"}
 WEAK_FINDING_VALIDATION_STATUSES = {"weak", "suppressed", "unresolved", "appendix"}
 DISPROVEN_FINDING_VALIDATION_STATUSES = {"disproven", "rejected", "false_positive", "invalid"}
-FINDING_ID_ALIAS_FIELDS = ("id", "finding_id", "cluster_id", "local_id", "source_finding_id", "source_finding_ids")
+FINDING_ID_ALIAS_FIELDS = (
+    "id",
+    "finding_id",
+    "finding_ids",
+    "cluster_id",
+    "source_cluster_id",
+    "candidate_id",
+    "canonical_finding_id",
+    "local_id",
+    "source_finding_id",
+    "source_finding_ids",
+)
 VALIDATION_STATUS_ALIAS_FIELDS = ("status", "validator_status", "validation_status", "classification", "disposition")
 
 
@@ -6916,6 +6949,15 @@ def matching_validation_entry(
 def finding_is_backed_by_validation(finding: object, accepted_entries: list[dict[str, Any]]) -> bool:
     return matching_validation_entry(finding, accepted_entries) is not None
 
+
+def validation_entry_label(entry: dict[str, Any], index: int) -> str:
+    for field in ("id", "cluster_id", "candidate_id", "finding_id"):
+        values = sorted(_binding_scalar_ids(entry.get(field)))
+        if values:
+            return values[0]
+    values = sorted(finding_binding_ids(entry))
+    return values[0] if values else f"validation[{index}]"
+
 def validate_source_unmodified_for_qa(repo_dir: Path, run_dir: Path, errors: list[str]) -> None:
     inventory_payload = read_json(run_dir / "inventory.json", {})
     files = inventory_payload.get("files") if isinstance(inventory_payload.get("files"), list) else None
@@ -6989,14 +7031,24 @@ def qa_gate_payload(repo_dir: Path, run_dir: Path, artifact_dir: Path | None = N
         intent_classification = str(intent_signal.get("classification") or "").strip()
         if intent_classification in {"confirmed_bug", "plausible_bug"} and validator_status not in {"confirmed", "plausible", "validated"}:
             errors.append(f"finding[{index}] uses bug-supporting intent test signal without validator_status")
+    validation_ok, accepted_validation = validation_binding_entries(run_dir)
+    matched_validation_entries: set[int] = set()
     if findings:
-        validation_ok, accepted_validation = validation_binding_entries(run_dir)
         if not validation_ok:
             errors.append("validated-findings.json is missing or invalid for non-empty main findings")
         else:
             for index, finding in enumerate(findings):
-                if not finding_is_backed_by_validation(finding, accepted_validation):
+                matching_entry = matching_validation_entry(finding, accepted_validation)
+                if matching_entry is None:
                     errors.append(f"finding[{index}] is not backed by confirmed/plausible validation")
+                else:
+                    matched_validation_entries.add(id(matching_entry))
+    if validation_ok:
+        for index, entry in enumerate(accepted_validation):
+            if id(entry) not in matched_validation_entries:
+                errors.append(
+                    f"validated main finding {validation_entry_label(entry, index)} is missing from report.agent.json"
+                )
     coverage = read_json(run_dir / "coverage.json", {})
     if isinstance(coverage, dict):
         total = _qa_int(coverage.get("source_like_files_total"))
@@ -8552,6 +8604,8 @@ def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
         blocker_codes.append("reviewer_assignments_batched")
     if intent_targets and executed == 0:
         blocker_codes.append("intent_tests_not_executed")
+    if len(report_main) < len(validated_main):
+        blocker_codes.append("validated_main_missing_from_report")
     if weak_findings and not report_main:
         blocker_codes.append("weak_findings_excluded_from_main")
     if len(weak_findings) > len(report_appendix):

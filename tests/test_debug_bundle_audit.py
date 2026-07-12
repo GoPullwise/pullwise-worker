@@ -583,6 +583,26 @@ class DebugBundleAuditTest(unittest.TestCase):
 
         self.assertIn("intent_evidence_fully_degraded", issue_codes(result))
 
+    def test_validated_main_findings_missing_from_report_are_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            validation = json.loads((root / "worker/run/validated-findings.json").read_text(encoding="utf-8"))
+            validation["validated_findings"].append(
+                {
+                    "cluster_id": "candidate-2",
+                    "finding_ids": ["COR-002", "TG-002"],
+                    "status": "confirmed",
+                }
+            )
+            write_json(root, "worker/run/validated-findings.json", validation)
+
+            result = audit_bundle(root)
+
+        issue = next(item for item in result["issues"] if item["code"] == "validated_main_missing_from_report")
+        self.assertEqual(issue["severity"], "error")
+        self.assertEqual(issue["details"]["validation_ids"], ["candidate-2"])
+
 
 if __name__ == "__main__":
     unittest.main()

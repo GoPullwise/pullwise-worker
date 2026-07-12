@@ -2672,6 +2672,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         },
                     )
                     validation = validation_entry("validator-local-id", status="confirmed")
+                    validation.pop("title", None)
+                    validation.pop("locations", None)
                     validation.update(validation_ids)
                     write_json(run_dir / "validated-findings.json", validation_payload(validation))
 
@@ -7028,6 +7030,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("defense-in-depth", reviewer_prompt)
         self.assertIn("Merge test-gap evidence into the underlying defect", cluster_prompt)
         self.assertIn("unknown cross-service producer", validator_prompt)
+        self.assertIn("Do not transfer a payload shape from one endpoint to another", validator_prompt)
         self.assertIn("dependency_missing is absence of dynamic evidence, not disproof", validator_prompt)
         self.assertIn("static source and contract evidence can still support plausible", validator_prompt)
         self.assertIn("Do not inherit reviewer severity", reporter_prompt)
