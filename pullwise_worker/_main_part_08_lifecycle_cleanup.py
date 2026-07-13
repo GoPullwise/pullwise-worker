@@ -1466,7 +1466,8 @@ def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None =
         return
     if not checkout_root_is_owned(config.work_dir):
         return
-    cleanup_repository_mirror_cache(config)
+    if not active:
+        cleanup_repository_mirror_cache(config)
     for marker in config.work_dir.glob(f"*{_FAILED_CHECKOUT_MARKER_SUFFIX}"):
         checkout = checkout_dir_from_failed_marker(marker)
         if checkout.name in protected:

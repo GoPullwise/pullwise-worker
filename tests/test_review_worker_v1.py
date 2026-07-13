@@ -1852,7 +1852,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_prepare_workspace_clones_claimed_repository_when_checkout_dir_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            work_dir = root / "checkouts"
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root), work_dir=work_dir)
+            )
             calls: list[list[str]] = []
             envs: list[dict[str, str]] = []
 
@@ -1861,28 +1864,43 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 env = kwargs.get("env") if isinstance(kwargs.get("env"), dict) else {}
                 envs.append(dict(env))
                 self.assertNotIn("secret-token", " ".join(args))
+                if args[:3] == ["git", "init", "--bare"]:
+                    mirror_dir = Path(args[3])
+                    mirror_dir.mkdir(parents=True, exist_ok=True)
+                    (mirror_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
                 if "checkout" in args:
                     repo_dir = Path(args[args.index("-C") + 1])
                     (repo_dir / "app.py").write_text("print('ok')\n", encoding="utf-8")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
             with patch("pullwise_worker.review_worker_v1.subprocess.run", side_effect=fake_run):
-                repo_dir, run_dir, _artifact_dir = worker.prepare_workspace(
-                    {
-                        "job_id": "job_1",
-                        "repository": {"clone_url": "https://github.com/acme/api.git"},
-                        "branch": "main",
-                        "commit": "pending",
-                        "clone_token": {"token": "secret-token"},
-                        "repositoryLimits": {"maxFiles": 10, "maxBytes": 4096},
-                    },
-                    "run_1",
-                )
+                job = {
+                    "job_id": "job_1",
+                    "repo": "acme/api",
+                    "repository": {"clone_url": "https://github.com/acme/api.git"},
+                    "branch": "main",
+                    "commit": "pending",
+                    "clone_token": {"token": "secret-token"},
+                    "repositoryLimits": {"maxFiles": 10, "maxBytes": 4096},
+                }
+                repo_dir, run_dir, _artifact_dir = worker.prepare_workspace(job, "run_1")
+                second_repo_dir, _second_run_dir, _second_artifact_dir = worker.prepare_workspace(job, "run_2")
 
             self.assertTrue((repo_dir / "app.py").is_file())
+            self.assertTrue((second_repo_dir / "app.py").is_file())
             self.assertTrue((run_dir / "bundles").is_dir())
-            self.assertTrue(any(call[:2] == ["git", "init"] for call in calls))
-            self.assertTrue(any(call[:6] == ["git", "-C", str(repo_dir), "fetch", "--depth", "1"] for call in calls))
+            mirror_root = work_dir / ".pullwise-repo-cache"
+            mirror_init_calls = [call for call in calls if call[:3] == ["git", "init", "--bare"]]
+            self.assertEqual(len(mirror_init_calls), 1)
+            self.assertTrue(str(mirror_init_calls[0][3]).startswith(str(mirror_root)))
+            self.assertEqual(
+                sum(1 for call in calls if call[:4] == ["git", "clone", "--shared", "--no-checkout"]),
+                2,
+            )
+            self.assertEqual(
+                sum(1 for call in calls if len(call) > 3 and call[:2] == ["git", "-C"] and call[3] == "fetch" and str(call[2]).startswith(str(mirror_root))),
+                2,
+            )
             self.assertTrue(any(env.get("PULLWISE_GIT_TOKEN") == "secret-token" for env in envs))
             self.assertFalse((repo_dir.parent / "git-askpass.sh").exists())
 
@@ -2886,7 +2904,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(raw["test_runs"][0]["target_test_ids"], ["IT-001", "IT-002"])
         self.assertEqual(
             raw["test_runs"][0]["command"],
-            "python -m unittest discover -s intent/generated-tests -p test_regressions.py",
+            "python3 -m unittest discover -s intent/generated-tests -p test_regressions.py",
         )
         run.assert_called_once()
 
@@ -2933,7 +2951,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 raw = run_intent_tests(run_dir)
 
         self.assertEqual(len(raw["test_runs"]), 1)
-        self.assertEqual(raw["test_runs"][0]["command"], "python -m unittest test_first.py")
+        self.assertEqual(raw["test_runs"][0]["command"], "python3 -m unittest test_first.py")
         run.assert_called_once()
 
     def test_repair_intent_test_source_maps_single_top_level_test_command(self) -> None:
@@ -3008,7 +3026,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             ):
                 raw = run_intent_tests(run_dir)
 
-        self.assertEqual(raw["test_runs"][0]["command"], "python -m unittest test_generated.py")
+        self.assertEqual(raw["test_runs"][0]["command"], "python3 -m unittest test_generated.py")
 
     def test_intent_counters_do_not_report_more_runs_than_total_when_source_has_extra_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

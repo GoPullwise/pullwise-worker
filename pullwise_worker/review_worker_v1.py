@@ -17,13 +17,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import __version__
-from ._main_part_01_bootstrap import worker_machine_metrics_payload
+from ._main_part_01_bootstrap import REPOSITORY_MIRROR_CACHE_DIR_NAME, worker_machine_metrics_payload
 
 try:
     import fcntl
@@ -2799,7 +2800,13 @@ class ReviewWorkerV1:
                 deadline_monotonic=copy_deadline,
             )
         else:
-            clone_repository_checkout(job, repo_dir, deadline_monotonic=copy_deadline)
+            work_dir = Path(str(getattr(self.config, "work_dir", "") or self.isolation.worker_root))
+            clone_repository_checkout(
+                job,
+                repo_dir,
+                mirror_cache_root=work_dir / REPOSITORY_MIRROR_CACHE_DIR_NAME,
+                deadline_monotonic=copy_deadline,
+            )
         repo_supplied_review_root = repo_dir / ".codex-review"
         if repo_supplied_review_root.exists():
             if repo_supplied_review_root.is_symlink() or repo_supplied_review_root.is_file():
@@ -8528,6 +8535,8 @@ def agent_report_location_candidates(value: object, *, default_path: object = ""
         "lineRange",
         "range",
         "lines",
+        "start",
+        "end",
     }
     if location_fields.intersection(value):
         candidate = dict(value)
@@ -10349,12 +10358,165 @@ def write_git_askpass(parent: Path) -> Path:
     return path
 
 
-def clone_repository_checkout(job: dict[str, Any], repo_dir: Path, *, deadline_monotonic: float | None = None) -> None:
-    clone_url = job_clone_url(job)
-    branch = str(job.get("branch") or "main").strip() or "main"
+def repository_mirror_identity_url(clone_url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(clone_url)
+        hostname = parsed.hostname or ""
+        if not parsed.scheme or not hostname:
+            return clone_url.split("?", 1)[0].split("#", 1)[0]
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        return urllib.parse.urlunsplit((parsed.scheme.lower(), host.lower(), parsed.path, "", ""))
+    except ValueError:
+        return clone_url.split("?", 1)[0].split("#", 1)[0]
+
+
+def repository_mirror_dir(cache_root: Path, job: dict[str, Any], clone_url: str) -> Path:
+    repo = str(job.get("repo") or "repository").strip().lower()
+    slug = re.sub(r"[^a-z0-9._-]+", "__", repo).strip("._-") or "repository"
+    identity_url = repository_mirror_identity_url(clone_url)
+    digest = hashlib.sha256(f"{repo}\n{identity_url}".encode("utf-8")).hexdigest()[:16]
+    root = cache_root.resolve(strict=False)
+    mirror_dir = root / f"{slug}-{digest}.git"
+    try:
+        common = os.path.commonpath([str(root), str(mirror_dir)])
+    except ValueError as exc:
+        raise RuntimeError("repository mirror cache path must stay inside cache root") from exc
+    if os.path.normcase(common) != os.path.normcase(str(root)) or mirror_dir == root:
+        raise RuntimeError("repository mirror cache path must stay inside cache root")
+    return mirror_dir
+
+
+def ensure_repository_mirror(
+    mirror_dir: Path,
+    clone_url: str,
+    *,
+    env: dict[str, str],
+    deadline_monotonic: float | None,
+) -> None:
+    cache_root = mirror_dir.parent
+    if cache_root.is_symlink():
+        raise RuntimeError("repository mirror cache root must not be a symlink")
+    if cache_root.exists() and not cache_root.is_dir():
+        raise RuntimeError("repository mirror cache root must be a directory")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    if mirror_dir.is_symlink():
+        raise RuntimeError("repository mirror directory must not be a symlink")
+    if mirror_dir.exists() and not mirror_dir.is_dir():
+        raise RuntimeError("repository mirror directory must be a directory")
+    if not (mirror_dir / "HEAD").is_file():
+        run_git(["git", "init", "--bare", str(mirror_dir)], env=env, deadline_monotonic=deadline_monotonic)
+        run_git(
+            ["git", "-C", str(mirror_dir), "remote", "add", "origin", clone_url],
+            env=env,
+            deadline_monotonic=deadline_monotonic,
+        )
+    else:
+        run_git(
+            ["git", "-C", str(mirror_dir), "remote", "set-url", "origin", clone_url],
+            env=env,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+
+def repository_fetch_ref(job: dict[str, Any], mirror_dir: Path) -> tuple[str, str]:
     commit = str(job.get("commit") or "").strip()
     commit = "" if commit.lower() == "pending" else commit
+    if commit:
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit):
+            raise RuntimeError("claimed job commit must be a Git commit hash or pending")
+        target_ref = f"refs/pullwise/commits/{hashlib.sha256(commit.lower().encode('utf-8')).hexdigest()[:24]}"
+        return commit, target_ref
+
+    branch = str(job.get("branch") or "main").strip() or "main"
+    if (
+        branch.startswith(("/", "-"))
+        or branch.endswith(("/", "."))
+        or any(marker in branch for marker in ("..", "@{", "\\"))
+        or any(ord(char) < 32 or char in " ~^:?*[" for char in branch)
+        or any(part in {"", ".", ".."} or part.endswith(".lock") for part in branch.split("/"))
+    ):
+        raise RuntimeError("claimed job branch name is invalid")
+    target_ref = f"refs/pullwise/branches/{hashlib.sha256(branch.encode('utf-8')).hexdigest()[:24]}"
+    return f"refs/heads/{branch}", target_ref
+
+
+def fetch_repository_mirror(
+    job: dict[str, Any],
+    mirror_dir: Path,
+    *,
+    env: dict[str, str],
+    deadline_monotonic: float | None,
+) -> str:
+    source_ref, target_ref = repository_fetch_ref(job, mirror_dir)
+    force_prefix = "+" if source_ref.startswith("refs/heads/") else ""
+    run_git(
+        [
+            "git",
+            "-C",
+            str(mirror_dir),
+            "fetch",
+            "--depth",
+            "1",
+            "--no-tags",
+            "origin",
+            f"{force_prefix}{source_ref}:{target_ref}",
+        ],
+        env=env,
+        deadline_monotonic=deadline_monotonic,
+    )
+    return target_ref
+
+
+def clone_checkout_from_mirror(
+    mirror_dir: Path,
+    repo_dir: Path,
+    mirror_ref: str,
+    *,
+    env: dict[str, str],
+    deadline_monotonic: float | None,
+) -> None:
+    run_git(
+        ["git", "clone", "--shared", "--no-checkout", str(mirror_dir), str(repo_dir)],
+        env=env,
+        deadline_monotonic=deadline_monotonic,
+    )
+    checkout_ref = "refs/pullwise/checkout"
+    run_git(
+        ["git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin", f"{mirror_ref}:{checkout_ref}"],
+        env=env,
+        deadline_monotonic=deadline_monotonic,
+    )
+    run_git(
+        ["git", "-C", str(repo_dir), "checkout", "--detach", checkout_ref],
+        env=env,
+        deadline_monotonic=deadline_monotonic,
+    )
+    run_git(
+        ["git", "-C", str(repo_dir), "remote", "remove", "origin"],
+        env=env,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+
+def remove_repository_mirror(mirror_dir: Path) -> None:
+    if mirror_dir.is_symlink():
+        raise RuntimeError("repository mirror directory must not be a symlink")
+    if mirror_dir.exists():
+        shutil.rmtree(mirror_dir)
+
+
+def clone_repository_checkout(
+    job: dict[str, Any],
+    repo_dir: Path,
+    *,
+    mirror_cache_root: Path,
+    deadline_monotonic: float | None = None,
+) -> None:
+    clone_url = job_clone_url(job)
     token = job_clone_token(job)
+    mirror_dir = repository_mirror_dir(mirror_cache_root, job, clone_url)
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     askpass_path: Path | None = None
@@ -10363,12 +10525,38 @@ def clone_repository_checkout(job: dict[str, Any], repo_dir: Path, *, deadline_m
         env["GIT_ASKPASS"] = str(askpass_path)
         env["PULLWISE_GIT_TOKEN"] = token
     try:
-        run_git(["git", "init", str(repo_dir)], env=env, deadline_monotonic=deadline_monotonic)
-        run_git(["git", "-C", str(repo_dir), "remote", "add", "origin", clone_url], env=env, deadline_monotonic=deadline_monotonic)
-        ref = commit or branch
-        run_git(["git", "-C", str(repo_dir), "fetch", "--depth", "1", "--no-tags", "origin", ref], env=env, deadline_monotonic=deadline_monotonic)
-        run_git(["git", "-C", str(repo_dir), "checkout", "--detach", "FETCH_HEAD"], env=env, deadline_monotonic=deadline_monotonic)
-        run_git(["git", "-C", str(repo_dir), "remote", "remove", "origin"], env=env, deadline_monotonic=deadline_monotonic)
+        for attempt in range(2):
+            try:
+                ensure_repository_mirror(
+                    mirror_dir,
+                    clone_url,
+                    env=env,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                mirror_ref = fetch_repository_mirror(
+                    job,
+                    mirror_dir,
+                    env=env,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                clone_checkout_from_mirror(
+                    mirror_dir,
+                    repo_dir,
+                    mirror_ref,
+                    env=env,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                try:
+                    os.utime(mirror_dir, None, follow_symlinks=False)
+                except (NotImplementedError, OSError):
+                    pass
+                break
+            except RuntimeError:
+                if repo_dir.exists():
+                    shutil.rmtree(repo_dir)
+                if attempt > 0:
+                    raise
+                remove_repository_mirror(mirror_dir)
     finally:
         env.pop("PULLWISE_GIT_TOKEN", None)
         if askpass_path is not None:
