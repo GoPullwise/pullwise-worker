@@ -11,11 +11,48 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pullwise_worker.main as worker_main
+from pullwise_worker import _main_part_07_readiness_doctor as readiness
 from pullwise_worker import _main_part_08_lifecycle_cleanup as lifecycle
 from pullwise_worker._main_part_08_lifecycle_cleanup import command_worker_has_active_jobs
 
 
 class WorkerMainContractsTest(unittest.TestCase):
+    def test_cleanup_checkouts_loads_private_runtime_constants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = Path(tmpdir) / "checkouts"
+            config = argparse.Namespace(
+                work_dir=work_dir,
+                max_checkout_bytes=1024,
+                repo_cache_max_bytes=1024,
+                repo_cache_ttl_seconds=60,
+            )
+            with patch.object(lifecycle, "cleanup_repository_mirror_cache"):
+                lifecycle.cleanup_checkouts(config)
+
+            self.assertTrue(work_dir.exists())
+            self.assertEqual(
+                (work_dir / ".pullwise-checkout-root").read_text(encoding="utf-8"),
+                "pullwise-worker checkout root\n",
+            )
+
+    def test_scan_summary_append_uses_no_follow_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir) / "logs"
+            config = argparse.Namespace(
+                log_dir=log_dir,
+                worker_token="pww_secret",
+                scan_summary_log_max_bytes=1024 * 1024,
+            )
+
+            readiness.write_scan_summary(config, "job_1", "done", 10, "")
+            readiness.write_scan_progress_summary(config, "job_1", "repo_map", 25)
+
+            lines = (log_dir / "scan-summary.log").read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(lines), 2)
+        self.assertIn('"status": "done"', lines[0])
+        self.assertIn('"status": "progress"', lines[1])
+
     def test_main_module_does_not_import_retired_review_pipeline(self) -> None:
         imported = set(sys.modules)
         importlib.reload(worker_main)
