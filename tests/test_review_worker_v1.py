@@ -78,6 +78,7 @@ from pullwise_worker.review_worker_v1 import (
     package_json_has_test_script,
     materialize_artifacts,
     materialize_terminal_artifacts,
+    normalized_agent_report_finding,
     pack_bundles,
     pipeline_diagnostics_payload,
     prepare_validation_workspace,
@@ -2855,6 +2856,72 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(summary["finding_counts"]["confirmed_high"], 1)
         self.assertEqual(summary["finding_counts"]["confirmed_medium"], 1)
         self.assertEqual(summary["finding_counts"]["confirmed_low"], 0)
+
+    def test_agent_report_finding_normalizes_model_location_aliases(self) -> None:
+        cases = (
+            (
+                {"primary_path": "src/primary.py", "primary_line": 17},
+                {"path": "src/primary.py", "start_line": 17, "end_line": 17},
+            ),
+            (
+                {"path_line_evidence": [{"file": "src/evidence.py", "line_range": "21-24"}]},
+                {"path": "src/evidence.py", "start_line": 21, "end_line": 24},
+            ),
+            (
+                {"paths": [{"filename": "src/structured.py", "startLine": 31, "endLine": 33}]},
+                {"path": "src/structured.py", "start_line": 31, "end_line": 33},
+            ),
+        )
+
+        for aliases, expected_location in cases:
+            with self.subTest(aliases=aliases):
+                normalized = normalized_agent_report_finding(
+                    {
+                        "finding_id": "CL-001",
+                        "severity": "P1",
+                        "confidence": "high",
+                        **aliases,
+                    }
+                )
+
+                self.assertIsNotNone(normalized)
+                self.assertEqual(normalized["locations"], [expected_location])
+
+    def test_agent_report_finding_normalizes_evidence_aliases(self) -> None:
+        supporting = normalized_agent_report_finding(
+            {
+                "id": "CL-001",
+                "supporting_evidence": [
+                    {
+                        "type": "code",
+                        "path": "src/app.py",
+                        "start_line": 8,
+                        "end_line": 8,
+                        "summary": "The guard is bypassed.",
+                    }
+                ],
+            }
+        )
+        summary_only = normalized_agent_report_finding(
+            {
+                "id": "CL-002",
+                "evidence_summary": "The branch remains reachable with an empty token.",
+            }
+        )
+
+        self.assertIsNotNone(supporting)
+        self.assertEqual(supporting["evidence"][0]["summary"], "The guard is bypassed.")
+        self.assertIsNotNone(summary_only)
+        self.assertEqual(
+            summary_only["evidence"],
+            [
+                {
+                    "type": "code",
+                    "label": "Evidence summary",
+                    "summary": "The branch remains reachable with an empty token.",
+                }
+            ],
+        )
 
     def test_report_repair_preserves_plausible_validation_in_summary_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

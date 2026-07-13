@@ -8294,7 +8294,14 @@ def agent_report_line_range(value: object) -> tuple[int, int]:
 def agent_report_location(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    path = str(value.get("path") or value.get("file") or value.get("filename") or "").strip()
+    path = str(
+        value.get("path")
+        or value.get("file")
+        or value.get("filename")
+        or value.get("primary_path")
+        or value.get("primaryPath")
+        or ""
+    ).strip()
     start = _qa_int(
         value.get("start_line")
         or value.get("line_start")
@@ -8303,6 +8310,8 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
         or value.get("line")
         or value.get("line_number")
         or value.get("lineNumber")
+        or value.get("primary_line")
+        or value.get("primaryLine")
         or value.get("start")
     )
     end = _qa_int(
@@ -8329,6 +8338,8 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
     location = dict(value)
     location["path"] = path
     for key in (
+        "file",
+        "filename",
         "line",
         "line_start",
         "line_end",
@@ -8338,6 +8349,10 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
         "endLine",
         "line_number",
         "lineNumber",
+        "primary_line",
+        "primaryLine",
+        "primary_path",
+        "primaryPath",
         "start",
         "end",
         "line_range",
@@ -8354,7 +8369,13 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
 def agent_report_finding_location(finding: dict[str, Any]) -> dict[str, Any] | None:
     return agent_report_location(
         {
-            "path": finding.get("path") or finding.get("file") or finding.get("filename"),
+            "path": (
+                finding.get("path")
+                or finding.get("file")
+                or finding.get("filename")
+                or finding.get("primary_path")
+                or finding.get("primaryPath")
+            ),
             "start_line": (
                 finding.get("start_line")
                 or finding.get("line_start")
@@ -8363,6 +8384,8 @@ def agent_report_finding_location(finding: dict[str, Any]) -> dict[str, Any] | N
                 or finding.get("line")
                 or finding.get("line_number")
                 or finding.get("lineNumber")
+                or finding.get("primary_line")
+                or finding.get("primaryLine")
             ),
             "end_line": (
                 finding.get("end_line")
@@ -8370,10 +8393,56 @@ def agent_report_finding_location(finding: dict[str, Any]) -> dict[str, Any] | N
                 or finding.get("endLine")
                 or finding.get("lineEnd")
                 or finding.get("line")
+                or finding.get("primary_line")
+                or finding.get("primaryLine")
             ),
             "line_range": finding.get("line_range") or finding.get("lineRange") or finding.get("range") or finding.get("lines"),
         }
     )
+
+
+def agent_report_location_candidates(value: object, *, default_path: object = "") -> list[dict[str, Any]]:
+    if isinstance(value, (list, tuple)):
+        candidates: list[dict[str, Any]] = []
+        for item in value:
+            candidates.extend(agent_report_location_candidates(item, default_path=default_path))
+        return candidates
+    if not isinstance(value, dict):
+        return []
+    location_fields = {
+        "path",
+        "file",
+        "filename",
+        "primary_path",
+        "primaryPath",
+        "line",
+        "start_line",
+        "startLine",
+        "line_start",
+        "lineStart",
+        "primary_line",
+        "primaryLine",
+        "line_range",
+        "lineRange",
+        "range",
+        "lines",
+    }
+    if location_fields.intersection(value):
+        candidate = dict(value)
+        if default_path and not any(candidate.get(key) for key in ("path", "file", "filename", "primary_path", "primaryPath")):
+            candidate["path"] = default_path
+        return [candidate]
+
+    candidates = []
+    for path, location_value in value.items():
+        if isinstance(location_value, dict):
+            candidate = dict(location_value)
+            if not any(candidate.get(key) for key in ("path", "file", "filename", "primary_path", "primaryPath")):
+                candidate["path"] = path
+            candidates.append(candidate)
+        elif isinstance(location_value, (int, float, str, list, tuple)):
+            candidates.append({"path": path, "line_range": location_value})
+    return candidates
 
 
 def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
@@ -8387,20 +8456,18 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(finding.get(key), list):
                 raw_locations = finding[key]
                 break
-    if not raw_locations and isinstance(finding.get("line_evidence"), dict):
-        raw_locations = [
-            {
-                **finding["line_evidence"],
-                "path": finding.get("path") or finding.get("file") or finding.get("filename"),
-            }
-        ]
-    if not raw_locations and isinstance(finding.get("lineEvidence"), dict):
-        raw_locations = [
-            {
-                **finding["lineEvidence"],
-                "path": finding.get("path") or finding.get("file") or finding.get("filename"),
-            }
-        ]
+    default_path = (
+        finding.get("path")
+        or finding.get("file")
+        or finding.get("filename")
+        or finding.get("primary_path")
+        or finding.get("primaryPath")
+    )
+    if not raw_locations:
+        for key in ("line_evidence", "lineEvidence", "path_line_evidence", "pathLineEvidence", "paths"):
+            raw_locations = agent_report_location_candidates(finding.get(key), default_path=default_path)
+            if raw_locations:
+                break
     if not raw_locations:
         finding_location = agent_report_finding_location(finding)
         if finding_location is not None:
@@ -8460,6 +8527,47 @@ def agent_report_confidence(value: object) -> float:
     return 0.0
 
 
+def agent_report_evidence(finding: dict[str, Any]) -> list[object]:
+    raw_evidence: object = finding.get("evidence")
+    if not raw_evidence:
+        for key in ("supporting_evidence", "supportingEvidence", "path_line_evidence", "pathLineEvidence"):
+            if finding.get(key):
+                raw_evidence = finding[key]
+                break
+    if not raw_evidence:
+        raw_evidence = finding.get("evidence_summary") or finding.get("evidenceSummary")
+        label = "Evidence summary"
+    else:
+        label = "Evidence"
+
+    if isinstance(raw_evidence, (str, dict)):
+        raw_items: list[object] = [raw_evidence]
+    elif isinstance(raw_evidence, list):
+        raw_items = raw_evidence
+    else:
+        raw_items = []
+
+    evidence: list[object] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            summary = item.strip()
+            if summary:
+                evidence.append({"type": "code", "label": label, "summary": summary})
+            continue
+        if not isinstance(item, dict):
+            continue
+        record = dict(item)
+        if not str(record.get("summary") or "").strip():
+            for key in ("evidence", "text", "reason", "description"):
+                summary = str(record.get(key) or "").strip()
+                if summary:
+                    record["summary"] = summary
+                    break
+        record.setdefault("type", "code")
+        evidence.append(record)
+    return evidence
+
+
 def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
     if not isinstance(finding, dict):
         return None
@@ -8483,8 +8591,9 @@ def normalized_agent_report_finding(finding: object) -> dict[str, Any] | None:
                 break
     for key in ("recommended_fix", "recommended_action", "remediation"):
         normalized.pop(key, None)
-    if "evidence" not in normalized:
-        normalized["evidence"] = []
+    normalized["evidence"] = agent_report_evidence(finding)
+    for key in ("supporting_evidence", "supportingEvidence", "evidence_summary", "evidenceSummary"):
+        normalized.pop(key, None)
     return normalized
 
 

@@ -1425,6 +1425,35 @@ def cleanup_worker_resources(config: WorkerConfig, *, active_job_ids: set[str] |
     cleanup_logs(config, active_job_ids=active_job_ids)
 
 
+def checkout_root_sentinel(work_dir: Path) -> Path:
+    return work_dir / _CHECKOUT_ROOT_SENTINEL_NAME
+
+
+def checkout_root_sentinel_is_valid(sentinel: Path) -> bool:
+    try:
+        if not stat.S_ISREG(sentinel.lstat().st_mode):
+            return False
+        return read_no_follow_text_file(sentinel) == "pullwise-worker checkout root\n"
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def checkout_root_is_owned(work_dir: Path) -> bool:
+    if work_dir.is_symlink():
+        return False
+    sentinel = checkout_root_sentinel(work_dir)
+    if checkout_root_sentinel_is_valid(sentinel):
+        return True
+    entries = [path for path in work_dir.iterdir() if path.name not in _CHECKOUT_RUNTIME_DIR_NAMES]
+    if entries:
+        return False
+    try:
+        write_no_follow_text_file(sentinel, "pullwise-worker checkout root\n")
+    except OSError:
+        return False
+    return True
+
+
 def cleanup_checkouts(config: WorkerConfig, *, active_job_ids: set[str] | None = None) -> None:
     now_ts = int(time.time())
     active = set(active_job_ids or set())

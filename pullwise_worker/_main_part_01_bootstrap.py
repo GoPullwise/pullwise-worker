@@ -437,9 +437,69 @@ def write_no_follow_text_file(path: Path, text: str, mode: int = 0o600) -> None:
         handle.write(str(text))
 
 
+def append_no_follow_text_file(path: Path, text: str, mode: int = 0o600) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    with _open_text_file_no_follow(Path(path), flags, "a", mode) as handle:
+        handle.write(str(text))
+
+
 def read_no_follow_text_file(path: Path) -> str:
     with _open_text_file_no_follow(Path(path), os.O_RDONLY, "r") as handle:
         return handle.read()
+
+
+def regular_log_file(path: Path) -> bool:
+    target = Path(path)
+    return not target.parent.is_symlink() and target.is_file() and not target.is_symlink()
+
+
+def open_log_file_no_follow(path: Path, mode: str, **kwargs):
+    target = Path(path)
+    if target.parent.is_symlink():
+        raise OSError(f"refusing to open log through symlinked directory: {target.parent}")
+    if "w" in mode:
+        flags = os.O_WRONLY | os.O_TRUNC
+    elif "a" in mode:
+        flags = os.O_WRONLY | os.O_APPEND
+    elif "+" in mode:
+        flags = os.O_RDWR
+    else:
+        flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(target, flags)
+    try:
+        return os.fdopen(fd, mode, **kwargs)
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def trim_file_to_last_bytes(path: Path, max_bytes: int) -> None:
+    target = Path(path)
+    if not regular_log_file(target):
+        return
+    try:
+        size = target.lstat().st_size
+    except OSError:
+        return
+    if size <= max_bytes:
+        return
+    keep = max(1, max_bytes)
+    try:
+        with open_log_file_no_follow(target, "rb") as handle:
+            handle.seek(-keep, os.SEEK_END)
+            data = handle.read()
+    except OSError:
+        return
+    newline = data.find(b"\n")
+    if newline >= 0 and newline + 1 < len(data):
+        data = data[newline + 1 :]
+    try:
+        with open_log_file_no_follow(target, "wb") as handle:
+            handle.write(data)
+    except OSError:
+        return
 
 
 def install_ubuntu_2204_dependencies(requirements: list[str], *, dry_run: bool = False) -> tuple[bool, str]:
@@ -1385,5 +1445,3 @@ def main() -> None:
     worker.run(once=args.once)
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
-
-
