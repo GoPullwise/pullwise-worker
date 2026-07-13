@@ -1518,6 +1518,88 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(skipped[phase]["progress"]["status"], "skipped")
             self.assertEqual(skipped[phase]["data"]["skip_reason"], "intent test validation disabled")
 
+    def test_intent_test_writing_repairs_generated_source_before_validation(self) -> None:
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+        class Worker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                run_dir.mkdir(parents=True)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+            def run_semantic_phase(
+                self,
+                _codex_client: object,
+                _repo_dir: Path,
+                run_dir: Path,
+                _job: dict,
+                phase: str,
+            ) -> None:
+                self.assert_phase(phase)
+                generated_path = run_dir / "intent" / "generated-tests" / "test_writer.py"
+                generated_path.parent.mkdir(parents=True)
+                generated_path.write_text("import unittest\n", encoding="utf-8")
+                write_json(
+                    run_dir / "intent" / "intent-test-source.json",
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [
+                            {
+                                "test_id": "ITV-001",
+                                "path": "intent/generated-tests/test_writer.py",
+                            }
+                        ],
+                    },
+                )
+
+            @staticmethod
+            def assert_phase(phase: str) -> None:
+                if phase != "intent_test_writing":
+                    raise AssertionError(f"unexpected semantic phase: {phase}")
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "model_profile": {
+                "default_model": "gpt-5.5",
+                "core_effort": "high",
+                "non_core_effort": "medium",
+            },
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = Worker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            with patch("pullwise_worker.review_worker_v1.PIPELINE_PHASES", (("intent_test_writing", 80),)), patch(
+                "pullwise_worker.review_worker_v1.validate_phase_outputs"
+            ):
+                worker.run_job(job)
+            repaired = json.loads(
+                (root / "repo" / ".codex-review" / "runs" / "run_1" / "intent" / "intent-test-source.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(repaired["generated_tests"][0]["artifact_refs"], ["art_intent_test_source"])
+
     def test_completed_run_preserves_codex_events(self) -> None:
         calls = []
         codex_client_holder = {}
@@ -2400,6 +2482,150 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(raw["test_runs"][0]["classification"], "dependency_missing")
         self.assertEqual(raw["test_runs"][0]["command"], "npm test -- .codex-review/generated-tests/intent-root-relative-api-base.test.jsx")
         self.assertIn("Dependencies are not installed", raw["test_runs"][0]["skip_reason"])
+
+    def test_run_intent_tests_executes_when_writer_delegates_to_running_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            generated_test = validation_repo / "test_delegated.py"
+            validation_repo.mkdir()
+            generated_test.write_text("import unittest\n", encoding="utf-8")
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {"schema_version": "validation-workspace/v1", "validation_repo_root": str(validation_repo)},
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "execution": {
+                        "ran": False,
+                        "reason": "Execution is delegated to the intent_test_running phase.",
+                    },
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": "test_delegated.py",
+                            "test_framework": "unittest",
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="/usr/bin/python3",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as run:
+                raw = run_intent_tests(run_dir)
+
+        self.assertEqual(raw["test_runs"][0]["status"], "passed")
+        self.assertEqual(raw["test_runs"][0]["command"], "python3 -m unittest test_delegated.py")
+        run.assert_called_once()
+
+    def test_run_intent_tests_maps_explicit_source_command_to_materialized_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir()
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            generated_source = run_dir / "intent" / "generated-tests" / "test_materialized.py"
+            generated_source.parent.mkdir(parents=True)
+            generated_source.write_text("import unittest\n", encoding="utf-8")
+            write_json(
+                run_dir / "intent" / "validation-workspace.json",
+                {
+                    "schema_version": "validation-workspace/v1",
+                    "validation_repo_root": str(validation_repo),
+                    "source_repo_root": str(repo),
+                },
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": str(generated_source),
+                            "command": ["python", "-m", "unittest", str(generated_source)],
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="/usr/bin/python3",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as run:
+                raw = run_intent_tests(run_dir)
+
+        self.assertEqual(raw["test_runs"][0]["status"], "passed")
+        self.assertEqual(
+            raw["test_runs"][0]["command"],
+            "python3 -m unittest discover -s intent/generated-tests -p test_materialized.py",
+        )
+        executed_command = run.call_args.args[0]
+        self.assertNotIn(str(generated_source), executed_command)
+        self.assertIn("intent/generated-tests", executed_command)
+
+    def test_run_intent_tests_keeps_materialization_error_bound_after_source_copy_filtering(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir()
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "validation-workspace.json",
+                {"schema_version": "validation-workspace/v1", "validation_repo_root": str(validation_repo)},
+            )
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {"path_kind": "artifact_source_copy"},
+                        {
+                            "path": "intent/generated-tests/test_missing.py",
+                            "command": ["python3", "-m", "unittest", "intent/generated-tests/test_missing.py"],
+                            "artifact_refs": ["art_intent_test_source"],
+                        },
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+                raw = run_intent_tests(run_dir)
+
+        run.assert_not_called()
+        self.assertEqual(raw["test_runs"][0]["test_id"], "ITV-002")
+        self.assertEqual(raw["test_runs"][0]["classification"], "test_harness_error")
+        self.assertIn("generated test source is missing", raw["test_runs"][0]["skip_reason"])
 
     def test_run_intent_tests_executes_one_generated_file_once_for_multiple_plan_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3444,6 +3670,37 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertGreaterEqual(effective["sources"]["semantic_routes"], 1)
         self.assertGreaterEqual(effective["sources"]["profile_fallback_routes"], 1)
         self.assertGreaterEqual(effective["sources"]["hard_skip_routes"], 1)
+
+    def test_risk_routing_normalizes_risk_alias_inside_existing_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [
+                        {
+                            "path": "src/app.py",
+                            "is_source_like": True,
+                            "is_binary": False,
+                            "is_generated_candidate": False,
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": "src/app.py", "risk": "P0", "reason": "entry point"}],
+                },
+            )
+
+            validate_phase_outputs(run_dir, "risk_routing")
+            normalized = json.loads((run_dir / "risk-routing.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(normalized["routes"][0]["tier"], "P0")
 
     def test_bundle_plan_uses_effective_routing_without_overwriting_semantic_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -191,6 +191,24 @@ class DebugBundleAuditTest(unittest.TestCase):
         self.assertEqual(directory_result["facts"]["terminal_status"], "completed")
         self.assertEqual(directory_result["facts"]["findings"], 1)
 
+    def test_artifact_audit_does_not_fall_back_to_run_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/artifacts/artifact-manifest.json",
+                {
+                    "schema_version": "artifact-manifest/v1",
+                    "items": [{"name": "report.md", "required": True}],
+                },
+            )
+            (root / "worker" / "run" / "report.md").write_text("run copy only\n", encoding="utf-8")
+
+            result = audit_bundle(root)
+
+        self.assertIn("required_artifact_missing", issue_codes(result))
+
     def test_generated_test_own_id_prevents_false_uncovered_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir) / "bundle"

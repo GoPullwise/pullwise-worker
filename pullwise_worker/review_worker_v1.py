@@ -2568,6 +2568,11 @@ class ReviewWorkerV1:
                         )
                     elif phase in SEMANTIC_PHASES:
                         self.run_semantic_phase(codex_client, repo_dir, run_dir, job, phase)
+                        if phase == "intent_test_writing":
+                            repair_intent_test_source_artifact(
+                                run_dir / "intent" / "intent-test-source.json",
+                                run_dir,
+                            )
                         if phase == "validator_disproof":
                             repair_validation_output_artifact(run_dir / "validated-findings.json")
                         if phase == "final_report_json":
@@ -4440,7 +4445,7 @@ def canonical_review_file_tier(value: object) -> str:
 
 
 def risk_route_tier(route: dict[str, Any]) -> str:
-    for key in ("tier", "depth", "review_depth", "reviewDepth", "priority", "classification"):
+    for key in ("tier", "risk", "risk_tier", "riskTier", "depth", "review_depth", "reviewDepth", "priority", "classification"):
         tier = canonical_review_file_tier(route.get(key))
         if tier:
             return tier
@@ -4469,6 +4474,7 @@ def _canonical_risk_route(value: object, *, tier_hint: str = "") -> dict[str, An
         return None
     tier = canonical_review_file_tier(
         value.get("tier")
+        or value.get("risk")
         or value.get("priority")
         or value.get("risk_tier")
         or value.get("riskTier")
@@ -4500,7 +4506,26 @@ def _canonical_risk_route(value: object, *, tier_hint: str = "") -> dict[str, An
 
 def normalize_risk_routing_artifact(path: Path) -> None:
     payload = read_json(path, {})
-    if not isinstance(payload, dict) or isinstance(payload.get("routes"), list):
+    if not isinstance(payload, dict):
+        return
+    raw_routes = payload.get("routes")
+    if isinstance(raw_routes, list):
+        routes = []
+        changed = False
+        for raw_route in raw_routes:
+            if not isinstance(raw_route, dict):
+                routes.append(raw_route)
+                continue
+            route = dict(raw_route)
+            tier = risk_route_tier(route)
+            if tier and route.get("tier") != tier:
+                route["tier"] = tier
+                changed = True
+            routes.append(route)
+        if changed:
+            normalized = dict(payload)
+            normalized["routes"] = routes
+            write_json(path, normalized)
         return
     routes: list[dict[str, Any]] = []
     tiers = payload.get("tiers") if isinstance(payload.get("tiers"), dict) else {}
@@ -5313,7 +5338,13 @@ def _intent_generated_command(
 
 
 def _intent_generated_execution_records(generated_tests: list[Any]) -> list[dict[str, Any]]:
-    records = [item for item in generated_tests if isinstance(item, dict)]
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(generated_tests):
+        if not isinstance(item, dict):
+            continue
+        record = dict(item)
+        record["_source_test_id"] = _intent_test_id(item, f"ITV-{index + 1:03d}")
+        records.append(record)
     executable: list[dict[str, Any]] = []
     for record in records:
         path_kind = str(record.get("path_kind") or record.get("pathKind") or "").strip().lower()
@@ -5345,16 +5376,56 @@ def _intent_generated_execution_records(generated_tests: list[Any]) -> list[dict
     return grouped
 
 
-def _intent_normalized_execution_command(command: list[str]) -> list[str]:
-    if len(command) != 4:
-        return command
-    executable, module_flag, framework, raw_path = command
+def _intent_command_path_matches_materialized(
+    argument: str,
+    declared_path: str,
+    materialized_path: str,
+) -> bool:
+    candidate = argument.strip().replace("\\", "/")
+    declared = declared_path.strip().replace("\\", "/")
+    materialized = materialized_path.strip().replace("\\", "/")
+    if not candidate or candidate.startswith("-") or not materialized:
+        return False
+    if candidate in {declared, materialized}:
+        return True
+    stripped = _strip_validation_workspace_prefix(candidate)
+    if stripped and stripped == materialized:
+        return True
+    candidate_path = PurePosixPath(candidate)
+    declared_path_value = PurePosixPath(declared) if declared else None
+    materialized_path_value = PurePosixPath(materialized)
+    return bool(
+        declared_path_value
+        and candidate_path.name == declared_path_value.name == materialized_path_value.name
+        and candidate_path.suffix
+    )
+
+
+def _intent_normalized_execution_command(
+    command: list[str],
+    *,
+    declared_path: str = "",
+    materialized_path: str = "",
+) -> list[str]:
+    normalized = list(command)
+    if normalized and PurePosixPath(normalized[0].replace("\\", "/")).name.lower() == "python":
+        normalized[0] = "python3"
+    if materialized_path:
+        normalized = [
+            materialized_path
+            if index > 0 and _intent_command_path_matches_materialized(part, declared_path, materialized_path)
+            else part
+            for index, part in enumerate(normalized)
+        ]
+    if len(normalized) != 4:
+        return normalized
+    executable, module_flag, framework, raw_path = normalized
     if module_flag != "-m" or framework != "unittest" or not raw_path.lower().endswith(".py"):
-        return command
+        return normalized
     path = PurePosixPath(raw_path.replace("\\", "/"))
     start_dir = path.parent.as_posix()
     if start_dir in {"", "."}:
-        return command
+        return normalized
     return [
         executable,
         "-m",
@@ -5376,6 +5447,17 @@ def _intent_source_execution_skip(run_dir: Path) -> tuple[str, str]:
     if not reason:
         return "", ""
     lowered = reason.lower()
+    delegated_to_runner = (
+        "intent_test_running" in lowered
+        or "intent-test-running" in lowered
+        or "intent test running" in lowered
+        or (
+            any(marker in lowered for marker in ("running phase", "runner", "worker"))
+            and any(marker in lowered for marker in ("delegate", "execute", "run later", "will run", "will be run"))
+        )
+    )
+    if delegated_to_runner:
+        return "", ""
     if "dependenc" in lowered or "node_modules" in lowered or "not installed" in lowered:
         return reason, "dependency_missing"
     if "environment" in lowered or "sandbox" in lowered:
@@ -5540,6 +5622,8 @@ def materialize_generated_intent_test_sources(
     validation_repo: Path | None,
     validation: dict[str, Any],
     source: dict[str, Any],
+    *,
+    materialized_paths: dict[str, str] | None = None,
 ) -> dict[str, str]:
     generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
     if validation_repo is None:
@@ -5564,6 +5648,13 @@ def materialize_generated_intent_test_sources(
         declared_path = Path(raw_path)
         validation_candidate = declared_path if declared_path.is_absolute() else validation_repo / declared_path
         if path_is_under(validation_candidate, validation_repo) and validation_candidate.is_file():
+            if materialized_paths is not None:
+                try:
+                    materialized_paths[test_id] = validation_candidate.resolve(strict=False).relative_to(
+                        validation_repo.resolve(strict=False)
+                    ).as_posix()
+                except ValueError:
+                    pass
             continue
         source_candidate = declared_path if declared_path.is_absolute() else (source_root / declared_path if source_root is not None else None)
         source_is_canonical = (
@@ -5597,6 +5688,8 @@ def materialize_generated_intent_test_sources(
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_candidate, destination, follow_symlinks=False)
+            if materialized_paths is not None:
+                materialized_paths[test_id] = relative_path.as_posix()
         except OSError as exc:
             errors[test_id] = f"generated test source could not be materialized: {exc}"
     return errors
@@ -5616,11 +5709,13 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     targets = plan.get("test_targets") if isinstance(plan.get("test_targets"), list) else []
     source = read_json(run_dir / "intent" / "intent-test-source.json", {})
     generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
+    materialized_paths: dict[str, str] = {}
     materialization_errors = materialize_generated_intent_test_sources(
         run_dir,
         validation_repo,
         validation if isinstance(validation, dict) else {},
         source if isinstance(source, dict) else {},
+        materialized_paths=materialized_paths,
     )
     target_by_id = {
         _intent_test_id(target, f"ITV-{index + 1:03d}"): target
@@ -5631,7 +5726,10 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     execution_records: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     if generated_records:
         for index, generated in enumerate(generated_records):
-            test_id = _intent_test_id(generated, f"ITV-{index + 1:03d}")
+            test_id = str(generated.get("_source_test_id") or "").strip() or _intent_test_id(
+                generated,
+                f"ITV-{index + 1:03d}",
+            )
             related_ids = _intent_related_test_ids(generated)
             target = target_by_id.get(test_id)
             if not isinstance(target, dict):
@@ -5659,7 +5757,11 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             generated_index=generated_index,
             generated_total=len(execution_records),
         )
-        command = _intent_normalized_execution_command(command)
+        command = _intent_normalized_execution_command(
+            command,
+            declared_path=_intent_source_path_from_entry(generated),
+            materialized_path=materialized_paths.get(test_id, ""),
+        )
         base_result = {"schema_version": "project-test-run/v1", "test_id": test_id}
         related_ids = _intent_related_test_ids(generated)
         if related_ids:

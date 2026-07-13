@@ -1270,11 +1270,7 @@ class BundleAudit:
             name = normalized_name(item.get("name") or item.get("path"))
             if not name or name == "debug-bundle.zip":
                 continue
-            candidate = self.files.find(
-                f"{manifest_parent}/{name}",
-                f"{self.run_prefix}/{name}",
-                name,
-            )
+            candidate = self.files.find(f"{manifest_parent}/{name}")
             if not candidate:
                 if item.get("required") is True:
                     self.issue(
