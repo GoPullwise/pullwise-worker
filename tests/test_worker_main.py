@@ -308,14 +308,15 @@ class WorkerMainContractsTest(unittest.TestCase):
             code = lifecycle.update_worker(config, dry_run=True)
 
         output = stdout.getvalue()
+        normalized_output = output.replace(chr(92), "/")
         self.assertEqual(code, 0)
-        self.assertIn("https://chatgpt.com/codex/install.sh", output)
-        self.assertIn(f"CODEX_INSTALL_DIR={worker_root}/.local/codex-versions/update-staged", output)
-        self.assertIn("CODEX_RELEASE=latest", output)
-        self.assertIn("--release latest", output)
-        self.assertIn(f"append env PULLWISE_CODEX_COMMAND={worker_root}/.local/bin/codex", output)
-        self.assertLess(output.index("CODEX_RELEASE=latest"), output.index("pip install"))
-        self.assertIn("/.venvs/update-", output)
+        self.assertIn("https://chatgpt.com/codex/install.sh", normalized_output)
+        self.assertIn(f"CODEX_INSTALL_DIR={worker_root}/.local/codex-versions/update-staged", normalized_output)
+        self.assertIn("CODEX_RELEASE=latest", normalized_output)
+        self.assertIn("--release latest", normalized_output)
+        self.assertIn(f"append env PULLWISE_CODEX_COMMAND={worker_root}/.local/bin/codex", normalized_output)
+        self.assertLess(normalized_output.index("CODEX_RELEASE=latest"), normalized_output.index("pip install"))
+        self.assertIn("/.venvs/update-", normalized_output)
 
     def test_codex_cli_refresh_stages_before_activation_and_can_restore_previous_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -350,7 +351,9 @@ class WorkerMainContractsTest(unittest.TestCase):
                     staged_command.chmod(0o755)
                 return argparse.Namespace(returncode=0)
 
-            with patch.object(lifecycle.subprocess, "run", side_effect=run):
+            with patch.object(lifecycle, "provider_tool_path", return_value=config.service_path), patch.object(
+                lifecycle.subprocess, "run", side_effect=run
+            ):
                 code = lifecycle.refresh_codex_cli(config, settings)
 
             backup_path = lifecycle.codex_cli_backup_path(settings)
@@ -410,7 +413,7 @@ class WorkerMainContractsTest(unittest.TestCase):
 
             pip_command = next(command for command in calls if "pip" in command)
             self.assertEqual(code, 9)
-            self.assertIn("/.venvs/update-", pip_command[0])
+            self.assertIn("/.venvs/update-", pip_command[0].replace(chr(92), "/"))
             self.assertNotEqual(pip_command[0], str(old_python))
             self.assertEqual(env_path.read_text(encoding="utf-8"), f"PULLWISE_PYTHON_BIN={old_python}\n")
             self.assertEqual(old_python.read_text(encoding="utf-8"), "old-python\n")
