@@ -639,6 +639,14 @@ def load_codex_sdk_runtime() -> CodexSdkRuntime:
     return CodexSdkRuntime(Codex=Codex, CodexConfig=CodexConfig, ApprovalMode=ApprovalMode, Sandbox=Sandbox)
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 class CodexSdkClient:
     def __init__(
         self,
@@ -658,6 +666,8 @@ class CodexSdkClient:
         self._client: Any | None = None
         self._threads: dict[str, Any] = {}
         self._approval_workspace = cwd
+        self._events_lock = threading.Lock()
+        self._threads_lock = threading.Lock()
 
     def start(self) -> None:
         if self.is_running():
@@ -743,7 +753,8 @@ class CodexSdkClient:
         )
         thread_id = str(getattr(thread, "id", "") or "")
         if thread_id:
-            self._threads[thread_id] = thread
+            with self._threads_lock:
+                self._threads[thread_id] = thread
         return thread_id
 
     def run_turn(
@@ -756,13 +767,18 @@ class CodexSdkClient:
         read_only: bool,
         timeout_seconds: int,
         cancel_requested: Callable[[], bool] | None = None,
+        writable_roots: list[Path] | None = None,
     ) -> None:
         client = self._sdk_client()
         self._approval_workspace = repo_dir
         params = {
             "cwd": str(repo_dir),
             "approvalPolicy": "never",
-            "sandboxPolicy": self._sandbox_policy(repo_dir, read_only=read_only),
+            "sandboxPolicy": self._sandbox_policy(
+                repo_dir,
+                read_only=read_only,
+                writable_roots=writable_roots,
+            ),
             "effort": effort,
             "summary": "concise",
         }
@@ -886,14 +902,29 @@ class CodexSdkClient:
         if error.get("message"):
             raise RuntimeError(error["message"])
 
-    def _sandbox_policy(self, repo_dir: Path, *, read_only: bool) -> dict[str, Any]:
+    def _sandbox_policy(
+        self,
+        repo_dir: Path,
+        *,
+        read_only: bool,
+        writable_roots: list[Path] | None = None,
+    ) -> dict[str, Any]:
         if read_only:
             return {"type": "readOnly", "networkAccess": False}
         validation_repo = repo_dir.parent / "validation-repo"
+        default_roots = [repo_dir / ".codex-review", validation_repo]
+        selected_roots = writable_roots if writable_roots is not None else default_roots
+        allowed_roots = [root.resolve(strict=False) for root in default_roots]
+        resolved_roots: list[str] = []
+        for root in selected_roots:
+            resolved = Path(root).resolve(strict=False)
+            if not any(_path_is_within(resolved, allowed) for allowed in allowed_roots):
+                raise ValueError(f"Codex writable root is outside the review workspace: {resolved}")
+            resolved_roots.append(str(resolved))
         return {
             "type": "workspaceWrite",
             "networkAccess": False,
-            "writableRoots": [str(repo_dir / ".codex-review"), str(validation_repo)],
+            "writableRoots": resolved_roots,
         }
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
@@ -961,7 +992,8 @@ class CodexSdkClient:
         codex = self._codex
         self._codex = None
         self._client = None
-        self._threads.clear()
+        with self._threads_lock:
+            self._threads.clear()
         if codex is not None:
             codex.close()
 
@@ -980,7 +1012,8 @@ class CodexSdkClient:
     def _record_sdk_notification(self, notification: Any) -> None:
         method = str(getattr(notification, "method", "") or "")
         payload = self._model_to_dict(getattr(notification, "payload", None))
-        append_jsonl(self.events_path, {"method": method, "params": payload})
+        with self._events_lock:
+            append_jsonl(self.events_path, {"method": method, "params": payload})
 
     def _model_to_dict(self, value: Any) -> dict[str, Any]:
         if value is None:
@@ -2063,6 +2096,44 @@ def terminal_state_from_result_status(status: object) -> str:
     return "failed"
 
 
+@dataclass(frozen=True)
+class ReviewerAssignmentWork:
+    index: int
+    bundle_id: str
+    reviewer_id: str
+    output_name: str
+    output_path: Path
+    staging_dir: Path
+    staging_output_path: Path
+
+
+@dataclass
+class ReviewerAssignmentOutcome:
+    work: ReviewerAssignmentWork
+    thread_id: str
+    attempt: int
+    valid_output: bool = False
+    finding_count: int = 0
+    error: BaseException | None = None
+
+
+def reviewer_error_is_transient_capacity(error: BaseException) -> bool:
+    message = str(error).lower()
+    if any(marker in message for marker in ("usagelimitexceeded", "usage limit exceeded", "quota exhausted")):
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "429",
+            "rate limit",
+            "too many requests",
+            "server busy",
+            "overloaded",
+            "temporarily unavailable",
+        )
+    )
+
+
 class ReviewWorkerV1:
     def __init__(self, config: Any, client: Any | None = None) -> None:
         self.config = config
@@ -2931,6 +3002,63 @@ class ReviewWorkerV1:
             cancel_requested=self.poll_cancel_requested,
         )
 
+    def _execute_reviewer_assignment(
+        self,
+        codex_client: CodexSdkClient,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        work: ReviewerAssignmentWork,
+        *,
+        thread_id: str,
+        attempt: int,
+        expected_assignments: set[tuple[str, str]],
+        cancel_event: threading.Event,
+    ) -> ReviewerAssignmentOutcome:
+        def cancel_requested() -> bool:
+            return cancel_event.is_set() or self.poll_cancel_requested()
+
+        try:
+            codex_client.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                prompt=reviewer_assignment_prompt(
+                    run_dir,
+                    work.bundle_id,
+                    work.reviewer_id,
+                    job,
+                    output_path=work.staging_output_path,
+                ),
+                effort=effort_for_phase(job, "reviewer_fanout"),
+                read_only=False,
+                timeout_seconds=turn_timeout_for_job(job),
+                cancel_requested=cancel_requested,
+                writable_roots=[work.staging_dir],
+            )
+        except Exception as exc:
+            return ReviewerAssignmentOutcome(
+                work=work,
+                thread_id=thread_id,
+                attempt=attempt,
+                error=exc,
+            )
+
+        payload = read_json(work.staging_output_path, None)
+        covered = _reviewer_output_assignments(payload, work.staging_output_path, expected_assignments)
+        valid_output = (
+            isinstance(payload, dict)
+            and isinstance(payload.get("findings"), list)
+            and covered == {(work.bundle_id, work.reviewer_id)}
+        )
+        finding_count = len(payload.get("findings") or []) if isinstance(payload, dict) else 0
+        return ReviewerAssignmentOutcome(
+            work=work,
+            thread_id=thread_id,
+            attempt=attempt,
+            valid_output=valid_output,
+            finding_count=finding_count,
+        )
+
     def run_reviewer_fanout_phase(
         self,
         codex_client: CodexSdkClient | None,
@@ -2951,128 +3079,332 @@ class ReviewWorkerV1:
         if not assignments:
             raise RuntimeError("reviewer_fanout has no planned reviewer assignments")
 
+        max_concurrency = reviewer_concurrency_for_job(job)
         raw_dir = run_dir / "raw-reviewers"
         raw_dir.mkdir(parents=True, exist_ok=True)
+        staging_root = run_dir / "reviewer-staging"
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        staging_root.mkdir(parents=True, exist_ok=True)
         execution_path = run_dir / "reviewer-execution.json"
         expected_assignments = set(assignments)
+        works: list[ReviewerAssignmentWork] = []
         records: list[dict[str, Any]] = []
-        completed = 0
+        for index, (bundle_id, reviewer_id) in enumerate(assignments, start=1):
+            output_name = reviewer_assignment_output_name(bundle_id, reviewer_id)
+            output_path = raw_dir / output_name
+            if output_path.exists():
+                output_path.unlink()
+            assignment_hash = hashlib.sha256(
+                f"{bundle_id}\0{reviewer_id}".encode("utf-8")
+            ).hexdigest()[:12]
+            staging_dir = staging_root / f"assignment-{index:04d}-{assignment_hash}"
+            work = ReviewerAssignmentWork(
+                index=index,
+                bundle_id=bundle_id,
+                reviewer_id=reviewer_id,
+                output_name=output_name,
+                output_path=output_path,
+                staging_dir=staging_dir,
+                staging_output_path=staging_dir / output_name,
+            )
+            works.append(work)
+            records.append(
+                {
+                    "bundle_id": bundle_id,
+                    "reviewer_id": reviewer_id,
+                    "output": f"raw-reviewers/{output_name}",
+                    "status": "pending",
+                    "attempts": [],
+                }
+            )
+
         execution = {
             "schema_version": "reviewer-execution/v1",
             "strategy": "one_turn_per_assignment",
+            "thread_strategy": "one_thread_per_assignment",
+            "scheduler": "bounded_parallel",
             "root_thread_id": thread_id,
+            "max_concurrency": max_concurrency,
+            "effective_concurrency": max_concurrency,
+            "max_observed_concurrency": 0,
             "assignments_total": len(assignments),
             "assignments_completed": 0,
             "assignments": records,
         }
         write_json(execution_path, execution)
 
-        for index, (bundle_id, reviewer_id) in enumerate(assignments, start=1):
-            output_name = reviewer_assignment_output_name(bundle_id, reviewer_id)
-            output_path = raw_dir / output_name
-            if output_path.exists():
-                output_path.unlink()
-            record = {
-                "bundle_id": bundle_id,
-                "reviewer_id": reviewer_id,
-                "output": f"raw-reviewers/{output_name}",
-                "status": "running",
-                "started_at": iso_time(time.time()),
-            }
-            records.append(record)
-            write_json(execution_path, execution)
-            append_jsonl(
-                run_dir / "worker.log.jsonl",
-                {
-                    "event": "reviewer_assignment_started",
-                    "bundle_id": bundle_id,
-                    "reviewer_id": reviewer_id,
-                    "assignment_index": index,
-                    "assignments_total": len(assignments),
-                    "time": iso_time(time.time()),
-                },
-            )
-            try:
-                codex_client.run_turn(
-                    thread_id=thread_id,
-                    repo_dir=repo_dir,
-                    prompt=reviewer_assignment_prompt(run_dir, bundle_id, reviewer_id, job),
-                    effort=effort_for_phase(job, "reviewer_fanout"),
-                    read_only=False,
-                    timeout_seconds=turn_timeout_for_job(job),
-                    cancel_requested=self.poll_cancel_requested,
-                )
-            except Exception as exc:
-                record.update(
-                    {
-                        "status": "failed",
-                        "completed_at": iso_time(time.time()),
-                        "error": quota_text(exc, 500),
-                    }
-                )
-                write_json(execution_path, execution)
-                append_jsonl(
-                    run_dir / "worker.log.jsonl",
-                    {
-                        "event": "reviewer_assignment_failed",
-                        "bundle_id": bundle_id,
-                        "reviewer_id": reviewer_id,
-                        "error": quota_text(exc, 500),
-                        "time": iso_time(time.time()),
-                    },
-                )
-                raise
+        pending = deque(works)
+        active_futures: dict[
+            Future[ReviewerAssignmentOutcome],
+            tuple[ReviewerAssignmentWork, dict[str, Any], dict[str, Any]],
+        ] = {}
+        cancel_event = threading.Event()
+        completed = 0
+        finished = 0
+        effective_concurrency = max_concurrency
+        fatal_error: BaseException | None = None
+        max_rate_limit_retries = 1
 
-            payload = read_json(output_path, None)
-            covered = _reviewer_output_assignments(payload, output_path, expected_assignments)
-            valid_output = (
-                isinstance(payload, dict)
-                and isinstance(payload.get("findings"), list)
-                and covered == {(bundle_id, reviewer_id)}
-            )
-            finding_count = len(payload.get("findings") or []) if isinstance(payload, dict) else 0
-            record.update(
-                {
-                    "status": "completed" if valid_output else "invalid_output",
-                    "completed_at": iso_time(time.time()),
-                    "finding_count": finding_count,
-                }
-            )
-            if valid_output:
-                completed += 1
-            else:
-                record["error"] = "exact assignment output is missing, malformed, or covers a different assignment"
-            execution["assignments_completed"] = completed
+        with ThreadPoolExecutor(
+            max_workers=max_concurrency,
+            thread_name_prefix="pullwise-reviewer",
+        ) as executor:
+            while (pending and fatal_error is None) or active_futures:
+                if fatal_error is None and self.poll_cancel_requested():
+                    fatal_error = JobCancelled("cancel requested")
+                    cancel_event.set()
+
+                while (
+                    fatal_error is None
+                    and pending
+                    and len(active_futures) < effective_concurrency
+                ):
+                    work = pending.popleft()
+                    record = records[work.index - 1]
+                    attempt = len(record["attempts"]) + 1
+                    if work.staging_dir.exists():
+                        shutil.rmtree(work.staging_dir)
+                    work.staging_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        reviewer_thread_id = codex_client.start_thread(
+                            repo_dir,
+                            model_for_job(job),
+                        )
+                        if not reviewer_thread_id:
+                            raise RuntimeError("Codex reviewer thread is missing")
+                    except Exception as exc:
+                        record.update(
+                            {
+                                "status": "failed",
+                                "completed_at": iso_time(time.time()),
+                                "error": quota_text(exc, 500),
+                            }
+                        )
+                        fatal_error = exc
+                        cancel_event.set()
+                        write_json(execution_path, execution)
+                        break
+
+                    attempt_record = {
+                        "attempt": attempt,
+                        "thread_id": reviewer_thread_id,
+                        "status": "running",
+                        "started_at": iso_time(time.time()),
+                    }
+                    record["attempts"].append(attempt_record)
+                    record.update(
+                        {
+                            "status": "running",
+                            "thread_id": reviewer_thread_id,
+                            "started_at": record.get("started_at") or attempt_record["started_at"],
+                        }
+                    )
+                    execution["max_observed_concurrency"] = max(
+                        int(execution["max_observed_concurrency"]),
+                        len(active_futures) + 1,
+                    )
+                    write_json(execution_path, execution)
+                    append_jsonl(
+                        run_dir / "worker.log.jsonl",
+                        {
+                            "event": "reviewer_assignment_started",
+                            "bundle_id": work.bundle_id,
+                            "reviewer_id": work.reviewer_id,
+                            "assignment_index": work.index,
+                            "assignments_total": len(assignments),
+                            "attempt": attempt,
+                            "thread_id": reviewer_thread_id,
+                            "time": iso_time(time.time()),
+                        },
+                    )
+                    future = executor.submit(
+                        self._execute_reviewer_assignment,
+                        codex_client,
+                        repo_dir,
+                        run_dir,
+                        job,
+                        work,
+                        thread_id=reviewer_thread_id,
+                        attempt=attempt,
+                        expected_assignments=expected_assignments,
+                        cancel_event=cancel_event,
+                    )
+                    active_futures[future] = (work, record, attempt_record)
+
+                if not active_futures:
+                    break
+
+                done, _pending_futures = wait(
+                    tuple(active_futures),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in sorted(done, key=lambda item: active_futures[item][0].index):
+                    work, record, attempt_record = active_futures.pop(future)
+                    try:
+                        outcome = future.result()
+                    except BaseException as exc:
+                        outcome = ReviewerAssignmentOutcome(
+                            work=work,
+                            thread_id=str(attempt_record["thread_id"]),
+                            attempt=int(attempt_record["attempt"]),
+                            error=exc,
+                        )
+
+                    if outcome.valid_output:
+                        try:
+                            os.replace(work.staging_output_path, work.output_path)
+                        except OSError as exc:
+                            outcome.error = exc
+                            outcome.valid_output = False
+
+                    if outcome.error is not None:
+                        error_text = quota_text(outcome.error, 500)
+                        attempt_record.update(
+                            {
+                                "status": "failed",
+                                "completed_at": iso_time(time.time()),
+                                "error": error_text,
+                            }
+                        )
+                        can_retry_capacity = (
+                            fatal_error is None
+                            and outcome.attempt <= max_rate_limit_retries
+                            and reviewer_error_is_transient_capacity(outcome.error)
+                        )
+                        if can_retry_capacity:
+                            record.update(
+                                {
+                                    "status": "pending_retry",
+                                    "error": error_text,
+                                }
+                            )
+                            effective_concurrency = 1
+                            execution["effective_concurrency"] = 1
+                            pending.appendleft(work)
+                            shutil.rmtree(work.staging_dir, ignore_errors=True)
+                            append_jsonl(
+                                run_dir / "worker.log.jsonl",
+                                {
+                                    "event": "reviewer_concurrency_reduced",
+                                    "reason": "transient_capacity_error",
+                                    "from": max_concurrency,
+                                    "to": 1,
+                                    "bundle_id": work.bundle_id,
+                                    "reviewer_id": work.reviewer_id,
+                                    "error": error_text,
+                                    "time": iso_time(time.time()),
+                                },
+                            )
+                            write_json(execution_path, execution)
+                            continue
+
+                        cancelled = isinstance(outcome.error, JobCancelled)
+                        record.update(
+                            {
+                                "status": "cancelled" if cancelled else "failed",
+                                "completed_at": iso_time(time.time()),
+                                "error": error_text,
+                            }
+                        )
+                        append_jsonl(
+                            run_dir / "worker.log.jsonl",
+                            {
+                                "event": "reviewer_assignment_cancelled" if cancelled else "reviewer_assignment_failed",
+                                "bundle_id": work.bundle_id,
+                                "reviewer_id": work.reviewer_id,
+                                "attempt": outcome.attempt,
+                                "thread_id": outcome.thread_id,
+                                "error": error_text,
+                                "time": iso_time(time.time()),
+                            },
+                        )
+                        if fatal_error is None:
+                            fatal_error = outcome.error
+                            cancel_event.set()
+                        write_json(execution_path, execution)
+                        continue
+
+                    attempt_record.update(
+                        {
+                            "status": "completed" if outcome.valid_output else "invalid_output",
+                            "completed_at": iso_time(time.time()),
+                            "finding_count": outcome.finding_count,
+                        }
+                    )
+                    record.update(
+                        {
+                            "status": "completed" if outcome.valid_output else "invalid_output",
+                            "completed_at": iso_time(time.time()),
+                            "finding_count": outcome.finding_count,
+                        }
+                    )
+                    if outcome.valid_output:
+                        completed += 1
+                        shutil.rmtree(work.staging_dir, ignore_errors=True)
+                    else:
+                        record["error"] = (
+                            "exact assignment output is missing, malformed, or covers a different assignment"
+                        )
+                    finished += 1
+                    execution["assignments_completed"] = completed
+                    write_json(execution_path, execution)
+                    append_jsonl(
+                        run_dir / "worker.log.jsonl",
+                        {
+                            "event": "reviewer_assignment_completed"
+                            if outcome.valid_output
+                            else "reviewer_assignment_invalid_output",
+                            "bundle_id": work.bundle_id,
+                            "reviewer_id": work.reviewer_id,
+                            "finding_count": outcome.finding_count,
+                            "assignment_index": work.index,
+                            "assignments_total": len(assignments),
+                            "attempt": outcome.attempt,
+                            "thread_id": outcome.thread_id,
+                            "time": iso_time(time.time()),
+                        },
+                    )
+                    self.progress_phase(
+                        active,
+                        run_dir,
+                        "reviewer_fanout",
+                        progress,
+                        current_phase_percent=min(
+                            90.0,
+                            (finished / len(assignments)) * 90.0,
+                        ),
+                        message=f"Completed reviewer assignment {finished} of {len(assignments)}.",
+                        data={
+                            "reviewer_runs_total": len(assignments),
+                            "reviewer_runs_completed": completed,
+                            "active_unit": {
+                                "bundle_id": work.bundle_id,
+                                "reviewer_id": work.reviewer_id,
+                                "assignment_index": work.index,
+                                "thread_id": outcome.thread_id,
+                            },
+                        },
+                    )
+
+        if fatal_error is not None:
+            for work in pending:
+                record = records[work.index - 1]
+                if record.get("status") in {"pending", "pending_retry"}:
+                    record.update(
+                        {
+                            "status": "cancelled",
+                            "completed_at": iso_time(time.time()),
+                            "error": "reviewer fanout stopped before this assignment started",
+                        }
+                    )
             write_json(execution_path, execution)
-            append_jsonl(
-                run_dir / "worker.log.jsonl",
-                {
-                    "event": "reviewer_assignment_completed" if valid_output else "reviewer_assignment_invalid_output",
-                    "bundle_id": bundle_id,
-                    "reviewer_id": reviewer_id,
-                    "finding_count": finding_count,
-                    "assignment_index": index,
-                    "assignments_total": len(assignments),
-                    "time": iso_time(time.time()),
-                },
-            )
-            self.progress_phase(
-                active,
-                run_dir,
-                "reviewer_fanout",
-                progress,
-                current_phase_percent=min(90.0, (index / len(assignments)) * 90.0),
-                message=f"Completed reviewer assignment {index} of {len(assignments)}.",
-                data={
-                    "reviewer_runs_total": len(assignments),
-                    "reviewer_runs_completed": completed,
-                    "active_unit": {
-                        "bundle_id": bundle_id,
-                        "reviewer_id": reviewer_id,
-                        "assignment_index": index,
-                    },
-                },
-            )
+            raise fatal_error
+
+        try:
+            staging_root.rmdir()
+        except OSError:
+            pass
 
     def repair_semantic_phase_outputs(
         self,
@@ -3397,6 +3729,10 @@ def review_worker_policy_for_job(job: dict[str, Any]) -> dict[str, int]:
     return dict(validate_job_policy(job)["review_worker"])
 
 
+def reviewer_concurrency_for_job(job: dict[str, Any]) -> int:
+    return int(review_worker_policy_for_job(job)["reviewerConcurrency"])
+
+
 def turn_timeout_for_job(job: dict[str, Any]) -> int:
     return int(review_worker_policy_for_job(job)["turnTimeoutSeconds"])
 
@@ -3558,12 +3894,22 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
         turn_timeout_seconds = _policy_int(review_policy, "turn_timeout_seconds", "turnTimeoutSeconds", default=None)
     except (TypeError, ValueError):
         raise ValueError("claimed job must include review_request.policy.turn_timeout_seconds") from None
+    reviewer_concurrency = _policy_int(
+        review_policy,
+        "reviewer_concurrency",
+        "reviewerConcurrency",
+        default=1,
+    )
     try:
         scan_deadline_seconds = _policy_int(review_budget, "max_wall_time_seconds", "maxWallTimeSeconds", default=None)
     except (TypeError, ValueError):
         raise ValueError("claimed job must include review_request.budget.max_wall_time_seconds") from None
     if turn_timeout_seconds <= 0 or scan_deadline_seconds < 0:
         raise ValueError("review worker turn timeout must be positive and scan deadline must be non-negative")
+    if reviewer_concurrency < 1 or reviewer_concurrency > MAX_REVIEWER_CONCURRENCY:
+        raise ValueError(
+            f"review_request.policy.reviewer_concurrency must be between 1 and {MAX_REVIEWER_CONCURRENCY}"
+        )
     limits = repository_limits_for_job(job)
     if limits is None:
         raise ValueError("claimed job must include repositoryLimits.maxFiles and repositoryLimits.maxBytes")
@@ -3580,6 +3926,7 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
         "review_worker": {
             "turnTimeoutSeconds": turn_timeout_seconds,
             "scanDeadlineSeconds": scan_deadline_seconds,
+            "reviewerConcurrency": reviewer_concurrency,
         },
         "repository_limits": limits,
         "intent_test_validation": intent_validation_policy_for_job(job),
@@ -3859,6 +4206,8 @@ def reviewer_assignment_prompt(
     bundle_id: str,
     reviewer_id: str,
     job: dict[str, Any] | None = None,
+    *,
+    output_path: Path | None = None,
 ) -> str:
     reviewer_template_names = {
         "security": "reviewers/security.md",
@@ -3870,6 +4219,8 @@ def reviewer_assignment_prompt(
     if template_name is None:
         raise RuntimeError(f"unsupported reviewer assignment: {reviewer_id}")
     output_name = reviewer_assignment_output_name(bundle_id, reviewer_id)
+    exact_output_path = output_path or run_dir / "raw-reviewers" / output_name
+    relative_output_path = exact_output_path.relative_to(run_dir).as_posix()
     lines = [
         "Phase: reviewer_fanout",
         "Role: Independent Bundle Reviewer",
@@ -3877,8 +4228,8 @@ def reviewer_assignment_prompt(
         f"Bundle assignment: {bundle_id}",
         f"Reviewer assignment: {reviewer_id}",
         f"Read the packed bundle at: {run_dir / 'bundles' / f'{bundle_id}.md'}",
-        f"Exact output path: {run_dir / 'raw-reviewers' / output_name}",
-        f"Output path relative to the run artifact directory: raw-reviewers/{output_name}",
+        f"Exact output path: {exact_output_path}",
+        f"Output path relative to the run artifact directory: {relative_output_path}",
         "Do not review or emit output for any other bundle or reviewer assignment in this turn.",
         "Treat this assignment as an independent review; do not inherit an earlier reviewer's empty conclusion.",
         "Inspect the concrete source in the packed bundle and follow referenced repository call sites when needed.",

@@ -8830,6 +8830,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 progress=70,
             )
             execution = json.loads((run_dir / "reviewer-execution.json").read_text(encoding="utf-8"))
+            published_outputs = [
+                (run_dir / "raw-reviewers" / f"{bundle}.{reviewer.replace('_', '-')}.json").is_file()
+                for bundle, reviewer in assignments
+            ]
 
         self.assertEqual(len(turn_calls), 4)
         self.assertEqual(len(started_threads), 4)
@@ -8858,12 +8862,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(execution["assignments_total"], 4)
         self.assertEqual(execution["assignments_completed"], 4)
         self.assertEqual([update["reviewer_runs_completed"] for update in progress_updates], [1, 2, 3, 4])
-        self.assertTrue(
-            all(
-                (run_dir / "raw-reviewers" / f"{bundle}.{reviewer.replace('_', '-')}.json").is_file()
-                for bundle, reviewer in assignments
-            )
-        )
+        self.assertTrue(all(published_outputs))
 
     def test_debug_summary_explains_candidate_disposition_and_degraded_intent_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
