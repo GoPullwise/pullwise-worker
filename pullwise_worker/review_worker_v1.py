@@ -94,6 +94,59 @@ INTENT_VALIDATION_CHILD_PHASES = {
     "intent_test_running",
     "intent_test_failure_analysis",
 }
+
+
+def phase_estimate_unit_id(phase: str) -> str:
+    return f"phase:{phase}"
+
+
+def current_run_estimator_for_job(
+    job: dict[str, Any],
+    *,
+    monotonic_clock: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], float] = time.time,
+) -> CurrentRunEstimator:
+    policy = review_worker_policy_for_job(job)
+    deadline_seconds = max(0, int(policy.get("scanDeadlineSeconds") or 0))
+    started_monotonic = monotonic_clock()
+    estimator = CurrentRunEstimator(
+        monotonic_clock=monotonic_clock,
+        wall_clock=wall_clock,
+        deadline_monotonic=(
+            started_monotonic + deadline_seconds if deadline_seconds > 0 else None
+        ),
+    )
+    estimator.set_resource_pool(
+        "pipeline",
+        configured_concurrency=1,
+        effective_concurrency=1,
+    )
+    reviewer_concurrency = reviewer_concurrency_for_job(job)
+    estimator.set_resource_pool(
+        "reviewer",
+        configured_concurrency=reviewer_concurrency,
+        effective_concurrency=reviewer_concurrency,
+    )
+    previous_unit_id = ""
+    for index, (phase, _progress) in enumerate(PIPELINE_PHASES):
+        unit_id = phase_estimate_unit_id(phase)
+        estimator.add_work_unit(
+            unit_id,
+            kind=(
+                "reviewer_barrier"
+                if phase == "reviewer_fanout"
+                else "semantic_turn"
+                if phase in SEMANTIC_PHASES
+                else "mechanical_phase"
+            ),
+            resource_pool="pipeline",
+            dependencies=(previous_unit_id,) if previous_unit_id else (),
+            order=index,
+        )
+        previous_unit_id = unit_id
+    return estimator
+
+
 CORE_EFFORT_PHASES = SEMANTIC_PHASES - {"bootstrap_helper_scripts"}
 MECHANICAL_PHASES = {phase for phase, _progress in PIPELINE_PHASES} - SEMANTIC_PHASES
 REQUIRED_COMPLETED_ARTIFACTS = {
@@ -2161,6 +2214,7 @@ class ReviewerAssignmentWork:
     output_path: Path
     staging_dir: Path
     staging_output_path: Path
+    estimated_weight: float = 1.0
 
 
 @dataclass
@@ -2170,6 +2224,7 @@ class ReviewerAssignmentOutcome:
     attempt: int
     valid_output: bool = False
     finding_count: int = 0
+    duration_ms: int = 0
     error: BaseException | None = None
 
 
@@ -3082,8 +3137,9 @@ class ReviewWorkerV1:
         def cancel_requested() -> bool:
             return cancel_event.is_set() or self.poll_cancel_requested()
 
+        started_monotonic = time.monotonic()
         try:
-            codex_client.run_turn(
+            turn_metrics = codex_client.run_turn(
                 thread_id=thread_id,
                 repo_dir=repo_dir,
                 prompt=reviewer_assignment_prompt(
@@ -3104,8 +3160,14 @@ class ReviewWorkerV1:
                 work=work,
                 thread_id=thread_id,
                 attempt=attempt,
+                duration_ms=max(0, int((time.monotonic() - started_monotonic) * 1000)),
                 error=exc,
             )
+
+        reported_duration = getattr(turn_metrics, "duration_ms", None)
+        if isinstance(reported_duration, bool) or not isinstance(reported_duration, (int, float)):
+            reported_duration = (time.monotonic() - started_monotonic) * 1000
+        duration_ms = max(0, int(reported_duration))
 
         payload = read_json(work.staging_output_path, None)
         covered = _reviewer_output_assignments(payload, work.staging_output_path, expected_assignments)
@@ -3121,6 +3183,7 @@ class ReviewWorkerV1:
             attempt=attempt,
             valid_output=valid_output,
             finding_count=finding_count,
+            duration_ms=duration_ms,
         )
 
     def run_reviewer_fanout_phase(
@@ -3152,6 +3215,21 @@ class ReviewWorkerV1:
         staging_root.mkdir(parents=True, exist_ok=True)
         execution_path = run_dir / "reviewer-execution.json"
         expected_assignments = set(assignments)
+        bundle_weights: dict[str, float] = {}
+        bundle_plan = read_json(run_dir / "bundle-plan.json", {})
+        raw_bundles = bundle_plan.get("bundles") if isinstance(bundle_plan, dict) else []
+        if isinstance(raw_bundles, list):
+            for bundle in raw_bundles:
+                if not isinstance(bundle, dict):
+                    continue
+                bundle_key = _normalized_review_bundle_id(bundle.get("bundle_id") or bundle.get("id"))
+                if not bundle_key:
+                    continue
+                try:
+                    bundle_weight = float(bundle.get("estimated_tokens") or 1)
+                except (TypeError, ValueError):
+                    bundle_weight = 1.0
+                bundle_weights[bundle_key] = bundle_weight if math.isfinite(bundle_weight) and bundle_weight > 0 else 1.0
         works: list[ReviewerAssignmentWork] = []
         records: list[dict[str, Any]] = []
         for index, (bundle_id, reviewer_id) in enumerate(assignments, start=1):
@@ -3171,6 +3249,7 @@ class ReviewWorkerV1:
                 output_path=output_path,
                 staging_dir=staging_dir,
                 staging_output_path=staging_dir / output_name,
+                estimated_weight=bundle_weights.get(bundle_id, 1.0),
             )
             works.append(work)
             records.append(
@@ -3182,6 +3261,27 @@ class ReviewWorkerV1:
                     "attempts": [],
                 }
             )
+
+        estimator = active.current_run_estimator
+
+        def estimate_unit_id(work: ReviewerAssignmentWork, attempt: int) -> str:
+            return f"reviewer:{work.index}:attempt:{attempt}"
+
+        if estimator is not None:
+            estimator.set_resource_pool(
+                "reviewer",
+                configured_concurrency=max_concurrency,
+                effective_concurrency=max_concurrency,
+            )
+            for work in works:
+                estimator.add_work_unit(
+                    estimate_unit_id(work, 1),
+                    kind="reviewer_turn",
+                    resource_pool="reviewer",
+                    order=work.index,
+                    weight=work.estimated_weight,
+                )
+            estimator.mark_plan_ready()
 
         execution = {
             "schema_version": "reviewer-execution/v1",
@@ -3230,6 +3330,8 @@ class ReviewWorkerV1:
                     if work.staging_dir.exists():
                         shutil.rmtree(work.staging_dir)
                     work.staging_dir.mkdir(parents=True, exist_ok=True)
+                    if estimator is not None:
+                        estimator.start_work_unit(estimate_unit_id(work, attempt))
                     try:
                         reviewer_thread_id = codex_client.start_thread(
                             repo_dir,
@@ -3238,6 +3340,11 @@ class ReviewWorkerV1:
                         if not reviewer_thread_id:
                             raise RuntimeError("Codex reviewer thread is missing")
                     except Exception as exc:
+                        if estimator is not None:
+                            estimator.finish_work_unit(
+                                estimate_unit_id(work, attempt),
+                                state="failed",
+                            )
                         record.update(
                             {
                                 "status": "failed",
@@ -3295,6 +3402,24 @@ class ReviewWorkerV1:
                         cancel_event=cancel_event,
                     )
                     active_futures[future] = (work, record, attempt_record)
+                    self.progress_phase(
+                        active,
+                        run_dir,
+                        "reviewer_fanout",
+                        progress,
+                        current_phase_percent=min(90.0, (finished / len(assignments)) * 90.0),
+                        message=f"Started reviewer assignment {work.index} of {len(assignments)}.",
+                        data={
+                            "reviewer_runs_total": len(assignments),
+                            "reviewer_runs_completed": completed,
+                            "active_unit": {
+                                "bundle_id": work.bundle_id,
+                                "reviewer_id": work.reviewer_id,
+                                "assignment_index": work.index,
+                                "attempt": attempt,
+                            },
+                        },
+                    )
 
                 if not active_futures:
                     break
@@ -3322,6 +3447,15 @@ class ReviewWorkerV1:
                             outcome.error = exc
                             outcome.valid_output = False
 
+                    duration_ms = max(0, int(outcome.duration_ms or 0))
+                    attempt_record["duration_ms"] = duration_ms
+                    if estimator is not None:
+                        estimator.finish_work_unit(
+                            estimate_unit_id(work, outcome.attempt),
+                            duration_seconds=(duration_ms / 1000.0) if duration_ms > 0 else None,
+                            state="failed" if outcome.error is not None else "completed",
+                        )
+
                     if outcome.error is not None:
                         error_text = quota_text(outcome.error, 500)
                         attempt_record.update(
@@ -3345,6 +3479,22 @@ class ReviewWorkerV1:
                             )
                             effective_concurrency = 1
                             execution["effective_concurrency"] = 1
+                            if estimator is not None:
+                                retry_attempt = outcome.attempt + 1
+                                estimator.set_resource_pool(
+                                    "reviewer",
+                                    configured_concurrency=max_concurrency,
+                                    effective_concurrency=effective_concurrency,
+                                )
+                                estimator.add_work_unit(
+                                    estimate_unit_id(work, retry_attempt),
+                                    kind="reviewer_turn",
+                                    resource_pool="reviewer",
+                                    dependencies=(estimate_unit_id(work, outcome.attempt),),
+                                    order=work.index,
+                                    weight=work.estimated_weight,
+                                    state="retrying",
+                                )
                             pending.appendleft(work)
                             shutil.rmtree(work.staging_dir, ignore_errors=True)
                             append_jsonl(
@@ -3361,6 +3511,24 @@ class ReviewWorkerV1:
                                 },
                             )
                             write_json(execution_path, execution)
+                            self.progress_phase(
+                                active,
+                                run_dir,
+                                "reviewer_fanout",
+                                progress,
+                                current_phase_percent=min(90.0, (finished / len(assignments)) * 90.0),
+                                message="Reviewer capacity reduced; retrying with concurrency 1.",
+                                data={
+                                    "reviewer_runs_total": len(assignments),
+                                    "reviewer_runs_completed": completed,
+                                    "active_unit": {
+                                        "bundle_id": work.bundle_id,
+                                        "reviewer_id": work.reviewer_id,
+                                        "assignment_index": work.index,
+                                        "attempt": outcome.attempt + 1,
+                                    },
+                                },
+                            )
                             continue
 
                         cancelled = isinstance(outcome.error, JobCancelled)
@@ -3446,7 +3614,7 @@ class ReviewWorkerV1:
                                 "bundle_id": work.bundle_id,
                                 "reviewer_id": work.reviewer_id,
                                 "assignment_index": work.index,
-                                "thread_id": outcome.thread_id,
+                                "attempt": outcome.attempt,
                             },
                         },
                     )

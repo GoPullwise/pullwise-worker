@@ -111,6 +111,13 @@ class CurrentRunEstimator:
             duration_seconds=normalized_duration,
         )
 
+    def has_work_unit(self, unit_id: str) -> bool:
+        return str(unit_id) in self._units
+
+    def work_unit_state(self, unit_id: str) -> str | None:
+        unit = self._units.get(str(unit_id))
+        return unit.state if unit is not None else None
+
     def replace_dependencies(self, unit_id: str, dependencies: tuple[str, ...]) -> None:
         self._units[str(unit_id)].dependencies = tuple(str(value) for value in dependencies)
 

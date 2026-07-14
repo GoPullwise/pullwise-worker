@@ -10,10 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
 
+from pullwise_worker.current_run_eta import CurrentRunEstimator
 from pullwise_worker.review_worker_v1 import (
     ActiveJob,
     JobCancelled,
+    PIPELINE_PHASES,
     ReviewWorkerV1,
+    SEMANTIC_PHASES,
+    current_run_estimator_for_job,
     write_json,
 )
 
@@ -129,6 +133,113 @@ def fanout_fixture(
 
 
 class ReviewerFanoutConcurrencyTest(unittest.TestCase):
+    def test_estimate_includes_downstream_pipeline_critical_path(self) -> None:
+        with fanout_fixture(['security', 'correctness', 'test_gap']) as (
+            worker,
+            repo,
+            run_dir,
+            job,
+            active,
+        ):
+            monotonic_now = [100.0]
+            active.current_run_estimator = current_run_estimator_for_job(
+                job,
+                monotonic_clock=lambda: monotonic_now[0],
+                wall_clock=lambda: 1000.0,
+            )
+            for phase, phase_progress in PIPELINE_PHASES:
+                if phase == 'reviewer_fanout':
+                    break
+                worker.start_phase(active, run_dir, phase, phase_progress)
+                monotonic_now[0] += 5.0 if phase in SEMANTIC_PHASES else 2.0
+                worker.complete_phase(active, run_dir, phase, phase_progress)
+
+            class FakeCodexClient:
+                def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                    return f'reviewer-thread-{time.monotonic_ns()}'
+
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    _bundle, reviewer, _output = prompt_assignment(kwargs['prompt'])
+                    time.sleep(0.01 if reviewer == 'security' else 0.05)
+                    write_reviewer_output(kwargs['prompt'])
+                    return SimpleNamespace(duration_ms=10_000)
+
+            worker.start_phase(active, run_dir, 'reviewer_fanout', 70)
+            worker.run_reviewer_fanout_phase(
+                FakeCodexClient(),
+                repo,
+                run_dir,
+                job,
+                active=active,
+                progress=70,
+            )
+
+            progress_events = [
+                json.loads(line)
+                for line in (run_dir / 'progress.log.jsonl').read_text(encoding='utf-8').splitlines()
+                if line.strip()
+            ]
+
+        available_remaining = [
+            event['progress']['estimate']['remainingSeconds']
+            for event in progress_events
+            if event.get('progress', {}).get('estimate', {}).get('state') == 'available'
+            and event['progress']['estimate'].get('remainingSeconds', 0) > 0
+        ]
+        self.assertTrue(available_remaining)
+        self.assertGreater(available_remaining[0], 10)
+
+    def test_progress_estimate_uses_completed_turn_duration_and_live_scheduler_state(self) -> None:
+        with fanout_fixture(['security', 'correctness', 'test_gap']) as (
+            worker,
+            repo,
+            run_dir,
+            job,
+            active,
+        ):
+            active.current_run_estimator = CurrentRunEstimator(wall_clock=lambda: 1000.0)
+
+            class FakeCodexClient:
+                def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                    return f'reviewer-thread-{time.monotonic_ns()}'
+
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    _bundle, reviewer, _output = prompt_assignment(kwargs['prompt'])
+                    time.sleep(0.01 if reviewer == 'security' else 0.05)
+                    write_reviewer_output(kwargs['prompt'])
+                    return SimpleNamespace(duration_ms=10_000)
+
+            worker.run_reviewer_fanout_phase(
+                FakeCodexClient(),
+                repo,
+                run_dir,
+                job,
+                active=active,
+                progress=70,
+            )
+
+            progress_events = [
+                json.loads(line)
+                for line in (run_dir / 'progress.log.jsonl').read_text(encoding='utf-8').splitlines()
+                if line.strip()
+            ]
+            execution = json.loads(
+                (run_dir / 'reviewer-execution.json').read_text(encoding='utf-8')
+            )
+
+        available = [
+            event['progress']['estimate']
+            for event in progress_events
+            if event.get('progress', {}).get('estimate', {}).get('state') == 'available'
+            and event['progress']['estimate'].get('remainingSeconds', 0) > 0
+        ]
+        self.assertTrue(available)
+        self.assertEqual(available[0]['basis'], 'current_run_work_graph')
+        self.assertEqual(available[0]['parallel']['configuredConcurrency'], 2)
+        self.assertEqual(available[0]['parallel']['effectiveConcurrency'], 2)
+        self.assertNotIn('thread_id', available[0])
+        self.assertEqual(execution['assignments'][0]['attempts'][0]['duration_ms'], 10_000)
+
     def test_fatal_assignment_cancels_active_sibling_and_never_starts_pending_work(self) -> None:
         with fanout_fixture(["security", "correctness", "test_gap"]) as (
             worker,
@@ -194,6 +305,7 @@ class ReviewerFanoutConcurrencyTest(unittest.TestCase):
             max_active_after_limit = 0
             capacity_error_seen = threading.Event()
             state_lock = threading.Lock()
+            active.current_run_estimator = CurrentRunEstimator(wall_clock=lambda: 1000.0)
 
             class FakeCodexClient:
                 def start_thread(self, _repo_dir: Path, _model: str) -> str:
@@ -243,6 +355,13 @@ class ReviewerFanoutConcurrencyTest(unittest.TestCase):
                 .splitlines()
                 if line.strip()
             ]
+            progress_events = [
+                json.loads(line)
+                for line in (run_dir / "progress.log.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
             self.assertEqual(attempt_counts["security"], 2)
             self.assertEqual(len(started_threads), 4)
             self.assertEqual(max_active_after_limit, 1)
@@ -253,6 +372,16 @@ class ReviewerFanoutConcurrencyTest(unittest.TestCase):
             self.assertIn(
                 "reviewer_concurrency_reduced",
                 {event.get("event") for event in log_events},
+            )
+            self.assertTrue(
+                any(
+                    event.get("progress", {})
+                    .get("estimate", {})
+                    .get("parallel", {})
+                    .get("effectiveConcurrency")
+                    == 1
+                    for event in progress_events
+                )
             )
 
 
