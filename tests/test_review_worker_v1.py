@@ -74,6 +74,7 @@ from pullwise_worker.review_worker_v1 import (
     phase_completion_data,
     phase_progress_data,
     phase_prompt,
+    prompt_template_for_name,
     progress_final_payload,
     inventory,
     intent_test_command_policy,
@@ -1494,6 +1495,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("passed_no_bug_reproduced", INTENT_TEST_CLASSIFICATIONS)
         self.assertIn("skipped_not_runnable", INTENT_TEST_CLASSIFICATIONS)
 
+    def test_intent_test_writer_prompt_requires_canonical_isolated_tests(self) -> None:
+        prompt = prompt_template_for_name("intent/06_intent_test_writer.md")
+
+        self.assertIn("intent-test-source/v1", prompt)
+        self.assertIn('top-level "generated_tests"', prompt)
+        self.assertIn("path, command, and target_test_ids", prompt)
+        self.assertIn("imported TestCase subclasses", prompt)
+        self.assertIn("uncertain", prompt)
+
     def test_job_policy_requires_canonical_v1_policy_and_repository_limits(self) -> None:
         with self.assertRaisesRegex(ValueError, "model_profile.default_model"):
             validate_job_policy({
@@ -1654,6 +1664,27 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
                     }
                 )
+
+    def test_scoped_codex_command_uses_active_worker_root_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service_home = Path(tmp_dir) / "service"
+            configured_root = service_home / "workers" / "wk_1"
+            active_root = service_home / "relocated" / "wk_1"
+            config = SimpleNamespace(
+                worker_id="wk_1",
+                service_home=str(service_home),
+                worker_root=str(configured_root),
+                codex_command=str(configured_root / ".local" / "bin" / "codex"),
+            )
+
+            with patch.dict(
+                os.environ,
+                {"PULLWISE_WORKER_ROOT": str(active_root)},
+                clear=False,
+            ):
+                self.assertEqual(Isolation(config).worker_root, active_root)
+                with self.assertRaisesRegex(RuntimeError, "inside worker_root"):
+                    scoped_codex_command(config)
 
     def test_job_policy_accepts_max_and_ultra_reasoning_effort(self) -> None:
         for effort in ("max", "ultra", "future_level"):

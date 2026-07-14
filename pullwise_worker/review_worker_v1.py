@@ -584,13 +584,25 @@ class WorkerLock:
         self._handle = None
 
 
+def _active_worker_root(config: Any) -> Path:
+    service_home = Path(
+        str(getattr(config, "service_home", "") or "/var/lib/codex-review")
+    ).expanduser()
+    configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
+    if not configured_root:
+        configured_root = str(getattr(config, "worker_root", "") or "").strip()
+    if configured_root:
+        return Path(configured_root).expanduser()
+    worker_id = str(getattr(config, "worker_id", "worker") or "worker")
+    return service_home / "workers" / worker_id
+
+
 class Isolation:
     def __init__(self, config: Any) -> None:
         self.worker_id = str(config.worker_id)
         service_home = Path(str(getattr(config, "service_home", "") or "/var/lib/codex-review"))
         self.service_home = service_home
-        configured_root = os.environ.get("PULLWISE_WORKER_ROOT", "").strip()
-        self.worker_root = Path(configured_root) if configured_root else service_home / "workers" / self.worker_id
+        self.worker_root = _active_worker_root(config)
         self.codex_home = Path(str(getattr(config, "codex_home", "") or self.worker_root / "codex-home"))
         self.codex_sqlite_home = Path(str(getattr(config, "codex_sqlite_home", "") or self.worker_root / "codex-sqlite"))
         self.config_home = self.worker_root / ".config"
@@ -672,8 +684,7 @@ class Isolation:
 
 
 def scoped_codex_command(config: Any) -> str:
-    service_home = Path(str(getattr(config, "service_home", "") or "/var/lib/pullwise-worker")).expanduser()
-    worker_root = Path(str(getattr(config, "worker_root", "") or service_home / "workers" / str(getattr(config, "worker_id", "worker") or "worker"))).expanduser()
+    worker_root = _active_worker_root(config)
     command = str(getattr(config, "codex_command", "") or "").strip()
     if not command:
         return ""
@@ -4433,10 +4444,12 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "outputs": ["intent/intent-test-source.json", "intent/generated-tests/** or disposable validation workspace tests"],
         "instructions": [
             "Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**.",
-            "Every generated test must include target_test_ids linking it to the intent-test-plan target(s) it implements.",
+            "Return JSON only using intent-test-source/v1. Put every executable test record in the top-level generated_tests array, not only in aliases such as generated_test_files, created_test_files, or test_sources.",
+            "Every generated test record must include path, command, and target_test_ids linking it to the intent-test-plan target(s) it implements.",
+            "Verify each expected outcome against AGENTS instructions, documentation, types, API contracts, and existing tests. If the intended behavior remains uncertain, do not encode it as an asserted oracle.",
+            "For Python unittest entry points, do not leave imported TestCase subclasses at module scope where unittest.main() can discover unrelated repository suites; import the module under an alias or explicitly load only the generated test class or method.",
             "Prefer the repository's existing runnable test framework. If a JavaScript target is dependency-free and the package-local runner is unavailable, use Node's built-in node --test runner; otherwise record the dependency limitation instead of inventing a runnable command.",
             "Do not modify the main repo workspace, install dependencies, use production secrets, or use network.",
-            "Return JSON describing created test files.",
         ],
     },
     "intent_test_failure_analysis": {
@@ -9178,7 +9191,17 @@ def prompt_template_for_name(name: str) -> str:
         "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Merge test-gap evidence into the underlying defect when contract, sink, and fix match. Do not create new findings. Return JSON only.\n",
         "intent/04_intent_miner.md": "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route definitions, and error messages. Do not infer intent only from implementation code. Return JSON only using intent-map/v1.\n",
         "intent/05_intent_test_planner.md": "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return JSON only using intent-test-plan/v1.\n",
-        "intent/06_intent_test_writer.md": "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**. Every generated test must include target_test_ids linking it to the intent-test-plan target(s) it implements. Do not modify the main repo workspace. Return JSON describing created test files.\n",
+        "intent/06_intent_test_writer.md": (
+            "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or "
+            ".codex-review/generated-tests/**. Return JSON only using intent-test-source/v1, with every executable "
+            'test record in the top-level "generated_tests" array rather than only in aliases such as '
+            "generated_test_files, created_test_files, or test_sources. Every record must include path, command, "
+            "and target_test_ids. Verify expected outcomes against AGENTS instructions, documentation, types, API "
+            "contracts, and existing tests; when intended behavior remains uncertain, do not turn it into an asserted "
+            "oracle. For Python unittest entry points, do not expose imported TestCase subclasses at module scope "
+            "where unittest.main() can discover unrelated repository suites; import a module alias or explicitly load "
+            "only the generated test class or method. Do not modify the main repo workspace.\n"
+        ),
         "intent/07_intent_test_failure_analyzer.md": "You are the Test Failure Analyzer. A failing test is not automatically a bug. Classify each result using intent-test-result/v1. Return JSON only.\n",
         "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. dependency_missing is absence of dynamic evidence, not disproof; static source and contract evidence can still support plausible. Return JSON only.\n",
         "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to the top-level appendix_findings list. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",
