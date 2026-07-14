@@ -1309,6 +1309,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "allow_network": False,
                         "helper_scripts_standard_library_only": True,
                         "turn_timeout_seconds": 1800,
+                        "reviewer_concurrency": 2,
                     },
                 },
                 "agentConfig": {"provider": "codex", "reviewWorker": {"scanDeadlineSeconds": 14400}},
@@ -7678,6 +7679,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "allow_network": False,
                         "helper_scripts_standard_library_only": True,
                         "turn_timeout_seconds": 1800,
+                        "reviewer_concurrency": 2,
                     },
                 },
                 "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
@@ -8690,7 +8692,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "repo-map"):
                 validate_phase_outputs(run_dir, "repo_map")
 
-    def test_reviewer_fanout_runs_one_scoped_turn_per_planned_assignment(self) -> None:
+    def test_reviewer_fanout_runs_scoped_assignments_on_bounded_independent_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             repo = root / "repo"
@@ -8708,7 +8710,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         {
                             "bundle_id": "p0-bundle-001",
                             "tier": "P0",
-                            "reviewers": ["security", "correctness"],
+                            "reviewers": ["security", "correctness", "test_gap"],
                         },
                         {
                             "bundle_id": "p2-bundle-002",
@@ -8720,7 +8722,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
             for bundle_id in ("p0-bundle-001", "p2-bundle-002"):
                 (bundles_dir / f"{bundle_id}.md").write_text(f"# {bundle_id}\n", encoding="utf-8")
-            for reviewer in ("security", "correctness", "correctness_lite"):
+            for reviewer in ("security", "correctness", "test_gap", "correctness_lite"):
                 (prompts_dir / f"{reviewer}.md").write_text(
                     f"UNIQUE {reviewer.upper()} REVIEW TEMPLATE\n",
                     encoding="utf-8",
@@ -8729,26 +8731,65 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             assignments = [
                 ("p0-bundle-001", "security"),
                 ("p0-bundle-001", "correctness"),
+                ("p0-bundle-001", "test_gap"),
                 ("p2-bundle-002", "correctness_lite"),
             ]
             turn_calls: list[dict] = []
+            started_threads: list[dict] = []
+            active_turns = 0
+            max_active_turns = 0
+            turn_lock = threading.Lock()
+            two_turns_active = threading.Event()
 
             class FakeCodexClient:
+                def start_thread(self, repo_dir: Path, model: str) -> str:
+                    thread_id = f"reviewer-thread-{len(started_threads) + 1}"
+                    started_threads.append({"thread_id": thread_id, "repo_dir": repo_dir, "model": model})
+                    return thread_id
+
                 def run_turn(self, **kwargs: object) -> None:
-                    turn_calls.append(dict(kwargs))
-                    bundle_id, reviewer = assignments[len(turn_calls) - 1]
-                    output_name = f"{bundle_id}.{reviewer.replace('_', '-')}.json"
-                    write_json(
-                        run_dir / "raw-reviewers" / output_name,
-                        {
-                            "schema_version": "codex-reviewer-output/v1",
-                            "bundle_id": bundle_id,
-                            "reviewer": reviewer,
-                            "reviewed_paths": ["src/app.py"],
-                            "findings": [],
-                            "uncertainties": [],
-                        },
+                    nonlocal active_turns, max_active_turns
+                    prompt = str(kwargs["prompt"])
+                    bundle_id = next(
+                        line.removeprefix("Bundle assignment: ")
+                        for line in prompt.splitlines()
+                        if line.startswith("Bundle assignment: ")
                     )
+                    reviewer = next(
+                        line.removeprefix("Reviewer assignment: ")
+                        for line in prompt.splitlines()
+                        if line.startswith("Reviewer assignment: ")
+                    )
+                    output_path = Path(
+                        next(
+                            line.removeprefix("Exact output path: ")
+                            for line in prompt.splitlines()
+                            if line.startswith("Exact output path: ")
+                        )
+                    )
+                    with turn_lock:
+                        turn_calls.append(dict(kwargs))
+                        active_turns += 1
+                        max_active_turns = max(max_active_turns, active_turns)
+                        if active_turns >= 2:
+                            two_turns_active.set()
+                    try:
+                        self.assertTrue(two_turns_active.wait(1), "reviewer turns did not overlap")
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        write_json(
+                            output_path,
+                            {
+                                "schema_version": "codex-reviewer-output/v1",
+                                "bundle_id": bundle_id,
+                                "reviewer": reviewer,
+                                "reviewed_paths": ["src/app.py"],
+                                "findings": [],
+                                "uncertainties": [],
+                            },
+                        )
+                    finally:
+                        with turn_lock:
+                            active_turns -= 1
 
             progress_updates: list[dict] = []
 
@@ -8770,6 +8811,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "allow_network": False,
                         "helper_scripts_standard_library_only": True,
                         "turn_timeout_seconds": 1800,
+                        "reviewer_concurrency": 2,
                     },
                     "budget": {"max_wall_time_seconds": 14400},
                 },
@@ -8788,20 +8830,39 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
             execution = json.loads((run_dir / "reviewer-execution.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(len(turn_calls), 3)
-        for call, (bundle_id, reviewer) in zip(turn_calls, assignments, strict=True):
+        self.assertEqual(len(turn_calls), 4)
+        self.assertEqual(len(started_threads), 4)
+        self.assertEqual(max_active_turns, 2)
+        self.assertEqual({call["thread_id"] for call in turn_calls}, {item["thread_id"] for item in started_threads})
+        self.assertNotIn("thread_1", {call["thread_id"] for call in turn_calls})
+        for call in turn_calls:
             prompt = str(call["prompt"])
+            bundle_id, reviewer = next(
+                assignment
+                for assignment in assignments
+                if f"Bundle assignment: {assignment[0]}" in prompt
+                and f"Reviewer assignment: {assignment[1]}" in prompt
+            )
             self.assertIn(f"Bundle assignment: {bundle_id}", prompt)
             self.assertIn(f"Reviewer assignment: {reviewer}", prompt)
             self.assertIn(f"UNIQUE {reviewer.upper()} REVIEW TEMPLATE", prompt)
-            self.assertIn(f"raw-reviewers/{bundle_id}.{reviewer.replace('_', '-')}.json", prompt)
+            self.assertIn(f"{bundle_id}.{reviewer.replace('_', '-')}.json", prompt)
             other_bundles = {value for value, _reviewer in assignments if value != bundle_id}
             self.assertTrue(all(other not in prompt for other in other_bundles))
             self.assertFalse(call["read_only"])
+            self.assertEqual(len(call["writable_roots"]), 1)
         self.assertEqual(execution["strategy"], "one_turn_per_assignment")
-        self.assertEqual(execution["assignments_total"], 3)
-        self.assertEqual(execution["assignments_completed"], 3)
-        self.assertEqual([update["reviewer_runs_completed"] for update in progress_updates], [1, 2, 3])
+        self.assertEqual(execution["thread_strategy"], "one_thread_per_assignment")
+        self.assertEqual(execution["max_concurrency"], 2)
+        self.assertEqual(execution["assignments_total"], 4)
+        self.assertEqual(execution["assignments_completed"], 4)
+        self.assertEqual([update["reviewer_runs_completed"] for update in progress_updates], [1, 2, 3, 4])
+        self.assertTrue(
+            all(
+                (run_dir / "raw-reviewers" / f"{bundle}.{reviewer.replace('_', '-')}.json").is_file()
+                for bundle, reviewer in assignments
+            )
+        )
 
     def test_debug_summary_explains_candidate_disposition_and_degraded_intent_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
