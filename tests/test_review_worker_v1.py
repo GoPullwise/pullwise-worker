@@ -8774,7 +8774,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         if active_turns >= 2:
                             two_turns_active.set()
                     try:
-                        self.assertTrue(two_turns_active.wait(1), "reviewer turns did not overlap")
+                        if not two_turns_active.wait(1):
+                            raise AssertionError("reviewer turns did not overlap")
                         output_path.parent.mkdir(parents=True, exist_ok=True)
                         write_json(
                             output_path,

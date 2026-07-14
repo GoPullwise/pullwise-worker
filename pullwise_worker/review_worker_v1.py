@@ -19,6 +19,8 @@ import threading
 import time
 import urllib.parse
 import zipfile
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -33,6 +35,7 @@ except ImportError:  # pragma: no cover - runtime is Linux only; import stays te
 
 PROTOCOL_VERSION = "review-worker-protocol/v1"
 WORKER_VERSION = __version__
+MAX_REVIEWER_CONCURRENCY = 2
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 WORKER_COMMAND_ACTIVE_STATUSES = {"pending", "running"}
