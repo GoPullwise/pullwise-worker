@@ -137,6 +137,28 @@ Codex execution rules:
   downloads, network access, branch changes, commit, push, and access to other
   worker directories.
 
+## Whole-Scan ETA Contract
+
+- A running scan ETA always estimates the remaining time for the whole scan,
+  not the current phase. Queued jobs have no execution ETA, and terminal jobs
+  expose actual elapsed duration instead of retaining a forecast.
+- The worker is the sole ETA authority. Base forecasts only on monotonic timing
+  observations from the current run and its remaining hard deadline; do not use
+  cross-run history, repository-size heuristics, cache state, or server/web
+  guesses. Report `estimating` until current-run evidence is sufficient, then
+  either an `available` lower/upper interval or an explicit `unavailable` state.
+- Model remaining work as a dependency graph scheduled over explicit resources.
+  Pipeline work is serial; reviewer assignments use the current configured and
+  effective reviewer concurrency for any supported positive value, including
+  values other than 1 or 2. Account for active residual work and parallel
+  long-tail effects rather than summing every reviewer duration.
+- A retry or semantic/JSON repair is new work in the current-run graph and must
+  rewire downstream dependencies. Runtime concurrency reductions must affect
+  the next snapshot immediately without rewriting completed observations.
+- Include sanitized ETA snapshots in running progress events and heartbeats.
+  Clear ETA at every terminal boundary, and never expose Codex thread ids in
+  public progress or ETA payloads.
+
 ## Adaptive Repository Scan Rules
 
 `../auto-adjust-plan.md` defines the current adaptive scan upgrade. Keep these rules in force for worker changes in this area:
