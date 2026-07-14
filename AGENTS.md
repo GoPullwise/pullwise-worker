@@ -485,7 +485,7 @@ Provider readiness is plan-aware and provider-specific.
   `available_job_slots = 1`) and carries the failure through `codex_ready`,
   `codex_quota`, `doctor_status`, and `last_error`.
 - Codex quota telemetry shown to admin should represent the worker's main review model bucket, currently GPT-5.5/GPT-5.4/GPT-5 preference order; do not use Spark-specific buckets such as `GPT-5.3-Codex-Spark` or `codex_bengalfox` as the fallback main quota.
-- Handle the server's `refresh_codex_quota` command only while idle. Force `CodexQuotaMonitor.refresh()`, send a heartbeat containing the new snapshot, and only then report command success; defer the command while a review run is active.
+- Handle the server's `refresh_codex_quota` command whenever the worker is online, including while a review run is active. Reuse the worker's existing Codex SDK/App Server, never start a second Codex process, force `CodexQuotaMonitor.refresh()`, send a heartbeat containing the new snapshot, and only then report command success.
 - Only check providers required by the loaded plan configs.
 - Login/auth instructions printed by `doctor` must use the same instance-scoped
   command environment documented above.

@@ -2207,10 +2207,10 @@ class ReviewWorkerV1:
                 if command.get("type") == "cancel_run" and str(command.get("run_id") or "") == active.run_id:
                     self.request_cancel(active, reason=str(command.get("reason") or "server_cancelled"))
         if process_worker_command:
-            self.handle_worker_command(response, active=active)
+            self.handle_worker_command(response)
         return response if isinstance(response, dict) else {}
 
-    def handle_worker_command(self, response: object, *, active: ActiveJob | None) -> bool:
+    def handle_worker_command(self, response: object) -> bool:
         if not isinstance(response, dict):
             return False
         command = response.get("command")
@@ -2223,7 +2223,6 @@ class ReviewWorkerV1:
             not command_id
             or command_name != REFRESH_CODEX_QUOTA_COMMAND
             or command_status not in WORKER_COMMAND_ACTIVE_STATUSES
-            or active is not None
         ):
             return False
         report_status = getattr(self.client, "command_status", None)
