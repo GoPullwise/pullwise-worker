@@ -144,6 +144,16 @@ def write_completed_artifact_inputs(run_dir: Path) -> None:
         encoding="utf-8",
     )
 
+
+def write_uploaded_artifact_snapshot(artifact_dir: Path) -> None:
+    manifest_payload = json.loads((artifact_dir / "artifact-manifest.json").read_text(encoding="utf-8"))
+    write_uploaded_artifact_manifest(
+        artifact_dir,
+        manifest_payload,
+        artifact_manifest_items(manifest_payload),
+    )
+
+
 def finding_payload(finding_id: str = "CL-001", *, title: str = "Backed finding", severity: str = "high", path: str = "app.py", line: int = 1) -> dict:
     return {
         "id": finding_id,
@@ -1953,7 +1963,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 artifact_dir = root / "artifacts" / run_id
                 run_dir = repo_dir / ".codex-review" / "runs" / run_id
                 write_completed_artifact_inputs(run_dir)
-                artifact_dir.mkdir(parents=True)
+                materialize_artifacts(run_dir, artifact_dir)
+                write_uploaded_artifact_snapshot(artifact_dir)
                 return repo_dir, run_dir, artifact_dir
 
             def ensure_codex_client(self, events_path: Path | None = None) -> FakeCodexClient:
@@ -2599,6 +2610,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     "schema_version": "codex-reviewer-output/v1",
                     "bundle_id": "p1-bundle-001",
                     "reviewer": "correctness",
+                    "reviewed_paths": ["src/settings.jsx"],
+                    "review_summary": "Reviewed the supplied location evidence.",
+                    "uncertainties": [],
                     "findings": [
                         {
                             "id": "F-001",
@@ -6628,6 +6642,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 artifact_dir = root / "artifacts" / run_id
                 write_completed_artifact_inputs(run_dir)
                 materialize_artifacts(run_dir, artifact_dir)
+                write_uploaded_artifact_snapshot(artifact_dir)
                 return repo_dir, run_dir, artifact_dir
 
         job = {
@@ -6692,6 +6707,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 artifact_dir = root / "artifacts" / run_id
                 write_completed_artifact_inputs(run_dir)
                 materialize_artifacts(run_dir, artifact_dir)
+                write_uploaded_artifact_snapshot(artifact_dir)
                 return repo_dir, run_dir, artifact_dir
 
         job = {
@@ -7770,8 +7786,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 raw_dir / "correctness.json",
                 {
                     "schema_version": "codex-reviewer-output/v1",
+                    "bundle_id": "p0-bundle-001",
                     "reviewer": "correctness",
                     "bundles_reviewed": ["p0-bundle-001"],
+                    "reviewed_paths": ["app.py"],
+                    "review_summary": "Reviewed the planned correctness assignment.",
+                    "uncertainties": [],
                     "findings": [],
                 },
             )
@@ -7838,7 +7858,16 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             raw_dir = run_dir / "raw-reviewers"
             raw_dir.mkdir(parents=True)
-            payload = {"schema_version": "reviewer-output/v1", "protocol": "codex-reviewer-output/v1", "findings": []}
+            payload = {
+                "schema_version": "reviewer-output/v1",
+                "protocol": "codex-reviewer-output/v1",
+                "bundle_id": "p1-bundle-001",
+                "reviewer": "correctness",
+                "reviewed_paths": ["app.py"],
+                "review_summary": "Reviewed the assigned path and found no issue.",
+                "uncertainties": [],
+                "findings": [],
+            }
             (raw_dir / "correctness.json").write_text(json.dumps(payload), encoding="utf-8")
 
             validate_reviewer_outputs(run_dir)
@@ -7866,7 +7895,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             raw_dir = run_dir / "raw-reviewers"
             raw_dir.mkdir(parents=True)
-            payload = {"schema_version": "codex-reviewer-output/v1", "findings": []}
+            payload = {
+                "schema_version": "codex-reviewer-output/v1",
+                "bundle_id": "p0-bundle-001",
+                "reviewer": "security",
+                "reviewed_paths": ["app.py"],
+                "review_summary": "Reviewed the assigned path and found no issue.",
+                "uncertainties": [],
+                "findings": [],
+            }
             (raw_dir / "security.json").write_text(json.dumps(payload), encoding="utf-8")
 
             validate_reviewer_outputs(run_dir)
@@ -7977,7 +8014,17 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 def run_turn(self, **kwargs: object) -> SimpleNamespace:
                     calls.append(kwargs)
                     (raw_dir / "security.json").write_text(
-                        json.dumps({"schema_version": "codex-reviewer-output/v1", "findings": []}),
+                        json.dumps(
+                            {
+                                "schema_version": "codex-reviewer-output/v1",
+                                "bundle_id": "p0-bundle-001",
+                                "reviewer": "security",
+                                "reviewed_paths": ["app.py"],
+                                "review_summary": "Reviewed the assigned path and found no issue.",
+                                "uncertainties": [],
+                                "findings": [],
+                            }
+                        ),
                         encoding="utf-8",
                     )
                     return SimpleNamespace(duration_ms=4_000)
@@ -9663,7 +9710,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(env["CODEX_HOME"], str(worker_root / "codex-home"))
         self.assertEqual(env["CODEX_SQLITE_HOME"], str(worker_root / "codex-sqlite"))
         self.assertEqual(env["XDG_CONFIG_HOME"], str(worker_root / ".config"))
-        self.assertEqual(env["PATH"].split(os.pathsep)[0], str(worker_root / ".local" / "bin"))
+        self.assertEqual(env["PATH"].split(os.pathsep)[0], str(worker_root / ".venv" / "bin"))
+        self.assertEqual(env["PATH"].split(os.pathsep)[1], str(worker_root / ".local" / "bin"))
         self.assertIn("/opt/provider/bin", env["PATH"])
     def test_result_payload_uses_stable_v1_envelope_without_derived_topology_payload(self) -> None:
         active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk-1")
@@ -10560,12 +10608,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             validation = json.loads(
                 (run_dir / "json-errors.json").read_text(encoding="utf-8")
             )
+            self.assertFalse(
+                (run_dir / "verified-reviewers" / "p1-bundle-001.correctness.json").exists()
+            )
 
         self.assertTrue(
             any("reviewed_paths" in item["error"] for item in validation["errors"])
-        )
-        self.assertFalse(
-            (run_dir / "verified-reviewers" / "p1-bundle-001.correctness.json").exists()
         )
 
     def test_optional_artifact_failure_does_not_inflate_uploaded_progress_count(self) -> None:
