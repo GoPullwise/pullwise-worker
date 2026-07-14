@@ -9123,7 +9123,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             class Worker(ReviewWorkerV1):
                 def progress_phase(self, *args: object, **kwargs: object) -> None:
-                    progress_updates.append(dict(kwargs.get("data") or {}))
+                    progress_updates.append(
+                        {
+                            "message": str(kwargs.get("message") or ""),
+                            **dict(kwargs.get("data") or {}),
+                        }
+                    )
 
             job = {
                 "job_id": "job_1",
@@ -9188,7 +9193,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(execution["max_concurrency"], 2)
         self.assertEqual(execution["assignments_total"], 4)
         self.assertEqual(execution["assignments_completed"], 4)
-        self.assertEqual([update["reviewer_runs_completed"] for update in progress_updates], [1, 2, 3, 4])
+        self.assertEqual(
+            [
+                update["reviewer_runs_completed"]
+                for update in progress_updates
+                if update["message"].startswith("Completed reviewer assignment")
+            ],
+            [1, 2, 3, 4],
+        )
         self.assertTrue(all(published_outputs))
 
     def test_debug_summary_explains_candidate_disposition_and_degraded_intent_evidence(self) -> None:
