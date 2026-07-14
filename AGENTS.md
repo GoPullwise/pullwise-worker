@@ -257,6 +257,14 @@ Review pipeline rules:
   timeout, or environment-limited intent tests are degraded evidence and must
   not fail the whole repository scan after they can be represented in
   `intent-test-result/v1`.
+- Intent writer output must use `intent-test-source/v1` with every executable
+  record in top-level `generated_tests`; recover known aliases such as
+  `generated_test_files` and `created_test_files`, but require each canonical
+  record to retain `path`, `command`, and `target_test_ids`. Generated test
+  oracles must be grounded in repository instructions/contracts. A Python
+  `unittest` entry point must not expose imported repository `TestCase`
+  subclasses at module scope where `unittest.main()` can discover unrelated
+  suites.
 - Semantic artifact repair must also overwrite existing malformed phase outputs
   when a common schema alias can be normalized. For example, a Codex-created
   `bootstrap_helper_scripts.summary.json` with
@@ -353,6 +361,11 @@ Review pipeline rules:
   each successfully uploaded artifact.
 - Reviewer progress counts logical `(bundle_id, reviewer_id)` assignments, not reviewer-output files. Grouped outputs must declare every covered bundle through `bundles_reviewed`; validation must reject missing planned assignments and unexpected assignments before a run can complete.
 - Once the terminal result request has been submitted, do not post non-terminal cleanup phase events. Only the terminal event matching the submitted status may follow result acceptance.
+- A heartbeat response that stops accepting the active job while its terminal
+  result request is in flight or already accepted is terminal-commit
+  acknowledgement, not a new cancellation. Do not emit `server_cancelled` in
+  that window; clear the guard if result submission fails so genuine later
+  cancellation remains observable.
 - V1 `cancel_run` commands must mark the active job `cancelling`, keep
   available job slots at zero, emit exactly one `run_cancel_requested` event
   before the terminal `run_cancelled` event, interrupt the active Codex turn,
