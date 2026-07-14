@@ -85,9 +85,15 @@ class BundleFiles:
                 if name:
                     self._zip_names[name] = info
         elif path.is_dir():
+            total_size = 0
             for candidate in path.rglob("*"):
                 if not candidate.is_file() or candidate.is_symlink():
                     continue
+                total_size += max(0, int(candidate.stat().st_size))
+                if total_size > MAX_BUNDLE_BYTES:
+                    raise ValueError(
+                        f"bundle is too large after decompression: {total_size}"
+                    )
                 name = normalized_name(candidate.relative_to(path).as_posix())
                 if name:
                     self._directory_names[name] = candidate

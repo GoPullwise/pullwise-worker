@@ -650,6 +650,7 @@ class Isolation:
             or DEFAULT_PROVIDER_PATH
         )
         path_parts = [
+            str(self.worker_root / ".venv" / "bin"),
             str(self.worker_root / ".local" / "bin"),
             str(self.worker_root / ".codex" / "bin"),
             str(self.codex_home / "bin"),
@@ -5806,6 +5807,36 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
         elif schema_version != REVIEWER_OUTPUT_SCHEMA_VERSION:
             errors.append({"file": path.name, "error": f"schema_version must be {REVIEWER_OUTPUT_SCHEMA_VERSION}"})
             continue
+        bundle_id = str(payload.get("bundle_id") or "").strip()
+        if not bundle_id:
+            errors.append({"file": path.name, "error": "bundle_id is required"})
+            continue
+        reviewer_id = str(payload.get("reviewer") or "").strip()
+        if reviewer_id not in {"security", "correctness", "test_gap", "correctness_lite"}:
+            errors.append({"file": path.name, "error": "reviewer is missing or unsupported"})
+            continue
+        reviewed_paths = payload.get("reviewed_paths")
+        if (
+            not isinstance(reviewed_paths, list)
+            or not reviewed_paths
+            or any(not isinstance(item, str) or not item.strip() for item in reviewed_paths)
+        ):
+            errors.append({"file": path.name, "error": "reviewed_paths must be a non-empty string list"})
+            continue
+        review_summary = payload.get("review_summary")
+        summary_present = (
+            isinstance(review_summary, str)
+            and bool(review_summary.strip())
+        ) or (
+            isinstance(review_summary, (dict, list))
+            and bool(review_summary)
+        )
+        if not summary_present:
+            errors.append({"file": path.name, "error": "review_summary must contain review evidence"})
+            continue
+        if not isinstance(payload.get("uncertainties"), list):
+            errors.append({"file": path.name, "error": "uncertainties must be a list"})
+            continue
         if not isinstance(payload.get("findings"), list):
             errors.append({"file": path.name, "error": "findings must be a list"})
             continue
@@ -5870,6 +5901,7 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
 
 def location_verification_payload(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
     checks = []
+    repo_root = repo_dir.resolve(strict=False)
     for path in sorted((run_dir / "verified-reviewers").glob("*.json")):
         payload = read_json(path, {})
         findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
@@ -5887,9 +5919,21 @@ def location_verification_payload(repo_dir: Path, run_dir: Path) -> dict[str, An
                 rel = str(location.get("path") or "")
                 start = int(location.get("start_line") or location.get("line") or 0)
                 end = int(location.get("end_line") or start or 0)
-                file_path = repo_dir / rel
-                line_count = len(file_path.read_text(encoding="utf-8", errors="replace").splitlines()) if file_path.is_file() else 0
-                status = "valid" if rel and file_path.is_file() and 1 <= start <= max(line_count, 1) and start <= max(end, start) else "invalid"
+                raw_path = Path(rel)
+                file_path = raw_path if raw_path.is_absolute() else repo_root / raw_path
+                file_path = file_path.resolve(strict=False)
+                contained = bool(rel) and path_is_under(file_path, repo_root)
+                is_file = contained and file_path.is_file()
+                line_count = (
+                    len(file_path.read_text(encoding="utf-8", errors="replace").splitlines())
+                    if is_file
+                    else 0
+                )
+                status = (
+                    "valid"
+                    if is_file and 1 <= start <= end <= line_count
+                    else "invalid"
+                )
                 checks.append(
                     {
                         "finding_id": finding_id,
@@ -6083,7 +6127,17 @@ def _intent_generated_command(
     generated_index: int = 0,
     generated_total: int = 1,
 ) -> list[str]:
-    for key in ("command", "test_command", "testCommand", "run_command", "runCommand"):
+    for key in (
+        "command",
+        "test_command",
+        "testCommand",
+        "run_command",
+        "runCommand",
+        "runnable_command",
+        "runnableCommand",
+        "intended_command",
+        "intendedCommand",
+    ):
         command = _intent_command(generated.get(key))
         if command:
             return command
@@ -6093,7 +6147,17 @@ def _intent_generated_command(
         )
         if command:
             return command
-    for key in ("command", "test_command", "testCommand", "run_command", "runCommand"):
+    for key in (
+        "command",
+        "test_command",
+        "testCommand",
+        "run_command",
+        "runCommand",
+        "runnable_command",
+        "runnableCommand",
+        "intended_command",
+        "intendedCommand",
+    ):
         command = _intent_command(target.get(key))
         if command:
             return command
@@ -6323,6 +6387,59 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
     return env
 
 
+def _path_is_lexically_under(path: Path, root: Path) -> bool:
+    try:
+        Path(os.path.abspath(path)).relative_to(Path(os.path.abspath(root)))
+    except ValueError:
+        return False
+    return True
+
+
+def _intent_private_runtime_bind_root(command: list[str]) -> tuple[Path | None, str]:
+    if not command:
+        return None, ""
+    executable = Path(command[0])
+    if not executable.is_absolute():
+        return None, ""
+    visible_roots = tuple(
+        Path(root)
+        for root in ("/usr", "/bin", "/lib", "/lib64", "/opt")
+        if Path(root).exists()
+    )
+    if any(_path_is_lexically_under(executable, root) for root in visible_roots):
+        return None, ""
+    try:
+        is_active_python = executable.resolve(strict=True) == Path(sys.executable).resolve(strict=True)
+    except OSError:
+        is_active_python = False
+    if not is_active_python:
+        return (
+            None,
+            "environment_error: absolute generated test executable is outside the sandbox-visible trusted runtime",
+        )
+    prefix = Path(sys.prefix)
+    bind_root = (
+        prefix
+        if prefix.is_dir() and _path_is_lexically_under(executable, prefix)
+        else executable.parent
+    )
+    if not bind_root.is_dir():
+        return None, "environment_error: active Python runtime directory is unavailable"
+    return bind_root, ""
+
+
+def _append_sandbox_bind(argv: list[str], bind_root: Path) -> None:
+    if bind_root.anchor == "/":
+        parents: list[Path] = []
+        parent = bind_root.parent
+        while parent != Path("/"):
+            parents.append(parent)
+            parent = parent.parent
+        for directory in reversed(parents):
+            argv.extend(["--dir", str(directory)])
+    argv.extend(["--ro-bind", str(bind_root), str(bind_root)])
+
+
 def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo: Path) -> tuple[list[str], str, str]:
     if not sys.platform.startswith("linux"):
         return command, str(cwd), ""
@@ -6359,6 +6476,11 @@ def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo:
     for host_path in ("/usr", "/bin", "/lib", "/lib64", "/opt"):
         if Path(host_path).exists():
             argv.extend(["--ro-bind", host_path, host_path])
+    runtime_bind_root, runtime_bind_error = _intent_private_runtime_bind_root(command)
+    if runtime_bind_error:
+        return [], "", runtime_bind_error
+    if runtime_bind_root is not None:
+        _append_sandbox_bind(argv, runtime_bind_root)
     argv.extend(["--", *command])
     return argv, sandbox_cwd, ""
 
@@ -6367,17 +6489,15 @@ def _intent_sandbox_setup_failed(command: list[str], completed: subprocess.Compl
     executable = Path(command[0]).name.lower() if command else ""
     if executable not in {"bwrap", "bubblewrap"}:
         return False
-    stderr = str(completed.stderr or "").lower()
-    markers = (
-        "bwrap:",
-        "bubblewrap:",
-        "operation not permitted",
-        "permission denied",
-        "creating new namespace",
-        "unshare",
-        "namespace",
+    stderr_lines = [
+        line.strip().lower()
+        for line in str(completed.stderr or "").splitlines()
+        if line.strip()
+    ]
+    return completed.returncode != 0 and any(
+        line.startswith(("bwrap:", "bubblewrap:"))
+        for line in stderr_lines
     )
-    return completed.returncode != 0 and any(marker in stderr for marker in markers)
 
 
 def materialize_generated_intent_test_sources(
@@ -6896,9 +7016,22 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
             if test_id:
                 intended_by_id[test_id] = command
     generated = payload.get("generated_tests")
-    if not isinstance(generated, list):
-        generated = tests if tests else payload.get("created_files") or payload.get("createdFiles") or []
-    generated_items = generated if isinstance(generated, list) else []
+    generated_items = generated if isinstance(generated, list) and generated else []
+    if not generated_items:
+        for alias in (
+            "generated_test_files",
+            "generatedTestFiles",
+            "created_test_files",
+            "createdTestFiles",
+            "created_files",
+            "createdFiles",
+        ):
+            alias_items = payload.get(alias)
+            if isinstance(alias_items, list) and alias_items:
+                generated_items = alias_items
+                break
+    if not generated_items and tests:
+        generated_items = tests
     plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
     plan_targets = plan.get("test_targets") if isinstance(plan, dict) and isinstance(plan.get("test_targets"), list) else []
     plan_ids_by_ordinal: dict[int, list[str]] = {}
@@ -6935,6 +7068,10 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
                 "testCommand",
                 "run_command",
                 "runCommand",
+                "runnable_command",
+                "runnableCommand",
+                "intended_command",
+                "intendedCommand",
                 "cwd",
                 "framework",
                 "test_framework",
@@ -6957,6 +7094,17 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
             _intent_command(entry.get(key))
             for key in ("command", "test_command", "testCommand", "run_command", "runCommand")
         )
+        if not has_explicit_command:
+            for alias in (
+                "runnable_command",
+                "runnableCommand",
+                "intended_command",
+                "intendedCommand",
+            ):
+                if _intent_command(entry.get(alias)):
+                    entry["command"] = entry[alias]
+                    has_explicit_command = True
+                    break
         if not has_explicit_command:
             intended_command = intended_by_id.get(test_id)
             if not intended_command:
@@ -7718,6 +7866,23 @@ def intent_validation_missing_results_error(run_dir: Path) -> str:
         return ""
     if config.get("require_intent_evidence") is False:
         return ""
+    raw_runs = read_json(
+        run_dir / "intent" / "intent-test-results.raw.json",
+        {},
+    ).get("test_runs", [])
+    if isinstance(raw_runs, list) and raw_runs:
+        fully_skipped = all(
+            isinstance(raw_run, dict)
+            and str(raw_run.get("status") or "").strip().lower() == "skipped"
+            and bool(_intent_skip_reason_from_payload(raw_run))
+            for raw_run in raw_runs
+        )
+        if fully_skipped:
+            return ""
+        return (
+            "intent-test-results.json is missing while intent-test validation "
+            "has attempted or incompletely skipped raw runs"
+        )
     for payload in (
         config,
         read_json(run_dir / "intent" / "intent-test-plan.json", {}),
@@ -7725,11 +7890,6 @@ def intent_validation_missing_results_error(run_dir: Path) -> str:
     ):
         if _intent_skip_reason_from_payload(payload):
             return ""
-    raw_runs = read_json(run_dir / "intent" / "intent-test-results.raw.json", {}).get("test_runs", [])
-    if isinstance(raw_runs, list):
-        for raw_run in raw_runs:
-            if _intent_skip_reason_from_payload(raw_run):
-                return ""
     return "intent-test-results.json is missing while intent-test validation is enabled and no skipped reason exists"
 
 
@@ -7831,8 +7991,6 @@ def reconcile_envelope_artifact_manifest_with_uploads(envelope: dict[str, Any], 
 
 def result_manifest_uploaded_snapshot_mismatches(envelope: dict[str, Any], artifact_dir: Path) -> list[str]:
     uploaded = uploaded_artifact_manifest_items(artifact_dir)
-    if not uploaded:
-        return []
     uploaded_by_id = {
         str(item.get("artifact_id") or "").strip(): item
         for item in uploaded
@@ -7844,17 +8002,39 @@ def result_manifest_uploaded_snapshot_mismatches(envelope: dict[str, Any], artif
         if not isinstance(item, dict) or item.get("required") is not True:
             continue
         artifact_id = str(item.get("artifact_id") or "").strip()
-        if not artifact_id or artifact_id not in uploaded_by_id:
+        if not artifact_id:
             continue
-        if item != uploaded_by_id[artifact_id]:
+        if artifact_id not in uploaded_by_id or item != uploaded_by_id[artifact_id]:
             mismatches.append(artifact_id)
     return mismatches
 
 
 def validate_result_manifest_matches_uploaded_snapshot(envelope: dict[str, Any], artifact_dir: Path) -> None:
     mismatches = result_manifest_uploaded_snapshot_mismatches(envelope, artifact_dir)
+    status = result_status_from_envelope(envelope)
+    extensions = envelope.get("extensions") if isinstance(envelope.get("extensions"), dict) else {}
+    worker_internal = (
+        extensions.get("worker_internal")
+        if isinstance(extensions.get("worker_internal"), dict)
+        else {}
+    )
+    upload_error = str(worker_internal.get("artifact_upload_error") or "").strip()
+    if mismatches and status in {"failed", "cancelled", "partial_completed"} and upload_error:
+        uploaded_ids = {
+            str(item.get("artifact_id") or "").strip()
+            for item in uploaded_artifact_manifest_items(artifact_dir)
+            if str(item.get("artifact_id") or "").strip()
+        }
+        mismatches = [
+            artifact_id
+            for artifact_id in mismatches
+            if artifact_id in uploaded_ids
+        ]
     if mismatches:
-        raise RuntimeError("result artifact manifest differs from uploaded artifact snapshot: " + ", ".join(mismatches[:10]))
+        raise RuntimeError(
+            "required result artifact is missing from or differs from the uploaded artifact snapshot: "
+            + ", ".join(mismatches[:10])
+        )
 
 
 def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors: list[str]) -> None:
@@ -11496,7 +11676,8 @@ def upload_artifacts(
     total = len(uploadable)
     uploaded_manifest_items: list[dict[str, Any]] = []
     optional_upload_errors: list[str] = []
-    for uploaded, (item, path) in enumerate(uploadable, start=1):
+    uploaded_count = 0
+    for item, path in uploadable:
         artifact_id = str(item.get("artifact_id") or "").strip()
         name = str(item.get("name") or "").strip()
         if source_run_dir is not None and artifact_id == DEBUG_BUNDLE_ARTIFACT_ID:
@@ -11534,9 +11715,10 @@ def upload_artifacts(
             optional_upload_errors.append(f"{artifact_id}: {exc}")
             continue
         uploaded_manifest_items.append(copy.deepcopy(item))
+        uploaded_count += 1
         write_uploaded_artifact_manifest(artifact_dir, manifest_payload, uploaded_manifest_items, source_run_dir=source_run_dir)
         if progress_callback is not None:
-            progress_callback(uploaded, total, item)
+            progress_callback(uploaded_count, total, item)
     if optional_upload_errors:
         warnings = manifest_payload.get("warnings")
         if not isinstance(warnings, list):
