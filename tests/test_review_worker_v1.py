@@ -10482,11 +10482,21 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with self.subTest(alias=alias), tempfile.TemporaryDirectory() as tmp_dir:
                 root = Path(tmp_dir)
                 repo = root / "repo"
+                validation_repo = root / "validation-repo"
+                validation_repo.mkdir()
                 run_dir = repo / ".codex-review" / "runs" / "run_1"
                 intent_dir = run_dir / "intent"
                 generated_path = intent_dir / "generated-tests" / "test_alias.py"
                 generated_path.parent.mkdir(parents=True)
                 generated_path.write_text("import unittest\n", encoding="utf-8")
+                write_json(
+                    intent_dir / "validation-workspace.json",
+                    {"validation_repo_root": str(validation_repo)},
+                )
+                write_json(
+                    intent_dir / "intent-test-validation.json",
+                    {"schema_version": "intent-test-validation/v1", "enabled": True},
+                )
                 write_json(
                     intent_dir / "intent-test-plan.json",
                     {
@@ -10518,6 +10528,21 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     repaired["generated_tests"][0]["target_test_ids"],
                     ["ITP-001"],
                 )
+                with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                    "pullwise_worker.review_worker_v1.shutil.which",
+                    return_value="python",
+                ), patch(
+                    "pullwise_worker.review_worker_v1.subprocess.run",
+                    return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+                ) as subprocess_run:
+                    raw = run_intent_tests(run_dir)
+
+                self.assertEqual(raw["test_runs"][0]["status"], "passed")
+                self.assertEqual(
+                    raw["test_runs"][0]["command"],
+                    "python3 -m unittest discover -s intent/generated-tests -p test_alias.py",
+                )
+                subprocess_run.assert_called_once()
 
     def test_sandbox_test_output_that_mentions_namespace_flags_is_not_a_setup_failure(self) -> None:
         completed = SimpleNamespace(
