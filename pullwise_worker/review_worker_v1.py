@@ -667,6 +667,7 @@ class CodexSdkClient:
         self._threads: dict[str, Any] = {}
         self._approval_workspace = cwd
         self._events_lock = threading.Lock()
+        self._rate_limit_callback_lock = threading.Lock()
         self._threads_lock = threading.Lock()
 
     def start(self) -> None:
@@ -852,7 +853,8 @@ class CodexSdkClient:
                     payload = getattr(notification, "payload", None)
                     if method == "account/rateLimits/updated" and self.rate_limit_callback is not None:
                         params = self._model_to_dict(payload)
-                        self.rate_limit_callback(params)
+                        with self._rate_limit_callback_lock:
+                            self.rate_limit_callback(params)
                     if method == "error":
                         params = self._model_to_dict(payload)
                         notification_turn_id = str(params.get("turnId") or params.get("turn_id") or "")
@@ -1334,16 +1336,22 @@ class CodexQuotaMonitor:
         self.snapshot: dict[str, Any] | None = None
         self.rate_limits_response: dict[str, Any] = {}
         self.next_check_at = 0
+        self._lock = threading.RLock()
 
     def snapshot_if_due(self, *, active: bool = False) -> dict[str, Any] | None:
-        current_time = int(time.time())
-        if active and self.snapshot is not None:
-            return self.snapshot
-        if active or current_time < self.next_check_at:
-            return self.snapshot
-        return self.refresh(current_time)
+        with self._lock:
+            current_time = int(time.time())
+            if active and self.snapshot is not None:
+                return self.snapshot
+            if active or current_time < self.next_check_at:
+                return self.snapshot
+            return self.refresh(current_time)
 
     def refresh(self, current_time: int | None = None) -> dict[str, Any]:
+        with self._lock:
+            return self._refresh(current_time)
+
+    def _refresh(self, current_time: int | None = None) -> dict[str, Any]:
         checked_at = int(current_time if current_time is not None else time.time())
         threshold = codex_quota_threshold_percent(self.config)
         interval = codex_quota_check_seconds(self.config)
@@ -1394,6 +1402,10 @@ class CodexQuotaMonitor:
         return self.snapshot or {}
 
     def apply_rate_limit_update(self, params: dict[str, Any]) -> None:
+        with self._lock:
+            self._apply_rate_limit_update(params)
+
+    def _apply_rate_limit_update(self, params: dict[str, Any]) -> None:
         current_time = int(time.time())
         threshold = codex_quota_threshold_percent(self.config)
         degraded = bool(self.snapshot) and not bool((self.snapshot or {}).get("ready", True))
@@ -1411,6 +1423,10 @@ class CodexQuotaMonitor:
         self.next_check_at = int((self.snapshot or {}).get("nextCheckAt") or next_check_at)
 
     def mark_exhausted(self, error: object, *, checked_at: int | None = None) -> dict[str, Any]:
+        with self._lock:
+            return self._mark_exhausted(error, checked_at=checked_at)
+
+    def _mark_exhausted(self, error: object, *, checked_at: int | None = None) -> dict[str, Any]:
         current_time = int(checked_at if checked_at is not None else time.time())
         threshold = codex_quota_threshold_percent(self.config)
         next_check_at = current_time + codex_quota_check_seconds(self.config, degraded=True)
@@ -3972,7 +3988,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         ],
     },
     "reviewer_fanout": {
-        "role": "Sequential Logical Reviewer Fanout",
+        "role": "Bounded Parallel Logical Reviewer Fanout",
         "prompt_files": [
             "reviewers/security.md",
             "reviewers/correctness.md",
@@ -3982,7 +3998,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "inputs": ["bundles/*.md", "repo-map.json", "risk-routing.json", "reviewer prompts"],
         "outputs": ["raw-reviewers/*.json"],
         "instructions": [
-            "Review bundles in tier order using security, correctness, test-gap, and correctness-lite perspectives as applicable.",
+            "Review each planned bundle/reviewer assignment on its own independent thread; the worker may run up to the server-provided bounded concurrency while preserving the deterministic plan order for scheduling.",
             "Every finding must be concrete, located, evidenced, actionable, and include false-positive risk.",
             "For security severity, demonstrate an end-to-end attacker-controlled path to the sink and account for producer-side validation, generated server values, and browser/process isolation. If controllability is unproven, label the issue defense-in-depth and do not rate it high or critical.",
             "Before reporting an async UI race or duplicate mutation, inspect disabled state, synchronous ref/lock guards, event ordering, and server idempotency; demonstrate that a second user action reaches a harmful non-idempotent operation.",

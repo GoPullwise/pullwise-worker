@@ -583,6 +583,83 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(notifications, ["turn_1", "turn_1"])
 
+    def test_codex_sdk_serializes_rate_limit_callbacks_across_concurrent_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            notification_barrier = threading.Barrier(2)
+            notification_counts: dict[str, int] = {}
+            callback_lock = threading.Lock()
+            active_callbacks = 0
+            max_active_callbacks = 0
+
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    return SimpleNamespace(turn=SimpleNamespace(id=f"turn-{thread_id}"))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    count = notification_counts.get(turn_id, 0)
+                    notification_counts[turn_id] = count + 1
+                    if count == 0:
+                        notification_barrier.wait(1)
+                        return SimpleNamespace(
+                            method="account/rateLimits/updated",
+                            payload={"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 10}}},
+                        )
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)),
+                    )
+
+                def unregister_turn_notifications(self, turn_id: str) -> None:
+                    return
+
+            def rate_limit_callback(_params: dict) -> None:
+                nonlocal active_callbacks, max_active_callbacks
+                with callback_lock:
+                    active_callbacks += 1
+                    max_active_callbacks = max(max_active_callbacks, active_callbacks)
+                try:
+                    time.sleep(0.05)
+                finally:
+                    with callback_lock:
+                        active_callbacks -= 1
+
+            server = CodexSdkClient(
+                "codex",
+                {},
+                workspace,
+                workspace / "events.jsonl",
+                rate_limit_callback=rate_limit_callback,
+            )
+            server._client = Client()
+            outcomes: list[BaseException] = []
+
+            def run_turn(thread_id: str) -> None:
+                try:
+                    server.run_turn(
+                        thread_id=thread_id,
+                        repo_dir=workspace,
+                        prompt="review",
+                        effort="medium",
+                        read_only=True,
+                        timeout_seconds=2,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - captured for the assertion thread.
+                    outcomes.append(exc)
+
+            runners = [
+                threading.Thread(target=run_turn, args=(thread_id,), daemon=True)
+                for thread_id in ("thread-1", "thread-2")
+            ]
+            for runner in runners:
+                runner.start()
+            for runner in runners:
+                runner.join(2)
+
+        self.assertFalse(outcomes)
+        self.assertTrue(all(not runner.is_alive() for runner in runners))
+        self.assertEqual(max_active_callbacks, 1)
+
     def test_codex_sdk_turn_uses_restricted_workspace_write_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -1365,6 +1442,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     "allow_network": False,
                     "helper_scripts_standard_library_only": True,
                     "turn_timeout_seconds": 1800,
+                    "reviewer_concurrency": 2,
                     "intent_test_validation": {
                         "enabled": True,
                         "only_tiers": ["P0"],
@@ -1381,6 +1459,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(model_for_job(job), "gpt-5.5")
         self.assertEqual(turn_timeout_for_job(job), 1800)
         self.assertEqual(review_worker_policy_for_job(job)["scanDeadlineSeconds"], 14400)
+        self.assertEqual(review_worker_policy_for_job(job)["reviewerConcurrency"], 2)
         self.assertEqual(effort_for_phase(job, "reviewer_fanout"), "high")
         self.assertEqual(effort_for_phase(job, "inventory_repository"), "medium")
         parsed = validate_job_policy(job)["intent_test_validation"]
@@ -1411,10 +1490,35 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             },
         }
         fallback_policy = validate_job_policy(fallback_job)["intent_test_validation"]
+        self.assertEqual(review_worker_policy_for_job(fallback_job)["reviewerConcurrency"], 1)
         self.assertTrue(fallback_policy["enabled"])
         self.assertEqual(fallback_policy["only_tiers"], ["P0", "P1"])
         self.assertEqual(fallback_policy["max_tests_per_run"], 20)
         self.assertEqual(fallback_policy["max_test_run_seconds_per_test"], 60)
+
+    def test_job_policy_rejects_reviewer_concurrency_outside_bounded_range(self) -> None:
+        for reviewer_concurrency in (0, 3):
+            with self.subTest(reviewer_concurrency=reviewer_concurrency), self.assertRaisesRegex(
+                ValueError,
+                "reviewer_concurrency must be between 1 and 2",
+            ):
+                validate_job_policy(
+                    {
+                        "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
+                        "review_request": {
+                            "budget": {"max_wall_time_seconds": 14400},
+                            "policy": {
+                                "allow_source_modification": False,
+                                "allow_dependency_install": False,
+                                "allow_network": False,
+                                "helper_scripts_standard_library_only": True,
+                                "turn_timeout_seconds": 1800,
+                                "reviewer_concurrency": reviewer_concurrency,
+                            },
+                        },
+                        "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+                    }
+                )
 
     def test_job_policy_accepts_max_and_ultra_reasoning_effort(self) -> None:
         for effort in ("max", "ultra", "future_level"):

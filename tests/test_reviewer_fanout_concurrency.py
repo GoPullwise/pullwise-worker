@@ -1,0 +1,260 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import threading
+import time
+import unittest
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Iterator
+
+from pullwise_worker.review_worker_v1 import (
+    ActiveJob,
+    JobCancelled,
+    ReviewWorkerV1,
+    write_json,
+)
+
+
+def prompt_assignment(prompt: object) -> tuple[str, str, Path]:
+    lines = str(prompt).splitlines()
+    bundle_id = next(
+        line.removeprefix("Bundle assignment: ")
+        for line in lines
+        if line.startswith("Bundle assignment: ")
+    )
+    reviewer_id = next(
+        line.removeprefix("Reviewer assignment: ")
+        for line in lines
+        if line.startswith("Reviewer assignment: ")
+    )
+    output_path = Path(
+        next(
+            line.removeprefix("Exact output path: ")
+            for line in lines
+            if line.startswith("Exact output path: ")
+        )
+    )
+    return bundle_id, reviewer_id, output_path
+
+
+def write_reviewer_output(prompt: object) -> None:
+    bundle_id, reviewer_id, output_path = prompt_assignment(prompt)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        output_path,
+        {
+            "schema_version": "codex-reviewer-output/v1",
+            "bundle_id": bundle_id,
+            "reviewer": reviewer_id,
+            "reviewed_paths": ["src/app.py"],
+            "findings": [],
+            "uncertainties": [],
+        },
+    )
+
+
+@contextmanager
+def fanout_fixture(
+    reviewers: list[str],
+) -> Iterator[tuple[ReviewWorkerV1, Path, Path, dict, ActiveJob]]:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        repo = root / "repo"
+        run_dir = repo / ".codex-review" / "runs" / "run_1"
+        bundles_dir = run_dir / "bundles"
+        prompts_dir = repo / ".codex-review" / "prompts" / "reviewers"
+        bundles_dir.mkdir(parents=True)
+        prompts_dir.mkdir(parents=True)
+        write_json(run_dir / "run-state.json", {"thread_id": "root-thread"})
+        write_json(
+            run_dir / "bundle-plan.json",
+            {
+                "schema_version": "bundle-plan/v1",
+                "bundles": [
+                    {
+                        "bundle_id": "p0-bundle-001",
+                        "tier": "P0",
+                        "reviewers": reviewers,
+                    }
+                ],
+            },
+        )
+        (bundles_dir / "p0-bundle-001.md").write_text(
+            "# p0-bundle-001\n",
+            encoding="utf-8",
+        )
+        for reviewer in reviewers:
+            (prompts_dir / f"{reviewer}.md").write_text(
+                f"{reviewer} reviewer\n",
+                encoding="utf-8",
+            )
+        job = {
+            "job_id": "job_1",
+            "model_profile": {
+                "default_model": "gpt-5.5",
+                "core_effort": "high",
+                "non_core_effort": "medium",
+            },
+            "review_request": {
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1800,
+                    "reviewer_concurrency": 2,
+                },
+                "budget": {"max_wall_time_seconds": 14400},
+            },
+            "repositoryLimits": {
+                "maxFiles": 2000,
+                "maxBytes": 50 * 1024 * 1024,
+            },
+        }
+        worker = ReviewWorkerV1(
+            SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+            client=object(),
+        )
+        active = ActiveJob(
+            "job_1",
+            "run_1",
+            "lease_1",
+            "attempt_1",
+            thread_id="root-thread",
+        )
+        yield worker, repo, run_dir, job, active
+
+
+class ReviewerFanoutConcurrencyTest(unittest.TestCase):
+    def test_fatal_assignment_cancels_active_sibling_and_never_starts_pending_work(self) -> None:
+        with fanout_fixture(["security", "correctness", "test_gap"]) as (
+            worker,
+            repo,
+            run_dir,
+            job,
+            active,
+        ):
+            started_reviewers: list[str] = []
+            sibling_cancelled = threading.Event()
+
+            class FakeCodexClient:
+                def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                    return f"reviewer-thread-{len(started_reviewers) + 1}"
+
+                def run_turn(self, **kwargs: object) -> None:
+                    _bundle, reviewer, _output = prompt_assignment(kwargs["prompt"])
+                    started_reviewers.append(reviewer)
+                    if reviewer == "security":
+                        time.sleep(0.05)
+                        raise RuntimeError("reviewer exploded")
+                    cancel_requested = kwargs["cancel_requested"]
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline and not cancel_requested():
+                        time.sleep(0.01)
+                    if cancel_requested():
+                        sibling_cancelled.set()
+                        raise JobCancelled("cancel requested")
+                    raise AssertionError("active sibling was not cancelled")
+
+            with self.assertRaisesRegex(RuntimeError, "reviewer exploded"):
+                worker.run_reviewer_fanout_phase(
+                    FakeCodexClient(),
+                    repo,
+                    run_dir,
+                    job,
+                    active=active,
+                    progress=70,
+                )
+
+            execution = json.loads(
+                (run_dir / "reviewer-execution.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(sibling_cancelled.is_set())
+            self.assertCountEqual(started_reviewers, ["security", "correctness"])
+            self.assertEqual(
+                [record["status"] for record in execution["assignments"]],
+                ["failed", "cancelled", "cancelled"],
+            )
+            self.assertEqual(execution["assignments"][2]["attempts"], [])
+
+    def test_transient_capacity_error_retries_once_and_reduces_concurrency_to_one(self) -> None:
+        with fanout_fixture(["security", "correctness", "test_gap"]) as (
+            worker,
+            repo,
+            run_dir,
+            job,
+            active,
+        ):
+            attempt_counts: dict[str, int] = {}
+            started_threads: list[str] = []
+            active_turns = 0
+            max_active_after_limit = 0
+            capacity_error_seen = threading.Event()
+            state_lock = threading.Lock()
+
+            class FakeCodexClient:
+                def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                    thread_id = f"reviewer-thread-{len(started_threads) + 1}"
+                    started_threads.append(thread_id)
+                    return thread_id
+
+                def run_turn(self, **kwargs: object) -> None:
+                    nonlocal active_turns, max_active_after_limit
+                    _bundle, reviewer, _output = prompt_assignment(kwargs["prompt"])
+                    with state_lock:
+                        attempt_counts[reviewer] = attempt_counts.get(reviewer, 0) + 1
+                        attempt = attempt_counts[reviewer]
+                        active_turns += 1
+                        if capacity_error_seen.is_set():
+                            max_active_after_limit = max(
+                                max_active_after_limit,
+                                active_turns,
+                            )
+                    try:
+                        if reviewer == "security" and attempt == 1:
+                            raise RuntimeError("429 rate limit")
+                        time.sleep(0.03)
+                        write_reviewer_output(kwargs["prompt"])
+                    finally:
+                        with state_lock:
+                            active_turns -= 1
+                        if reviewer == "security" and attempt == 1:
+                            capacity_error_seen.set()
+
+            worker.run_reviewer_fanout_phase(
+                FakeCodexClient(),
+                repo,
+                run_dir,
+                job,
+                active=active,
+                progress=70,
+            )
+
+            execution = json.loads(
+                (run_dir / "reviewer-execution.json").read_text(encoding="utf-8")
+            )
+            log_events = [
+                json.loads(line)
+                for line in (run_dir / "worker.log.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(attempt_counts["security"], 2)
+            self.assertEqual(len(started_threads), 4)
+            self.assertEqual(max_active_after_limit, 1)
+            self.assertEqual(execution["max_concurrency"], 2)
+            self.assertEqual(execution["effective_concurrency"], 1)
+            self.assertEqual(execution["assignments_completed"], 3)
+            self.assertEqual(len(execution["assignments"][0]["attempts"]), 2)
+            self.assertIn(
+                "reviewer_concurrency_reduced",
+                {event.get("event") for event in log_events},
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
