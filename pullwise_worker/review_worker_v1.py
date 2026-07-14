@@ -3721,6 +3721,10 @@ class ReviewWorkerV1:
         repair_number = active.estimate_repair_counts.get(phase, 0) + 1
         active.estimate_repair_counts[phase] = repair_number
         repair_unit_id = f"repair:{phase}:{repair_number}"
+        repair_dependency_id = phase_unit_id
+        previous_repair_unit_id = f"repair:{phase}:{repair_number - 1}"
+        if repair_number > 1 and estimator.has_work_unit(previous_repair_unit_id):
+            repair_dependency_id = previous_repair_unit_id
         phase_index = next(
             (index for index, (candidate, _progress) in enumerate(PIPELINE_PHASES) if candidate == phase),
             len(PIPELINE_PHASES),
@@ -3729,7 +3733,7 @@ class ReviewWorkerV1:
             repair_unit_id,
             kind="semantic_turn",
             resource_pool="pipeline",
-            dependencies=(phase_unit_id,),
+            dependencies=(repair_dependency_id,),
             order=(phase_index * 100) + repair_number,
             state="retrying",
         )

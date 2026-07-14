@@ -1,11 +1,81 @@
 from __future__ import annotations
 
+import threading
 import unittest
 
 from pullwise_worker.current_run_eta import CurrentRunEstimator
 
 
 class CurrentRunEstimatorTest(unittest.TestCase):
+    def test_dynamic_updates_are_serialized_with_concurrent_snapshots(self) -> None:
+        entered_values = threading.Event()
+        release_values = threading.Event()
+
+        class BlockingValuesDict(dict):
+            pause_once = True
+
+            def values(self):
+                for index, value in enumerate(super().values()):
+                    if index == 0 and self.pause_once:
+                        self.pause_once = False
+                        entered_values.set()
+                        release_values.wait(2)
+                    yield value
+
+        estimator = CurrentRunEstimator()
+        estimator.set_resource_pool(
+            'reviewer',
+            configured_concurrency=1,
+            effective_concurrency=1,
+        )
+        estimator.add_work_unit(
+            'sample',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+            state='completed',
+            duration_seconds=10,
+        )
+        estimator.add_work_unit(
+            'pending',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+        )
+        estimator.mark_plan_ready()
+        estimator._units = BlockingValuesDict(estimator._units)
+        snapshot_errors: list[BaseException] = []
+
+        def take_snapshot() -> None:
+            try:
+                estimator.snapshot()
+            except BaseException as exc:
+                snapshot_errors.append(exc)
+
+        snapshot_thread = threading.Thread(target=take_snapshot)
+        snapshot_thread.start()
+        self.assertTrue(entered_values.wait(1))
+        writer_finished = threading.Event()
+
+        def add_retry() -> None:
+            estimator.add_work_unit(
+                'retry',
+                kind='reviewer_turn',
+                resource_pool='reviewer',
+                state='retrying',
+            )
+            writer_finished.set()
+
+        writer_thread = threading.Thread(target=add_retry)
+        writer_thread.start()
+
+        self.assertFalse(writer_finished.wait(0.05))
+        release_values.set()
+        snapshot_thread.join(2)
+        writer_thread.join(2)
+
+        self.assertEqual(snapshot_errors, [])
+        self.assertTrue(writer_finished.is_set())
+        self.assertTrue(estimator.has_work_unit('retry'))
+
     def test_runtime_concurrency_changes_recompute_and_zero_is_unavailable(self) -> None:
         estimator = CurrentRunEstimator()
         estimator.set_resource_pool(

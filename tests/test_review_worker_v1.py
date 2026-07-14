@@ -9352,6 +9352,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 active=active,
             )
             validate_phase_outputs(run_dir, "repo_map")
+            worker.repair_semantic_phase_outputs(
+                FakeCodexClient(),
+                repo,
+                run_dir,
+                job,
+                "repo_map",
+                RuntimeError("second repair"),
+                active=active,
+            )
 
         self.assertEqual(calls[0]["thread_id"], "thread_1")
         self.assertEqual(calls[0]["effort"], "high")
@@ -9361,8 +9370,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         estimator = active.current_run_estimator
         self.assertEqual(estimator.work_unit_state("repair:repo_map:1"), "completed")
         self.assertEqual(
-            estimator.work_unit_dependencies("phase:risk_routing"),
+            estimator.work_unit_dependencies("repair:repo_map:2"),
             ("repair:repo_map:1",),
+        )
+        self.assertEqual(
+            estimator.work_unit_dependencies("phase:risk_routing"),
+            ("repair:repo_map:2",),
         )
 
     def test_semantic_phase_output_repair_falls_back_when_codex_omits_output(self) -> None:

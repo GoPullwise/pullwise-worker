@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import statistics
+import threading
 import time
+from functools import wraps
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable
@@ -11,6 +13,15 @@ from typing import Callable
 ESTIMATE_BASIS = "current_run_work_graph"
 FINISHED_STATES = {"completed", "failed", "cancelled"}
 UNFINISHED_STATES = {"pending", "active", "retrying"}
+
+
+def synchronized(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 @dataclass
@@ -51,6 +62,7 @@ class CurrentRunEstimator:
         wall_clock: Callable[[], float] = time.time,
         deadline_monotonic: float | None = None,
     ) -> None:
+        self._lock = threading.RLock()
         self._monotonic_clock = monotonic_clock
         self._wall_clock = wall_clock
         self._deadline_monotonic = deadline_monotonic
@@ -59,6 +71,7 @@ class CurrentRunEstimator:
         self._plan_ready = False
         self._terminal = False
 
+    @synchronized
     def set_resource_pool(
         self,
         pool_id: str,
@@ -74,6 +87,7 @@ class CurrentRunEstimator:
             raise ValueError("effective_concurrency must be non-negative")
         self._pools[str(pool_id)] = ResourcePool(configured, effective)
 
+    @synchronized
     def add_work_unit(
         self,
         unit_id: str,
@@ -111,20 +125,25 @@ class CurrentRunEstimator:
             duration_seconds=normalized_duration,
         )
 
+    @synchronized
     def has_work_unit(self, unit_id: str) -> bool:
         return str(unit_id) in self._units
 
+    @synchronized
     def work_unit_state(self, unit_id: str) -> str | None:
         unit = self._units.get(str(unit_id))
         return unit.state if unit is not None else None
 
+    @synchronized
     def work_unit_dependencies(self, unit_id: str) -> tuple[str, ...] | None:
         unit = self._units.get(str(unit_id))
         return unit.dependencies if unit is not None else None
 
+    @synchronized
     def replace_dependencies(self, unit_id: str, dependencies: tuple[str, ...]) -> None:
         self._units[str(unit_id)].dependencies = tuple(str(value) for value in dependencies)
 
+    @synchronized
     def start_work_unit(
         self,
         unit_id: str,
@@ -144,6 +163,7 @@ class CurrentRunEstimator:
         unit.state = "active"
         unit.started_at_monotonic = started_at
 
+    @synchronized
     def finish_work_unit(
         self,
         unit_id: str,
@@ -178,12 +198,15 @@ class CurrentRunEstimator:
         unit.completed_at_monotonic = completed_at
         unit.duration_seconds = measured_duration
 
+    @synchronized
     def mark_plan_ready(self) -> None:
         self._plan_ready = True
 
+    @synchronized
     def mark_terminal(self) -> None:
         self._terminal = True
 
+    @synchronized
     def snapshot(self) -> dict[str, object] | None:
         if self._terminal:
             return None
