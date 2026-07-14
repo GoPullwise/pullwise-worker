@@ -53,6 +53,7 @@ from pullwise_worker.review_worker_v1 import (
     artifact_manifest_items,
     codex_error_code,
     codex_quota_payload_from_rate_limits,
+    current_run_estimator_for_job,
     quota_refresh_error_is_exhaustion,
     reconcile_envelope_artifact_manifest_with_uploads,
     refresh_coverage_intent_counters,
@@ -451,6 +452,29 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
 
         self.assertEqual(result.duration_ms, 1234)
+
+    def test_codex_sdk_turn_without_turn_id_returns_fallback_duration_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+
+            class Client:
+                def turn_start(self, _thread_id: str, _input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    return SimpleNamespace()
+
+            server = CodexSdkClient('codex', {}, workspace, workspace / 'events.jsonl')
+            server._client = Client()
+            server._threads['thread_1'] = SimpleNamespace(id='thread_1')
+
+            result = server.run_turn(
+                thread_id='thread_1',
+                repo_dir=workspace,
+                prompt='review',
+                effort='medium',
+                read_only=True,
+                timeout_seconds=2,
+            )
+
+        self.assertGreaterEqual(result.duration_ms, 0)
 
     def test_codex_sdk_turn_interrupts_when_cancel_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1643,6 +1667,93 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 }
 
                 self.assertEqual(validate_job_policy(job)["reasoning_effort"], effort)
+
+    def test_run_job_uses_monotonic_deadline_and_emits_full_run_estimate(self) -> None:
+        events: list[dict[str, object]] = []
+        results: list[dict[str, object]] = []
+        started_phases: list[str] = []
+        monotonic_now = [100.0]
+
+        class Client:
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {}
+
+            def event(self, _run_id: str, event: dict) -> dict:
+                events.append(event)
+                return {}
+
+            def artifact(self, _job_id: str, _artifact_id: str, _payload: dict) -> dict:
+                return {}
+
+            def result(self, _job_id: str, payload: dict) -> None:
+                results.append(payload)
+
+        class Worker(ReviewWorkerV1):
+            def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
+                repo_dir = root / "repo"
+                run_dir = repo_dir / ".codex-review" / "runs" / run_id
+                artifact_dir = root / "artifacts" / run_id
+                run_dir.mkdir(parents=True)
+                artifact_dir.mkdir(parents=True)
+                return repo_dir, run_dir, artifact_dir
+
+            def start_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int) -> None:
+                started_phases.append(phase)
+                super().start_phase(active, run_dir, phase, progress)
+
+            def complete_phase(
+                self,
+                active: ActiveJob,
+                run_dir: Path,
+                phase: str,
+                progress: int,
+                *,
+                data: dict | None = None,
+            ) -> None:
+                super().complete_phase(active, run_dir, phase, progress, data=data)
+                monotonic_now[0] = 14_501.0
+
+        job = {
+            "job_id": "job_1",
+            "run_id": "run_1",
+            "lease_id": "lease_1",
+            "model_profile": {
+                "default_model": "gpt-5.5",
+                "core_effort": "high",
+                "non_core_effort": "medium",
+            },
+            "review_request": {
+                "budget": {"max_wall_time_seconds": 14_400},
+                "policy": {
+                    "allow_source_modification": False,
+                    "allow_dependency_install": False,
+                    "allow_network": False,
+                    "helper_scripts_standard_library_only": True,
+                    "turn_timeout_seconds": 1_800,
+                },
+            },
+            "repositoryLimits": {"maxFiles": 2_000, "maxBytes": 50 * 1024 * 1024},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = Worker(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=Client())
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            with patch(
+                "pullwise_worker.review_worker_v1.PIPELINE_PHASES",
+                (("prepare_workspace", 3), ("inventory_repository", 24)),
+            ), patch("pullwise_worker.review_worker_v1.time.monotonic", side_effect=lambda: monotonic_now[0]), patch(
+                "pullwise_worker.review_worker_v1.time.time",
+                return_value=1_800_000_000.0,
+            ):
+                worker.run_job(job)
+
+        self.assertEqual(started_phases, ["prepare_workspace"])
+        self.assertEqual(results[0]["status"], "partial_completed")
+        run_started = next(event for event in events if event["event_type"] == "run_started")
+        self.assertEqual(run_started["progress"]["estimate"]["state"], "estimating")
+        terminal = next(event for event in events if event["event_type"] == "run_partial_completed")
+        self.assertNotIn("estimate", terminal["progress"])
 
     def test_disabled_intent_validation_skips_child_phases_without_codex_turns(self) -> None:
         events = []
@@ -7858,12 +7969,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             calls = []
 
             class FakeCodexClient:
-                def run_turn(self, **kwargs: object) -> None:
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
                     calls.append(kwargs)
                     (raw_dir / "security.json").write_text(
                         json.dumps({"schema_version": "codex-reviewer-output/v1", "findings": []}),
                         encoding="utf-8",
                     )
+                    return SimpleNamespace(duration_ms=4_000)
 
             job = {
                 "model_profile": {
@@ -7885,8 +7997,17 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
             }
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+            active = ActiveJob("job_1", "run_1", "lease_1", "attempt_1")
+            active.current_run_estimator = current_run_estimator_for_job(job)
+            worker.start_phase(active, run_dir, "reviewer_json_validation", 73)
 
-            worker.run_reviewer_json_validation_phase(FakeCodexClient(), repo, run_dir, job)
+            worker.run_reviewer_json_validation_phase(
+                FakeCodexClient(),
+                repo,
+                run_dir,
+                job,
+                active=active,
+            )
 
             validation = json.loads((run_dir / "json-errors.json").read_text(encoding="utf-8"))
             verified = json.loads((run_dir / "verified-reviewers" / "security.json").read_text(encoding="utf-8"))
@@ -7897,6 +8018,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(calls[0]["effort"], "medium")
         self.assertFalse(calls[0]["read_only"])
         self.assertIn("Reviewer JSON output repair", calls[0]["prompt"])
+        estimator = active.current_run_estimator
+        self.assertEqual(estimator.work_unit_state("repair:reviewer_json_validation:1"), "completed")
+        self.assertEqual(
+            estimator.work_unit_dependencies("phase:location_validation"),
+            ("repair:reviewer_json_validation:1",),
+        )
 
     def test_progress_phase_posts_v1_progress_updated_event_with_counters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -9174,12 +9301,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             calls = []
 
             class FakeCodexClient:
-                def run_turn(self, **kwargs: object) -> None:
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
                     calls.append(kwargs)
                     (run_dir / "repo-map.json").write_text(
                         json.dumps({"schema_version": "repo-map/v1", "areas": []}),
                         encoding="utf-8",
                     )
+                    return SimpleNamespace(duration_ms=7_000)
 
             job = {
                 "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
@@ -9196,10 +9324,21 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
             }
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+            active = ActiveJob("job_1", "run_1", "lease_1", "attempt_1")
+            active.current_run_estimator = current_run_estimator_for_job(job)
+            worker.start_phase(active, run_dir, "repo_map", 33)
 
             with self.assertRaisesRegex(RuntimeError, "repo-map/v1"):
                 validate_phase_outputs(run_dir, "repo_map")
-            worker.repair_semantic_phase_outputs(FakeCodexClient(), repo, run_dir, job, "repo_map", RuntimeError("bad schema"))
+            worker.repair_semantic_phase_outputs(
+                FakeCodexClient(),
+                repo,
+                run_dir,
+                job,
+                "repo_map",
+                RuntimeError("bad schema"),
+                active=active,
+            )
             validate_phase_outputs(run_dir, "repo_map")
 
         self.assertEqual(calls[0]["thread_id"], "thread_1")
@@ -9207,6 +9346,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse(calls[0]["read_only"])
         self.assertIn("Phase output repair: repo_map", calls[0]["prompt"])
         self.assertIn("Repair only the required output file", calls[0]["prompt"])
+        estimator = active.current_run_estimator
+        self.assertEqual(estimator.work_unit_state("repair:repo_map:1"), "completed")
+        self.assertEqual(
+            estimator.work_unit_dependencies("phase:risk_routing"),
+            ("repair:repo_map:1",),
+        )
 
     def test_semantic_phase_output_repair_falls_back_when_codex_omits_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

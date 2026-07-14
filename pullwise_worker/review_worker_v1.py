@@ -105,15 +105,18 @@ def current_run_estimator_for_job(
     *,
     monotonic_clock: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], float] = time.time,
+    started_monotonic: float | None = None,
 ) -> CurrentRunEstimator:
     policy = review_worker_policy_for_job(job)
     deadline_seconds = max(0, int(policy.get("scanDeadlineSeconds") or 0))
-    started_monotonic = monotonic_clock()
+    run_started_monotonic = (
+        monotonic_clock() if started_monotonic is None else float(started_monotonic)
+    )
     estimator = CurrentRunEstimator(
         monotonic_clock=monotonic_clock,
         wall_clock=wall_clock,
         deadline_monotonic=(
-            started_monotonic + deadline_seconds if deadline_seconds > 0 else None
+            run_started_monotonic + deadline_seconds if deadline_seconds > 0 else None
         ),
     )
     estimator.set_resource_pool(
@@ -430,6 +433,7 @@ class ActiveJob:
     active_unit: dict[str, Any] = field(default_factory=dict)
     flow_steps: list[dict[str, Any]] = field(default_factory=default_progress_steps)
     current_run_estimator: CurrentRunEstimator | None = field(default=None, repr=False)
+    estimate_repair_counts: dict[str, int] = field(default_factory=dict, repr=False)
 
     def heartbeat_payload(self) -> dict[str, Any]:
         return {
@@ -902,7 +906,9 @@ class CodexSdkClient:
         turn = getattr(started, "turn", None)
         turn_id = str(getattr(turn, "id", "") or getattr(started, "turn_id", "") or "")
         if not turn_id:
-            return
+            return CodexTurnMetrics(
+                duration_ms=max(0, int((time.monotonic() - turn_started_monotonic) * 1000))
+            )
 
         completed = threading.Event()
         abandoned = threading.Event()
@@ -2492,7 +2498,6 @@ class ReviewWorkerV1:
             active.apply_progress_data(data)
             if active.current_run_estimator and (
                 event_type in {"run_completed", "run_failed", "run_cancelled", "run_partial_completed"}
-                or status in TERMINAL_STATES
             ):
                 active.current_run_estimator.mark_terminal()
             event = {
@@ -2572,6 +2577,14 @@ class ReviewWorkerV1:
         with self._progress_lock:
             if active.cancel_requested:
                 return
+            estimator = active.current_run_estimator
+            estimate_unit_id = phase_estimate_unit_id(phase)
+            if (
+                estimator is not None
+                and estimator.has_work_unit(estimate_unit_id)
+                and estimator.work_unit_state(estimate_unit_id) in {"pending", "retrying"}
+            ):
+                estimator.start_work_unit(estimate_unit_id)
             active.state = "finishing" if phase in {"upload_artifacts", "submit_result_envelope", "cleanup_active_job"} else "busy"
             append_jsonl(
                 run_dir / "worker.log.jsonl",
@@ -2589,6 +2602,10 @@ class ReviewWorkerV1:
             )
 
     def complete_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int, *, data: dict[str, Any] | None = None) -> None:
+        estimator = active.current_run_estimator
+        estimate_unit_id = phase_estimate_unit_id(phase)
+        if estimator is not None and estimator.has_work_unit(estimate_unit_id):
+            estimator.finish_work_unit(estimate_unit_id)
         append_jsonl(run_dir / "worker.log.jsonl", {"event": "phase_completed", "phase": phase, "progress": progress, "time": iso_time(time.time())})
         self.emit_event(
             active,
@@ -2603,6 +2620,10 @@ class ReviewWorkerV1:
         )
 
     def skip_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int, *, reason: str, data: dict[str, Any] | None = None) -> None:
+        estimator = active.current_run_estimator
+        estimate_unit_id = phase_estimate_unit_id(phase)
+        if estimator is not None and estimator.has_work_unit(estimate_unit_id):
+            estimator.finish_work_unit(estimate_unit_id, duration_seconds=0.0)
         payload = {"skip_reason": reason}
         if data:
             payload.update(data)
@@ -2655,6 +2676,10 @@ class ReviewWorkerV1:
 
     def fail_phase(self, active: ActiveJob, run_dir: Path, phase: str, error: object) -> None:
         with self._progress_lock:
+            estimator = active.current_run_estimator
+            estimate_unit_id = phase_estimate_unit_id(phase)
+            if estimator is not None and estimator.has_work_unit(estimate_unit_id):
+                estimator.finish_work_unit(estimate_unit_id, state="failed")
             failure = failure_payload_for_error(error, status="failed", phase=phase)
             failure_record = {
                 "event": "phase_failed",
@@ -2702,17 +2727,26 @@ class ReviewWorkerV1:
         run_dir: Path | None = None
         artifact_dir: Path | None = None
         started = time.time()
+        started_monotonic = time.monotonic()
         try:
             job_policy = validate_job_policy(job)
             scan_deadline_seconds = int(job_policy.get("review_worker", {}).get("scanDeadlineSeconds") or 0)
-            wall_deadline = started + scan_deadline_seconds if scan_deadline_seconds > 0 else None
+            deadline_monotonic = (
+                started_monotonic + scan_deadline_seconds
+                if scan_deadline_seconds > 0
+                else None
+            )
+            active.current_run_estimator = current_run_estimator_for_job(
+                job,
+                started_monotonic=started_monotonic,
+            )
             repo_dir, run_dir, artifact_dir = self.prepare_workspace(job, run_id)
             active.run_dir = run_dir
             events_path = run_dir / "codex-events.jsonl"
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_started", "job_id": job_id, "run_id": run_id, "time": iso_time(started)})
             self.emit_event(active, run_dir, "run_started", "prepare_workspace", status="running", progress=0, message="Run started.")
             for phase, progress in PIPELINE_PHASES:
-                if wall_deadline is not None and time.time() > wall_deadline:
+                if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
                     raise JobPartialCompleted("review wall-time deadline exceeded")
                 if active.cancel_requested:
                     raise JobCancelled(active.cancel_reason or "cancel requested")
@@ -2772,7 +2806,13 @@ class ReviewWorkerV1:
                         if phase == "final_report_json":
                             repair_agent_report_artifact(run_dir, job)
                     elif phase == "reviewer_json_validation":
-                        self.run_reviewer_json_validation_phase(codex_client, repo_dir, run_dir, job)
+                        self.run_reviewer_json_validation_phase(
+                            codex_client,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            active=active,
+                        )
                     elif phase in MECHANICAL_PHASES:
                         self.run_mechanical_phase(repo_dir, run_dir, job, phase, active=active, progress=progress)
                     if phase in {"reviewer_fanout", "intent_test_validation"}:
@@ -2797,6 +2837,7 @@ class ReviewWorkerV1:
                             job,
                             phase,
                             validation_exc,
+                            active=active,
                         )
                         validate_phase_outputs(run_dir, phase, artifact_dir)
                     if phase in {"intent_test_planning", "intent_test_running", "intent_test_failure_analysis"}:
@@ -3267,19 +3308,34 @@ class ReviewWorkerV1:
         def estimate_unit_id(work: ReviewerAssignmentWork, attempt: int) -> str:
             return f"reviewer:{work.index}:attempt:{attempt}"
 
+        latest_estimate_unit_ids: dict[int, str] = {}
+        downstream_estimate_unit_id = phase_estimate_unit_id("reviewer_json_validation")
         if estimator is not None:
             estimator.set_resource_pool(
                 "reviewer",
                 configured_concurrency=max_concurrency,
                 effective_concurrency=max_concurrency,
             )
+            fanout_barrier_unit_id = phase_estimate_unit_id("reviewer_fanout")
+            dependencies: tuple[str, ...] = ()
+            if estimator.has_work_unit(fanout_barrier_unit_id):
+                estimator.finish_work_unit(fanout_barrier_unit_id)
+                dependencies = (fanout_barrier_unit_id,)
             for work in works:
+                unit_id = estimate_unit_id(work, 1)
                 estimator.add_work_unit(
-                    estimate_unit_id(work, 1),
+                    unit_id,
                     kind="reviewer_turn",
                     resource_pool="reviewer",
+                    dependencies=dependencies,
                     order=work.index,
                     weight=work.estimated_weight,
+                )
+                latest_estimate_unit_ids[work.index] = unit_id
+            if estimator.has_work_unit(downstream_estimate_unit_id):
+                estimator.replace_dependencies(
+                    downstream_estimate_unit_id,
+                    tuple(latest_estimate_unit_ids[index] for index in sorted(latest_estimate_unit_ids)),
                 )
             estimator.mark_plan_ready()
 
@@ -3495,6 +3551,18 @@ class ReviewWorkerV1:
                                     weight=work.estimated_weight,
                                     state="retrying",
                                 )
+                                latest_estimate_unit_ids[work.index] = estimate_unit_id(
+                                    work,
+                                    retry_attempt,
+                                )
+                                if estimator.has_work_unit(downstream_estimate_unit_id):
+                                    estimator.replace_dependencies(
+                                        downstream_estimate_unit_id,
+                                        tuple(
+                                            latest_estimate_unit_ids[index]
+                                            for index in sorted(latest_estimate_unit_ids)
+                                        ),
+                                    )
                             pending.appendleft(work)
                             shutil.rmtree(work.staging_dir, ignore_errors=True)
                             append_jsonl(
@@ -3638,6 +3706,71 @@ class ReviewWorkerV1:
         except OSError:
             pass
 
+    def _start_phase_repair_estimate(
+        self,
+        active: ActiveJob | None,
+        phase: str,
+    ) -> str | None:
+        if active is None or active.current_run_estimator is None:
+            return None
+        estimator = active.current_run_estimator
+        phase_unit_id = phase_estimate_unit_id(phase)
+        if not estimator.has_work_unit(phase_unit_id):
+            return None
+        estimator.finish_work_unit(phase_unit_id)
+        repair_number = active.estimate_repair_counts.get(phase, 0) + 1
+        active.estimate_repair_counts[phase] = repair_number
+        repair_unit_id = f"repair:{phase}:{repair_number}"
+        phase_index = next(
+            (index for index, (candidate, _progress) in enumerate(PIPELINE_PHASES) if candidate == phase),
+            len(PIPELINE_PHASES),
+        )
+        estimator.add_work_unit(
+            repair_unit_id,
+            kind="semantic_turn",
+            resource_pool="pipeline",
+            dependencies=(phase_unit_id,),
+            order=(phase_index * 100) + repair_number,
+            state="retrying",
+        )
+        next_phase = next(
+            (
+                PIPELINE_PHASES[index + 1][0]
+                for index, (candidate, _progress) in enumerate(PIPELINE_PHASES[:-1])
+                if candidate == phase
+            ),
+            "",
+        )
+        next_phase_unit_id = phase_estimate_unit_id(next_phase) if next_phase else ""
+        if next_phase_unit_id and estimator.has_work_unit(next_phase_unit_id):
+            estimator.replace_dependencies(next_phase_unit_id, (repair_unit_id,))
+        estimator.start_work_unit(repair_unit_id)
+        return repair_unit_id
+
+    @staticmethod
+    def _finish_phase_repair_estimate(
+        active: ActiveJob | None,
+        repair_unit_id: str | None,
+        turn_metrics: object = None,
+        *,
+        state: str = "completed",
+    ) -> None:
+        if active is None or active.current_run_estimator is None or not repair_unit_id:
+            return
+        raw_duration_ms = getattr(turn_metrics, "duration_ms", None)
+        duration_seconds: float | None = None
+        try:
+            parsed_duration_ms = int(raw_duration_ms)
+        except (TypeError, ValueError):
+            parsed_duration_ms = -1
+        if parsed_duration_ms >= 0:
+            duration_seconds = parsed_duration_ms / 1000.0
+        active.current_run_estimator.finish_work_unit(
+            repair_unit_id,
+            duration_seconds=duration_seconds,
+            state=state,
+        )
+
     def repair_semantic_phase_outputs(
         self,
         codex_client: CodexSdkClient | None,
@@ -3646,6 +3779,8 @@ class ReviewWorkerV1:
         job: dict[str, Any],
         phase: str,
         validation_error: object,
+        *,
+        active: ActiveJob | None = None,
     ) -> None:
         append_jsonl(
             run_dir / "worker.log.jsonl",
@@ -3662,22 +3797,44 @@ class ReviewWorkerV1:
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
-        codex_client.run_turn(
-            thread_id=thread_id,
-            repo_dir=repo_dir,
-            prompt=phase_repair_prompt(phase, run_dir, validation_error, job),
-            effort=effort_for_phase(job, phase),
-            read_only=False,
-            timeout_seconds=turn_timeout_for_job(job),
-            cancel_requested=self.poll_cancel_requested,
-        )
-        fallback_semantic_artifact(run_dir, job, phase)
+        repair_unit_id = self._start_phase_repair_estimate(active, phase)
+        turn_metrics: object = None
+        try:
+            turn_metrics = codex_client.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                prompt=phase_repair_prompt(phase, run_dir, validation_error, job),
+                effort=effort_for_phase(job, phase),
+                read_only=False,
+                timeout_seconds=turn_timeout_for_job(job),
+                cancel_requested=self.poll_cancel_requested,
+            )
+            fallback_semantic_artifact(run_dir, job, phase)
+        except BaseException:
+            self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
+            raise
+        self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
 
-    def run_reviewer_json_validation_phase(self, codex_client: CodexSdkClient | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
+    def run_reviewer_json_validation_phase(
+        self,
+        codex_client: CodexSdkClient | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        *,
+        active: ActiveJob | None = None,
+    ) -> None:
         try:
             validate_reviewer_outputs(run_dir)
         except RuntimeError as validation_exc:
-            self.repair_reviewer_outputs(codex_client, repo_dir, run_dir, job, validation_exc)
+            self.repair_reviewer_outputs(
+                codex_client,
+                repo_dir,
+                run_dir,
+                job,
+                validation_exc,
+                active=active,
+            )
             validate_reviewer_outputs(run_dir)
 
     def repair_reviewer_outputs(
@@ -3687,6 +3844,8 @@ class ReviewWorkerV1:
         run_dir: Path,
         job: dict[str, Any],
         validation_error: object,
+        *,
+        active: ActiveJob | None = None,
     ) -> None:
         append_jsonl(
             run_dir / "worker.log.jsonl",
@@ -3703,15 +3862,22 @@ class ReviewWorkerV1:
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
-        codex_client.run_turn(
-            thread_id=thread_id,
-            repo_dir=repo_dir,
-            prompt=reviewer_json_repair_prompt(run_dir, validation_error, job),
-            effort=effort_for_phase(job, "reviewer_json_validation"),
-            read_only=False,
-            timeout_seconds=turn_timeout_for_job(job),
-            cancel_requested=self.poll_cancel_requested,
-        )
+        repair_unit_id = self._start_phase_repair_estimate(active, "reviewer_json_validation")
+        turn_metrics: object = None
+        try:
+            turn_metrics = codex_client.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                prompt=reviewer_json_repair_prompt(run_dir, validation_error, job),
+                effort=effort_for_phase(job, "reviewer_json_validation"),
+                read_only=False,
+                timeout_seconds=turn_timeout_for_job(job),
+                cancel_requested=self.poll_cancel_requested,
+            )
+        except BaseException:
+            self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
+            raise
+        self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
 
     def run_mechanical_phase(
         self,

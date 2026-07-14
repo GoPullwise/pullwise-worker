@@ -118,6 +118,10 @@ class CurrentRunEstimator:
         unit = self._units.get(str(unit_id))
         return unit.state if unit is not None else None
 
+    def work_unit_dependencies(self, unit_id: str) -> tuple[str, ...] | None:
+        unit = self._units.get(str(unit_id))
+        return unit.dependencies if unit is not None else None
+
     def replace_dependencies(self, unit_id: str, dependencies: tuple[str, ...]) -> None:
         self._units[str(unit_id)].dependencies = tuple(str(value) for value in dependencies)
 

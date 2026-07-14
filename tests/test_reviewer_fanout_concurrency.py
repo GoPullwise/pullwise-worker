@@ -186,7 +186,10 @@ class ReviewerFanoutConcurrencyTest(unittest.TestCase):
             if event.get('progress', {}).get('estimate', {}).get('state') == 'available'
             and event['progress']['estimate'].get('remainingSeconds', 0) > 0
         ]
-        self.assertTrue(available_remaining)
+        self.assertTrue(
+            available_remaining,
+            [event.get('progress', {}).get('estimate') for event in progress_events],
+        )
         self.assertGreater(available_remaining[0], 10)
 
     def test_progress_estimate_uses_completed_turn_duration_and_live_scheduler_state(self) -> None:
