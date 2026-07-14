@@ -2279,7 +2279,8 @@ class ReviewWorkerV1:
         active = self.state.active_job
         if active is None:
             return False
-        self.heartbeat()
+        # The active-job supervisor owns server polling. This callback runs in
+        # the Codex wait loop every 0.5 seconds, so it must remain local-only.
         return bool(active.cancel_requested)
 
     def emit_event(

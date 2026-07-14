@@ -559,6 +559,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 ## Execution And Validation Resilience
 
 - Keep an independent active-job heartbeat/cancellation supervisor running from immediately after a job becomes active until terminal cleanup finishes, including checkout and other blocking setup work. The supervisor must not start a second Codex client while a job is active.
+- Codex turn cancellation callbacks must read only the local active-job cancellation state. The independent active-job supervisor owns server polling; never issue a synchronous heartbeat from the 0.5-second Codex turn wait loop.
 - A Codex turn deadline starts before `turn_start`. Both turn start and interruption RPCs must remain bounded from the worker's perspective, and a timed-out/cancelled notification consumer must not write run artifacts after `run_turn` returns.
 - Execute reviewer fanout as one sequential root-thread Codex turn per planned `(bundle_id, reviewer_id)` assignment. Require the exact `raw-reviewers/<bundle>.<reviewer>.json` output, record each turn in `reviewer-execution.json`, and never batch the whole repository's logical reviewer assignments into one turn.
 - Validator output must be normalized to the canonical `validated_findings`, `weak_findings`, and `disproven_findings` collections before downstream progress/report generation. Legacy collection names may be repaired, but an unknown disposition must never default to confirmed.

@@ -4790,6 +4790,28 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(all(payload["concurrency"]["available_job_slots"] == 0 for payload in busy_heartbeats))
         self.assertEqual(results[0]["status"], "cancelled")
 
+    def test_codex_turn_cancel_poll_reads_supervisor_state_without_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=tmp_dir),
+                client=object(),
+            )
+            active = ActiveJob(
+                job_id="job_1",
+                run_id="run_1",
+                lease_id="lease_1",
+                attempt_id="wk_1-1",
+            )
+            worker.state.set_active(active)
+            heartbeat_calls: list[bool] = []
+            worker.heartbeat = lambda: heartbeat_calls.append(True) or {}  # type: ignore[method-assign]
+
+            self.assertFalse(worker.poll_cancel_requested())
+            active.cancel_requested = True
+            self.assertTrue(worker.poll_cancel_requested())
+
+        self.assertEqual(heartbeat_calls, [])
+
     def test_heartbeat_includes_progress_snapshot_when_busy(self) -> None:
         calls = []
 
