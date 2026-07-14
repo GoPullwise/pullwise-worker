@@ -107,8 +107,15 @@ Codex execution rules:
   a worker-unique Unix socket.
 - Do not use `codex exec` for review phases and do not launch one Codex runtime
   process per reviewer/subtask.
-- Each run has one root Codex thread. Logical subagents are sequential Codex
-  turns by default; the default active Codex turns per worker is one.
+- Each run has one root coordinator Codex thread. Root semantic phases remain
+  sequential. `reviewer_fanout` is the only bounded-turn exception: use the
+  server-owned `reviewerConcurrency` policy (`1..2`) to run independent
+  reviewer threads inside the same worker-owned SDK/App Server, never a second
+  Codex process. Do not run concurrent turns on the root thread.
+- Keep one worker-owned `CODEX_HOME` and auth store per worker identity. Never
+  copy or share `auth.json` across worker roots. In-process reviewer turns must
+  reuse the same App Server/AuthManager, and event, quota, progress, and
+  execution-artifact mutations must remain serialized by the worker.
 - Start the Codex SDK client with the worker-owned `CODEX_HOME` and
   `CODEX_SQLITE_HOME`, then initialize the JSON-RPC connection before turns.
 - After root thread initialization, store the `thread_id` on the active job and
@@ -561,7 +568,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Keep an independent active-job heartbeat/cancellation supervisor running from immediately after a job becomes active until terminal cleanup finishes, including checkout and other blocking setup work. The supervisor must not start a second Codex client while a job is active.
 - Codex turn cancellation callbacks must read only the local active-job cancellation state. The independent active-job supervisor owns server polling; never issue a synchronous heartbeat from the 0.5-second Codex turn wait loop.
 - A Codex turn deadline starts before `turn_start`. Both turn start and interruption RPCs must remain bounded from the worker's perspective, and a timed-out/cancelled notification consumer must not write run artifacts after `run_turn` returns.
-- Execute reviewer fanout as one sequential root-thread Codex turn per planned `(bundle_id, reviewer_id)` assignment. Require the exact `raw-reviewers/<bundle>.<reviewer>.json` output, record each turn in `reviewer-execution.json`, and never batch the whole repository's logical reviewer assignments into one turn.
+- Execute reviewer fanout as one fresh independent Codex thread and one turn per planned `(bundle_id, reviewer_id)` assignment inside the existing worker-owned App Server. Schedule assignments in deterministic plan order with server-owned concurrency `1..2`; the coordinator alone may update progress, logs, and `reviewer-execution.json`. Give each attempt a unique staging writable root, validate its exact assignment output, then atomically publish `raw-reviewers/<bundle>.<reviewer>.json`. Never batch logical reviewers into one turn or start another Codex runtime. On transient 429/overload capacity failures, retry once on a fresh thread after reducing effective concurrency to `1`; on a fatal failure, cancel active siblings and do not start pending assignments.
 - Validator output must be normalized to the canonical `validated_findings`, `weak_findings`, and `disproven_findings` collections before downstream progress/report generation. Legacy collection names may be repaired, but an unknown disposition must never default to confirmed.
 - Normalize reporter `appendix.weak_findings` and validator `weak_findings` into top-level `report.agent.json.appendix_findings` before building the stable envelope. Deduplicate appendix entries when any canonical/source/cluster identity overlaps, not only when whole ID sets are equal. `summary.finding_counts.weak_appendix` must preserve that canonical appendix count even though weak findings are not issue-eligible main findings.
 - Treat `dependency_missing` as missing dynamic evidence, not disproof. It must not by itself demote a correctness finding whose static source, control-flow, and contract evidence still support a plausible failure scenario.
