@@ -3402,6 +3402,58 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(raw["test_runs"][0]["command"], "python3 -m unittest test_generated.py")
 
+    def test_run_intent_tests_rejects_module_scope_imported_project_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            generated_test = validation_repo / "test_generated.py"
+            validation_repo.mkdir(parents=True)
+            generated_test.write_text(
+                "import unittest\n"
+                "try:\n"
+                "    from tests.test_existing import ExistingRegressionTest\n"
+                "except ModuleNotFoundError:\n"
+                "    ExistingRegressionTest = None\n\n"
+                "class GeneratedIntentTest(unittest.TestCase):\n"
+                "    def test_generated_contract(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(intent_dir / "validation-workspace.json", {"validation_repo_root": str(validation_repo)})
+            write_json(intent_dir / "intent-test-validation.json", {"schema_version": "intent-test-validation/v1", "enabled": True})
+            write_json(
+                intent_dir / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": "test_generated.py",
+                            "command": "python3 -m unittest test_generated.py",
+                            "test_framework": "unittest",
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="python",
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as subprocess_run:
+                raw = run_intent_tests(run_dir)
+
+        result = raw["test_runs"][0]
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["classification"], "test_harness_error")
+        self.assertIn("module scope", result["skip_reason"])
+        subprocess_run.assert_not_called()
+
     def test_intent_counters_do_not_report_more_runs_than_total_when_source_has_extra_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"

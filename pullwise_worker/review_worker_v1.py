@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import copy
 import fnmatch
@@ -6360,9 +6361,54 @@ def _intent_generated_python_compile_error(
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
         compile(source, str(path), "exec", dont_inherit=True)
+        tree = ast.parse(source, filename=str(path), mode="exec")
     except (OSError, SyntaxError, ValueError) as exc:
         return f"generated Python test does not compile on worker Python {sys.version_info.major}.{sys.version_info.minor}: {exc}"
+    harness_error = _intent_module_scope_project_test_import_error(tree)
+    if harness_error:
+        return harness_error
     return ""
+
+
+def _intent_module_scope_project_test_import_error(tree: ast.AST) -> str:
+    violations: list[tuple[str, str]] = []
+
+    class ModuleScopeImportVisitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            module = str(node.module or "").strip()
+            module_parts = [part for part in module.split(".") if part]
+            if not any(part.startswith("test_") or part.endswith("_test") for part in module_parts):
+                return
+            for alias in node.names:
+                exposed_name = str(alias.asname or alias.name or "").rsplit(".", 1)[-1]
+                if (
+                    exposed_name == "*"
+                    or exposed_name.startswith("test_")
+                    or re.search(r"(?:Test|Tests|TestCase)$", exposed_name)
+                ):
+                    violations.append((module, exposed_name))
+
+    ModuleScopeImportVisitor().visit(tree)
+    if not violations:
+        return ""
+    module, name = violations[0]
+    return (
+        f"generated Python test exposes imported project test object {name!r} from {module!r} at module scope; "
+        "import the test module instead and access the helper through that module so unittest or pytest cannot "
+        "over-discover unrelated tests"
+    )
 
 
 def _intent_output_path(run_dir: Path, test_id: str, suffix: str) -> Path:

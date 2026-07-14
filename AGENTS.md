@@ -264,7 +264,9 @@ Review pipeline rules:
   oracles must be grounded in repository instructions/contracts. A Python
   `unittest` entry point must not expose imported repository `TestCase`
   subclasses at module scope where `unittest.main()` can discover unrelated
-  suites.
+  suites. Generated-Python preflight rejects module-scope `from` imports of
+  test-like objects from project test modules as `test_harness_error`; import
+  the module and access any reused helper through that module instead.
 - Semantic artifact repair must also overwrite existing malformed phase outputs
   when a common schema alias can be normalized. For example, a Codex-created
   `bootstrap_helper_scripts.summary.json` with
