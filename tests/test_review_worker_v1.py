@@ -1504,6 +1504,18 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("imported TestCase subclasses", prompt)
         self.assertIn("uncertain", prompt)
 
+    def test_intent_semantic_prompts_name_their_canonical_top_level_fields(self) -> None:
+        miner = prompt_template_for_name("intent/04_intent_miner.md")
+        planner = prompt_template_for_name("intent/05_intent_test_planner.md")
+        analyzer = prompt_template_for_name("intent/07_intent_test_failure_analyzer.md")
+
+        self.assertIn('top-level "bundle_id"', miner)
+        self.assertIn('"behavioral_contracts" array', miner)
+        self.assertIn('top-level "test_targets" array', planner)
+        self.assertIn("expected_result_before_fix", planner)
+        self.assertIn('top-level "test_results" array', analyzer)
+        self.assertIn('status must be one of "passed", "failed", "skipped", "timeout", or "error"', analyzer)
+
     def test_job_policy_requires_canonical_v1_policy_and_repository_limits(self) -> None:
         with self.assertRaisesRegex(ValueError, "model_profile.default_model"):
             validate_job_policy({
@@ -9715,6 +9727,50 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(active.current_phase_status, "failed")
         self.assertEqual(failed["status"], "result_submit_failed")
         self.assertFalse((artifact_dir / "pending-submit.json").exists())
+
+    def test_accepted_result_ignores_terminal_heartbeat_cancellation_race(self) -> None:
+        events = []
+
+        class Client:
+            worker = None
+
+            def heartbeat(self, **_payload: dict) -> dict:
+                return {"cancelled_job_ids": ["job_1"]}
+
+            def event(self, run_id: str, payload: dict) -> dict:
+                events.append((run_id, payload))
+                return {"accepted": True}
+
+            def result(self, _job_id: str, _payload: dict) -> None:
+                assert self.worker is not None
+                self.worker.heartbeat()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "run_1"
+            run_dir.mkdir(parents=True)
+            artifact_dir = root / "artifacts" / "run_1"
+            client = Client()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=client)
+            client.worker = worker
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+            active.run_dir = run_dir
+            worker.state.set_active(active)
+
+            submitted = worker.submit_result_or_record_failure(
+                active,
+                "job_1",
+                {"status": "done"},
+                artifact_dir,
+                {"protocol_version": "review-worker-protocol/v1"},
+            )
+            worker.heartbeat()
+
+        self.assertTrue(submitted)
+        self.assertTrue(active.terminal_result_submitted)
+        self.assertFalse(active.cancel_requested)
+        self.assertEqual(events, [])
 
     def test_isolation_env_does_not_inherit_provider_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -422,6 +422,8 @@ class ActiveJob:
     cancel_requested: bool = False
     cancel_reason: str = ""
     cancel_requested_reported: bool = False
+    terminal_result_in_flight: bool = False
+    terminal_result_submitted: bool = False
     run_dir: Path | None = None
     last_event_sequence: int = 0
     overall_percent: float = 0.0
@@ -2399,11 +2401,16 @@ class ReviewWorkerV1:
             with self._progress_lock:
                 heartbeat_payload["progress"] = active.progress_snapshot()
         response = self.client.heartbeat(**heartbeat_payload)
+        with self._progress_lock:
+            terminal_result_committing = bool(
+                active
+                and (active.terminal_result_in_flight or active.terminal_result_submitted)
+            )
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
-        if active and active.job_id in (cancelled or []):
+        if active and not terminal_result_committing and active.job_id in (cancelled or []):
             self.request_cancel(active, reason="server_cancelled")
         commands = response.get("commands") if isinstance(response, dict) and isinstance(response.get("commands"), list) else []
-        if active:
+        if active and not terminal_result_committing:
             for command in commands:
                 if not isinstance(command, dict):
                     continue
@@ -3114,9 +3121,16 @@ class ReviewWorkerV1:
             )
             return False
         try:
+            with self._progress_lock:
+                active.terminal_result_in_flight = True
             self.client.result(job_id, payload)
+            with self._progress_lock:
+                active.terminal_result_in_flight = False
+                active.terminal_result_submitted = True
             return True
         except Exception as exc:
+            with self._progress_lock:
+                active.terminal_result_in_flight = False
             active.state = "finishing"
             active.current_phase = "submit_result_envelope"
             active.current_phase_status = "failed"
@@ -4423,7 +4437,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Extract behavioral contracts from docs, tests, API specs, types, comments, route definitions, and error messages.",
             "Do not infer intent only from implementation code.",
-            "Write JSON only using intent-map/v1.",
+            'Write JSON only using intent-map/v1 with a top-level "bundle_id" and a top-level "behavioral_contracts" array, even when the array is empty.',
         ],
     },
     "intent_test_planning": {
@@ -4434,7 +4448,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Select only high-value P0/P1 candidate findings for temporary tests.",
             "Every test target must link to finding IDs and behavioral contract IDs.",
-            "Write JSON only using intent-test-plan/v1.",
+            'Write JSON only using intent-test-plan/v1 with a top-level "test_targets" array. Each target must include test_id, title, linked_finding_ids, contract_ids, and expected_result_before_fix set to fail, pass, or unknown.',
         ],
     },
     "intent_test_writing": {
@@ -4460,7 +4474,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Classify each generated test result as confirmed_bug, plausible_bug, test_oracle_wrong, test_harness_error, environment_error, flaky_or_nondeterministic, dependency_missing, unclear_requirement, passed_no_bug_reproduced, or skipped_not_runnable.",
             "A failing generated test is not automatically a bug.",
-            "Write JSON only using intent-test-result/v1.",
+            'Write JSON only using intent-test-result/v1 with a top-level "test_results" array. Every result must include test_id, status, classification, confidence in 0..1, evidence, and artifacts; status must be one of "passed", "failed", "skipped", "timeout", or "error".',
         ],
     },
     "validator_disproof": {
@@ -9189,8 +9203,16 @@ def prompt_template_for_name(name: str) -> str:
         "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/correctness_lite.md": "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. Return JSON only using codex-reviewer-output/v1.\n",
         "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Merge test-gap evidence into the underlying defect when contract, sink, and fix match. Do not create new findings. Return JSON only.\n",
-        "intent/04_intent_miner.md": "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route definitions, and error messages. Do not infer intent only from implementation code. Return JSON only using intent-map/v1.\n",
-        "intent/05_intent_test_planner.md": "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return JSON only using intent-test-plan/v1.\n",
+        "intent/04_intent_miner.md": (
+            "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route "
+            'definitions, and error messages. Do not infer intent only from implementation code. Return JSON only '
+            'using intent-map/v1 with a top-level "bundle_id" and a "behavioral_contracts" array, even when empty.\n'
+        ),
+        "intent/05_intent_test_planner.md": (
+            "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return "
+            'JSON only using intent-test-plan/v1 with a top-level "test_targets" array. Every target must include '
+            "test_id, title, linked_finding_ids, contract_ids, and expected_result_before_fix set to fail, pass, or unknown.\n"
+        ),
         "intent/06_intent_test_writer.md": (
             "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or "
             ".codex-review/generated-tests/**. Return JSON only using intent-test-source/v1, with every executable "
@@ -9202,7 +9224,12 @@ def prompt_template_for_name(name: str) -> str:
             "where unittest.main() can discover unrelated repository suites; import a module alias or explicitly load "
             "only the generated test class or method. Do not modify the main repo workspace.\n"
         ),
-        "intent/07_intent_test_failure_analyzer.md": "You are the Test Failure Analyzer. A failing test is not automatically a bug. Classify each result using intent-test-result/v1. Return JSON only.\n",
+        "intent/07_intent_test_failure_analyzer.md": (
+            "You are the Test Failure Analyzer. A failing test is not automatically a bug. Return JSON only using "
+            'intent-test-result/v1 with a top-level "test_results" array. Every result must include test_id, status, '
+            "classification, confidence in 0..1, evidence, and artifacts; status must be one of "
+            '"passed", "failed", "skipped", "timeout", or "error". Use only the documented intent-test classifications.\n'
+        ),
         "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. dependency_missing is absence of dynamic evidence, not disproof; static source and contract evidence can still support plausible. Return JSON only.\n",
         "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to the top-level appendix_findings list. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",
     }
