@@ -5415,7 +5415,7 @@ def _intent_normalized_execution_command(
     materialized_path: str = "",
 ) -> list[str]:
     normalized = list(command)
-    if normalized and PurePosixPath(normalized[0].replace("\\", "/")).name.lower() == "python":
+    if normalized and normalized[0].strip().lower() == "python":
         normalized[0] = "python3"
     if materialized_path:
         normalized = [

@@ -4108,6 +4108,54 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(env["PYTHONPATH"], str(validation_repo))
         self.assertEqual(env["PULLWISE_INTENT_TEST_NETWORK_DISABLED"], "1")
 
+    def test_intent_tests_preserve_absolute_python_interpreter_without_path_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            python_executable = root / "toolchain" / "python"
+            validation_repo.mkdir(parents=True)
+            python_executable.parent.mkdir()
+            python_executable.write_text("", encoding="utf-8")
+            write_json(
+                run_dir / "intent" / "validation-workspace.json",
+                {"validation_repo_root": str(validation_repo)},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-validation.json",
+                {"schema_version": "intent-test-validation/v1", "enabled": True},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-plan.json",
+                {"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-python"}]},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-python",
+                            "command": [str(python_executable), "-m", "unittest", "test_generated"],
+                            "artifact_refs": ["art_intent_test_source"],
+                        }
+                    ],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value=None,
+            ), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run:
+                result = run_intent_tests(run_dir)
+
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][0], str(python_executable))
+        self.assertEqual(result["test_runs"][0]["status"], "passed")
+
     def test_intent_command_policy_accepts_supported_versioned_python(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             validation_repo = Path(tmp_dir)
