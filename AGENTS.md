@@ -539,6 +539,13 @@ manual/local worker uninstall, and post-watcher-start install failures. Watcher
 self-removal is allowed only for an admin-initiated Delete instance lifecycle
 operation, and only after the watcher has first ensured the paired worker
 instance service and instance resources have been successfully uninstalled.
+
+After local lifecycle cleanup completes, a failed terminal status request must
+not make the watcher exit or repeat the destructive cleanup. Keep the completed
+command in memory, retry only its terminal status report at the watcher poll
+interval, and exit an uninstall watcher only after the server acknowledges
+`succeeded`.
+
 ## Debug Bundle Contract
 
 A debug bundle is not the audit bundle and must never silently fall back to the audit bundle.

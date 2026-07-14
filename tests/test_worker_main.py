@@ -129,6 +129,53 @@ class WorkerMainContractsTest(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(calls, [("wcmd_1", "running", None), ("wcmd_1", "succeeded", None)])
 
+    def test_lifecycle_watcher_retries_success_report_without_repeating_cleanup(self) -> None:
+        calls = []
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.poll_count = 0
+                self.success_attempts = 0
+
+            def command_poll(self) -> dict:
+                self.poll_count += 1
+                return {
+                    "command": {"id": "wcmd_retry", "command": "uninstall"},
+                    "worker": {"running_jobs": 0},
+                }
+
+            def command_status(self, command_id: str, status: str, *, error: str | None = None) -> None:
+                calls.append((command_id, status, error))
+                if status == "succeeded":
+                    self.success_attempts += 1
+                    if self.success_attempts == 1:
+                        raise lifecycle.PullwiseRequestError("temporary status outage")
+
+        config = argparse.Namespace(worker_id="wk_test", worker_token="pww_test", watcher_poll_seconds=1)
+        watcher = lifecycle.WorkerLifecycleWatcher.__new__(lifecycle.WorkerLifecycleWatcher)
+        watcher.config = config
+        watcher.client = FakeClient()
+        watcher.last_error = None
+        watcher.log_tailers = {}
+
+        with patch.object(lifecycle, "execute_watcher_lifecycle_command", return_value=0) as execute, patch.object(
+            lifecycle.time, "sleep"
+        ) as sleep:
+            result = watcher.run()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(watcher.client.poll_count, 1)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(
+            calls,
+            [
+                ("wcmd_retry", "running", None),
+                ("wcmd_retry", "succeeded", None),
+                ("wcmd_retry", "succeeded", None),
+            ],
+        )
+        sleep.assert_called_once_with(1)
+
     def test_lifecycle_watcher_marks_uninstall_cleanup_failed_on_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             calls = []

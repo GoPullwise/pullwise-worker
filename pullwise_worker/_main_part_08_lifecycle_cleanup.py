@@ -433,9 +433,50 @@ class WorkerLifecycleWatcher:
         self.client = PullwiseClient(config)
         self.last_error: str | None = None
         self.log_tailers: dict[str, WorkerLogStreamTailer] = {}
+        self.pending_terminal_report: dict[str, str | None] | None = None
+
+    def retry_pending_terminal_report(self) -> tuple[str, str] | None:
+        report = getattr(self, "pending_terminal_report", None)
+        if not isinstance(report, dict):
+            return None
+        command_id = str(report.get("command_id") or "")
+        action = str(report.get("action") or "")
+        status = str(report.get("status") or "")
+        error = report.get("error")
+        try:
+            self.client.command_status(command_id, status, error=error)
+        except PullwiseRequestError as exc:
+            self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
+            return None
+        self.pending_terminal_report = None
+        self.last_error = None
+        return action, status
+
+    def queue_terminal_report(
+        self,
+        command_id: str,
+        action: str,
+        status: str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        self.pending_terminal_report = {
+            "command_id": command_id,
+            "action": action,
+            "status": status,
+            "error": error,
+        }
 
     def run(self, *, once: bool = False) -> int:
         while True:
+            terminal_report = self.retry_pending_terminal_report()
+            if terminal_report == ("uninstall", "succeeded"):
+                return 0
+            if getattr(self, "pending_terminal_report", None) is not None:
+                if once:
+                    return 1
+                time.sleep(max(1, int(getattr(self.config, "watcher_poll_seconds", 1) or 1)))
+                continue
             handled_uninstall = False
             try:
                 payload = self.client.command_poll()
@@ -450,7 +491,7 @@ class WorkerLifecycleWatcher:
             if handled_uninstall:
                 return 0
             if once:
-                return 0
+                return 1 if getattr(self, "pending_terminal_report", None) is not None else 0
             time.sleep(max(1, int(getattr(self.config, "watcher_poll_seconds", 1) or 1)))
 
     def handle_lifecycle_command(self, command: dict, *, worker_state: dict | None = None) -> bool:
@@ -473,18 +514,22 @@ class WorkerLifecycleWatcher:
                 self.client.command_status(command_id, "failed", error=error)
             except PullwiseRequestError as status_exc:
                 self.last_error = f"command status failed: {redact_secrets(str(status_exc), self.config)}"[:500]
+                self.queue_terminal_report(command_id, action, "failed", error=error)
             return False
         if code == 0:
             try:
                 self.client.command_status(command_id, "succeeded")
             except PullwiseRequestError as exc:
                 self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
+                self.queue_terminal_report(command_id, action, "succeeded")
+                return False
             return True
         error = f"{action} command exited {code}"
         try:
             self.client.command_status(command_id, "failed", error=error)
         except PullwiseRequestError as exc:
             self.last_error = f"command status failed: {redact_secrets(str(exc), self.config)}"[:500]
+            self.queue_terminal_report(command_id, action, "failed", error=error)
         return False
 
     def handle_log_session(self, session: object) -> None:
