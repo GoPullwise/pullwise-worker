@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from . import __version__
 from ._main_part_01_bootstrap import REPOSITORY_MIRROR_CACHE_DIR_NAME, worker_machine_metrics_payload
+from .current_run_eta import CurrentRunEstimator
 
 try:
     import fcntl
@@ -375,6 +376,7 @@ class ActiveJob:
     counters: dict[str, int] = field(default_factory=default_progress_counters)
     active_unit: dict[str, Any] = field(default_factory=dict)
     flow_steps: list[dict[str, Any]] = field(default_factory=default_progress_steps)
+    current_run_estimator: CurrentRunEstimator | None = field(default=None, repr=False)
 
     def heartbeat_payload(self) -> dict[str, Any]:
         return {
@@ -389,7 +391,7 @@ class ActiveJob:
         }
 
     def progress_snapshot(self) -> dict[str, Any]:
-        return {
+        payload = {
             "run_id": self.run_id,
             "overall_percent": self.overall_percent,
             "current_phase": self.current_phase,
@@ -402,6 +404,11 @@ class ActiveJob:
             "last_event_sequence": self.last_event_sequence,
             "updated_at": iso_time(time.time()),
         }
+
+        estimate = self.current_run_estimator.snapshot() if self.current_run_estimator else None
+        if isinstance(estimate, dict):
+            payload["estimate"] = estimate
+        return payload
 
     def apply_progress_data(self, data: dict[str, Any] | None) -> None:
         if not isinstance(data, dict):
@@ -631,6 +638,11 @@ class CodexSdkRuntime:
     Sandbox: Any
 
 
+@dataclass(frozen=True)
+class CodexTurnMetrics:
+    duration_ms: int
+
+
 def load_codex_sdk_runtime() -> CodexSdkRuntime:
     try:
         from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox
@@ -769,7 +781,8 @@ class CodexSdkClient:
         timeout_seconds: int,
         cancel_requested: Callable[[], bool] | None = None,
         writable_roots: list[Path] | None = None,
-    ) -> None:
+    ) -> CodexTurnMetrics:
+        turn_started_monotonic = time.monotonic()
         client = self._sdk_client()
         self._approval_workspace = repo_dir
         params = {
@@ -841,6 +854,7 @@ class CodexSdkClient:
         completed = threading.Event()
         abandoned = threading.Event()
         error: dict[str, str] = {}
+        metrics: dict[str, int] = {}
 
         def consume_turn() -> None:
             try:
@@ -849,6 +863,26 @@ class CodexSdkClient:
                     if abandoned.is_set():
                         break
                     self._record_sdk_notification(notification)
+                    payload = getattr(notification, 'payload', None)
+                    payload_data = self._model_to_dict(payload)
+                    turn_data = payload_data.get('turn')
+                    if not isinstance(turn_data, dict):
+                        turn_data = {}
+                    reported_duration = (
+                        turn_data.get('durationMs')
+                        if turn_data.get('durationMs') is not None
+                        else turn_data.get('duration_ms')
+                    )
+                    if reported_duration is None:
+                        reported_duration = payload_data.get('durationMs')
+                    if reported_duration is None:
+                        reported_duration = payload_data.get('duration_ms')
+                    try:
+                        parsed_duration = int(reported_duration)
+                    except (TypeError, ValueError):
+                        parsed_duration = -1
+                    if parsed_duration >= 0:
+                        metrics['duration_ms'] = parsed_duration
                     method = str(getattr(notification, "method", "") or "")
                     payload = getattr(notification, "payload", None)
                     if method == "account/rateLimits/updated" and self.rate_limit_callback is not None:
@@ -903,6 +937,12 @@ class CodexSdkClient:
                 raise JobCancelled("cancel requested")
         if error.get("message"):
             raise RuntimeError(error["message"])
+
+        duration_ms = metrics.get(
+            'duration_ms',
+            max(0, int((time.monotonic() - turn_started_monotonic) * 1000)),
+        )
+        return CodexTurnMetrics(duration_ms=duration_ms)
 
     def _sandbox_policy(
         self,
@@ -2395,6 +2435,11 @@ class ReviewWorkerV1:
             active.current_phase_percent = round(float(current_phase_percent), 2)
             active.message = message
             active.apply_progress_data(data)
+            if active.current_run_estimator and (
+                event_type in {"run_completed", "run_failed", "run_cancelled", "run_partial_completed"}
+                or status in TERMINAL_STATES
+            ):
+                active.current_run_estimator.mark_terminal()
             event = {
                 "protocol_version": PROTOCOL_VERSION,
                 "run_id": active.run_id,
@@ -2413,6 +2458,9 @@ class ReviewWorkerV1:
                 },
                 "data": data or {},
             }
+            estimate = active.current_run_estimator.snapshot() if active.current_run_estimator else None
+            if isinstance(estimate, dict):
+                event["progress"]["estimate"] = estimate
             append_jsonl(run_dir / "progress.log.jsonl", event)
             snapshot = active.progress_snapshot()
             write_json(run_dir / "progress.json", snapshot)

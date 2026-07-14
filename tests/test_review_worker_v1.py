@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pullwise_worker import __version__
+from pullwise_worker.current_run_eta import CurrentRunEstimator
 from pullwise_worker._main_part_01_bootstrap import (
     PULLWISE_WORKER_USER_AGENT,
     PullwiseClient,
@@ -293,6 +294,67 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(repo_step["percent"], 40)
         self.assertEqual(events[0]["progress"]["steps"], event["progress"]["steps"])
 
+    def test_progress_events_and_heartbeat_snapshots_include_eta_until_terminal(self) -> None:
+        estimator = CurrentRunEstimator(wall_clock=lambda: 1000.0)
+        estimator.set_resource_pool(
+            'reviewer',
+            configured_concurrency=3,
+            effective_concurrency=3,
+        )
+        estimator.add_work_unit(
+            'sample',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+            state='completed',
+            duration_seconds=10,
+        )
+        estimator.add_work_unit(
+            'pending',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+        )
+        estimator.mark_plan_ready()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            active = ActiveJob(
+                job_id='job_1',
+                run_id='run_1',
+                lease_id='lease_1',
+                attempt_id='wk_1-1',
+                current_run_estimator=estimator,
+            )
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id='wk_1', service_home=tmp_dir),
+                client=object(),
+            )
+
+            event = worker.emit_event(
+                active,
+                run_dir,
+                'progress_updated',
+                'reviewer_fanout',
+                progress=50,
+                current_phase_percent=20,
+                message='Reviewing assignments',
+            )
+
+            self.assertEqual(event['progress']['estimate']['remainingSeconds'], 10)
+            self.assertEqual(active.progress_snapshot()['estimate'], event['progress']['estimate'])
+
+            terminal_event = worker.emit_event(
+                active,
+                run_dir,
+                'run_cancelled',
+                'reviewer_fanout',
+                status='cancelled',
+                progress=50,
+                message='Cancelled',
+            )
+
+        self.assertNotIn('estimate', terminal_event['progress'])
+        self.assertNotIn('estimate', active.progress_snapshot())
+
     def test_concurrent_progress_events_cannot_overwrite_newer_snapshot_with_stale_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
@@ -355,6 +417,40 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(snapshot["current_phase"], "risk_routing")
         self.assertEqual(snapshot["message"], "second")
         self.assertEqual([event["sequence"] for event in events], [1, 2])
+
+    def test_codex_sdk_turn_returns_completed_duration_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+
+            class Client:
+                def turn_start(self, thread_id: str, input_items: list, params: dict | None = None) -> SimpleNamespace:
+                    return SimpleNamespace(turn=SimpleNamespace(id='turn_1'))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    return SimpleNamespace(
+                        method='turn/completed',
+                        payload=SimpleNamespace(
+                            turn=SimpleNamespace(id=turn_id, error=None, durationMs=1234)
+                        ),
+                    )
+
+                def unregister_turn_notifications(self, _turn_id: str) -> None:
+                    return None
+
+            server = CodexSdkClient('codex', {}, workspace, workspace / 'events.jsonl')
+            server._client = Client()
+            server._threads['thread_1'] = SimpleNamespace(id='thread_1')
+
+            result = server.run_turn(
+                thread_id='thread_1',
+                repo_dir=workspace,
+                prompt='review',
+                effort='medium',
+                read_only=True,
+                timeout_seconds=2,
+            )
+
+        self.assertEqual(result.duration_ms, 1234)
 
     def test_codex_sdk_turn_interrupts_when_cancel_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
