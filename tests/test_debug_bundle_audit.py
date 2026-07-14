@@ -5,8 +5,9 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-from pullwise_worker.debug_bundle_audit import audit_bundle
+from pullwise_worker.debug_bundle_audit import BundleFiles, audit_bundle
 
 
 def write_json(root: Path, relative: str, payload: object) -> None:
@@ -700,6 +701,18 @@ class DebugBundleAuditTest(unittest.TestCase):
             result = audit_bundle(root)
 
         self.assertIn("weak_findings_duplicated_in_report_appendix", issue_codes(result))
+
+    def test_directory_bundle_enforces_the_same_total_size_limit_as_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            root.mkdir()
+            (root / "oversized.log").write_bytes(b"1234")
+
+            with patch(
+                "pullwise_worker.debug_bundle_audit.MAX_BUNDLE_BYTES",
+                3,
+            ), self.assertRaisesRegex(ValueError, "too large"):
+                BundleFiles(root)
 
 
 if __name__ == "__main__":

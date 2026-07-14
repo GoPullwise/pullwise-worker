@@ -47,6 +47,7 @@ from pullwise_worker.review_worker_v1 import (
     CodexQuotaMonitor,
     JobCancelled,
     CodexSdkClient,
+    Isolation,
     ReviewWorkerV1,
     RepositoryLimitExceeded,
     WorkerState,
@@ -63,6 +64,7 @@ from pullwise_worker.review_worker_v1 import (
     effective_routing,
     fallback_semantic_artifact,
     intent_test_artifact_counts,
+    intent_validation_missing_results_error,
     model_for_job,
     review_worker_policy_for_job,
     turn_timeout_for_job,
@@ -99,9 +101,12 @@ from pullwise_worker.review_worker_v1 import (
     validate_job_policy,
     validate_phase_outputs,
     validate_reviewer_outputs,
+    validate_result_manifest_matches_uploaded_snapshot,
     write_debug_bundle,
     write_json,
     _intent_generated_python_compile_error,
+    _intent_sandbox_setup_failed,
+    _intent_test_sandbox_command,
 )
 
 
@@ -10256,6 +10261,358 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             "weak_findings_duplicated_in_report_appendix",
             diagnostics["blocker_codes"],
         )
+
+    def test_isolation_env_prefixes_worker_virtualenv_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
+            os.environ,
+            {"PULLWISE_WORKER_ROOT": ""},
+            clear=False,
+        ):
+            config = SimpleNamespace(
+                worker_id="wk_env",
+                service_home=tmp_dir,
+                service_path="base-service-path",
+            )
+            isolation = Isolation(config)
+            env = isolation.env(config)
+
+        self.assertEqual(
+            env["PATH"].split(os.pathsep)[:4],
+            [
+                str(isolation.worker_root / ".venv" / "bin"),
+                str(isolation.worker_root / ".local" / "bin"),
+                str(isolation.worker_root / ".codex" / "bin"),
+                str(isolation.codex_home / "bin"),
+            ],
+        )
+
+    def test_intent_source_repair_recovers_live_generated_file_aliases(self) -> None:
+        alias_cases = (
+            ("generated_test_files", "command"),
+            ("created_test_files", "runnable_command"),
+        )
+        for alias, command_key in alias_cases:
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as tmp_dir:
+                root = Path(tmp_dir)
+                repo = root / "repo"
+                run_dir = repo / ".codex-review" / "runs" / "run_1"
+                intent_dir = run_dir / "intent"
+                generated_path = intent_dir / "generated-tests" / "test_alias.py"
+                generated_path.parent.mkdir(parents=True)
+                generated_path.write_text("import unittest\n", encoding="utf-8")
+                write_json(
+                    intent_dir / "intent-test-plan.json",
+                    {
+                        "schema_version": "intent-test-plan/v1",
+                        "test_targets": [{"test_id": "ITP-001"}],
+                    },
+                )
+                generated_entry = {
+                    "path": "intent/generated-tests/test_alias.py",
+                    "target_test_ids": ["ITP-001"],
+                    command_key: "python -m unittest intent/generated-tests/test_alias.py",
+                }
+                source_path = intent_dir / "intent-test-source.json"
+                write_json(
+                    source_path,
+                    {
+                        "schema_version": "intent-test-source/v1",
+                        "generated_tests": [],
+                        alias: [generated_entry],
+                    },
+                )
+
+                repair_intent_test_source_artifact(source_path, run_dir)
+                repaired = json.loads(source_path.read_text(encoding="utf-8"))
+
+                self.assertEqual(len(repaired["generated_tests"]), 1)
+                self.assertIn("command", repaired["generated_tests"][0])
+                self.assertEqual(
+                    repaired["generated_tests"][0]["target_test_ids"],
+                    ["ITP-001"],
+                )
+
+    def test_sandbox_test_output_that_mentions_namespace_flags_is_not_a_setup_failure(self) -> None:
+        completed = SimpleNamespace(
+            returncode=1,
+            stderr=(
+                "FAIL: test_linux_sandbox_contract\n"
+                "AssertionError: '--unshare-net' missing from namespace command"
+            ),
+        )
+
+        self.assertFalse(
+            _intent_sandbox_setup_failed(["/usr/bin/bwrap", "--unshare-net"], completed)
+        )
+
+    def test_linux_sandbox_read_only_binds_the_active_private_python_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            validation_repo.mkdir()
+            venv_root = root / "worker" / ".venv"
+            interpreter = venv_root / "bin" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text("", encoding="utf-8")
+            (venv_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+
+            with patch(
+                "pullwise_worker.review_worker_v1.sys.platform",
+                "linux",
+            ), patch(
+                "pullwise_worker.review_worker_v1.sys.executable",
+                str(interpreter),
+            ), patch(
+                "pullwise_worker.review_worker_v1.sys.prefix",
+                str(venv_root),
+            ), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                return_value="/usr/bin/bwrap",
+            ):
+                command, sandbox_cwd, reason = _intent_test_sandbox_command(
+                    [str(interpreter), "test_generated.py"],
+                    validation_repo,
+                    validation_repo,
+                )
+
+        triples = list(zip(command, command[1:], command[2:]))
+        self.assertEqual(reason, "")
+        self.assertEqual(sandbox_cwd, "/workspace")
+        self.assertIn(("--ro-bind", str(venv_root), str(venv_root)), triples)
+        separator = command.index("--")
+        self.assertEqual(command[separator + 1], str(interpreter))
+
+    def test_location_verification_rejects_paths_outside_repo_and_lines_past_eof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            verified_dir = run_dir / "verified-reviewers"
+            verified_dir.mkdir(parents=True)
+            source = repo / "src" / "module.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            outside = root / "outside.py"
+            outside.write_text("secret\n", encoding="utf-8")
+            write_json(
+                verified_dir / "correctness.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "findings": [
+                        {
+                            "id": "finding-boundaries",
+                            "locations": [
+                                {"path": "src/module.py", "start_line": 1, "end_line": 3},
+                                {"path": "src/module.py", "start_line": 1, "end_line": 4},
+                                {"path": "../outside.py", "start_line": 1, "end_line": 1},
+                                {"path": str(outside), "start_line": 1, "end_line": 1},
+                                {"path": "src/module.py", "start_line": 3, "end_line": 2},
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            verification = location_verification_payload(repo, run_dir)
+
+        statuses = {
+            (item["path"], item["start_line"], item["end_line"]): item["location_status"]
+            for item in verification["items"]
+        }
+        self.assertEqual(statuses[("src/module.py", 1, 3)], "valid")
+        self.assertEqual(statuses[("src/module.py", 1, 4)], "invalid")
+        self.assertEqual(statuses[("../outside.py", 1, 1)], "invalid")
+        self.assertEqual(statuses[(str(outside), 1, 1)], "invalid")
+        self.assertEqual(statuses[("src/module.py", 2, 3)], "valid")
+
+    def test_mixed_skipped_and_executed_intent_runs_do_not_exempt_missing_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            intent_dir = run_dir / "intent"
+            intent_dir.mkdir(parents=True)
+            write_json(
+                intent_dir / "intent-test-validation.json",
+                {
+                    "schema_version": "intent-test-validation/v1",
+                    "enabled": True,
+                    "require_intent_evidence": True,
+                },
+            )
+            write_json(
+                intent_dir / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [
+                        {
+                            "test_id": "ITV-skipped",
+                            "status": "skipped",
+                            "skip_reason": "dependency missing",
+                        },
+                        {
+                            "test_id": "ITV-failed",
+                            "status": "failed",
+                            "command": "python3 test_generated.py",
+                        },
+                    ],
+                },
+            )
+
+            error = intent_validation_missing_results_error(run_dir)
+
+        self.assertIn("intent-test-results.json is missing", error)
+
+    def test_completed_result_requires_every_required_artifact_in_uploaded_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_dir = Path(tmp_dir) / "run_1"
+            artifact_dir.mkdir()
+            uploaded = {
+                "artifact_id": "art_report",
+                "kind": "report.human",
+                "name": "report.md",
+                "required": True,
+            }
+            missing = {
+                "artifact_id": "art_qa",
+                "kind": "qa",
+                "name": "qa.json",
+                "required": True,
+            }
+            manifest_payload = {
+                "schema_version": "artifact-manifest/v1",
+                "run_id": "run_1",
+                "items": [uploaded, missing],
+            }
+            write_uploaded_artifact_manifest(
+                artifact_dir,
+                manifest_payload,
+                [uploaded],
+            )
+            envelope = {
+                "execution": {"status": "completed"},
+                "artifact_manifest": [uploaded, missing],
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "art_qa"):
+                validate_result_manifest_matches_uploaded_snapshot(
+                    envelope,
+                    artifact_dir,
+                )
+
+    def test_failed_result_may_declare_required_upload_failure_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            artifact_dir = Path(tmp_dir) / "run_1"
+            artifact_dir.mkdir()
+            uploaded = {
+                "artifact_id": "art_worker_log",
+                "kind": "worker_log",
+                "name": "worker.log.jsonl",
+                "required": True,
+            }
+            missing = {
+                "artifact_id": "art_error",
+                "kind": "error_report",
+                "name": "error.json",
+                "required": True,
+            }
+            manifest_payload = {
+                "schema_version": "artifact-manifest/v1",
+                "run_id": "run_1",
+                "items": [uploaded, missing],
+            }
+            write_uploaded_artifact_manifest(
+                artifact_dir,
+                manifest_payload,
+                [uploaded],
+            )
+            envelope = {
+                "execution": {"status": "failed"},
+                "artifact_manifest": [uploaded, missing],
+                "extensions": {
+                    "worker_internal": {
+                        "artifact_upload_error": "upload unavailable",
+                    }
+                },
+            }
+
+            validate_result_manifest_matches_uploaded_snapshot(
+                envelope,
+                artifact_dir,
+            )
+
+    def test_validate_reviewer_outputs_rejects_incomplete_empty_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            raw_dir.mkdir(parents=True)
+            write_json(
+                raw_dir / "p1-bundle-001.correctness.json",
+                {
+                    "schema_version": "codex-reviewer-output/v1",
+                    "bundle_id": "p1-bundle-001",
+                    "reviewer": "correctness",
+                    "findings": [],
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "reviewed_paths"):
+                validate_reviewer_outputs(run_dir)
+
+            validation = json.loads(
+                (run_dir / "json-errors.json").read_text(encoding="utf-8")
+            )
+
+        self.assertTrue(
+            any("reviewed_paths" in item["error"] for item in validation["errors"])
+        )
+        self.assertFalse(
+            (run_dir / "verified-reviewers" / "p1-bundle-001.correctness.json").exists()
+        )
+
+    def test_optional_artifact_failure_does_not_inflate_uploaded_progress_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            materialize_artifacts(run_dir, artifact_dir)
+            attempts: list[str] = []
+            successes: list[str] = []
+            progress_calls: list[tuple[int, int, str]] = []
+            failed_optional = ""
+
+            class Client:
+                def artifact(
+                    self,
+                    _job_id: str,
+                    artifact_id: str,
+                    payload: dict,
+                ) -> dict:
+                    nonlocal failed_optional
+                    attempts.append(artifact_id)
+                    if not failed_optional and payload["artifact"].get("required") is not True:
+                        failed_optional = artifact_id
+                        raise RuntimeError("optional upload failed")
+                    successes.append(artifact_id)
+                    return {"accepted": True}
+
+            upload_artifacts(
+                Client(),
+                "job_1",
+                "wk_1-1",
+                artifact_dir,
+                progress_callback=lambda uploaded, total, item: progress_calls.append(
+                    (uploaded, total, item["artifact_id"])
+                ),
+            )
+
+        self.assertTrue(failed_optional)
+        self.assertGreater(len(attempts), len(successes))
+        self.assertEqual(
+            [uploaded for uploaded, _total, _artifact_id in progress_calls],
+            list(range(1, len(successes) + 1)),
+        )
+        self.assertEqual(progress_calls[-1][0], len(successes))
+        self.assertEqual(progress_calls[-1][1], len(attempts))
 
 
 if __name__ == "__main__":
