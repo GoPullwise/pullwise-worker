@@ -5428,12 +5428,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             ],
         )
 
-    def test_busy_worker_defers_quota_refresh_command(self) -> None:
+    def test_busy_worker_refreshes_quota_without_starting_another_codex_client(self) -> None:
         events = []
 
         class Client:
             def heartbeat(self, **payload: dict) -> dict:
-                events.append(("heartbeat", payload["status"]))
+                events.append(("heartbeat", payload["status"], payload["codex_quota"]["checkedAt"]))
                 return {
                     "command": {
                         "id": "cmd_quota_refresh",
@@ -5456,19 +5456,40 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=root), client=Client())
             worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
             worker.machine_metrics_payload = lambda: None  # type: ignore[method-assign]
-            worker.quota_monitor.snapshot_if_due = lambda active=False: {  # type: ignore[method-assign]
+            worker.quota_monitor.snapshot = {
                 "provider": "codex",
                 "status": "ok",
                 "ready": True,
                 "checkedAt": 100,
             }
-            worker.quota_monitor.refresh = lambda current_time=None: events.append(("refresh",))  # type: ignore[method-assign]
+            worker.quota_monitor.snapshot_if_due = lambda active=False: worker.quota_monitor.snapshot  # type: ignore[method-assign]
+
+            def refresh_quota(current_time=None):
+                events.append(("refresh",))
+                worker.quota_monitor.snapshot = {
+                    "provider": "codex",
+                    "status": "ok",
+                    "ready": True,
+                    "checkedAt": 200,
+                }
+                return worker.quota_monitor.snapshot
+
+            worker.quota_monitor.refresh = refresh_quota  # type: ignore[method-assign]
             worker.state.active_job = ActiveJob("job_1", "run_1", "lease_1", "attempt_1", state="busy")
             worker.state.state = "busy"
 
             worker.heartbeat()
 
-        self.assertEqual(events, [("heartbeat", "busy")])
+        self.assertEqual(
+            events,
+            [
+                ("heartbeat", "busy", 100),
+                ("command_status", "cmd_quota_refresh", "running", None),
+                ("refresh",),
+                ("heartbeat", "busy", 200),
+                ("command_status", "cmd_quota_refresh", "succeeded", None),
+            ],
+        )
 
     def test_worker_closes_codex_client_when_control_plane_stops_accepting_heartbeat(self) -> None:
         events = []
