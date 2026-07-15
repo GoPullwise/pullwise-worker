@@ -2106,15 +2106,47 @@ def _command_executable_available(command: list[str], cwd: Path) -> tuple[bool, 
     executable = str(command[0])
     executable_name = normalized_executable_name(executable)
     path = Path(executable)
-    if path.is_absolute() and path.exists():
-        return True, ""
+    if path.is_absolute():
+        if path.is_file() and os.access(path, os.X_OK):
+            return True, ""
+        return False, f"dependency_missing: {executable_name} executable is not available"
     if not path.is_absolute() and ("/" in executable or chr(92) in executable):
         contained_candidate = cwd / path
-        if contained_candidate.is_file() and not contained_candidate.is_symlink():
+        if (
+            contained_candidate.is_file()
+            and not contained_candidate.is_symlink()
+            and os.access(contained_candidate, os.X_OK)
+        ):
             return True, ""
+        return False, f"dependency_missing: {executable_name} executable is not available"
     if shutil.which(executable) is not None:
         return True, ""
     return False, f"dependency_missing: {executable_name} executable is not available"
+
+
+def _python_module_available(
+    executable: str,
+    module_name: str,
+    *,
+    cwd: Path,
+) -> bool:
+    probe = (
+        "import importlib.util; "
+        f"raise SystemExit(0 if importlib.util.find_spec({module_name!r}) else 1)"
+    )
+    try:
+        completed = subprocess.run(
+            [executable, "-I", "-c", probe],
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 def _node_package_json_for_cwd(cwd: Path, validation_repo: Path) -> Path:
@@ -2151,20 +2183,7 @@ def intent_command_is_runnable_for_repo(command: list[str], cwd: Path, validatio
     if executable in {"terraform", "helm", "kubectl"}:
         return False, "skipped_not_runnable: external provider or cluster initialization is not allowed"
     if _is_python_intent_executable(executable) and len(lowered) >= 3 and lowered[1] == "-m" and lowered[2] == "pytest":
-        try:
-            import importlib.util
-
-            if importlib.util.find_spec("pytest") is None:
-                return False, "dependency_missing: pytest is not available"
-        except (ImportError, ValueError):
-            return False, "dependency_missing: pytest is not available"
-    if executable == "pytest":
-        try:
-            import importlib.util
-
-            if importlib.util.find_spec("pytest") is None:
-                return False, "dependency_missing: pytest is not available"
-        except (ImportError, ValueError):
+        if not _python_module_available(argv[0], "pytest", cwd=cwd):
             return False, "dependency_missing: pytest is not available"
     return True, "runnable"
 
@@ -3277,7 +3296,8 @@ class ReviewWorkerV1:
                             write_json(run_dir / "codex-runtime.json", runtime_metadata())
                     elif phase == "initialize_codex_connection":
                         thread_id = (
-                            codex_client.start_thread(
+                            start_codex_thread_with_lifecycle(
+                                codex_client,
                                 repo_dir,
                                 model_for_job(job),
                                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
@@ -4044,7 +4064,8 @@ class ReviewWorkerV1:
                     if estimator is not None:
                         estimator.start_work_unit(estimate_unit_id(work, attempt))
                     try:
-                        reviewer_thread_id = codex_client.start_thread(
+                        reviewer_thread_id = start_codex_thread_with_lifecycle(
+                            codex_client,
                             repo_dir,
                             model_for_job(job),
                             timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
@@ -5066,6 +5087,27 @@ def invoke_with_lifecycle_controls(
     if cancel_requested is not None and (accepts_kwargs or "cancel_requested" in names):
         kwargs["cancel_requested"] = cancel_requested
     return method(*args, **kwargs)
+
+
+def start_codex_thread_with_lifecycle(
+    codex_client: Any,
+    repo_dir: Path,
+    model: str,
+    *,
+    timeout_seconds: int,
+    cancel_requested: Callable[[], bool] | None,
+) -> str:
+    method = codex_client.start_thread
+    parameters = inspect.signature(method).parameters.values()
+    names = {parameter.name for parameter in parameters}
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+    kwargs: dict[str, Any] = {}
+    if accepts_kwargs or "timeout_seconds" in names:
+        kwargs["timeout_seconds"] = timeout_seconds
+    if accepts_kwargs or "cancel_requested" in names:
+        kwargs["cancel_requested"] = cancel_requested
+    result = method(repo_dir, model, **kwargs)
+    return str(result or "").strip()
 
 
 class RepositoryLimitExceeded(RuntimeError):
@@ -8773,8 +8815,6 @@ def intent_runtime_repair_diagnostics(raw_payload: Any) -> dict[str, Any]:
     repair_candidates: list[dict[str, Any]] = []
     non_repairable: list[dict[str, Any]] = []
     dependency_markers = (
-        "modulenotfounderror",
-        "no module named",
         "cannot find module",
         "cannot find package",
         "err_module_not_found",
@@ -8799,6 +8839,11 @@ def intent_runtime_repair_diagnostics(raw_payload: Any) -> dict[str, Any]:
         status = str(raw_run.get("status") or "").strip().lower()
         text = _intent_runtime_diagnostic_text(raw_run)
         lowered = text.lower()
+        python_module_missing = re.search(
+            r"(?im)^\s*(?:E\s+)?ModuleNotFoundError:\s*"
+            r"No module named\s+\S+\s*$",
+            text,
+        ) is not None
         preflight = raw_run.get("preflight") if isinstance(raw_run.get("preflight"), dict) else {}
         diagnostic = {
             "test_id": test_id,
@@ -8824,7 +8869,11 @@ def intent_runtime_repair_diagnostics(raw_payload: Any) -> dict[str, Any]:
                     "classification": str(preflight.get("classification") or "test_harness_error"),
                 }
             )
-        elif any(marker in lowered for marker in dependency_markers) or raw_run.get("exit_code") == 127:
+        elif (
+            python_module_missing
+            or any(marker in lowered for marker in dependency_markers)
+            or raw_run.get("exit_code") == 127
+        ):
             repair_candidates.append(
                 {
                     **diagnostic,
@@ -13608,13 +13657,6 @@ def job_clone_token(job: dict[str, Any]) -> str:
     if isinstance(token_payload, dict):
         return str(token_payload.get("token") or "").strip()
     return str(token_payload or "").strip()
-
-
-def git_command_timeout(deadline_monotonic: float | None) -> int | None:
-    if deadline_monotonic is None:
-        return None
-    remaining = int(deadline_monotonic - time.monotonic())
-    return max(1, remaining)
 
 
 def terminate_polled_process(process: Any) -> None:

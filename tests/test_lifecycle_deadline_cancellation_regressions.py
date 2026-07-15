@@ -20,6 +20,7 @@ from pullwise_worker.review_worker_v1 import (
     prepare_validation_workspace,
     run_git,
     run_intent_tests,
+    start_codex_thread_with_lifecycle,
     write_json,
 )
 
@@ -119,6 +120,21 @@ class _JoinedThread:
 
 
 class LifecycleDeadlineCancellationRegressionsTest(unittest.TestCase):
+    def test_thread_start_adapter_keeps_missing_identifier_empty(self) -> None:
+        class CodexClient:
+            def start_thread(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        thread_id = start_codex_thread_with_lifecycle(
+            CodexClient(),
+            Path("."),
+            "gpt-5.5",
+            timeout_seconds=30,
+            cancel_requested=lambda: False,
+        )
+
+        self.assertEqual(thread_id, "")
+
     def test_run_job_persists_active_marker_before_checkout_and_keeps_it_when_result_is_unconfirmed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

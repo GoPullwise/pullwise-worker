@@ -416,7 +416,24 @@ retry sleep or cleanup IO.
 - Persist the active slot under the instance runtime directory before checkout
   starts. On restart, restore unfinished active/result-submission state before
   the first heartbeat or lease attempt; never claim around a recovered run and
-  never invent a result resubmission path.
+  never invent a result resubmission path. Clear runtime/active-run.json only
+  after the control plane has accepted a terminal result (or equivalent
+  confirmed terminal evidence); blocked/failed submission evidence must keep
+  the slot occupied.
+- A completed-result commit must check recorded cancellation under the same
+  lock that sets terminal_result_in_flight. Cancellation that wins before that
+  boundary produces a cancelled result; cancellation observed after the
+  terminal commit begins must not replace the accepted terminal outcome.
+- Start one absolute monotonic wall-time deadline before checkout and pass it
+  unchanged through checkout/copy/clone, Codex thread starts and turns,
+  inventory, intent execution, and repair retries. Clamp local turn/test caps
+  to the remaining global budget and never create a fresh global budget for a
+  retry.
+- Checkout Git/copy work and intent-test children must poll local cancellation
+  and the shared deadline. Intent stdout/stderr stream to files rather than
+  accumulating in parent memory; cancellation/deadline must terminate the child
+  without a retry, while process-reap failures must not mask the lifecycle
+  exception.
 - Clean `worker_root/workspaces` only from the idle low-priority path after
   heartbeat/claim. Protect every workspace with unfinished persisted evidence,
   and remove only direct children of the instance-scoped workspace root.

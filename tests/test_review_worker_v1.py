@@ -4497,7 +4497,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
                 "pullwise_worker.review_worker_v1.shutil.which",
                 side_effect=lambda executable: "/usr/bin/npm" if executable == "npm" else None,
-            ), patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+            ), patch("pullwise_worker.review_worker_v1.run_polled_intent_process") as run:
                 result = run_intent_tests(run_dir)
 
         run.assert_not_called()
@@ -4659,7 +4659,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"), patch(
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value=None,
-            ), patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+            ), patch("pullwise_worker.review_worker_v1.run_polled_intent_process") as run:
                 result = run_intent_tests(run_dir)
 
         run.assert_not_called()
