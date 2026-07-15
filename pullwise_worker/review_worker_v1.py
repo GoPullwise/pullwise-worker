@@ -28,7 +28,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import __version__
-from ._main_part_01_bootstrap import REPOSITORY_MIRROR_CACHE_DIR_NAME, worker_machine_metrics_payload
+from ._main_part_01_bootstrap import (
+    REPOSITORY_MIRROR_CACHE_DIR_NAME,
+    worker_machine_metrics_payload,
+    worker_memory_payload,
+)
 from .agentic_execution import build_execution_capabilities
 from .codex_sdk_runtime import CodexRuntimeResources, TurnEventScope, require_identifier, run_bounded_call
 from .current_run_eta import CurrentRunEstimator
@@ -41,6 +45,11 @@ except ImportError:  # pragma: no cover - runtime is Linux only; import stays te
 PROTOCOL_VERSION = "review-worker-protocol/v1"
 WORKER_VERSION = __version__
 MAX_REVIEWER_CONCURRENCY = 2
+MAX_REVIEW_BUNDLES = 64
+MAX_REVIEWER_ASSIGNMENTS = 128
+LOW_MEMORY_REVIEWER_TOTAL_BYTES = 6 * 1024**3
+LOW_MEMORY_REVIEWER_AVAILABLE_BYTES = 2 * 1024**3
+CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS = 15
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 WORKER_COMMAND_ACTIVE_STATUSES = {"pending", "running"}
@@ -858,13 +867,41 @@ class CodexSdkClient:
             timeout_message="codex thread start timed out",
             cancel_requested=cancel_requested,
             cancelled_error=lambda: JobCancelled("cancel requested"),
+            late_result=self._archive_late_thread,
         )
         thread_id = require_identifier(getattr(thread, "id", ""), label="thread id")
         self._runtime_resources.register_thread(thread_id, thread)
         return thread_id
 
     def release_thread(self, thread_id: str) -> None:
-        self._runtime_resources.release_thread(thread_id)
+        if not thread_id:
+            return
+        try:
+            run_bounded_call(
+                lambda: self._archive_thread(thread_id),
+                timeout_seconds=CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS,
+                timeout_message=f"codex thread archive timed out: {thread_id}",
+            )
+        finally:
+            self._runtime_resources.release_thread(thread_id)
+
+    def _archive_thread(self, thread_id: str) -> Any:
+        archive = getattr(self._codex, "thread_archive", None)
+        if callable(archive):
+            return archive(thread_id)
+        return self.request("thread/archive", {"threadId": thread_id})
+
+    def _archive_late_thread(self, thread: Any) -> None:
+        thread_id = str(getattr(thread, "id", "") or "").strip()
+        if not thread_id:
+            return
+        try:
+            self.release_thread(thread_id)
+        except Exception:
+            # The caller has already abandoned this start request. Closing the
+            # App Server is the only bounded way to guarantee the orphan does
+            # not remain loaded when archive itself is unhealthy.
+            self.close()
 
     def run_turn(
         self,
@@ -5251,6 +5288,78 @@ def reviewer_concurrency_for_job(job: dict[str, Any]) -> int:
     return int(review_worker_policy_for_job(job)["reviewerConcurrency"])
 
 
+def reviewer_concurrency_decision_for_job(
+    job: dict[str, Any],
+) -> tuple[int, int, str, dict[str, Any]]:
+    configured = reviewer_concurrency_for_job(job)
+    memory = worker_memory_payload()
+
+    def metric(name: str) -> int | None:
+        try:
+            value = int(memory.get(name))
+        except (TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    total_bytes = metric("totalBytes")
+    available_bytes = metric("availableBytes")
+    reason = ""
+    effective = configured
+    if configured > 1 and total_bytes is not None and total_bytes <= LOW_MEMORY_REVIEWER_TOTAL_BYTES:
+        effective = 1
+        reason = "low_memory_host"
+    elif (
+        configured > 1
+        and available_bytes is not None
+        and available_bytes <= LOW_MEMORY_REVIEWER_AVAILABLE_BYTES
+    ):
+        effective = 1
+        reason = "low_available_memory"
+    return configured, effective, reason, memory
+
+
+def review_plan_resource_counts(plan: object) -> tuple[int, int]:
+    bundles = (
+        plan.get("bundles")
+        if isinstance(plan, dict) and isinstance(plan.get("bundles"), list)
+        else []
+    )
+    bundle_count = sum(1 for bundle in bundles if isinstance(bundle, dict))
+    assignment_count = 0
+    for bundle in bundles:
+        if not isinstance(bundle, dict):
+            continue
+        reviewers = bundle.get("reviewers")
+        if not isinstance(reviewers, list):
+            continue
+        assignment_count += len(
+            {
+                str(reviewer or "").strip().lower()
+                for reviewer in reviewers
+                if str(reviewer or "").strip()
+            }
+        )
+    return bundle_count, assignment_count
+
+
+def enforce_review_plan_resource_limits(
+    plan: object,
+    job: dict[str, Any],
+) -> tuple[int, int]:
+    policy = review_worker_policy_for_job(job)
+    max_bundles = int(policy["maxBundles"])
+    max_assignments = int(policy["maxReviewerAssignments"])
+    bundle_count, assignment_count = review_plan_resource_counts(plan)
+    if bundle_count > max_bundles or assignment_count > max_assignments:
+        raise RuntimeError(
+            "REVIEW_PLAN_LIMIT_EXCEEDED: "
+            f"bundles={bundle_count}, max_bundles={max_bundles}; "
+            f"reviewer_assignments={assignment_count}, "
+            f"max_reviewer_assignments={max_assignments}"
+        )
+    return bundle_count, assignment_count
+
+
 def turn_timeout_for_job(job: dict[str, Any]) -> int:
     return int(review_worker_policy_for_job(job)["turnTimeoutSeconds"])
 
@@ -5439,6 +5548,26 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
         default=1,
     )
     try:
+        max_bundles = _policy_int(
+            review_policy,
+            "max_bundles",
+            "maxBundles",
+            default=None,
+        )
+    except (TypeError, ValueError):
+        raise ValueError("claimed job must include review_request.policy.max_bundles") from None
+    try:
+        max_reviewer_assignments = _policy_int(
+            review_policy,
+            "max_reviewer_assignments",
+            "maxReviewerAssignments",
+            default=None,
+        )
+    except (TypeError, ValueError):
+        raise ValueError(
+            "claimed job must include review_request.policy.max_reviewer_assignments"
+        ) from None
+    try:
         scan_deadline_seconds = _policy_int(review_budget, "max_wall_time_seconds", "maxWallTimeSeconds", default=None)
     except (TypeError, ValueError):
         raise ValueError("claimed job must include review_request.budget.max_wall_time_seconds") from None
@@ -5447,6 +5576,18 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
     if reviewer_concurrency < 1 or reviewer_concurrency > MAX_REVIEWER_CONCURRENCY:
         raise ValueError(
             f"review_request.policy.reviewer_concurrency must be between 1 and {MAX_REVIEWER_CONCURRENCY}"
+        )
+    if max_bundles < 1 or max_bundles > MAX_REVIEW_BUNDLES:
+        raise ValueError(
+            f"review_request.policy.max_bundles must be between 1 and {MAX_REVIEW_BUNDLES}"
+        )
+    if (
+        max_reviewer_assignments < 1
+        or max_reviewer_assignments > MAX_REVIEWER_ASSIGNMENTS
+    ):
+        raise ValueError(
+            "review_request.policy.max_reviewer_assignments must be between "
+            f"1 and {MAX_REVIEWER_ASSIGNMENTS}"
         )
     limits = repository_limits_for_job(job)
     if limits is None:
@@ -5465,6 +5606,8 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
             "turnTimeoutSeconds": turn_timeout_seconds,
             "scanDeadlineSeconds": scan_deadline_seconds,
             "reviewerConcurrency": reviewer_concurrency,
+            "maxBundles": max_bundles,
+            "maxReviewerAssignments": max_reviewer_assignments,
         },
         "repository_limits": limits,
         "intent_test_validation": intent_validation_policy_for_job(job),
@@ -6833,8 +6976,12 @@ def _write_bundle_coverage(
     return coverage
 
 
-def prepare_bundle_planning_input(run_dir: Path) -> dict[str, Any]:
+def prepare_bundle_planning_input(
+    run_dir: Path,
+    job: dict[str, Any],
+) -> dict[str, Any]:
     _repo_dir, inventory_payload, routing, grouped = _bundle_planning_context(run_dir)
+    review_worker_policy = review_worker_policy_for_job(job)
     _write_bundle_coverage(run_dir, inventory_payload, grouped)
     items: list[dict[str, Any]] = []
     for tier in ("P0", "P1", "P2"):
@@ -6871,8 +7018,13 @@ def prepare_bundle_planning_input(run_dir: Path) -> dict[str, Any]:
         "constraints": {
             "max_files_per_bundle": 25,
             "max_rendered_size": MAX_BUNDLE_ESTIMATED_TOKENS,
+            "max_bundles": int(review_worker_policy["maxBundles"]),
+            "max_reviewer_assignments": int(
+                review_worker_policy["maxReviewerAssignments"]
+            ),
             "allowed_tiers": ["P0", "P1", "P2"],
             "worker_may_split_oversized_groups": True,
+            "worker_may_coalesce_same_tier_groups": True,
         },
         "routing_sources": routing.get("sources", {}),
         "items": items,
@@ -6969,9 +7121,17 @@ def bundle_grouping_contract_errors(
     return errors
 
 
-def materialize_agent_bundle_plan(run_dir: Path) -> dict[str, Any]:
+def materialize_agent_bundle_plan(
+    run_dir: Path,
+    job: dict[str, Any],
+) -> dict[str, Any]:
     repo_dir = run_dir.parent.parent.parent
-    planning_input = prepare_bundle_planning_input(run_dir)
+    plan_path = run_dir / "bundle-plan.json"
+    try:
+        plan_path.unlink()
+    except FileNotFoundError:
+        pass
+    planning_input = prepare_bundle_planning_input(run_dir, job)
     grouping = parse_required_json_output(run_dir / "bundle-grouping.json")
     errors = bundle_grouping_contract_errors(run_dir, grouping)
     if errors:
@@ -6993,7 +7153,11 @@ def materialize_agent_bundle_plan(run_dir: Path) -> dict[str, Any]:
         for item in planning_input.get("items", [])
         if isinstance(item, dict) and str(item.get("path") or "").strip()
     }
-    bundles: list[dict[str, Any]] = []
+    items_by_tier: dict[str, list[dict[str, Any]]] = {
+        "P0": [],
+        "P1": [],
+        "P2": [],
+    }
     groups = grouping.get("groups")
     assert isinstance(groups, list)
     for group in groups:
@@ -7006,47 +7170,52 @@ def materialize_agent_bundle_plan(run_dir: Path) -> dict[str, Any]:
             for reason in group["grouping_reasons"]
             if str(reason).strip()
         ]
-        grouped_items: list[dict[str, Any]] = []
         for path in group["paths"]:
             item = dict(inventory_by_path[str(path)])
             item["_routing_source"] = str(
                 input_by_path[str(path)].get("routing_source") or ""
             )
-            grouped_items.extend(split_oversized_bundle_item(item, repo_dir))
-        first_bundle_index = len(bundles)
+            item["_semantic_group_id"] = group_id
+            item["_semantic_group_title"] = title
+            item["_semantic_group_reasons"] = semantic_reasons
+            items_by_tier[tier].extend(
+                split_oversized_bundle_item(item, repo_dir)
+            )
+
+    bundles: list[dict[str, Any]] = []
+    for tier in ("P0", "P1", "P2"):
         _append_render_fitted_bundle_chunks(
             repo_dir,
             tier,
-            grouped_items,
+            items_by_tier[tier],
             bundles,
-            payload_overrides={
-                "title": title,
-                "semantic_group_id": group_id,
-            },
         )
-        materialized = bundles[first_bundle_index:]
-        for bundle in materialized:
-            bundle["grouping_reasons"] = list(
-                dict.fromkeys(
-                    [
-                        *(
-                            bundle.get("grouping_reasons")
-                            if isinstance(bundle.get("grouping_reasons"), list)
-                            else []
-                        ),
-                        *semantic_reasons,
-                    ]
-                )
-            )
+
+    review_worker_policy = review_worker_policy_for_job(job)
     plan = {
         "schema_version": "bundle-plan/v1",
         "run_id": run_dir.name,
         "routing_sources": planning_input.get("routing_sources", {}),
-        "planning_strategy": "codex_semantic_grouping_then_worker_bounded_split",
+        "planning_strategy": (
+            "codex_semantic_grouping_then_worker_same_tier_bounded_pack"
+        ),
         "semantic_group_count": len(groups),
+        "resource_limits": {
+            "max_bundles": int(review_worker_policy["maxBundles"]),
+            "max_reviewer_assignments": int(
+                review_worker_policy["maxReviewerAssignments"]
+            ),
+        },
         "bundles": bundles,
     }
-    write_json(run_dir / "bundle-plan.json", plan)
+    bundle_count, assignment_count = enforce_review_plan_resource_limits(plan, job)
+    plan["bundle_count"] = bundle_count
+    plan["reviewer_assignment_count"] = assignment_count
+    plan["bundle_counts_by_tier"] = {
+        tier: sum(1 for bundle in bundles if bundle.get("tier") == tier)
+        for tier in ("P0", "P1", "P2")
+    }
+    write_json(plan_path, plan)
     return plan
 
 

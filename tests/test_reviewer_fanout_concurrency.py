@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
+from unittest.mock import patch
 
 from pullwise_worker.current_run_eta import CurrentRunEstimator
 from pullwise_worker.review_worker_v1 import (
@@ -110,6 +111,8 @@ def fanout_fixture(
                     "helper_scripts_standard_library_only": True,
                     "turn_timeout_seconds": 1800,
                     "reviewer_concurrency": 2,
+                    "max_bundles": 24,
+                    "max_reviewer_assignments": 48,
                 },
                 "budget": {"max_wall_time_seconds": 14400},
             },
@@ -133,6 +136,91 @@ def fanout_fixture(
 
 
 class ReviewerFanoutConcurrencyTest(unittest.TestCase):
+    def test_over_limit_plan_is_rejected_before_starting_any_thread(self) -> None:
+        with fanout_fixture(["security", "correctness", "test_gap"]) as (
+            worker,
+            repo,
+            run_dir,
+            job,
+            active,
+        ):
+            job["review_request"]["policy"]["max_reviewer_assignments"] = 2
+            starts: list[str] = []
+
+            class FakeCodexClient:
+                def start_thread(self, *_args: object, **_kwargs: object) -> str:
+                    starts.append("started")
+                    raise AssertionError("fanout started before enforcing its assignment cap")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "REVIEW_PLAN_LIMIT_EXCEEDED.*assignments.*2",
+            ):
+                worker.run_reviewer_fanout_phase(
+                    FakeCodexClient(),
+                    repo,
+                    run_dir,
+                    job,
+                    active=active,
+                    progress=70,
+                )
+
+        self.assertEqual(starts, [])
+
+    def test_low_memory_host_reduces_effective_concurrency_to_one(self) -> None:
+        with fanout_fixture(["security", "correctness", "test_gap"]) as (
+            worker,
+            repo,
+            run_dir,
+            job,
+            active,
+        ):
+            active_turns = 0
+            max_active_turns = 0
+            state_lock = threading.Lock()
+
+            class FakeCodexClient:
+                def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                    return f"reviewer-thread-{time.monotonic_ns()}"
+
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    nonlocal active_turns, max_active_turns
+                    with state_lock:
+                        active_turns += 1
+                        max_active_turns = max(max_active_turns, active_turns)
+                    try:
+                        time.sleep(0.02)
+                        write_reviewer_output(kwargs["prompt"])
+                    finally:
+                        with state_lock:
+                            active_turns -= 1
+                    return SimpleNamespace(duration_ms=20)
+
+            with patch(
+                "pullwise_worker.review_worker_v1.worker_memory_payload",
+                return_value={
+                    "totalBytes": 4 * 1024**3,
+                    "availableBytes": 3 * 1024**3,
+                },
+            ):
+                worker.run_reviewer_fanout_phase(
+                    FakeCodexClient(),
+                    repo,
+                    run_dir,
+                    job,
+                    active=active,
+                    progress=70,
+                )
+
+            execution = json.loads(
+                (run_dir / "reviewer-execution.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(max_active_turns, 1)
+        self.assertEqual(execution["max_concurrency"], 2)
+        self.assertEqual(execution["effective_concurrency"], 1)
+        self.assertEqual(execution["concurrency_limit_reason"], "low_memory_host")
+
     def test_estimate_includes_downstream_pipeline_critical_path(self) -> None:
         with fanout_fixture(['security', 'correctness', 'test_gap']) as (
             worker,

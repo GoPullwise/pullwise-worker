@@ -91,6 +91,29 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
                 release.set()
                 runner.join(2)
 
+    def test_release_thread_archives_app_server_thread_before_dropping_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            calls: list[tuple[str, dict[str, object]]] = []
+
+            class Client:
+                def _request_raw(
+                    self,
+                    method: str,
+                    params: dict[str, object],
+                ) -> dict[str, object]:
+                    calls.append((method, params))
+                    return {"thread": {"id": params.get("threadId")}}
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._runtime_resources.register_thread("thread-1", object())
+
+            server.release_thread("thread-1")
+
+        self.assertEqual(calls, [("thread/archive", {"threadId": "thread-1"})])
+        self.assertEqual(server._threads, {})
+
     def test_turn_start_without_turn_id_is_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
