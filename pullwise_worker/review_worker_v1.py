@@ -990,7 +990,7 @@ class CodexSdkClient:
 
         completed = threading.Event()
         abandoned = threading.Event()
-        error: dict[str, str] = {}
+        failure: dict[str, BaseException] = {}
         metrics: dict[str, int] = {}
 
         def consume_turn() -> None:
@@ -1039,20 +1039,60 @@ class CodexSdkClient:
                         if bool(will_retry):
                             continue
                         turn_error = params.get("error") or getattr(payload, "error", None) or params
-                        error["message"] = self._json_text(turn_error)
+                        failure["exception"] = RuntimeError(self._json_text(turn_error))
                         break
                     if method != "turn/completed":
                         continue
-                    completed_turn = getattr(payload, "turn", None)
-                    completed_turn_id = str(getattr(completed_turn, "id", "") or getattr(payload, "turn_id", "") or "")
-                    if completed_turn_id and completed_turn_id != turn_id:
+                    completed_turn_id = str(
+                        turn_data.get("id")
+                        or turn_data.get("turnId")
+                        or turn_data.get("turn_id")
+                        or payload_data.get("turnId")
+                        or payload_data.get("turn_id")
+                        or ""
+                    ).strip()
+                    if not completed_turn_id:
+                        failure["exception"] = RuntimeError(
+                            f"Codex turn/completed notification is missing turn id; expected {turn_id}"
+                        )
+                        break
+                    if completed_turn_id != turn_id:
                         continue
-                    turn_error = getattr(completed_turn, "error", None) or getattr(completed_turn, "last_error", None)
+                    raw_status = turn_data.get("status")
+                    if raw_status is None:
+                        raw_status = payload_data.get("status")
+                    turn_status = str(raw_status or "").strip().lower()
+                    turn_error = turn_data.get("error")
+                    if turn_error is None:
+                        turn_error = turn_data.get("lastError")
+                    if turn_error is None:
+                        turn_error = turn_data.get("last_error")
+                    if turn_error is None:
+                        turn_error = payload_data.get("error")
+                    if turn_status != "completed":
+                        status_text = turn_status or "missing"
+                        detail = f": {self._json_text(turn_error)}" if turn_error else ""
+                        failure["exception"] = RuntimeError(
+                            f"Codex turn {turn_id} completed with non-success status {status_text!r}{detail}"
+                        )
+                        break
                     if turn_error:
-                        error["message"] = self._json_text(turn_error)
+                        failure["exception"] = RuntimeError(
+                            f"Codex turn {turn_id} reported status 'completed' with an error: "
+                            f"{self._json_text(turn_error)}"
+                        )
                     break
             except BaseException as exc:  # noqa: BLE001 - surfaced to the worker phase as a Codex turn failure.
-                error["message"] = str(exc)
+                if not str(exc).strip():
+                    diagnostic = (
+                        f"Codex turn notification stream failed for {turn_id}: "
+                        f"{type(exc).__name__}"
+                    )
+                    try:
+                        exc.args = (diagnostic,)
+                    except Exception:
+                        exc = RuntimeError(diagnostic)
+                failure["exception"] = exc
             finally:
                 self._runtime_resources.abandon_turn(event_scope)
                 try:
@@ -1077,8 +1117,9 @@ class CodexSdkClient:
                 self._runtime_resources.abandon_turn(event_scope)
                 self.interrupt(thread_id, turn_id)
                 raise JobCancelled("cancel requested")
-        if error.get("message"):
-            raise RuntimeError(error["message"])
+        turn_failure = failure.get("exception")
+        if turn_failure is not None:
+            raise turn_failure
 
         duration_ms = metrics.get(
             'duration_ms',
@@ -1131,11 +1172,14 @@ class CodexSdkClient:
         # unbounded RPC wait. Preserve fast-path ordering for responsive SDKs.
         completed.wait(0.1)
 
-    def request(self, method: str, params: dict[str, Any] | None = None, timeout_seconds: int = 30) -> dict[str, Any]:
-        del timeout_seconds
+    def request(self, method: str, params: dict[str, Any] | None = None, timeout_seconds: float = 30) -> dict[str, Any]:
         client = self._sdk_client()
         if hasattr(client, "_request_raw"):
-            result = client._request_raw(method, params or {})
+            result = run_bounded_call(
+                lambda: client._request_raw(method, params or {}),
+                timeout_seconds=timeout_seconds,
+                timeout_message=f"Codex raw request timed out: {method}",
+            )
             return result if isinstance(result, dict) else {}
         raise RuntimeError(f"Codex SDK client does not expose raw request support: {method}")
 

@@ -114,6 +114,63 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(calls, [("thread/archive", {"threadId": "thread-1"})])
         self.assertEqual(server._threads, {})
 
+    def test_raw_request_is_bounded_and_late_result_cannot_contaminate_next_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            entered = threading.Event()
+            release = threading.Event()
+            late_request_finished = threading.Event()
+
+            class Client:
+                def __init__(self) -> None:
+                    self.call_count = 0
+
+                def _request_raw(
+                    self,
+                    _method: str,
+                    _params: dict[str, object],
+                ) -> dict[str, object]:
+                    self.call_count += 1
+                    call_number = self.call_count
+                    if call_number == 1:
+                        entered.set()
+                        release.wait(5)
+                        late_request_finished.set()
+                    return {"call_number": call_number}
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            outcome: list[BaseException] = []
+            returned: list[dict[str, object]] = []
+
+            def request() -> None:
+                try:
+                    returned.append(server.request("test/block", timeout_seconds=0.1))
+                except BaseException as exc:  # noqa: BLE001 - asserted below.
+                    outcome.append(exc)
+
+            runner = threading.Thread(target=request, daemon=True)
+            started_at = time.monotonic()
+            runner.start()
+            try:
+                self.assertTrue(entered.wait(0.5), "raw request was never invoked")
+                runner.join(0.5)
+                self.assertFalse(runner.is_alive(), "raw request exceeded its caller-visible timeout")
+                self.assertEqual(returned, [])
+                self.assertEqual(len(outcome), 1)
+                self.assertIsInstance(outcome[0], TimeoutError)
+                self.assertLess(time.monotonic() - started_at, 0.6)
+            finally:
+                release.set()
+                runner.join(1)
+
+            self.assertTrue(late_request_finished.wait(1), "timed-out raw request never settled")
+            self.assertEqual(returned, [])
+            self.assertEqual(
+                server.request("test/next", timeout_seconds=1),
+                {"call_number": 2},
+            )
+
     def test_turn_start_without_turn_id_is_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -136,6 +193,208 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
                     timeout_seconds=2,
                 )
 
+    def test_turn_completion_rejects_non_completed_terminal_statuses(self) -> None:
+        for status in ("failed", "interrupted", "cancelled"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp_dir:
+                workspace = Path(tmp_dir)
+
+                class Client:
+                    def turn_start(
+                        self,
+                        _thread_id: str,
+                        _items: list,
+                        params: dict | None = None,
+                    ) -> SimpleNamespace:
+                        del params
+                        return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+                    def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                        return SimpleNamespace(
+                            method="turn/completed",
+                            payload=SimpleNamespace(
+                                turn=SimpleNamespace(id=turn_id, status=status, error=None),
+                            ),
+                        )
+
+                    def unregister_turn_notifications(self, _turn_id: str) -> None:
+                        return None
+
+                server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+                server._client = Client()
+
+                with self.assertRaisesRegex(RuntimeError, status):
+                    server.run_turn(
+                        thread_id="thread-1",
+                        repo_dir=workspace,
+                        prompt="review",
+                        effort="medium",
+                        read_only=True,
+                        timeout_seconds=2,
+                    )
+
+    def test_turn_completion_without_turn_id_is_a_protocol_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+
+            class Client:
+                def turn_start(
+                    self,
+                    _thread_id: str,
+                    _items: list,
+                    params: dict | None = None,
+                ) -> SimpleNamespace:
+                    del params
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+                def next_turn_notification(self, _turn_id: str) -> SimpleNamespace:
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload=SimpleNamespace(
+                            turn=SimpleNamespace(id="", status="completed", error=None),
+                        ),
+                    )
+
+                def unregister_turn_notifications(self, _turn_id: str) -> None:
+                    return None
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+
+            with self.assertRaisesRegex(RuntimeError, "turn id"):
+                server.run_turn(
+                    thread_id="thread-1",
+                    repo_dir=workspace,
+                    prompt="review",
+                    effort="medium",
+                    read_only=True,
+                    timeout_seconds=2,
+                )
+
+    def test_turn_completion_reads_status_and_error_from_dict_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+
+            class Client:
+                def turn_start(
+                    self,
+                    _thread_id: str,
+                    _items: list,
+                    params: dict | None = None,
+                ) -> SimpleNamespace:
+                    del params
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload={
+                            "turn": {
+                                "id": turn_id,
+                                "status": "failed",
+                                "error": {
+                                    "message": "quota exhausted",
+                                    "codexErrorInfo": "usageLimitExceeded",
+                                },
+                            },
+                        },
+                    )
+
+                def unregister_turn_notifications(self, _turn_id: str) -> None:
+                    return None
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+
+            with self.assertRaisesRegex(RuntimeError, "failed.*usageLimitExceeded"):
+                server.run_turn(
+                    thread_id="thread-1",
+                    repo_dir=workspace,
+                    prompt="review",
+                    effort="medium",
+                    read_only=True,
+                    timeout_seconds=2,
+                )
+
+    def test_turn_completion_accepts_matching_completed_dict_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+
+            class Client:
+                def turn_start(
+                    self,
+                    _thread_id: str,
+                    _items: list,
+                    params: dict | None = None,
+                ) -> SimpleNamespace:
+                    del params
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload={
+                            "turn": {
+                                "id": turn_id,
+                                "status": "completed",
+                                "error": None,
+                                "durationMs": 321,
+                            },
+                        },
+                    )
+
+                def unregister_turn_notifications(self, _turn_id: str) -> None:
+                    return None
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+
+            metrics = server.run_turn(
+                thread_id="thread-1",
+                repo_dir=workspace,
+                prompt="review",
+                effort="medium",
+                read_only=True,
+                timeout_seconds=2,
+            )
+
+        self.assertEqual(metrics.duration_ms, 321)
+
+    def test_turn_notification_stream_preserves_empty_eof_error_with_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+
+            class Client:
+                def turn_start(
+                    self,
+                    _thread_id: str,
+                    _items: list,
+                    params: dict | None = None,
+                ) -> SimpleNamespace:
+                    del params
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+                def next_turn_notification(self, _turn_id: str) -> SimpleNamespace:
+                    raise EOFError()
+
+                def unregister_turn_notifications(self, _turn_id: str) -> None:
+                    return None
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+
+            with self.assertRaises(EOFError) as raised:
+                server.run_turn(
+                    thread_id="thread-1",
+                    repo_dir=workspace,
+                    prompt="review",
+                    effort="medium",
+                    read_only=True,
+                    timeout_seconds=2,
+                )
+
+        self.assertIn("EOFError", str(raised.exception))
+        self.assertIn("notification", str(raised.exception).lower())
+
     def test_abandoned_turn_consumer_cannot_write_to_later_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -153,7 +412,9 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
                 def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
                     return SimpleNamespace(
                         method="turn/completed",
-                        payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)),
+                        payload=SimpleNamespace(
+                            turn=SimpleNamespace(id=turn_id, status="completed", error=None),
+                        ),
                     )
 
                 def unregister_turn_notifications(self, _turn_id: str) -> None:

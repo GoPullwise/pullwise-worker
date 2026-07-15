@@ -645,7 +645,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     return SimpleNamespace(
                         method='turn/completed',
                         payload=SimpleNamespace(
-                            turn=SimpleNamespace(id=turn_id, error=None, durationMs=1234)
+                            turn=SimpleNamespace(
+                                id=turn_id,
+                                status="completed",
+                                error=None,
+                                durationMs=1234,
+                            )
                         ),
                     )
 
@@ -895,7 +900,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         )
                     return SimpleNamespace(
                         method="turn/completed",
-                        payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)),
+                        payload=SimpleNamespace(
+                            turn=SimpleNamespace(id=turn_id, status="completed", error=None),
+                        ),
                     )
 
                 def unregister_turn_notifications(self, turn_id: str) -> None:
@@ -940,7 +947,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         )
                     return SimpleNamespace(
                         method="turn/completed",
-                        payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)),
+                        payload=SimpleNamespace(
+                            turn=SimpleNamespace(id=turn_id, status="completed", error=None),
+                        ),
                     )
 
                 def unregister_turn_notifications(self, turn_id: str) -> None:
@@ -1004,7 +1013,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     return SimpleNamespace(turn=SimpleNamespace(id="turn_1"))
 
                 def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
-                    return SimpleNamespace(method="turn/completed", payload=SimpleNamespace(turn=SimpleNamespace(id=turn_id, error=None)))
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload=SimpleNamespace(
+                            turn=SimpleNamespace(id=turn_id, status="completed", error=None),
+                        ),
+                    )
 
                 def unregister_turn_notifications(self, turn_id: str) -> None:
                     return
