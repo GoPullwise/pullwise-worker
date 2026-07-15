@@ -2299,10 +2299,15 @@ def _intent_blocked_execution_diagnostic(
         reason_code = "sandbox_unavailable"
         classification = "environment_error"
         agent_repairable = False
+    display_reason = reason
+    for prefix in ("dependency_missing: ", "environment_error: ", "skipped_not_runnable: "):
+        if display_reason.startswith(prefix):
+            display_reason = display_reason[len(prefix):]
+            break
     return {
         "status": "blocked",
         "reason_code": reason_code,
-        "reason": reason.split(": ", 1)[-1] if reason else "not runnable",
+        "reason": display_reason or "not runnable",
         "classification": classification,
         "agent_repairable": bool(agent_repairable),
         "missing_capabilities": missing,
@@ -4205,6 +4210,38 @@ class ReviewWorkerV1:
             refresh_agentic_execution_capabilities(execution_repo, run_dir)
             preflight = intent_test_source_preflight_payload(run_dir)
             write_json(run_dir / "intent" / "intent-test-preflight.json", preflight)
+            workspace_integrity = (
+                preflight.get("workspace_integrity")
+                if isinstance(preflight.get("workspace_integrity"), dict)
+                else {}
+            )
+            if workspace_integrity.get("status") == "violation":
+                repair_rejections = (
+                    history.get("repair_rejections")
+                    if isinstance(history.get("repair_rejections"), list)
+                    else []
+                )
+                repair_rejections.append(
+                    {
+                        "stage": "runtime",
+                        "attempt": repair_attempt,
+                        "reason_code": "validation_workspace_modified",
+                        "violations": workspace_integrity.get("violations") or [],
+                    }
+                )
+                history["repair_rejections"] = repair_rejections
+                write_json(history_path, history)
+                append_jsonl(
+                    run_dir / "worker.log.jsonl",
+                    {
+                        "event": "intent_test_execution_repair_rejected",
+                        "stage": "runtime",
+                        "attempt": repair_attempt,
+                        "reason": "validation workspace repository files differ from the immutable inventory",
+                        "time": iso_time(time.time()),
+                    },
+                )
+                break
             current_attempt += 1
             retry = run_intent_tests(run_dir, only_test_ids=candidate_ids, attempt=current_attempt)
             retry_runs = retry.get("test_runs") if isinstance(retry.get("test_runs"), list) else []
@@ -4874,10 +4911,11 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Return JSON only using intent-test-source/v1. Put every executable test record in the top-level generated_tests array, not only in aliases such as generated_test_files, created_test_files, or test_sources.",
             "Every generated test record must include path, command, and target_test_ids linking it to the intent-test-plan target(s) it implements.",
             "Use the observed capability and candidate preflight data, but remain free to propose a different safe command or test approach when it preserves the behavioral oracle and executes real repository code.",
+            "An unchanged repository test may be reused only by setting reuse_existing to true; never present an application/source file as a generated test.",
             "If no faithful runnable approach exists, record an explicit top-level skip_reason instead of copying or reimplementing application logic in a self-contained imitation.",
             "Verify each expected outcome against AGENTS instructions, documentation, types, API contracts, and existing tests. If the intended behavior remains uncertain, do not encode it as an asserted oracle.",
             "For Python unittest entry points, do not leave imported TestCase subclasses at module scope where unittest.main() can discover unrelated repository suites; import the module under an alias or explicitly load only the generated test class or method.",
-            "Prefer the repository's existing runnable test framework. If a JavaScript target is dependency-free and the package-local runner is unavailable, use Node's built-in node --test runner; otherwise record the dependency limitation instead of inventing a runnable command.",
+            "Prefer a repository-native runner when it is runnable, but use any observed runtime or contained Agent-created harness that faithfully executes the real code and oracle. Do not install missing tooling.",
             "Do not modify the main repo workspace, install dependencies, use production secrets, or use network.",
         ],
     },
@@ -7070,6 +7108,41 @@ def materialize_generated_intent_test_sources(
             continue
         declared_path = Path(raw_path)
         validation_candidate = declared_path if declared_path.is_absolute() else validation_repo / declared_path
+        source_kind = str(generated.get("source_kind") or generated.get("sourceKind") or "").strip().lower()
+        reuse_existing = generated.get("reuse_existing") is True or source_kind in {
+            "existing",
+            "existing_test",
+            "repository_test",
+        }
+        if source_root is not None and source_generation_root is not None:
+            try:
+                validation_relative = validation_candidate.resolve(strict=False).relative_to(
+                    validation_repo.resolve(strict=False)
+                )
+            except ValueError:
+                validation_relative = None
+            original_candidate = source_root / validation_relative if validation_relative is not None else None
+            existing_repo_file = (
+                original_candidate is not None
+                and original_candidate.is_file()
+                and not path_is_under(original_candidate, source_generation_root)
+            )
+            if existing_repo_file:
+                if not reuse_existing:
+                    errors[test_id] = "generated test path overlaps an existing repository file"
+                    continue
+                try:
+                    immutable_match = (
+                        validation_candidate.is_file()
+                        and not validation_candidate.is_symlink()
+                        and hashlib.sha256(validation_candidate.read_bytes()).digest()
+                        == hashlib.sha256(original_candidate.read_bytes()).digest()
+                    )
+                except OSError:
+                    immutable_match = False
+                if not immutable_match:
+                    errors[test_id] = "explicitly reused existing repository test differs from source"
+                    continue
         if path_is_under(validation_candidate, validation_repo) and validation_candidate.is_file():
             if materialized_paths is not None:
                 try:
@@ -7118,6 +7191,85 @@ def materialize_generated_intent_test_sources(
     return errors
 
 
+def intent_validation_workspace_integrity_payload(run_dir: Path) -> dict[str, Any]:
+    validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+    validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+    validation_repo = Path(validation_root) if validation_root else None
+    inventory_payload = read_json(run_dir / "inventory.json", {})
+    inventory_files = (
+        inventory_payload.get("files")
+        if isinstance(inventory_payload, dict) and isinstance(inventory_payload.get("files"), list)
+        else []
+    )
+    violations: list[dict[str, str]] = []
+    if validation_repo is not None:
+        for item in inventory_files:
+            if not isinstance(item, dict):
+                continue
+            relative = str(item.get("path") or "").strip()
+            expected_sha = str(item.get("sha256") or "").strip().lower()
+            if not relative or not expected_sha:
+                continue
+            candidate = validation_repo / relative
+            if not path_is_under(candidate, validation_repo):
+                violations.append({"path": relative, "reason": "inventory path escapes validation workspace"})
+                continue
+            if candidate.is_symlink() or not candidate.is_file():
+                violations.append({"path": relative, "reason": "repository file is missing or no longer regular"})
+                continue
+            try:
+                actual_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            except OSError as exc:
+                violations.append({"path": relative, "reason": f"repository file could not be read: {exc}"})
+                continue
+            if actual_sha != expected_sha:
+                violations.append({"path": relative, "reason": "repository file content differs from immutable inventory"})
+    status = "ok"
+    if validation_repo is None or not inventory_files:
+        status = "unavailable"
+    if violations:
+        status = "violation"
+    return {
+        "schema_version": "intent-validation-workspace-integrity/v1",
+        "status": status,
+        "validation_repo_root": str(validation_repo) if validation_repo is not None else "",
+        "checked_files": len(inventory_files),
+        "violations": violations,
+        "summary": {
+            "checked_files": len(inventory_files),
+            "violations": len(violations),
+        },
+    }
+
+
+def _intent_result_with_post_execution_integrity(
+    run_dir: Path,
+    result: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    integrity = intent_validation_workspace_integrity_payload(run_dir)
+    write_json(run_dir / "intent" / "validation-workspace-integrity.json", integrity)
+    violations = integrity.get("violations") if isinstance(integrity.get("violations"), list) else []
+    if not violations:
+        return result, False
+    diagnostic = _intent_blocked_execution_diagnostic(
+        "validation workspace repository files differ from the immutable inventory after test execution",
+        reason_code="validation_workspace_modified",
+        classification="environment_error",
+        agent_repairable=False,
+    )
+    return (
+        {
+            **result,
+            "status": "error",
+            "classification": diagnostic["classification"],
+            "preflight": diagnostic,
+            "skip_reason": diagnostic["reason"],
+            "workspace_integrity": integrity,
+        },
+        True,
+    )
+
+
 def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
     validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
     validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
@@ -7127,6 +7279,9 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
     source = read_json(run_dir / "intent" / "intent-test-source.json", {})
     generated_tests = source.get("generated_tests") if isinstance(source, dict) and isinstance(source.get("generated_tests"), list) else []
     profile = read_json(run_dir / "repo-profile.json", {})
+    integrity = intent_validation_workspace_integrity_payload(run_dir)
+    write_json(run_dir / "intent" / "validation-workspace-integrity.json", integrity)
+    integrity_violations = integrity.get("violations") if isinstance(integrity.get("violations"), list) else []
     target_by_id = {
         _intent_test_id(target, f"ITP-{index + 1:03d}"): target
         for index, target in enumerate(targets)
@@ -7162,7 +7317,14 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
             materialized_path=materialized_paths.get(test_id, ""),
         )
         cwd = _intent_test_cwd(validation_repo, generated, target) if validation_repo is not None else None
-        if validation_repo is None:
+        if integrity_violations:
+            diagnostic = _intent_blocked_execution_diagnostic(
+                "validation workspace repository files differ from the immutable inventory",
+                reason_code="validation_workspace_modified",
+                classification="environment_error",
+                agent_repairable=False,
+            )
+        elif validation_repo is None:
             diagnostic = _intent_blocked_execution_diagnostic(
                 "validation workspace was not prepared",
                 reason_code="validation_workspace_missing",
@@ -7170,10 +7332,16 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
                 agent_repairable=False,
             )
         elif materialization_errors.get(test_id):
+            collision = "overlaps an existing repository file" in materialization_errors[test_id]
             diagnostic = _intent_blocked_execution_diagnostic(
                 materialization_errors[test_id],
-                reason_code="generated_test_materialization_failed",
+                reason_code=(
+                    "generated_test_overwrites_repository_file"
+                    if collision
+                    else "generated_test_materialization_failed"
+                ),
                 classification="test_harness_error",
+                agent_repairable=not collision,
             )
         elif cwd is None:
             diagnostic = _intent_blocked_execution_diagnostic(
@@ -7209,6 +7377,7 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
         "schema_version": "intent-test-preflight/v1",
         "run_id": run_dir.name,
         "tests": tests,
+        "workspace_integrity": integrity,
         "skip_reason": _intent_skip_reason_from_payload(source),
         "summary": {
             "total": len(tests),
@@ -7232,6 +7401,9 @@ def run_intent_tests(
     config = read_json(run_dir / "intent" / "intent-test-validation.json", {})
     profile = read_json(run_dir / "repo-profile.json", {})
     profile = profile if isinstance(profile, dict) and profile.get("schema_version") == "repo-profile/v1" else {}
+    integrity = intent_validation_workspace_integrity_payload(run_dir)
+    write_json(run_dir / "intent" / "validation-workspace-integrity.json", integrity)
+    integrity_violations = integrity.get("violations") if isinstance(integrity.get("violations"), list) else []
     if isinstance(config, dict) and config.get("enabled") is False:
         return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": []}
     plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
@@ -7302,19 +7474,51 @@ def run_intent_tests(
         related_ids = _intent_related_test_ids(generated)
         if related_ids:
             base_result["target_test_ids"] = related_ids
-        if not validation_repo:
-            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "validation workspace was not prepared"})
-            continue
-        if materialization_errors.get(test_id):
+        if integrity_violations:
+            preflight = _intent_blocked_execution_diagnostic(
+                "validation workspace repository files differ from the immutable inventory",
+                reason_code="validation_workspace_modified",
+                classification="environment_error",
+                agent_repairable=False,
+            )
             raw_results.append(
                 {
                     **base_result,
                     "status": "skipped",
-                    "classification": "test_harness_error",
+                    "classification": preflight["classification"],
+                    "preflight": preflight,
                     "exit_code": None,
                     "duration_ms": 0,
                     "timed_out": False,
-                    "skip_reason": materialization_errors[test_id],
+                    "skip_reason": preflight["reason"],
+                }
+            )
+            continue
+        if not validation_repo:
+            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "validation workspace was not prepared"})
+            continue
+        if materialization_errors.get(test_id):
+            collision = "overlaps an existing repository file" in materialization_errors[test_id]
+            preflight = _intent_blocked_execution_diagnostic(
+                materialization_errors[test_id],
+                reason_code=(
+                    "generated_test_overwrites_repository_file"
+                    if collision
+                    else "generated_test_materialization_failed"
+                ),
+                classification="test_harness_error",
+                agent_repairable=not collision,
+            )
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "skipped",
+                    "classification": preflight["classification"],
+                    "preflight": preflight,
+                    "exit_code": None,
+                    "duration_ms": 0,
+                    "timed_out": False,
+                    "skip_reason": preflight["reason"],
                 }
             )
             continue
@@ -7417,7 +7621,8 @@ def run_intent_tests(
                     }
                 )
                 continue
-            raw_results.append(
+            completed_result, integrity_failed = _intent_result_with_post_execution_integrity(
+                run_dir,
                 {
                     **base_result,
                     "status": "passed" if completed.returncode == 0 else "failed",
@@ -7429,13 +7634,17 @@ def run_intent_tests(
                     "stdout_path": str(stdout_path),
                     "stderr_path": str(stderr_path),
                     "timed_out": False,
-                }
+                },
             )
+            raw_results.append(completed_result)
+            if integrity_failed:
+                break
         except subprocess.TimeoutExpired as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             stdout_path.write_text(str(exc.stdout or ""), encoding="utf-8")
             stderr_path.write_text(str(exc.stderr or ""), encoding="utf-8")
-            raw_results.append(
+            timeout_result, integrity_failed = _intent_result_with_post_execution_integrity(
+                run_dir,
                 {
                     **base_result,
                     "status": "timeout",
@@ -7447,13 +7656,17 @@ def run_intent_tests(
                     "stdout_path": str(stdout_path),
                     "stderr_path": str(stderr_path),
                     "timed_out": True,
-                }
+                },
             )
+            raw_results.append(timeout_result)
+            if integrity_failed:
+                break
         except OSError as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(str(exc), encoding="utf-8")
-            raw_results.append(
+            error_result, integrity_failed = _intent_result_with_post_execution_integrity(
+                run_dir,
                 {
                     **base_result,
                     "status": "error",
@@ -7466,8 +7679,11 @@ def run_intent_tests(
                     "stderr_path": str(stderr_path),
                     "timed_out": False,
                     "error": str(exc),
-                }
+                },
             )
+            raw_results.append(error_result)
+            if integrity_failed:
+                break
     return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": raw_results}
 
 
@@ -9967,7 +10183,10 @@ def prompt_template_for_name(name: str) -> str:
         "intent/05_intent_test_planner.md": (
             "You are the Intent Test Planner. Select only high-value P0/P1 candidates for temporary tests. Return "
             'JSON only using intent-test-plan/v1 with a top-level "test_targets" array. Every target must include '
-            "test_id, title, linked_finding_ids, contract_ids, and expected_result_before_fix set to fail, pass, or unknown.\n"
+            "test_id, title, linked_finding_ids, contract_ids, and expected_result_before_fix set to fail, pass, or unknown. "
+            "Read intent/execution-capabilities.json as observed evidence, not a fixed framework menu. Propose one or "
+            "more execution_candidates with command and cwd; each is an Agent hypothesis that Worker policy and "
+            "preflight must verify. Prefer candidates that execute real repository behavior and preserve the oracle.\n"
         ),
         "intent/06_intent_test_writer.md": (
             "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or "
@@ -9978,7 +10197,11 @@ def prompt_template_for_name(name: str) -> str:
             "contracts, and existing tests; when intended behavior remains uncertain, do not turn it into an asserted "
             "oracle. For Python unittest entry points, do not expose imported TestCase subclasses at module scope "
             "where unittest.main() can discover unrelated repository suites; import a module alias or explicitly load "
-            "only the generated test class or method. Do not modify the main repo workspace.\n"
+            "only the generated test class or method. Read intent/execution-capabilities.json, then remain free to use "
+            "a different safe agent-proposed command, cwd, runtime, or contained harness when it faithfully executes "
+            "real repository code. An unchanged repository test may be selected with reuse_existing true, but never "
+            "claim an application/source file as generated. Do not copy or reimplement application logic to manufacture a passing test. If no "
+            "faithful runnable strategy exists, record a precise top-level skip_reason. Do not modify the main repo workspace.\n"
         ),
         "intent/07_intent_test_failure_analyzer.md": (
             "You are the Test Failure Analyzer. A failing test is not automatically a bug. Return JSON only using "
@@ -11585,6 +11808,11 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         ("intent/intent-test-source.json", "intent_test_source", "application/json", "intent-test-source"),
         ("intent/intent-test-results.json", "intent_test_result", "application/json", "intent-test-result"),
         ("intent/intent-test-results.raw.json", "intent_test_output", "application/json", "project-test-run"),
+        ("intent/execution-capabilities.json", "intent_execution_capabilities", "application/json", "agentic-execution-capabilities"),
+        ("intent/intent-test-preflight.json", "intent_test_preflight", "application/json", "intent-test-preflight"),
+        ("intent/intent-test-runtime-diagnostics.json", "intent_test_runtime_diagnostics", "application/json", "intent-test-runtime-diagnostics"),
+        ("intent/intent-test-execution-history.json", "intent_test_execution_history", "application/json", "intent-test-execution-history"),
+        ("intent/validation-workspace-integrity.json", "intent_workspace_integrity", "application/json", "intent-validation-workspace-integrity"),
     )
     for rel, kind, media_type, schema_id in optional_artifacts:
         src = run_dir / rel

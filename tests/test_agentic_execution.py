@@ -18,6 +18,8 @@ from pullwise_worker.review_worker_v1 import (
     intent_test_command_policy,
     intent_test_source_preflight_payload,
     phase_prompt,
+    prompt_template_for_name,
+    refresh_agentic_execution_capabilities,
     run_intent_tests,
     write_json,
 )
@@ -105,6 +107,42 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertTrue(candidates[0]["executable"]["available"])
         self.assertFalse(candidates[1]["executable"]["available"])
         self.assertEqual(candidates[1]["executable"]["name"], "missing-flex-runner")
+
+    def test_candidate_required_paths_are_mechanically_preflighted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={
+                    "schema_version": "intent-test-plan/v1",
+                    "test_targets": [
+                        {
+                            "test_id": "ITP-001",
+                            "execution_candidates": [
+                                {
+                                    "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                                    "cwd": ".",
+                                    "required_paths": ["fixtures/contract.json"],
+                                },
+                                {
+                                    "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                                    "cwd": ".",
+                                    "required_paths": ["../outside-secret"],
+                                },
+                            ],
+                        }
+                    ],
+                },
+                source={"schema_version": "intent-test-source/v1", "generated_tests": []},
+            )
+
+            payload = refresh_agentic_execution_capabilities(validation_repo, run_dir)
+
+        candidates = payload["agent_candidates"]
+        self.assertEqual(candidates[0]["preflight"]["reason_code"], "required_path_missing")
+        self.assertEqual(candidates[0]["preflight"]["missing_capabilities"], ["fixtures/contract.json"])
+        self.assertEqual(candidates[1]["preflight"]["reason_code"], "required_path_escape")
+        self.assertFalse(candidates[1]["preflight"]["agent_repairable"])
 
     def test_preflight_returns_structured_missing_local_runner_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -264,6 +302,116 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertFalse((validation_repo / "executed.marker").exists())
 
+    def test_passing_test_is_invalidated_if_it_mutates_repository_source_during_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "generated_test.py",
+                            "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                        }
+                    ],
+                },
+            )
+            source_repo = root / "repo"
+            source_repo.mkdir(parents=True, exist_ok=True)
+            original = b"def value(): return 7\n"
+            (source_repo / "app.py").write_bytes(original)
+            (validation_repo / "app.py").write_bytes(original)
+            (validation_repo / "generated_test.py").write_text(
+                "import unittest\n"
+                "from pathlib import Path\n"
+                "class GeneratedTest(unittest.TestCase):\n"
+                "    def test_mutating_pass(self):\n"
+                "        Path('app.py').write_text('def value(): return 999\\n')\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [{"path": "app.py", "sha256": hashlib.sha256(original).hexdigest()}],
+                },
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                result = run_intent_tests(run_dir)
+
+        self.assertEqual(result["test_runs"][0]["status"], "error")
+        self.assertEqual(result["test_runs"][0]["preflight"]["reason_code"], "validation_workspace_modified")
+
+    def test_generated_test_cannot_claim_an_existing_repository_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "app.py",
+                            "command": [sys.executable, "app.py"],
+                        }
+                    ],
+                },
+            )
+            source_repo = root / "repo"
+            source_repo.mkdir(parents=True, exist_ok=True)
+            (source_repo / "app.py").write_text("print('application')\n", encoding="utf-8")
+            (validation_repo / "app.py").write_text("print('application')\n", encoding="utf-8")
+
+            payload = intent_test_source_preflight_payload(run_dir)
+
+        self.assertEqual(payload["tests"][0]["reason_code"], "generated_test_overwrites_repository_file")
+        self.assertFalse(payload["tests"][0]["agent_repairable"])
+
+    def test_agent_can_explicitly_reuse_an_immutable_existing_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "tests/test_existing.py",
+                            "reuse_existing": True,
+                            "command": [sys.executable, "-m", "unittest", "tests/test_existing.py"],
+                        }
+                    ],
+                },
+            )
+            source_repo = root / "repo"
+            source_test = source_repo / "tests" / "test_existing.py"
+            validation_test = validation_repo / "tests" / "test_existing.py"
+            source_test.parent.mkdir(parents=True, exist_ok=True)
+            validation_test.parent.mkdir(parents=True, exist_ok=True)
+            content = (
+                "import unittest\n"
+                "class ExistingTest(unittest.TestCase):\n"
+                "    def test_behavior(self): self.assertTrue(True)\n"
+            )
+            source_test.write_text(content, encoding="utf-8")
+            validation_test.write_text(content, encoding="utf-8")
+
+            payload = intent_test_source_preflight_payload(run_dir)
+
+        self.assertEqual(payload["tests"][0]["status"], "ready")
+
     def test_runtime_diagnostics_repairs_harness_failure_but_not_product_assertion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
@@ -335,6 +483,16 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertIn("agent-proposed", prompt)
         self.assertIn("faithful", prompt)
         self.assertNotIn("must select a fixed language template", prompt)
+
+    def test_materialized_agent_prompts_preserve_the_agentic_execution_contract(self) -> None:
+        planner = prompt_template_for_name("intent/05_intent_test_planner.md")
+        writer = prompt_template_for_name("intent/06_intent_test_writer.md")
+
+        self.assertIn("execution-capabilities.json", planner)
+        self.assertIn("execution_candidates", planner)
+        self.assertIn("agent-proposed", writer)
+        self.assertIn("real repository code", writer)
+        self.assertIn("Do not copy or reimplement", writer)
 
     def test_execution_repair_prompt_preserves_oracle_and_forbids_logic_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -492,6 +650,83 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertEqual(repaired["test_runs"][0]["status"], "passed")
         self.assertEqual(repaired["test_runs"][0]["attempt"], 2)
         self.assertEqual(history["attempts"][0]["test_runs"][0]["status"], "failed")
+
+    def test_runtime_repair_is_rejected_when_agent_modifies_repository_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "generated_test.py",
+                            "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                        }
+                    ],
+                },
+            )
+            source_repo = root / "repo"
+            source_repo.mkdir(parents=True, exist_ok=True)
+            original = b"def value(): return 7\n"
+            (source_repo / "app.py").write_bytes(original)
+            validation_app = validation_repo / "app.py"
+            validation_app.write_bytes(original)
+            generated_path = validation_repo / "generated_test.py"
+            generated_path.write_text(
+                "import unittest\n"
+                "import unneeded_project_dependency\n"
+                "from app import value\n"
+                "class GeneratedTest(unittest.TestCase):\n"
+                "    def test_behavior(self): self.assertEqual(value(), 7)\n",
+                encoding="utf-8",
+            )
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [{"path": "app.py", "sha256": hashlib.sha256(original).hexdigest()}],
+                },
+            )
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                initial = run_intent_tests(run_dir)
+            write_json(run_dir / "intent" / "intent-test-results.raw.json", initial)
+
+            class SourceMutatingCodex:
+                def run_turn(self, **_kwargs):
+                    validation_app.write_text("def value(): return 7  # agent changed source\n", encoding="utf-8")
+                    generated_path.write_text(
+                        "import unittest\n"
+                        "from app import value\n"
+                        "class GeneratedTest(unittest.TestCase):\n"
+                        "    def test_behavior(self): self.assertEqual(value(), 7)\n",
+                        encoding="utf-8",
+                    )
+                    return SimpleNamespace(duration_ms=5)
+
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.effort_for_phase",
+                return_value="medium",
+            ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
+                repaired = worker.repair_intent_test_runtime(
+                    SourceMutatingCodex(),
+                    source_repo,
+                    run_dir,
+                    {},
+                    max_attempts=1,
+                )
+            history = json.loads(
+                (run_dir / "intent" / "intent-test-execution-history.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(repaired["test_runs"][0]["status"], "failed")
+        self.assertEqual(repaired["test_runs"][0]["attempt"], 1)
+        self.assertEqual(history["repair_rejections"][0]["reason_code"], "validation_workspace_modified")
 
     def test_real_python_unittest_executes_through_agentic_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
