@@ -81,6 +81,7 @@ SEMANTIC_PHASES = {
     "bootstrap_helper_scripts",
     "repo_map",
     "risk_routing",
+    "bundle_planning",
     "reviewer_fanout",
     "clustering_and_voting",
     "intent_mining",
@@ -154,7 +155,7 @@ def current_run_estimator_for_job(
     return estimator
 
 
-CORE_EFFORT_PHASES = SEMANTIC_PHASES - {"bootstrap_helper_scripts"}
+CORE_EFFORT_PHASES = SEMANTIC_PHASES - {"bootstrap_helper_scripts", "bundle_planning"}
 MECHANICAL_PHASES = {phase for phase, _progress in PIPELINE_PHASES} - SEMANTIC_PHASES
 REQUIRED_COMPLETED_ARTIFACTS = {
     "report.human",
@@ -176,7 +177,11 @@ PHASE_JSON_OUTPUTS: dict[str, tuple[tuple[str, str], ...]] = {
     "token_budget": (("token-budget.json", "token-budget/v1"),),
     "repo_map": (("repo-map.json", "repo-map/v1"),),
     "risk_routing": (("risk-routing.json", "risk-routing/v1"),),
-    "bundle_planning": (("bundle-plan.json", "bundle-plan/v1"), ("coverage.json", "coverage/v1")),
+    "bundle_planning": (
+        ("bundle-grouping.json", "bundle-grouping/v1"),
+        ("bundle-plan.json", "bundle-plan/v1"),
+        ("coverage.json", "coverage/v1"),
+    ),
     "reviewer_json_validation": (("json-errors.json", "reviewer-json-validation/v1"),),
     "location_validation": (("location-verification.json", "location-verification/v1"),),
     "clustering_and_voting": (("clusters.json", "cluster-output/v1"), ("validation-input.json", "validation-input/v1")),
@@ -219,6 +224,7 @@ REQUIRED_SCHEMA_FILES = (
     "repo-map.schema.json",
     "risk-routing.schema.json",
     "bundle-plan.schema.json",
+    "bundle-grouping.schema.json",
     "reviewer-output.schema.json",
     "location-verification.schema.json",
     "cluster-output.schema.json",
@@ -3407,6 +3413,8 @@ class ReviewWorkerV1:
                             data=phase_progress_data(run_dir, phase),
                         )
                     try:
+                        if phase == "bundle_planning":
+                            materialize_agent_bundle_plan(run_dir)
                         validate_phase_outputs(run_dir, phase, artifact_dir)
                     except Exception as validation_exc:
                         if phase not in SEMANTIC_PHASES:
@@ -3815,6 +3823,8 @@ class ReviewWorkerV1:
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
+        if phase == "bundle_planning":
+            prepare_bundle_planning_input(run_dir)
         effort = effort_for_phase(job, phase)
         prompt = phase_prompt(phase, run_dir, job)
         codex_client.run_turn(
@@ -4935,8 +4945,6 @@ class ReviewWorkerV1:
             ensure_intent_directories(run_dir)
             write_json(run_dir / "intent" / "intent-test-validation.json", intent_validation_config(job))
             refresh_agentic_execution_capabilities(repo_dir, run_dir)
-        elif phase == "bundle_planning":
-            write_json(run_dir / "bundle-plan.json", bundle_plan_payload(run_dir))
         elif phase == "bundle_packing":
             pack_bundles(repo_dir, run_dir)
         elif phase == "reviewer_json_validation":
@@ -5499,6 +5507,25 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Classify files and directories into P0/P1/P2/P3/SKIP using role, entrypoint, trust boundary, auth/payment/data/upload/config/concurrency signals.",
             "Do not report findings in this phase.",
             "Write JSON only using risk-routing/v1.",
+        ],
+    },
+    "bundle_planning": {
+        "role": "Semantic Bundle Planner",
+        "prompt_files": ["02_bundle_planner.md"],
+        "inputs": [
+            "bundle-planning-input.json",
+            "repo-map.json",
+            "risk-routing.json",
+            "effective-risk-routing.json",
+        ],
+        "outputs": ["bundle-grouping.json"],
+        "instructions": [
+            "Write bundle-grouping.json using schema_version bundle-grouping/v1.",
+            "Place every item from bundle-planning-input.json in exactly one group; do not omit or duplicate paths.",
+            "Keep every group within one tier and copy each path's P0/P1/P2 tier exactly.",
+            "Minimize the number of groups while preserving semantic cohesion by feature, entrypoint, trust boundary, state flow, and implementation/test affinity.",
+            "Use only repository evidence exposed by the inputs and paths; do not build dependency graphs or call graphs.",
+            "Do not assign reviewers, file ranges, bundle ids, token estimates, or final size limits; the Worker derives and enforces those fields.",
         ],
     },
     "reviewer_fanout": {
@@ -11626,6 +11653,10 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
             errors = cluster_output_contract_errors(payload)
             if errors:
                 raise RuntimeError(errors[0])
+        if rel == "bundle-grouping.json":
+            errors = bundle_grouping_contract_errors(run_dir, payload)
+            if errors:
+                raise RuntimeError("; ".join(errors))
         if rel == "validated-findings.json":
             errors = validation_output_errors(payload)
             if errors:
@@ -11977,6 +12008,8 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
                     "skipped_files": 0,
                 },
             )
+    elif phase == "bundle_planning":
+        materialize_agent_bundle_plan(run_dir)
     elif phase == "reviewer_fanout":
         (run_dir / "raw-reviewers").mkdir(parents=True, exist_ok=True)
     elif phase == "clustering_and_voting":
