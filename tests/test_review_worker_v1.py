@@ -9043,8 +9043,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
     def test_reviewer_prompts_require_confidence_as_bounded_json_number(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
+            write_review_instruction_tree(repo_dir)
 
             fanout_prompt = phase_prompt("reviewer_fanout", run_dir)
             repair_prompt = reviewer_json_repair_prompt(

@@ -277,6 +277,9 @@ REQUIRED_PROMPT_FILES = (
 )
 REVIEWER_OUTPUT_SCHEMA_VERSION = "codex-reviewer-output/v1"
 REVIEWER_OUTPUT_SCHEMA_ALIASES = {"reviewer-output/v1"}
+REVIEWER_CONFIDENCE_PROMPT_CONTRACT = (
+    "Every finding's confidence must be a JSON number in [0,1], not a string or label."
+)
 INTENT_TEST_CLASSIFICATIONS = {
     "confirmed_bug",
     "plausible_bug",
@@ -6093,6 +6096,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "instructions": [
             "Review each planned bundle/reviewer assignment on its own independent thread; the worker may run up to the server-provided bounded concurrency while preserving the deterministic plan order for scheduling.",
             "Every finding must be concrete, located, evidenced, actionable, and include false-positive risk.",
+            REVIEWER_CONFIDENCE_PROMPT_CONTRACT,
             "For security severity, demonstrate an end-to-end attacker-controlled path to the sink and account for producer-side validation, generated server values, and browser/process isolation. If controllability is unproven, label the issue defense-in-depth and do not rate it high or critical.",
             "Before reporting an async UI race or duplicate mutation, inspect disabled state, synchronous ref/lock guards, event ordering, and server idempotency; demonstrate that a second user action reaches a harmful non-idempotent operation.",
             "Write JSON only using codex-reviewer-output/v1.",
@@ -6375,6 +6379,7 @@ def reviewer_assignment_prompt(
         "Actively look for concrete failure scenarios before concluding that findings is empty.",
         "Before reporting an async UI race or duplicate mutation, inspect disabled state, synchronous ref/lock guards, event ordering, and server idempotency; prove that the second action reaches a harmful non-idempotent operation.",
         "Every finding must include id, title, severity, confidence, failure_scenario, evidence, impact, recommendation, false_positive_risk, and next_agent_task.",
+        REVIEWER_CONFIDENCE_PROMPT_CONTRACT,
         'Every finding must include a non-empty locations array. Each location must use the exact shape {"path": "relative/source/path", "start_line": 1, "end_line": 1} with positive repository line numbers.',
         "If findings is empty, review_summary must document concrete areas examined, checks performed, and rejected candidates with source-backed reasons.",
         "Write one JSON object only using schema_version codex-reviewer-output/v1.",
@@ -6422,6 +6427,7 @@ def reviewer_json_repair_prompt(
             f"Local validation failed: {validation_error}",
             "Repair only malformed files under .codex-review/runs/*/raw-reviewers/.",
             "Each repaired file must be JSON using schema_version codex-reviewer-output/v1 with a findings array.",
+            REVIEWER_CONFIDENCE_PROMPT_CONTRACT,
             'Every finding must contain a non-empty locations array using the exact item shape {"path": "relative/source/path", "start_line": 1, "end_line": 1} with positive repository line numbers.',
             "If a finding has no source-backed location, remove that unsupported finding instead of inventing a path or line.",
             "Preserve valid reviewer evidence, locations, severity, confidence, and false-positive context.",
@@ -12856,10 +12862,24 @@ def prompt_template_for_name(name: str) -> str:
             "only bundle-grouping.json using bundle-grouping/v1. Do not assign reviewers, ranges, final bundle ids, or final "
             "size limits; group_id is the semantic-group identifier and the Worker owns final bundle ids, validation, and bounded splitting.\n"
         ),
-        "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Demonstrate an end-to-end attacker-controlled path, account for producer-side validation and containment, and classify unproven reachability as defense-in-depth rather than high/critical. Return JSON only using codex-reviewer-output/v1.\n",
-        "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only using codex-reviewer-output/v1.\n",
-        "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only using codex-reviewer-output/v1.\n",
-        "reviewers/correctness_lite.md": "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. Return JSON only using codex-reviewer-output/v1.\n",
+        "reviewers/security.md": (
+            "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. "
+            "Demonstrate an end-to-end attacker-controlled path, account for producer-side validation and containment, "
+            "and classify unproven reachability as defense-in-depth rather than high/critical. "
+            f"{REVIEWER_CONFIDENCE_PROMPT_CONTRACT} Return JSON only using codex-reviewer-output/v1.\n"
+        ),
+        "reviewers/correctness.md": (
+            "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. "
+            f"{REVIEWER_CONFIDENCE_PROMPT_CONTRACT} Return JSON only using codex-reviewer-output/v1.\n"
+        ),
+        "reviewers/test_gap.md": (
+            "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. "
+            f"{REVIEWER_CONFIDENCE_PROMPT_CONTRACT} Return JSON only using codex-reviewer-output/v1.\n"
+        ),
+        "reviewers/correctness_lite.md": (
+            "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. "
+            f"{REVIEWER_CONFIDENCE_PROMPT_CONTRACT} Return JSON only using codex-reviewer-output/v1.\n"
+        ),
         "03_clusterer.md": (
             'You are the Finding Clusterer and Vote Aggregator. If every verified reviewer findings array is empty, '
             'immediately write canonical clusters.json with {"schema_version": "cluster-output/v1", "clusters": []} '
