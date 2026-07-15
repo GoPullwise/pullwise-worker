@@ -7,12 +7,18 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from pullwise_worker.review_worker_v1 import (
+    ActiveJob,
+    ReviewWorkerV1,
+    immutable_inventory_baseline_path,
     intent_validation_workspace_integrity_payload,
     inventory,
     materialize_artifacts,
+    materialize_generated_intent_test_sources,
     prepare_validation_workspace,
+    read_json,
     write_debug_bundle,
     write_json,
 )
@@ -114,6 +120,197 @@ class ValidationWorkspaceIntegrityBoundaryTests(unittest.TestCase):
                 for violation in integrity["violations"]
             )
         )
+
+    def test_declaring_validation_repo_source_does_not_allow_added_source_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _repo, run_dir, validation_repo = self._prepared_workspace(Path(tmp_dir))
+            added = validation_repo / "src" / "backdoor.py"
+            added.parent.mkdir(parents=True)
+            added.write_text("ENABLED = True\n", encoding="utf-8")
+            write_json(
+                run_dir / "intent" / "intent-test-source.json",
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {"test_id": "ITV-001", "path": "src/backdoor.py"}
+                    ],
+                },
+            )
+
+            integrity = intent_validation_workspace_integrity_payload(run_dir)
+
+        self.assertEqual(integrity["status"], "violation")
+        self.assertTrue(
+            any(
+                violation.get("path") == "src/backdoor.py"
+                and "added" in violation.get("reason", "")
+                for violation in integrity["violations"]
+            ),
+            integrity,
+        )
+
+    def test_tampered_source_repo_root_cannot_materialize_external_generated_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            _repo, run_dir, validation_repo = self._prepared_workspace(root)
+            external_root = root / "external-source"
+            external_source = external_root / ".codex-review" / "generated-tests" / "secret.py"
+            external_source.parent.mkdir(parents=True)
+            external_source.write_text("SECRET = 'outside canonical source'\n", encoding="utf-8")
+            validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+            validation["source_repo_root"] = str(external_root)
+            write_json(run_dir / "intent" / "validation-workspace.json", validation)
+            source = {
+                "schema_version": "intent-test-source/v1",
+                "generated_tests": [
+                    {"test_id": "ITV-001", "path": str(external_source)}
+                ],
+            }
+            write_json(run_dir / "intent" / "intent-test-source.json", source)
+
+            errors = materialize_generated_intent_test_sources(
+                run_dir,
+                validation_repo,
+                validation,
+                source,
+            )
+            integrity = intent_validation_workspace_integrity_payload(run_dir)
+            copied = validation_repo / ".codex-review" / "generated-tests" / "secret.py"
+
+        self.assertIn("ITV-001", errors)
+        self.assertFalse(copied.exists())
+        self.assertEqual(integrity["status"], "violation")
+        self.assertTrue(
+            any("source" in violation.get("reason", "") for violation in integrity["violations"]),
+            integrity,
+        )
+
+    def test_missing_worker_baseline_fails_closed_without_rebaselining_mutated_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo, run_dir, validation_repo = self._prepared_workspace(Path(tmp_dir))
+            baseline = immutable_inventory_baseline_path(run_dir)
+            baseline.unlink()
+            (repo / "app.py").write_text("VALUE = 'mutated'\n", encoding="utf-8")
+            (validation_repo / "app.py").write_text("VALUE = 'mutated'\n", encoding="utf-8")
+
+            integrity = intent_validation_workspace_integrity_payload(run_dir)
+
+        self.assertEqual(integrity["status"], "violation")
+        self.assertFalse(baseline.exists())
+        self.assertTrue(
+            any("baseline" in violation.get("reason", "") for violation in integrity["violations"]),
+            integrity,
+        )
+
+
+class CodexThreadLifecycleBoundaryTests(unittest.TestCase):
+    def test_reviewer_retry_releases_every_same_run_thread_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            (run_dir / "bundles").mkdir(parents=True)
+            prompts_dir = repo / ".codex-review" / "prompts" / "reviewers"
+            prompts_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "root-thread"})
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {
+                            "bundle_id": "p0-bundle-001",
+                            "tier": "P0",
+                            "reviewers": ["security"],
+                        }
+                    ],
+                },
+            )
+            (run_dir / "bundles" / "p0-bundle-001.md").write_text("# bundle\n", encoding="utf-8")
+            (prompts_dir / "security.md").write_text("Security reviewer\n", encoding="utf-8")
+
+            class CodexClient:
+                def __init__(self) -> None:
+                    self.threads = {"root-thread": object()}
+                    self.released: list[str] = []
+                    self.turns = 0
+                    self.next_id = 0
+
+                def start_thread(self, *_args: object, **_kwargs: object) -> str:
+                    self.next_id += 1
+                    thread_id = f"reviewer-{self.next_id}"
+                    self.threads[thread_id] = object()
+                    return thread_id
+
+                def release_thread(self, thread_id: str) -> None:
+                    self.released.append(thread_id)
+                    self.threads.pop(thread_id, None)
+
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    self.turns += 1
+                    if self.turns == 1:
+                        raise RuntimeError("429 server busy")
+                    prompt = str(kwargs["prompt"])
+                    output_path = Path(
+                        next(
+                            line.removeprefix("Exact output path: ")
+                            for line in prompt.splitlines()
+                            if line.startswith("Exact output path: ")
+                        )
+                    )
+                    write_json(
+                        output_path,
+                        {
+                            "schema_version": "codex-reviewer-output/v1",
+                            "bundle_id": "p0-bundle-001",
+                            "reviewer": "security",
+                            "reviewed_paths": ["src/app.py"],
+                            "review_summary": "Reviewed the assigned bundle.",
+                            "uncertainties": [],
+                            "findings": [],
+                        },
+                    )
+                    return SimpleNamespace(duration_ms=1)
+
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            worker.progress_phase = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+            codex = CodexClient()
+            worker.run_reviewer_fanout_phase(
+                codex,
+                repo,
+                run_dir,
+                {
+                    "model_profile": {
+                        "default_model": "gpt-5.5",
+                        "core_effort": "high",
+                        "non_core_effort": "medium",
+                    },
+                    "review_request": {
+                        "policy": {
+                            "allow_source_modification": False,
+                            "allow_dependency_install": False,
+                            "allow_network": False,
+                            "helper_scripts_standard_library_only": True,
+                            "turn_timeout_seconds": 30,
+                            "reviewer_concurrency": 1,
+                        },
+                        "budget": {"max_wall_time_seconds": 60},
+                    },
+                    "repositoryLimits": {
+                        "maxFiles": 1000,
+                        "maxBytes": 10 * 1024 * 1024,
+                    },
+                },
+                active=ActiveJob("job_1", "run_1", "lease_1", "wk_1-1"),
+                progress=70,
+            )
+
+        self.assertEqual(codex.turns, 2)
+        self.assertEqual(set(codex.threads), {"root-thread"})
+        self.assertEqual(codex.released, ["reviewer-1", "reviewer-2"])
 
 
 if __name__ == "__main__":

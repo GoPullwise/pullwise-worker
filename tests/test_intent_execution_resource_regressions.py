@@ -421,6 +421,57 @@ class IntentExecutablePreflightRegressionTest(unittest.TestCase):
 
 
 class IntentPreflightBindingRegressionTest(unittest.TestCase):
+    def test_source_preflight_records_and_rechecks_canonical_required_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            script = validation_repo / "test_approved.py"
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                source=_generated_python_source(
+                    path="test_approved.py",
+                    command=[sys.executable, str(script)],
+                    required_paths=["fixture.dat"],
+                ),
+            )
+            script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            fixture = validation_repo / "fixture.dat"
+            fixture.write_text("fixture", encoding="utf-8")
+
+            ready = intent_test_source_preflight_payload(run_dir)
+            fixture.unlink()
+            missing = intent_test_source_preflight_payload(run_dir)
+
+        self.assertEqual(ready["tests"][0]["status"], "ready")
+        self.assertEqual(
+            ready["tests"][0]["required_paths"],
+            [str(fixture.resolve(strict=False))],
+        )
+        self.assertEqual(missing["tests"][0]["status"], "blocked")
+        self.assertEqual(missing["tests"][0]["reason_code"], "required_path_missing")
+
+    def test_source_preflight_rejects_required_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation-repo"
+            script = validation_repo / "test_approved.py"
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                source=_generated_python_source(
+                    path="test_approved.py",
+                    command=[sys.executable, str(script)],
+                    required_paths=["../outside.dat"],
+                ),
+            )
+            script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            (root / "outside.dat").write_text("outside", encoding="utf-8")
+
+            preflight = intent_test_source_preflight_payload(run_dir)
+
+        self.assertEqual(preflight["tests"][0]["status"], "blocked")
+        self.assertEqual(preflight["tests"][0]["reason_code"], "required_path_escape")
+        self.assertFalse(preflight["tests"][0]["agent_repairable"])
+
     def test_execution_rejects_command_cwd_and_required_path_drift_after_preflight(self) -> None:
         drift_cases = ("command", "cwd", "required_paths")
         outcomes: dict[str, tuple[bool, dict[str, object]]] = {}
