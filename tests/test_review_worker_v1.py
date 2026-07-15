@@ -77,6 +77,8 @@ from pullwise_worker.review_worker_v1 import (
     phase_progress_data,
     phase_prompt,
     prompt_template_for_name,
+    reviewer_assignment_prompt,
+    reviewer_json_repair_prompt,
     progress_final_payload,
     inventory,
     intent_test_command_policy,
@@ -9038,6 +9040,30 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("skipped_not_runnable", failure_prompt)
         self.assertNotIn("flaky_nondeterministic", failure_prompt)
         self.assertIn("top-level appendix_findings", reporter_prompt)
+
+    def test_reviewer_prompts_require_confidence_as_bounded_json_number(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            fanout_prompt = phase_prompt("reviewer_fanout", run_dir)
+            repair_prompt = reviewer_json_repair_prompt(
+                run_dir,
+                "findings[0].confidence must be a number in 0..1",
+            )
+            assignment_prompts = [
+                reviewer_assignment_prompt(run_dir, "p0-bundle-001", reviewer_id)
+                for reviewer_id in ("security", "correctness", "test_gap", "correctness_lite")
+            ]
+            reviewer_templates = [
+                prompt_template_for_name(f"reviewers/{reviewer_name}.md")
+                for reviewer_name in ("security", "correctness", "test_gap", "correctness_lite")
+            ]
+
+        for prompt in [fanout_prompt, repair_prompt, *assignment_prompts, *reviewer_templates]:
+            with self.subTest(prompt=prompt.splitlines()[0]):
+                self.assertIn("confidence must be a JSON number in [0,1]", prompt)
+                self.assertIn("not a string or label", prompt)
 
     def test_validate_phase_outputs_rejects_missing_or_wrong_schema_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
