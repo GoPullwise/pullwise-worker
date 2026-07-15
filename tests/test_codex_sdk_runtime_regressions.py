@@ -22,6 +22,34 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
         )
         return server
 
+    def test_close_is_bounded_when_sdk_shutdown_wedges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            entered = threading.Event()
+            release = threading.Event()
+
+            class Codex:
+                def close(self) -> None:
+                    entered.set()
+                    release.wait(5)
+
+            server = CodexSdkClient("", {}, root, root / "events.jsonl")
+            server._codex = Codex()
+
+            started_at = time.monotonic()
+            try:
+                with patch.object(review_worker_v1, "CODEX_CLOSE_TIMEOUT_SECONDS", 0.05):
+                    with self.assertRaisesRegex(TimeoutError, "close timed out"):
+                        server.close()
+
+                self.assertTrue(entered.is_set())
+                self.assertLess(time.monotonic() - started_at, 0.5)
+                self.assertIsNone(server._codex)
+                self.assertIsNone(server._client)
+                self.assertFalse(server.is_running())
+            finally:
+                release.set()
+
     def test_thread_start_is_bounded_by_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)

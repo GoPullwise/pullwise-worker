@@ -81,6 +81,9 @@ class AgenticBundlePlanningTest(unittest.TestCase):
         self.assertIn("P1=2", prompt)
         self.assertIn("P2=1", prompt)
         self.assertIn("Worker will not merge", prompt)
+        self.assertIn("stable lowercase group_id", prompt)
+        self.assertIn("non-empty title", prompt)
+        self.assertIn("non-empty grouping_reasons", prompt)
         self.assertIn("Do not assign reviewers", prompt)
 
     def test_production_module_has_no_mechanical_bundle_planner(self) -> None:

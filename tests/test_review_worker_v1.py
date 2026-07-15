@@ -5586,11 +5586,26 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             disabled = qa_gate_payload(repo, run_dir)
+            validation_path.write_text("{not-json", encoding="utf-8")
+            malformed = qa_gate_payload(repo, run_dir)
 
         self.assertEqual(missing["status"], "fail")
         self.assertTrue(any("intent-test-results.json is missing" in error for error in missing["errors"]))
         self.assertEqual(skipped["status"], "pass")
         self.assertEqual(disabled["status"], "pass")
+        self.assertFalse(
+            any(
+                "intent-test-results.json is missing" in warning
+                for warning in disabled["warnings"]
+            )
+        )
+        self.assertEqual(malformed["status"], "pass")
+        self.assertTrue(
+            any(
+                "intent-test-results.json is missing" in warning
+                for warning in malformed["warnings"]
+            )
+        )
 
     def test_qa_gate_requires_validator_status_for_bug_supporting_intent_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -8916,6 +8931,31 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("Do not inherit reviewer severity", reporter_prompt)
         self.assertIn("Operator-only UI stale-state races without durable server-side data loss", reporter_prompt)
 
+    def test_empty_semantic_inputs_have_explicit_no_rescan_fast_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            cluster_prompt = phase_prompt("clustering_and_voting", run_dir)
+            validator_prompt = phase_prompt("validator_disproof", run_dir)
+            reporter_prompt = phase_prompt("final_report_json", run_dir)
+
+        self.assertIn("every verified reviewer findings array is empty", cluster_prompt)
+        self.assertIn('"clusters": []', cluster_prompt)
+        self.assertIn('"candidates": []', cluster_prompt)
+        self.assertIn("Do not inspect or rescan application source", cluster_prompt)
+
+        self.assertIn("validation input contains no candidates", validator_prompt)
+        self.assertIn('"validated_findings": []', validator_prompt)
+        self.assertIn('"weak_findings": []', validator_prompt)
+        self.assertIn('"disproven_findings": []', validator_prompt)
+        self.assertIn("Do not inspect or rescan application source", validator_prompt)
+
+        self.assertIn("validated and weak finding collections are empty", reporter_prompt)
+        self.assertIn('"findings": []', reporter_prompt)
+        self.assertIn('"appendix_findings": []', reporter_prompt)
+        self.assertIn("Do not inspect or rescan application source", reporter_prompt)
+
     def test_phase_prompt_omits_adaptive_context_when_profile_missing_or_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -11201,6 +11241,118 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             "weak_findings_duplicated_in_report_appendix",
             diagnostics["blocker_codes"],
         )
+
+    def test_pipeline_diagnostics_accepts_completed_valid_empty_reviewer_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run_1"
+            raw_dir = run_dir / "raw-reviewers"
+            verified_dir = run_dir / "verified-reviewers"
+            raw_dir.mkdir(parents=True)
+            verified_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {
+                            "bundle_id": "p1-bundle-001",
+                            "reviewers": ["correctness"],
+                        }
+                    ],
+                },
+            )
+            reviewer_output = {
+                "schema_version": "codex-reviewer-output/v1",
+                "bundle_id": "p1-bundle-001",
+                "reviewer": "correctness",
+                "reviewed_paths": ["app.py"],
+                "review_summary": "Reviewed the assignment; no supported findings remain.",
+                "uncertainties": [],
+                "findings": [],
+            }
+            write_json(raw_dir / "p1-bundle-001.correctness.json", reviewer_output)
+            write_json(
+                verified_dir / "p1-bundle-001.correctness.json",
+                reviewer_output,
+            )
+            write_json(
+                run_dir / "reviewer-execution.json",
+                {
+                    "schema_version": "reviewer-execution/v1",
+                    "strategy": "one_turn_per_assignment",
+                    "assignments_total": 1,
+                    "assignments_completed": 1,
+                },
+            )
+
+            diagnostics = pipeline_diagnostics_payload(run_dir)
+
+        self.assertEqual(diagnostics["reviewer"]["raw_findings"], 0)
+        self.assertEqual(diagnostics["reviewer"]["assignments_completed"], 1)
+        self.assertNotIn("all_reviewer_outputs_empty", diagnostics["blocker_codes"])
+        self.assertFalse(
+            any(code.startswith("reviewer_outputs_") for code in diagnostics["blocker_codes"])
+        )
+        self.assertNotIn("reviewer_assignments_incomplete", diagnostics["blocker_codes"])
+
+    def test_pipeline_diagnostics_keeps_incomplete_or_invalid_reviewer_runs_blocked(self) -> None:
+        valid_output = {
+            "schema_version": "codex-reviewer-output/v1",
+            "bundle_id": "p1-bundle-001",
+            "reviewer": "correctness",
+            "reviewed_paths": ["app.py"],
+            "review_summary": "Reviewed the assignment; no supported findings remain.",
+            "uncertainties": [],
+            "findings": [],
+        }
+        for case, expected_code in (
+            ("missing", "reviewer_outputs_missing"),
+            ("malformed", "reviewer_outputs_malformed"),
+            ("uncompleted", "reviewer_assignments_incomplete"),
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp_dir:
+                run_dir = Path(tmp_dir) / "run_1"
+                raw_dir = run_dir / "raw-reviewers"
+                verified_dir = run_dir / "verified-reviewers"
+                raw_dir.mkdir(parents=True)
+                verified_dir.mkdir(parents=True)
+                write_json(
+                    run_dir / "bundle-plan.json",
+                    {
+                        "schema_version": "bundle-plan/v1",
+                        "bundles": [
+                            {
+                                "bundle_id": "p1-bundle-001",
+                                "reviewers": ["correctness"],
+                            }
+                        ],
+                    },
+                )
+                if case == "malformed":
+                    write_json(raw_dir / "p1-bundle-001.correctness.json", {})
+                    write_json(verified_dir / "p1-bundle-001.correctness.json", {})
+                elif case == "uncompleted":
+                    write_json(
+                        raw_dir / "p1-bundle-001.correctness.json",
+                        valid_output,
+                    )
+                    write_json(
+                        verified_dir / "p1-bundle-001.correctness.json",
+                        valid_output,
+                    )
+                write_json(
+                    run_dir / "reviewer-execution.json",
+                    {
+                        "schema_version": "reviewer-execution/v1",
+                        "strategy": "one_turn_per_assignment",
+                        "assignments_total": 1,
+                        "assignments_completed": 0 if case == "uncompleted" else 1,
+                    },
+                )
+
+                diagnostics = pipeline_diagnostics_payload(run_dir)
+
+            self.assertIn(expected_code, diagnostics["blocker_codes"])
 
     def test_isolation_env_prefixes_worker_virtualenv_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(

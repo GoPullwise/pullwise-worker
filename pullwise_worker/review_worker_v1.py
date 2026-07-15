@@ -36,7 +36,13 @@ from ._main_part_01_bootstrap import (
     worker_memory_payload,
 )
 from .agentic_execution import build_execution_capabilities
-from .codex_sdk_runtime import CodexRuntimeResources, TurnEventScope, require_identifier, run_bounded_call
+from .codex_sdk_runtime import (
+    CodexRuntimeResources,
+    CodexTokenUsage,
+    TurnEventScope,
+    require_identifier,
+    run_bounded_call,
+)
 from .current_run_eta import CurrentRunEstimator
 
 try:
@@ -53,6 +59,7 @@ LOW_MEMORY_REVIEWER_TOTAL_BYTES = 6 * 1024**3
 LOW_MEMORY_REVIEWER_AVAILABLE_BYTES = 2 * 1024**3
 CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS = 15
 CODEX_ACCOUNT_READ_TIMEOUT_SECONDS = 15
+CODEX_CLOSE_TIMEOUT_SECONDS = 15
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 WORKER_COMMAND_ACTIVE_STATUSES = {"pending", "running"}
@@ -733,6 +740,7 @@ class CodexSdkRuntime:
 @dataclass(frozen=True)
 class CodexTurnMetrics:
     duration_ms: int
+    token_usage: CodexTokenUsage | None = None
 
 
 def load_codex_sdk_runtime() -> CodexSdkRuntime:
@@ -848,6 +856,9 @@ class CodexSdkClient:
         self._runtime_resources.switch_run(events_path)
         self.events_path = self._runtime_resources.events_path
 
+    def usage_snapshot(self) -> dict[str, Any]:
+        return self._runtime_resources.usage_snapshot()
+
     def start_thread(
         self,
         repo_dir: Path,
@@ -929,10 +940,14 @@ class CodexSdkClient:
         timeout_seconds: int,
         cancel_requested: Callable[[], bool] | None = None,
         writable_roots: list[Path] | None = None,
+        metrics_phase: str = "",
     ) -> CodexTurnMetrics:
         turn_started_monotonic = time.monotonic()
         client = self._sdk_client()
-        event_scope = self._runtime_resources.begin_turn()
+        event_scope = self._runtime_resources.begin_turn(
+            phase=metrics_phase,
+            thread_id=thread_id,
+        )
         self._approval_workspace = repo_dir
         params = {
             "cwd": str(repo_dir),
@@ -985,21 +1000,34 @@ class CodexSdkClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 abandon_start()
+                self._runtime_resources.abandon_turn(event_scope)
                 raise TimeoutError("codex turn start timed out")
             if start_completed.wait(min(0.5, remaining)):
                 break
             if cancel_requested is not None and cancel_requested():
                 abandon_start()
+                self._runtime_resources.abandon_turn(event_scope)
                 raise JobCancelled("cancel requested")
         start_error = start_state.get("error")
         if isinstance(start_error, BaseException):
+            self._runtime_resources.abandon_turn(event_scope)
             raise start_error
         started = start_state.get("started")
         turn = getattr(started, "turn", None)
-        turn_id = require_identifier(
-            getattr(turn, "id", "") or getattr(started, "turn_id", ""),
-            label="turn id",
-        )
+        try:
+            turn_id = require_identifier(
+                getattr(turn, "id", "") or getattr(started, "turn_id", ""),
+                label="turn id",
+            )
+            self._runtime_resources.bind_turn(
+                event_scope,
+                turn_id,
+                thread_id=thread_id,
+                phase=metrics_phase,
+            )
+        except BaseException:
+            self._runtime_resources.abandon_turn(event_scope)
+            raise
 
         completed = threading.Event()
         abandoned = threading.Event()
@@ -1138,7 +1166,10 @@ class CodexSdkClient:
             'duration_ms',
             max(0, int((time.monotonic() - turn_started_monotonic) * 1000)),
         )
-        return CodexTurnMetrics(duration_ms=duration_ms)
+        return CodexTurnMetrics(
+            duration_ms=duration_ms,
+            token_usage=self._runtime_resources.turn_usage(event_scope),
+        )
 
     def _sandbox_policy(
         self,
@@ -1260,7 +1291,11 @@ class CodexSdkClient:
         self._client = None
         self._runtime_resources.clear()
         if codex is not None:
-            codex.close()
+            run_bounded_call(
+                codex.close,
+                timeout_seconds=CODEX_CLOSE_TIMEOUT_SECONDS,
+                timeout_message="Codex SDK close timed out",
+            )
 
     def _sdk_client(self) -> Any:
         self._raise_if_unhealthy()
@@ -4140,6 +4175,7 @@ class ReviewWorkerV1:
             read_only=False,
             timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
             cancel_requested=self.poll_cancel_requested,
+            metrics_phase=phase,
         )
 
     def _execute_reviewer_assignment(
@@ -4176,6 +4212,7 @@ class ReviewWorkerV1:
                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=cancel_requested,
                 writable_roots=[work.staging_dir],
+                metrics_phase="reviewer_fanout",
             )
         except Exception as exc:
             return ReviewerAssignmentOutcome(
@@ -4918,6 +4955,7 @@ class ReviewWorkerV1:
                 read_only=False,
                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=self.poll_cancel_requested,
+                metrics_phase=f"{phase}_repair",
             )
             fallback_semantic_artifact(run_dir, job, phase)
         except BaseException:
@@ -4988,6 +5026,7 @@ class ReviewWorkerV1:
                 read_only=False,
                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=self.poll_cancel_requested,
+                metrics_phase=f"{phase}_repair",
             )
         except JobCancelled:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
@@ -5275,6 +5314,7 @@ class ReviewWorkerV1:
                 read_only=False,
                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=self.poll_cancel_requested,
+                metrics_phase="reviewer_json_validation_repair",
             )
         except BaseException:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
@@ -5402,6 +5442,33 @@ class ReviewWorkerV1:
         elif phase == "hash_artifacts":
             materialize_artifacts(run_dir, self.isolation.artifacts / safe_id(job.get("run_id") or f"run_{job.get('job_id')}", "run"))
 
+    def codex_usage_for_run(self, run_dir: Path) -> dict[str, Any] | None:
+        codex_client = self.codex_client
+        if codex_client is None:
+            return None
+        raw_events_path = getattr(codex_client, "events_path", None)
+        if raw_events_path is None:
+            return None
+        try:
+            current_events_path = Path(raw_events_path).resolve(strict=False)
+            expected_events_path = (run_dir / "codex-events.jsonl").resolve(strict=False)
+        except (OSError, TypeError, ValueError):
+            return None
+        if current_events_path != expected_events_path:
+            return None
+        snapshot_reader = getattr(codex_client, "usage_snapshot", None)
+        if not callable(snapshot_reader):
+            return None
+        try:
+            payload = snapshot_reader()
+        except Exception:
+            return None
+        if not isinstance(payload, dict) or payload.get("schema_version") != "codex-usage/v1":
+            return None
+        if not isinstance(payload.get("observed"), bool) or not isinstance(payload.get("tokens"), dict):
+            return None
+        return copy.deepcopy(payload)
+
     def build_envelope(
         self,
         job: dict[str, Any],
@@ -5429,6 +5496,7 @@ class ReviewWorkerV1:
         bundle_plan = read_json(run_dir / "bundle-plan.json", {})
         planned_bundles = bundle_plan.get("bundles") if isinstance(bundle_plan, dict) else []
         bundle_count = len(planned_bundles) if isinstance(planned_bundles, list) else 0
+        usage = self.codex_usage_for_run(run_dir)
         return {
             "protocol_version": PROTOCOL_VERSION,
             "message_type": "review_run_result",
@@ -5458,6 +5526,7 @@ class ReviewWorkerV1:
             "summary": summary_payload(run_dir, status),
             "quality_gate": read_json(run_dir / "qa.json", {"status": "fail", "errors": ["run did not reach qa gate"], "warnings": []}),
             "preflight": read_json(run_dir / "preflight.json", {}),
+            **({"usage": usage} if usage is not None else {}),
             "artifact_manifest": manifest,
             "extensions": {"worker_internal": {"bundle_count": bundle_count}},
         }
@@ -5998,6 +6067,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "outputs": ["bundle-grouping.json"],
         "instructions": [
             "Write bundle-grouping.json using schema_version bundle-grouping/v1.",
+            "Every group must include a stable lowercase group_id, a non-empty title, a non-empty grouping_reasons list, its P0/P1/P2 tier, and a non-empty paths list.",
             "Place every item from bundle-planning-input.json in exactly one group; do not omit or duplicate paths.",
             "Keep every group within one tier and copy each path's P0/P1/P2 tier exactly.",
             "Treat every output group as an agent-owned semantic bundle boundary: the Worker will not merge separate groups.",
@@ -6007,7 +6077,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Use estimated_tokens and the supplied constraints to make groups substantial; the Worker may split only when the rendered payload exceeds a hard safety boundary.",
             "If the limits cannot be met safely, still return the most compact valid exact-cover grouping; never omit a path, change a tier, or reduce reviewer coverage to force the counts under a limit. The Worker will reject an impossible rendered plan before fanout.",
             "Use only repository evidence exposed by the inputs and paths; do not build dependency graphs or call graphs.",
-            "Do not assign reviewers, file ranges, bundle ids, token estimates, or final size limits; the Worker derives and enforces those fields.",
+            "Do not assign reviewers, file ranges, final bundle ids, token estimates, or final size limits; group_id is only the required stable semantic-group identifier, while the Worker derives and enforces final bundle fields.",
         ],
     },
     "reviewer_fanout": {
@@ -6034,6 +6104,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "inputs": ["verified-reviewers/*.json", "location-verification.json"],
         "outputs": ["clusters.json", "validation-input.json"],
         "instructions": [
+            'If every verified reviewer findings array is empty, immediately write canonical clusters.json as {"schema_version": "cluster-output/v1", "clusters": []} and validation-input.json as {"schema_version": "validation-input/v1", "candidates": []}. Do not inspect or rescan application source in this empty-input case.',
             "Merge duplicate findings, preserve supporting agents, compute weighted confidence, and suppress vague findings.",
             "Merge test-gap evidence into the underlying defect when it covers the same contract, sink, and fix; do not inflate the main finding count with a duplicate test-gap cluster.",
             "Do not inspect source code and do not create new findings.",
@@ -6099,6 +6170,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "inputs": ["clusters.json", "location-verification.json", "intent/intent-test-results.json", "related snippets"],
         "outputs": ["validated-findings.json"],
         "instructions": [
+            'If the validation input contains no candidates, immediately write canonical validated-findings.json as {"schema_version": "validation-output/v1", "validated_findings": [], "weak_findings": [], "disproven_findings": []}. Do not inspect or rescan application source in this empty-input case.',
             "Try to disprove each candidate finding using reviewer evidence, location verification, related code, existing tests, and intent-test evidence.",
             "Check producer invariants and the complete trust boundary before confirming exploitability. Treat an unknown cross-service producer as unresolved controllability, not proof of attacker control, and lower confidence or severity accordingly.",
             "Do not transfer a payload shape from one endpoint to another. If the failure depends solely on an uninspected producer using the assumed shape, classify the candidate weak rather than plausible or confirmed.",
@@ -6115,6 +6187,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "inputs": ["validated-findings.json", "coverage.json", "token-budget.json", "artifact refs"],
         "outputs": ["report.agent.json"],
         "instructions": [
+            'If the validated and weak finding collections are empty, immediately write a canonical no-findings report.agent.json with "findings": [] and "appendix_findings": [], preserving the required summary, coverage, language, and artifact fields from existing inputs. Do not inspect or rescan application source in this empty-input case.',
             "Include only confirmed or plausible actionable findings in the main list.",
             "Do not inherit reviewer severity without re-calibrating it to demonstrated reachability, attacker control, user impact, and existing containment.",
             "Operator-only UI stale-state races without durable server-side data loss, privilege bypass, or service outage are normally medium or lower, not high.",
@@ -12061,11 +12134,19 @@ def qa_gate_payload(
     validate_source_unmodified_for_qa(repo_dir, run_dir, errors)
     intent_results = run_dir / "intent" / "intent-test-results.json"
     if not intent_results.exists():
-        missing_error = intent_validation_missing_results_error(run_dir)
-        if missing_error:
-            errors.append(missing_error)
-        else:
-            warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
+        intent_validation = read_json(
+            run_dir / "intent" / "intent-test-validation.json",
+            None,
+        )
+        if not (
+            isinstance(intent_validation, dict)
+            and intent_validation.get("enabled") is False
+        ):
+            missing_error = intent_validation_missing_results_error(run_dir)
+            if missing_error:
+                errors.append(missing_error)
+            else:
+                warnings.append("intent-test-results.json is missing; no intent tests may have been selected or runnable")
     else:
         payload = read_json(intent_results, {})
         errors.extend(intent_test_result_errors(payload, run_dir))
@@ -12765,20 +12846,27 @@ def prompt_template_for_name(name: str) -> str:
         "02_bundle_planner.md": (
             "You are the Semantic Bundle Planner. Read bundle-planning-input.json and group every eligible path "
             "exactly once by feature, entrypoint, trust boundary, state flow, and implementation/test affinity. "
-            "Keep groups tier-homogeneous. Treat each output group as a final semantic bundle boundary: the Worker "
+            "Every group must include a stable lowercase group_id, a non-empty title, a non-empty grouping_reasons "
+            "list, its tier, and a non-empty paths list. Keep groups tier-homogeneous. Treat each output group as a final semantic bundle boundary: the Worker "
             "will not merge separate groups. Honor constraints.max_bundles and constraints.max_reviewer_assignments; "
             "reviewer cost per bundle is P0=3, P1=2, and P2=1. Minimize both group count and weighted reviewer cost "
             "without losing semantic cohesion, and avoid tiny or singleton groups unless they are truly isolated. "
             "If a hard limit appears impossible, preserve exact coverage and tiers and return the most compact safe "
             "grouping so the Worker can reject it before fanout; never omit paths or reduce reviewer coverage. Write "
-            "only bundle-grouping.json using bundle-grouping/v1. Do not assign reviewers, ranges, bundle ids, or final "
-            "size limits; the Worker owns validation and bounded splitting.\n"
+            "only bundle-grouping.json using bundle-grouping/v1. Do not assign reviewers, ranges, final bundle ids, or final "
+            "size limits; group_id is the semantic-group identifier and the Worker owns final bundle ids, validation, and bounded splitting.\n"
         ),
         "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Demonstrate an end-to-end attacker-controlled path, account for producer-side validation and containment, and classify unproven reachability as defense-in-depth rather than high/critical. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/correctness_lite.md": "You are the Correctness Lite Reviewer. Only report clear bugs or user-visible behavior problems. Return JSON only using codex-reviewer-output/v1.\n",
-        "03_clusterer.md": "You are the Finding Clusterer and Vote Aggregator. Merge duplicates and suppress vague findings. Merge test-gap evidence into the underlying defect when contract, sink, and fix match. Do not create new findings. Return JSON only.\n",
+        "03_clusterer.md": (
+            'You are the Finding Clusterer and Vote Aggregator. If every verified reviewer findings array is empty, '
+            'immediately write canonical clusters.json with {"schema_version": "cluster-output/v1", "clusters": []} '
+            'and validation-input.json with {"schema_version": "validation-input/v1", "candidates": []}; do not inspect '
+            'or rescan application source. Otherwise merge duplicates and suppress vague findings. Merge test-gap '
+            'evidence into the underlying defect when contract, sink, and fix match. Do not create new findings. Return JSON only.\n'
+        ),
         "intent/04_intent_miner.md": (
             "You are the Intent Miner. Extract behavioral contracts from docs, API specs, types, tests, route "
             'definitions, and error messages. Do not infer intent only from implementation code. Return JSON only '
@@ -12813,8 +12901,23 @@ def prompt_template_for_name(name: str) -> str:
             "classification, confidence in 0..1, evidence, and artifacts; status must be one of "
             '"passed", "failed", "skipped", "timeout", or "error". Use only the documented intent-test classifications.\n'
         ),
-        "08_validator.md": "You are the Validation Reviewer. Try to disprove each candidate finding using evidence, location verification, related code, existing tests, and intent test results. An unknown cross-service producer is unresolved controllability, not proof of attacker control. dependency_missing is absence of dynamic evidence, not disproof; static source and contract evidence can still support plausible. Return JSON only.\n",
-        "09_reporter.md": "You are the Final Reporter. Include only confirmed/plausible actionable findings in main findings; weak findings go to the top-level appendix_findings list. Do not inherit reviewer severity without calibrating reachability, control, impact, and containment. Return JSON only.\n",
+        "08_validator.md": (
+            'You are the Validation Reviewer. If the validation input contains no candidates, immediately write '
+            'canonical validated-findings.json with {"schema_version": "validation-output/v1", '
+            '"validated_findings": [], "weak_findings": [], "disproven_findings": []}; do not inspect or rescan '
+            'application source. Otherwise try to disprove each candidate finding using evidence, location verification, '
+            'related code, existing tests, and intent test results. An unknown cross-service producer is unresolved '
+            'controllability, not proof of attacker control. dependency_missing is absence of dynamic evidence, not '
+            'disproof; static source and contract evidence can still support plausible. Return JSON only.\n'
+        ),
+        "09_reporter.md": (
+            'You are the Final Reporter. If the validated and weak finding collections are empty, immediately write '
+            'a canonical no-findings report.agent.json with "findings": [] and "appendix_findings": [], preserving '
+            'required summary, coverage, language, and artifact fields; do not inspect or rescan application source. '
+            'Otherwise include only confirmed/plausible actionable findings in main findings; weak findings go to the '
+            'top-level appendix_findings list. Do not inherit reviewer severity without calibrating reachability, '
+            'control, impact, and containment. Return JSON only.\n'
+        ),
     }
     discipline = (
         "\nRequired discipline:\n"
