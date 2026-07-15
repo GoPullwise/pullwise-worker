@@ -10,6 +10,7 @@ import inspect
 import json
 import math
 import os
+import random
 import re
 import shlex
 import shutil
@@ -29,6 +30,7 @@ from typing import Any, Callable
 
 from . import __version__
 from ._main_part_01_bootstrap import (
+    PullwiseRequestError,
     REPOSITORY_MIRROR_CACHE_DIR_NAME,
     worker_machine_metrics_payload,
     worker_memory_payload,
@@ -2619,6 +2621,21 @@ def reviewer_error_is_transient_capacity(error: BaseException) -> bool:
     )
 
 
+def control_plane_error_is_retryable(error: BaseException) -> bool:
+    if not isinstance(error, PullwiseRequestError):
+        return False
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        return True
+    if isinstance(status_code, bool):
+        return False
+    try:
+        normalized_status = int(status_code)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return normalized_status in {408, 429} or 500 <= normalized_status < 600
+
+
 class ReviewWorkerV1:
     def __init__(self, config: Any, client: Any | None = None) -> None:
         self.config = config
@@ -2635,6 +2652,8 @@ class ReviewWorkerV1:
         self._event_send_lock = threading.RLock()
         self._last_workspace_cleanup_monotonic = 0.0
         self._persisted_unfinished_workspace_names: set[str] = set()
+        self._empty_poll_count = 0
+        self._control_plane_error_count = 0
 
     def default_codex_events_path(self) -> Path:
         return self.isolation.logs / "codex-sdk-events.jsonl"
@@ -2945,31 +2964,139 @@ class ReviewWorkerV1:
             protected_run_ids=self._persisted_unfinished_workspace_names,
         )
 
+    def next_poll_sleep(
+        self,
+        *,
+        claimed_job: bool,
+        loop_error: bool,
+        worker_busy: bool = False,
+    ) -> float:
+        try:
+            poll_seconds = float(getattr(self.config, "poll_seconds", 5) or 5)
+        except (TypeError, ValueError, OverflowError):
+            poll_seconds = 5.0
+        if not math.isfinite(poll_seconds):
+            poll_seconds = 5.0
+        poll_seconds = max(1.0, poll_seconds)
+
+        try:
+            max_backoff_seconds = float(
+                getattr(self.config, "max_backoff_seconds", 60) or 60
+            )
+        except (TypeError, ValueError, OverflowError):
+            max_backoff_seconds = 60.0
+        if not math.isfinite(max_backoff_seconds):
+            max_backoff_seconds = 60.0
+        max_backoff_seconds = max(poll_seconds, max_backoff_seconds)
+
+        if loop_error:
+            self._control_plane_error_count += 1
+            self._empty_poll_count = 0
+            exponent = min(self._control_plane_error_count - 1, 30)
+            base_seconds = poll_seconds * (2**exponent)
+        elif claimed_job or worker_busy:
+            self._control_plane_error_count = 0
+            self._empty_poll_count = 0
+            base_seconds = poll_seconds
+        else:
+            self._control_plane_error_count = 0
+            self._empty_poll_count += 1
+            exponent = min(self._empty_poll_count - 1, 30)
+            base_seconds = poll_seconds * (2**exponent)
+
+        try:
+            jitter_seconds = float(
+                getattr(self.config, "poll_jitter_seconds", 0) or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            jitter_seconds = 0.0
+        if not math.isfinite(jitter_seconds):
+            jitter_seconds = 0.0
+        jitter_window = min(
+            max(0.0, jitter_seconds),
+            poll_seconds,
+            max(0.0, max_backoff_seconds - poll_seconds),
+        )
+        base_cap = max(poll_seconds, max_backoff_seconds - jitter_window)
+        bounded_base = min(base_seconds, base_cap)
+        jitter = random.uniform(0.0, jitter_window) if jitter_window else 0.0
+        return bounded_base + jitter
+
     def run(self, *, once: bool = False) -> None:
         if not sys.platform.startswith("linux"):
             raise RuntimeError("Pullwise review worker v1 is Linux only")
         self.isolation.prepare()
         self.lock.acquire()
+        run_error: BaseException | None = None
         try:
-            if hasattr(self.client, "register"):
-                self.client.register()
+            register = getattr(self.client, "register", None)
+            if callable(register):
+                while True:
+                    try:
+                        register()
+                        break
+                    except PullwiseRequestError as exc:
+                        if once or not control_plane_error_is_retryable(exc):
+                            raise
+                        time.sleep(
+                            self.next_poll_sleep(
+                                claimed_job=False,
+                                loop_error=True,
+                            )
+                        )
             if self.recover_persisted_active_job() is None:
                 self.state.state = "idle"
             while True:
-                self.heartbeat()
+                try:
+                    self.heartbeat()
+                except PullwiseRequestError as exc:
+                    if once or not control_plane_error_is_retryable(exc):
+                        raise
+                    time.sleep(
+                        self.next_poll_sleep(
+                            claimed_job=False,
+                            loop_error=True,
+                        )
+                    )
+                    continue
                 ran_job = False
                 if self.state.can_lease():
-                    job = self.client.claim()
+                    try:
+                        job = self.client.claim()
+                    except PullwiseRequestError as exc:
+                        if once or not control_plane_error_is_retryable(exc):
+                            raise
+                        time.sleep(
+                            self.next_poll_sleep(
+                                claimed_job=False,
+                                loop_error=True,
+                            )
+                        )
+                        continue
                     if job:
                         ran_job = True
                         self.run_job(job)
                 self.cleanup_idle_v1_workspaces_if_due(force=ran_job)
                 if once:
                     return
-                time.sleep(max(1, int(getattr(self.config, "poll_seconds", 5) or 5)))
+                time.sleep(
+                    self.next_poll_sleep(
+                        claimed_job=ran_job,
+                        loop_error=False,
+                        worker_busy=self.state.active_job is not None,
+                    )
+                )
+        except BaseException as exc:
+            run_error = exc
+            raise
         finally:
-            self.close_codex_client()
-            self.lock.release()
+            try:
+                self.close_codex_client()
+            except BaseException:
+                if run_error is None:
+                    raise
+            finally:
+                self.lock.release()
 
     def heartbeat(self) -> dict[str, Any]:
         with self._heartbeat_lock:

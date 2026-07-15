@@ -197,6 +197,67 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
             self.assertIs(raised.exception, failure)
             self.assertIs(server._client, client)
 
+    def test_account_read_is_bounded_and_timeout_invalidates_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            entered = threading.Event()
+            release = threading.Event()
+
+            class Codex:
+                def account(self, *, refresh_token: bool = False) -> object:
+                    self.refresh_token = refresh_token
+                    entered.set()
+                    release.wait(5)
+                    return SimpleNamespace(
+                        model_dump=lambda **_kwargs: {
+                            "account": {"type": "chatgpt"},
+                            "requiresOpenaiAuth": True,
+                        }
+                    )
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            codex = Codex()
+            server._codex = codex
+
+            try:
+                with self.assertRaisesRegex(TimeoutError, "account read timed out"):
+                    server.account(refresh_token=True, timeout_seconds=0.05)
+
+                self.assertTrue(entered.is_set())
+                self.assertTrue(codex.refresh_token)
+                self.assertFalse(server.is_running())
+                with self.assertRaisesRegex(RuntimeError, "unhealthy.*account read timed out"):
+                    server.account(timeout_seconds=1)
+            finally:
+                release.set()
+
+    def test_account_read_cancellation_invalidates_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            entered = threading.Event()
+            release = threading.Event()
+            cancel = threading.Event()
+
+            class Codex:
+                def account(self, *, refresh_token: bool = False) -> object:
+                    del refresh_token
+                    entered.set()
+                    release.wait(5)
+                    return {}
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._codex = Codex()
+            threading.Timer(0.05, cancel.set).start()
+
+            try:
+                with self.assertRaisesRegex(JobCancelled, "account read cancelled"):
+                    server.account(timeout_seconds=1, cancel_requested=cancel.is_set)
+
+                self.assertTrue(entered.is_set())
+                self.assertFalse(server.is_running())
+            finally:
+                release.set()
+
     def test_fallback_archive_uses_one_bounded_rpc_and_timeout_invalidates_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
