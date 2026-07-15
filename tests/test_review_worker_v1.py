@@ -469,7 +469,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(result.duration_ms, 1234)
 
-    def test_codex_sdk_turn_without_turn_id_returns_fallback_duration_metric(self) -> None:
+    def test_codex_sdk_turn_without_turn_id_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
 
@@ -481,16 +481,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             server._client = Client()
             server._threads['thread_1'] = SimpleNamespace(id='thread_1')
 
-            result = server.run_turn(
-                thread_id='thread_1',
-                repo_dir=workspace,
-                prompt='review',
-                effort='medium',
-                read_only=True,
-                timeout_seconds=2,
-            )
-
-        self.assertGreaterEqual(result.duration_ms, 0)
+            with self.assertRaisesRegex(RuntimeError, "turn id"):
+                server.run_turn(
+                    thread_id='thread_1',
+                    repo_dir=workspace,
+                    prompt='review',
+                    effort='medium',
+                    read_only=True,
+                    timeout_seconds=2,
+                )
 
     def test_codex_sdk_turn_interrupts_when_cancel_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3216,10 +3215,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     ],
                 },
             )
-            (validation_repo / "package.json").write_text(
-                json.dumps({"scripts": {"test": "vitest run"}}),
-                encoding="utf-8",
-            )
+            package_payload = json.dumps({"scripts": {"test": "vitest run"}})
+            (repo / "package.json").write_text(package_payload, encoding="utf-8")
+            (validation_repo / "package.json").write_text(package_payload, encoding="utf-8")
             runner = validation_repo / "node_modules" / ".bin" / "vitest"
             runner.parent.mkdir(parents=True)
             runner.write_text("", encoding="utf-8")
@@ -4367,8 +4365,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             validation_repo = root / "validation-repo"
             validation_repo.mkdir(parents=True)
-            (validation_repo / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"}}), encoding="utf-8")
+            package_payload = json.dumps({"scripts": {"build": "vite build"}})
+            (validation_repo / "package.json").write_text(package_payload, encoding="utf-8")
             (run_dir / "intent").mkdir(parents=True)
+            (root / "repo" / "package.json").write_text(package_payload, encoding="utf-8")
             (run_dir / "intent" / "validation-workspace.json").write_text(json.dumps({"validation_repo_root": str(validation_repo)}), encoding="utf-8")
             (run_dir / "intent" / "intent-test-validation.json").write_text(json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}), encoding="utf-8")
             (run_dir / "intent" / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-node"}]}), encoding="utf-8")
@@ -4391,8 +4391,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             validation_repo = root / "validation-repo"
             validation_repo.mkdir(parents=True)
-            (validation_repo / "package.json").write_text(json.dumps({"scripts": {"test": "node test.js"}}), encoding="utf-8")
+            package_payload = json.dumps({"scripts": {"test": "node test.js"}})
+            (validation_repo / "package.json").write_text(package_payload, encoding="utf-8")
             (run_dir / "intent").mkdir(parents=True)
+            (root / "repo" / "package.json").write_text(package_payload, encoding="utf-8")
             (run_dir / "intent" / "validation-workspace.json").write_text(json.dumps({"validation_repo_root": str(validation_repo)}), encoding="utf-8")
             (run_dir / "intent" / "intent-test-validation.json").write_text(json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}), encoding="utf-8")
             (run_dir / "intent" / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-node"}]}), encoding="utf-8")
@@ -4439,8 +4441,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             validation_repo = root / "validation-repo"
             validation_repo.mkdir(parents=True)
-            (validation_repo / "package.json").write_text(json.dumps({"scripts": {"test": "vitest"}}), encoding="utf-8")
+            package_payload = json.dumps({"scripts": {"test": "vitest"}})
+            (validation_repo / "package.json").write_text(package_payload, encoding="utf-8")
             (run_dir / "intent").mkdir(parents=True)
+            (root / "repo" / "package.json").write_text(package_payload, encoding="utf-8")
             (run_dir / "intent" / "validation-workspace.json").write_text(json.dumps({"validation_repo_root": str(validation_repo)}), encoding="utf-8")
             (run_dir / "intent" / "intent-test-validation.json").write_text(json.dumps({"schema_version": "intent-test-validation/v1", "enabled": True}), encoding="utf-8")
             (run_dir / "intent" / "intent-test-plan.json").write_text(json.dumps({"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITV-node"}]}), encoding="utf-8")
@@ -4463,11 +4467,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
             validation_repo = root / "validation-repo"
             validation_repo.mkdir(parents=True)
-            (validation_repo / "package.json").write_text(
-                json.dumps({"scripts": {"test": "vitest run"}}),
-                encoding="utf-8",
-            )
+            package_payload = json.dumps({"scripts": {"test": "vitest run"}})
+            (validation_repo / "package.json").write_text(package_payload, encoding="utf-8")
             (run_dir / "intent").mkdir(parents=True)
+            (root / "repo" / "package.json").write_text(package_payload, encoding="utf-8")
             write_json(run_dir / "intent" / "validation-workspace.json", {"validation_repo_root": str(validation_repo)})
             write_json(
                 run_dir / "intent" / "intent-test-validation.json",

@@ -7791,6 +7791,9 @@ def _declared_generated_test_paths(run_dir: Path, validation_repo: Path) -> set[
     )
     allowed: set[str] = set()
     validation_root = validation_repo.resolve(strict=False)
+    source_repo = _source_repository_for_run_dir(run_dir)
+    source_generation_root = source_repo / ".codex-review" / "generated-tests"
+    run_generation_root = run_dir / "intent" / "generated-tests"
     for generated in generated_tests:
         if not isinstance(generated, dict):
             continue
@@ -7808,7 +7811,37 @@ def _declared_generated_test_paths(run_dir: Path, validation_repo: Path) -> set[
         try:
             relative = candidate.resolve(strict=False).relative_to(validation_root)
         except ValueError:
-            continue
+            declared_source = Path(raw_path)
+            source_candidates = (
+                (
+                    declared_source if declared_source.is_absolute() else source_repo / declared_source,
+                    source_repo,
+                    source_generation_root,
+                ),
+                (
+                    declared_source if declared_source.is_absolute() else run_dir / declared_source,
+                    run_dir,
+                    run_generation_root,
+                ),
+            )
+            relative = None
+            for source_candidate, relative_root, permitted_root in source_candidates:
+                if (
+                    source_candidate.is_symlink()
+                    or not _is_regular_file_no_follow(source_candidate)
+                    or not path_is_under(source_candidate, permitted_root)
+                ):
+                    continue
+                try:
+                    relative = source_candidate.resolve(strict=True).relative_to(
+                        relative_root.resolve(strict=True)
+                    )
+                except (OSError, ValueError):
+                    relative = None
+                if relative is not None:
+                    break
+            if relative is None:
+                continue
         allowed.add(relative.as_posix())
     return allowed
 

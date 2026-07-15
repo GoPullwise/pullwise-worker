@@ -1,0 +1,485 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import stat
+import sys
+import tempfile
+import time
+import tracemalloc
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from pullwise_worker.review_worker_v1 import (
+    MAX_BUNDLE_ESTIMATED_TOKENS,
+    ReviewWorkerV1,
+    bundle_plan_payload,
+    intent_command_is_runnable_for_repo,
+    intent_execution_preflight,
+    intent_runtime_repair_diagnostics,
+    intent_test_source_preflight_payload,
+    pack_bundles,
+    run_intent_tests,
+    write_json,
+)
+
+
+def _write_intent_run(
+    root: Path,
+    *,
+    source: dict[str, object],
+    plan: dict[str, object] | None = None,
+    total_seconds: int = 60,
+) -> tuple[Path, Path]:
+    repo = root / "repo"
+    run_dir = repo / ".codex-review" / "runs" / "run_1"
+    validation_repo = root / "validation-repo"
+    validation_repo.mkdir(parents=True)
+    write_json(
+        run_dir / "intent" / "validation-workspace.json",
+        {
+            "schema_version": "validation-workspace/v1",
+            "validation_repo_root": str(validation_repo),
+            "source_repo_root": str(repo),
+        },
+    )
+    write_json(
+        run_dir / "intent" / "intent-test-validation.json",
+        {
+            "schema_version": "intent-test-validation/v1",
+            "enabled": True,
+            "max_tests_per_run": 20,
+            "max_test_run_seconds_per_test": total_seconds,
+            "max_total_test_run_seconds": total_seconds,
+        },
+    )
+    write_json(
+        run_dir / "intent" / "intent-test-plan.json",
+        plan
+        or {
+            "schema_version": "intent-test-plan/v1",
+            "test_targets": [{"test_id": "ITP-001"}],
+        },
+    )
+    write_json(run_dir / "intent" / "intent-test-source.json", source)
+    return run_dir, validation_repo
+
+
+def _generated_python_source(
+    *,
+    path: str,
+    command: list[str],
+    cwd: str = ".",
+    required_paths: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": "intent-test-source/v1",
+        "generated_tests": [
+            {
+                "test_id": "ITV-001",
+                "target_test_ids": ["ITP-001"],
+                "path": path,
+                "command": command,
+                "cwd": cwd,
+                "required_paths": list(required_paths or []),
+            }
+        ],
+    }
+
+
+class BundleResourceLimitRegressionTest(unittest.TestCase):
+    def test_oversized_single_line_packed_bundle_stays_below_hard_token_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            source_path = repo_dir / "src" / "single_line.py"
+            source_path.parent.mkdir(parents=True)
+            target_length = MAX_BUNDLE_ESTIMATED_TOKENS * 8
+            source_text = "".join(
+                hashlib.sha256(f"high-density-{index}".encode("ascii")).hexdigest()
+                + f":{index:08x};"
+                for index in range((target_length // 74) + 2)
+            )[:target_length]
+            source_path.write_text(source_text, encoding="utf-8")
+            run_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [
+                        {
+                            "path": "src/single_line.py",
+                            "is_source_like": True,
+                            "is_binary": False,
+                            "is_generated_candidate": False,
+                            "risk_hints": [],
+                            "estimated_tokens": MAX_BUNDLE_ESTIMATED_TOKENS * 2,
+                            "line_count": 1,
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": "src/single_line.py", "tier": "P0"}],
+                },
+            )
+
+            plan = bundle_plan_payload(run_dir)
+            write_json(run_dir / "bundle-plan.json", plan)
+            pack_bundles(repo_dir, run_dir)
+            packed_payloads = [
+                (
+                    bundle,
+                    (run_dir / "bundles" / f"{bundle['bundle_id']}.md").read_text(encoding="utf-8"),
+                )
+                for bundle in plan["bundles"]
+            ]
+
+        self.assertGreater(len(packed_payloads), 1)
+        self.assertTrue(
+            all(
+                len(payload.encode("utf-8")) <= MAX_BUNDLE_ESTIMATED_TOKENS
+                and len(payload) <= MAX_BUNDLE_ESTIMATED_TOKENS
+                for _bundle, payload in packed_payloads
+            ),
+            [
+                (len(payload.encode("utf-8")), len(payload))
+                for _bundle, payload in packed_payloads
+            ],
+        )
+        self.assertTrue(
+            all(
+                int(bundle["estimated_tokens"])
+                >= max(len(payload.encode("utf-8")), len(payload))
+                for bundle, payload in packed_payloads
+            ),
+            [
+                (
+                    bundle["estimated_tokens"],
+                    len(payload.encode("utf-8")),
+                    len(payload),
+                )
+                for bundle, payload in packed_payloads
+            ],
+        )
+
+
+class IntentSubprocessResourceRegressionTest(unittest.TestCase):
+    def test_large_intent_output_is_streamed_without_parent_memory_growth(self) -> None:
+        output_bytes = 12 * 1024 * 1024
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                source=_generated_python_source(
+                    path="test_large_output.py",
+                    command=[sys.executable, "test_large_output.py"],
+                ),
+            )
+            (validation_repo / "test_large_output.py").write_text(
+                "import sys\n"
+                f"sys.stdout.write('x' * {output_bytes})\n",
+                encoding="utf-8",
+            )
+
+            tracemalloc.start()
+            try:
+                with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                    result = run_intent_tests(run_dir)
+                _current, peak_bytes = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+
+            raw_run = result["test_runs"][0]
+            stdout_path = Path(raw_run["stdout_path"])
+            stdout_size = stdout_path.stat().st_size
+
+        self.assertEqual(raw_run["status"], "passed")
+        self.assertGreater(stdout_size, 0)
+        self.assertLess(
+            peak_bytes,
+            output_bytes // 2,
+            f"intent output consumed {peak_bytes} bytes in the worker process",
+        )
+
+
+class IntentRuntimeRepairRegressionTest(unittest.TestCase):
+    def test_runtime_repair_does_not_treat_assertion_text_as_missing_module(self) -> None:
+        diagnostics = intent_runtime_repair_diagnostics(
+            {
+                "test_runs": [
+                    {
+                        "test_id": "ITV-001",
+                        "status": "failed",
+                        "exit_code": 1,
+                        "stderr": (
+                            "AssertionError: expected message to contain "
+                            "ModuleNotFoundError: No module named 'optional_plugin'"
+                        ),
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(diagnostics["repair_candidates"], [])
+        self.assertEqual(
+            diagnostics["non_repairable"][0]["reason_code"],
+            "product_signal_or_non_repairable_environment",
+        )
+
+    def test_runtime_repair_recognizes_real_missing_module_traceback(self) -> None:
+        diagnostics = intent_runtime_repair_diagnostics(
+            {
+                "test_runs": [
+                    {
+                        "test_id": "ITV-001",
+                        "status": "failed",
+                        "exit_code": 1,
+                        "stderr": (
+                            "Traceback (most recent call last):\n"
+                            "  File 'test_generated.py', line 1, in <module>\n"
+                            "ModuleNotFoundError: No module named 'project_dependency'\n"
+                        ),
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            diagnostics["repair_candidates"][0]["reason_code"],
+            "project_dependency_missing",
+        )
+
+    def test_runtime_repair_forwards_one_global_deadline_to_turn_and_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, _validation_repo = _write_intent_run(
+                root,
+                source={"schema_version": "intent-test-source/v1", "generated_tests": []},
+            )
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "run_id": run_dir.name,
+                    "test_runs": [
+                        {
+                            "test_id": "ITV-001",
+                            "status": "skipped",
+                            "attempt": 1,
+                            "preflight": {
+                                "status": "blocked",
+                                "agent_repairable": True,
+                                "reason_code": "command_missing",
+                                "classification": "test_harness_error",
+                            },
+                        }
+                    ],
+                },
+            )
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            deadline = time.monotonic() + 30
+            retry_payload = {
+                "schema_version": "intent-test-run-results/v1",
+                "run_id": run_dir.name,
+                "test_runs": [{"test_id": "ITV-001", "status": "passed", "attempt": 2}],
+            }
+            with patch.object(
+                worker,
+                "_run_intent_execution_repair_turn",
+                return_value=True,
+            ) as repair_turn, patch(
+                "pullwise_worker.review_worker_v1.repair_intent_test_source_artifact"
+            ), patch(
+                "pullwise_worker.review_worker_v1.refresh_agentic_execution_capabilities",
+                return_value={},
+            ), patch(
+                "pullwise_worker.review_worker_v1.intent_test_source_preflight_payload",
+                return_value={"workspace_integrity": {"status": "ok"}},
+            ), patch(
+                "pullwise_worker.review_worker_v1.run_intent_tests",
+                return_value=retry_payload,
+            ) as retry:
+                worker.repair_intent_test_runtime(
+                    None,
+                    root / "repo",
+                    run_dir,
+                    {},
+                    max_attempts=1,
+                    deadline_monotonic=deadline,
+                )
+
+        self.assertEqual(repair_turn.call_args.kwargs["deadline_monotonic"], deadline)
+        self.assertEqual(retry.call_args.kwargs["deadline_monotonic"], deadline)
+
+    def test_runtime_repair_turn_timeout_is_clamped_to_global_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+
+            class RecordingCodex:
+                def __init__(self) -> None:
+                    self.timeout_seconds: int | float | None = None
+
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    self.timeout_seconds = kwargs.get("timeout_seconds")  # type: ignore[assignment]
+                    return SimpleNamespace(duration_ms=1)
+
+            codex = RecordingCodex()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch(
+                "pullwise_worker.review_worker_v1.time.monotonic",
+                return_value=100.0,
+            ), patch(
+                "pullwise_worker.review_worker_v1.turn_timeout_for_job",
+                return_value=30,
+            ), patch(
+                "pullwise_worker.review_worker_v1.effort_for_phase",
+                return_value="medium",
+            ):
+                completed = worker._run_intent_execution_repair_turn(
+                    codex,
+                    root / "repo",
+                    run_dir,
+                    {},
+                    stage="runtime",
+                    attempt=1,
+                    diagnostics={},
+                    deadline_monotonic=103.0,
+                )
+
+        self.assertTrue(completed)
+        self.assertIsNotNone(codex.timeout_seconds)
+        self.assertLessEqual(float(codex.timeout_seconds or 0), 3.0)
+
+
+class IntentExecutablePreflightRegressionTest(unittest.TestCase):
+    def test_absolute_directory_is_not_accepted_as_an_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            diagnostic = intent_execution_preflight(
+                [str(validation_repo), "test_behavior"],
+                validation_repo,
+                validation_repo,
+            )
+
+        self.assertEqual(diagnostic["status"], "blocked")
+        self.assertEqual(diagnostic["classification"], "dependency_missing")
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable mode is not meaningful on Windows")
+    def test_non_executable_regular_file_is_not_accepted_as_a_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            runner = validation_repo / "bespoke-test"
+            runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            runner.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+            diagnostic = intent_execution_preflight(
+                [str(runner), "behavior.spec"],
+                validation_repo,
+                validation_repo,
+            )
+
+        self.assertEqual(diagnostic["status"], "blocked")
+        self.assertEqual(diagnostic["classification"], "dependency_missing")
+
+    def test_pytest_probe_uses_the_selected_python_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            selected_python = validation_repo / "python3.99"
+            selected_python.write_text("selected interpreter", encoding="utf-8")
+            selected_python.chmod(0o755)
+            probe_calls: list[list[str]] = []
+
+            def fail_selected_probe(command: list[str], **_kwargs: object) -> SimpleNamespace:
+                probe_calls.append([str(part) for part in command])
+                return SimpleNamespace(returncode=1, stdout="", stderr="No module named pytest")
+
+            with patch.object(importlib.util, "find_spec", return_value=object()), patch(
+                "pullwise_worker.review_worker_v1.subprocess.run",
+                side_effect=fail_selected_probe,
+            ):
+                runnable, reason = intent_command_is_runnable_for_repo(
+                    [str(selected_python), "-m", "pytest", "test_behavior.py"],
+                    validation_repo,
+                    validation_repo,
+                    {},
+                )
+
+        self.assertFalse(runnable)
+        self.assertIn("pytest", reason.lower())
+        self.assertTrue(probe_calls)
+        self.assertEqual(Path(probe_calls[0][0]), selected_python)
+
+
+class IntentPreflightBindingRegressionTest(unittest.TestCase):
+    def test_execution_rejects_command_cwd_and_required_path_drift_after_preflight(self) -> None:
+        drift_cases = ("command", "cwd", "required_paths")
+        outcomes: dict[str, tuple[bool, dict[str, object]]] = {}
+        for drift_case in drift_cases:
+            with self.subTest(drift=drift_case), tempfile.TemporaryDirectory() as tmp_dir:
+                root = Path(tmp_dir)
+                validation_repo = root / "validation-repo"
+                script = validation_repo / "test_approved.py"
+                marker = root / f"{drift_case}.executed"
+                approved_command = [sys.executable, str(script), "--approved"]
+                approved_required_paths = [str(validation_repo / "fixture-a.dat")]
+                source = _generated_python_source(
+                    path="test_approved.py",
+                    command=approved_command,
+                    required_paths=approved_required_paths,
+                )
+                run_dir, validation_repo = _write_intent_run(root, source=source)
+                (validation_repo / "fixture-a.dat").write_text("a", encoding="utf-8")
+                (validation_repo / "fixture-b.dat").write_text("b", encoding="utf-8")
+                (validation_repo / "nested").mkdir()
+                script.write_text(
+                    "from pathlib import Path\n"
+                    f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
+                    encoding="utf-8",
+                )
+
+                preflight = intent_test_source_preflight_payload(run_dir)
+                preflight["tests"][0]["required_paths"] = approved_required_paths
+                write_json(run_dir / "intent" / "intent-test-preflight.json", preflight)
+
+                mutated_source = json.loads(
+                    (run_dir / "intent" / "intent-test-source.json").read_text(encoding="utf-8")
+                )
+                generated = mutated_source["generated_tests"][0]
+                if drift_case == "command":
+                    generated["command"] = [sys.executable, str(script), "--changed"]
+                elif drift_case == "cwd":
+                    generated["cwd"] = "nested"
+                else:
+                    generated["required_paths"] = [str(validation_repo / "fixture-b.dat")]
+                write_json(run_dir / "intent" / "intent-test-source.json", mutated_source)
+
+                with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                    result = run_intent_tests(run_dir)
+
+                raw_run = result["test_runs"][0]
+                marker_existed = marker.exists()
+
+            outcomes[drift_case] = (marker_existed, raw_run)
+        for drift_case, (marker_existed, raw_run) in outcomes.items():
+            with self.subTest(drift=drift_case):
+                self.assertFalse(marker_existed, drift_case)
+                self.assertNotEqual(raw_run["status"], "passed", drift_case)
+                self.assertEqual(
+                    raw_run.get("preflight", {}).get("reason_code"),
+                    "preflight_candidate_mismatch",
+                    drift_case,
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
