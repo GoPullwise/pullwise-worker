@@ -7123,7 +7123,6 @@ def prepare_bundle_planning_input(
                         for value in risk_hints
                         if str(value).strip()
                     ][:12],
-                    "component_hint": _bundle_component_key(path),
                     "routing_source": str(item.get("_routing_source") or ""),
                 }
             )
@@ -7333,18 +7332,6 @@ def materialize_agent_bundle_plan(
     return plan
 
 
-def _bundle_component_key(path: str) -> str:
-    normalized = path.replace("\\", "/").lstrip("./")
-    parts = [part for part in normalized.split("/") if part]
-    if len(parts) >= 2 and parts[0] in {"app", "src", "server", "lib"}:
-        return f"{parts[0]}/{parts[1]}"
-    if len(parts) >= 2 and parts[0] in {"test", "tests", "__tests__"}:
-        return f"app/{parts[1]}"
-    if len(parts) >= 2:
-        return "/".join(parts[:2])
-    return normalized
-
-
 def split_oversized_bundle_item(
     item: dict[str, Any],
     repo_dir: Path | None = None,
@@ -7403,25 +7390,8 @@ def split_oversized_bundle_item(
 
 
 def _bundle_metadata(files: list[dict[str, Any]]) -> dict[str, Any]:
-    paths = [str(item.get("path") or "") for item in files if item.get("path")]
-    component_keys = sorted({_bundle_component_key(path) for path in paths if _bundle_component_key(path)})
-    related_tests = sorted(
-        path
-        for path in paths
-        if path.startswith(("test/", "tests/", "__tests__/")) or "/tests/" in f"/{path}" or Path(path).name.startswith("test_") or ".test." in Path(path).name
-    )
     grouping_reasons: list[str] = []
-    if len(paths) > 1 and len(component_keys) == 1:
-        grouping_reasons.append("path_affinity")
-    if related_tests:
-        grouping_reasons.append("test_affinity")
     metadata: dict[str, Any] = {}
-    if len(component_keys) == 1:
-        metadata["component_key"] = component_keys[0]
-    if grouping_reasons:
-        metadata["grouping_reasons"] = grouping_reasons
-    if related_tests:
-        metadata["related_tests"] = related_tests
     routing_sources = sorted({str(item.get("_routing_source") or "") for item in files if str(item.get("_routing_source") or "")})
     if routing_sources:
         metadata["routing_sources"] = routing_sources

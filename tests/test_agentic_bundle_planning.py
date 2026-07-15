@@ -124,6 +124,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
             "worker_may_coalesce_same_tier_groups",
             planning_input["constraints"],
         )
+        self.assertNotIn("component_hint", planning_input["items"][0])
 
     def test_worker_preserves_agent_owned_semantic_bundle_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

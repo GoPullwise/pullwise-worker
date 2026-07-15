@@ -2809,7 +2809,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(coverage["deep_reviewed_files"], 1)
         self.assertEqual(coverage["inventory_only_files"], 1)
 
-    def test_bundle_plan_groups_component_and_related_tests_when_under_token_cap(self) -> None:
+    def test_bundle_plan_preserves_agent_group_metadata_without_mechanical_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
@@ -2841,10 +2841,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("app/users/service.py", users_bundle["paths"])
         self.assertIn("app/users/repository.py", users_bundle["paths"])
         self.assertIn("tests/users/test_routes.py", users_bundle["paths"])
-        self.assertEqual(users_bundle["component_key"], "app/users")
-        self.assertIn("path_affinity", users_bundle["grouping_reasons"])
-        self.assertIn("test_affinity", users_bundle["grouping_reasons"])
-        self.assertEqual(users_bundle["related_tests"], ["tests/users/test_routes.py"])
+        self.assertNotIn("component_key", users_bundle)
+        self.assertNotIn("path_affinity", users_bundle["grouping_reasons"])
+        self.assertNotIn("test_affinity", users_bundle["grouping_reasons"])
+        self.assertIn(
+            "test fixture preserves routed tiers while exercising the production materializer",
+            users_bundle["grouping_reasons"],
+        )
+        self.assertNotIn("related_tests", users_bundle)
         self.assertIn("routing_sources", users_bundle)
         self.assertEqual(plan["schema_version"], "bundle-plan/v1")
 
