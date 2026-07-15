@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.bundle_planning_fixtures import materialize_test_bundle_plan
 from pullwise_worker import __version__
 from pullwise_worker.current_run_eta import CurrentRunEstimator
 from pullwise_worker._main_part_01_bootstrap import (
@@ -71,7 +72,6 @@ from pullwise_worker.review_worker_v1 import (
     turn_timeout_for_job,
     result_payload,
     render_markdown,
-    bundle_plan_payload,
     phase_completion_data,
     phase_progress_data,
     phase_prompt,
@@ -2520,7 +2520,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             inv = inventory(repo)
             (run_dir / "inventory.json").write_text(__import__("json").dumps(inv), encoding="utf-8")
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
             (run_dir / "bundle-plan.json").write_text(__import__("json").dumps(plan), encoding="utf-8")
             pack_bundles(repo, run_dir)
 
@@ -2688,7 +2688,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
             coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
 
         p0_bundle = next(item for item in plan["bundles"] if item["tier"] == "P0")
@@ -2723,7 +2723,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
 
         users_bundle = next(bundle for bundle in plan["bundles"] if "app/users/routes.py" in bundle["paths"])
         self.assertEqual(users_bundle["tier"], "P1")
@@ -2737,7 +2737,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("routing_sources", users_bundle)
         self.assertEqual(plan["schema_version"], "bundle-plan/v1")
 
-    def test_bundle_plan_splits_group_when_token_cap_is_exceeded(self) -> None:
+    def test_bundle_plan_keeps_agent_group_together_when_rendered_payload_fits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
@@ -2748,14 +2748,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "inventory.json").write_text(json.dumps({"schema_version": "inventory/v1", "files": files}), encoding="utf-8")
             (run_dir / "risk-routing.json").write_text(json.dumps({"schema_version": "risk-routing/v1", "routes": [{"path": "app/large/", "tier": "P1"}]}), encoding="utf-8")
 
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
 
         large_bundles = [bundle for bundle in plan["bundles"] if any(path.startswith("app/large/") for path in bundle["paths"])]
-        self.assertEqual(len(large_bundles), 2)
+        self.assertEqual(len(large_bundles), 1)
         self.assertTrue(all(bundle["estimated_tokens"] <= 60000 for bundle in large_bundles))
         self.assertEqual(sorted(path for bundle in large_bundles for path in bundle["paths"]), ["app/large/routes.py", "app/large/service.py"])
 
-    def test_bundle_plan_splits_oversized_single_file_into_bounded_line_ranges(self) -> None:
+    def test_bundle_plan_recombines_estimated_segments_when_rendered_payload_fits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
@@ -2777,7 +2777,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "inventory.json").write_text(json.dumps({"schema_version": "inventory/v1", "files": files}), encoding="utf-8")
             (run_dir / "risk-routing.json").write_text(json.dumps({"schema_version": "risk-routing/v1", "routes": [{"path": "pullwise_worker/review_worker_v1.py", "tier": "P0"}]}), encoding="utf-8")
 
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
             (run_dir / "bundle-plan.json").write_text(json.dumps(plan), encoding="utf-8")
             pack_bundles(repo_dir, run_dir)
             review_bundles = [
@@ -2790,7 +2790,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 for bundle in review_bundles
             ]
 
-        self.assertEqual(len(review_bundles), 2)
+        self.assertEqual(len(review_bundles), 1)
         self.assertTrue(all(bundle["estimated_tokens"] <= 60000 for bundle in review_bundles))
         self.assertEqual(
             [item for bundle in review_bundles for item in bundle["file_ranges"]],
@@ -2800,10 +2800,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             ],
         )
         self.assertIn("1 | line 1", packed[0])
-        self.assertNotIn("601 | line 601", packed[0])
-        self.assertIn("601 | line 601", packed[1])
-        self.assertNotIn("600 | line 600", packed[1])
-        self.assertIn("1200 | line 1200", packed[1])
+        self.assertIn("600 | line 600", packed[0])
+        self.assertIn("601 | line 601", packed[0])
+        self.assertIn("1200 | line 1200", packed[0])
 
     def test_phase_validation_normalizes_live_routing_and_cluster_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4408,7 +4407,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (run_dir / "repo-profile.json").write_text(json.dumps(profile_payload), encoding="utf-8")
             original_semantic = (run_dir / "risk-routing.json").read_text(encoding="utf-8")
 
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
             coverage = json.loads((run_dir / "coverage.json").read_text(encoding="utf-8"))
             effective_payload = json.loads((run_dir / "effective-risk-routing.json").read_text(encoding="utf-8"))
             semantic_after = (run_dir / "risk-routing.json").read_text(encoding="utf-8")

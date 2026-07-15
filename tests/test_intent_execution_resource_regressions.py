@@ -14,10 +14,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tests.bundle_planning_fixtures import materialize_test_bundle_plan
 from pullwise_worker.review_worker_v1 import (
     MAX_BUNDLE_ESTIMATED_TOKENS,
     ReviewWorkerV1,
-    bundle_plan_payload,
     ensure_immutable_inventory_baseline,
     intent_command_is_runnable_for_repo,
     intent_execution_preflight,
@@ -195,7 +195,7 @@ class BundleResourceLimitRegressionTest(unittest.TestCase):
                 },
             )
 
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
             write_json(run_dir / "bundle-plan.json", plan)
             pack_bundles(repo_dir, run_dir)
             packed_payloads = [
@@ -272,7 +272,7 @@ class BundleResourceLimitRegressionTest(unittest.TestCase):
                 },
             )
 
-            plan = bundle_plan_payload(run_dir)
+            plan = materialize_test_bundle_plan(run_dir)
             write_json(run_dir / "bundle-plan.json", plan)
             pack_bundles(repo_dir, run_dir)
             packed_payloads = [

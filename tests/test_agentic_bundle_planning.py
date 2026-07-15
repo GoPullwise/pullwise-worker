@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from pullwise_worker import review_worker_v1
 from pullwise_worker.review_worker_v1 import (
     MAX_BUNDLE_ESTIMATED_TOKENS,
     ReviewWorkerV1,
@@ -47,6 +48,9 @@ class AgenticBundlePlanningTest(unittest.TestCase):
         self.assertIn("bundle-grouping/v1", prompt)
         self.assertIn("exactly once", prompt)
         self.assertIn("Do not assign reviewers", prompt)
+
+    def test_production_module_has_no_mechanical_bundle_planner(self) -> None:
+        self.assertFalse(hasattr(review_worker_v1, "bundle_plan_payload"))
 
     def test_semantic_turn_receives_worker_owned_planning_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
