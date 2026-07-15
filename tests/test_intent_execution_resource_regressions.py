@@ -108,6 +108,54 @@ def _generated_python_source(
 
 
 class BundleResourceLimitRegressionTest(unittest.TestCase):
+    def test_packed_bundle_keeps_unranged_files_alongside_a_ranged_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            (repo_dir / "src").mkdir(parents=True)
+            (repo_dir / "src" / "large.py").write_text(
+                "first line\nsecond line\n",
+                encoding="utf-8",
+            )
+            (repo_dir / "src" / "small.py").write_text(
+                "SMALL_FILE_SENTINEL = True\n",
+                encoding="utf-8",
+            )
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "run_id": run_dir.name,
+                    "bundles": [
+                        {
+                            "bundle_id": "p1-bundle-001",
+                            "tier": "P1",
+                            "title": "mixed ranged and unranged",
+                            "estimated_tokens": 1000,
+                            "paths": ["src/large.py", "src/small.py"],
+                            "file_ranges": [
+                                {
+                                    "path": "src/large.py",
+                                    "start_line": 2,
+                                    "end_line": 2,
+                                }
+                            ],
+                            "reviewers": ["correctness"],
+                            "intent_test_eligible": True,
+                        }
+                    ],
+                },
+            )
+
+            pack_bundles(repo_dir, run_dir)
+            packed = (run_dir / "bundles" / "p1-bundle-001.md").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertIn("2 | second line", packed)
+        self.assertIn("### src/small.py", packed)
+        self.assertIn("SMALL_FILE_SENTINEL = True", packed)
+
     def test_oversized_single_line_packed_bundle_stays_below_hard_token_cap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"

@@ -2227,7 +2227,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     (repo_dir / "big.bin").write_bytes(b"x" * (2 * 1024 * 1024 + 1))
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-            with patch("pullwise_worker.review_worker_v1.subprocess.run", side_effect=fake_run):
+            with patch("pullwise_worker.review_worker_v1.run_git", side_effect=fake_run):
                 worker.run_job(job)
 
         self.assertEqual(results[0]["status"], "failed")
@@ -2261,7 +2261,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     (repo_dir / "app.py").write_text("print('ok')\n", encoding="utf-8")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-            with patch("pullwise_worker.review_worker_v1.subprocess.run", side_effect=fake_run):
+            with patch("pullwise_worker.review_worker_v1.run_git", side_effect=fake_run):
                 job = {
                     "job_id": "job_1",
                     "repo": "acme/api",
@@ -2941,7 +2941,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="/usr/bin/python3",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
             ) as run:
                 raw = run_intent_tests(run_dir)
@@ -2991,7 +2991,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="/usr/bin/python3",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
             ) as run:
                 raw = run_intent_tests(run_dir)
@@ -3036,7 +3036,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 },
             )
 
-            with patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+            with patch("pullwise_worker.review_worker_v1.run_polled_intent_process") as run:
                 raw = run_intent_tests(run_dir)
 
         run.assert_not_called()
@@ -3096,7 +3096,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="python3",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
             ) as run:
                 raw = run_intent_tests(run_dir)
@@ -3160,7 +3160,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="python3",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
             ) as run:
                 raw = run_intent_tests(run_dir)
@@ -3226,7 +3226,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="/usr/bin/npm",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
             ) as run:
                 raw = run_intent_tests(run_dir)
@@ -3293,7 +3293,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="python",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ) as run:
                 raw = run_intent_tests(run_dir)
@@ -3343,7 +3343,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="python",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ) as run:
                 raw = run_intent_tests(run_dir)
@@ -3419,7 +3419,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="python",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ):
                 raw = run_intent_tests(run_dir)
@@ -3467,7 +3467,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="python",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ) as subprocess_run:
                 raw = run_intent_tests(run_dir)
@@ -4338,7 +4338,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
 
             with patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ) as run:
                 result = run_intent_tests(run_dir)
@@ -4377,7 +4377,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+            with patch("pullwise_worker.review_worker_v1.run_polled_intent_process") as run:
                 result = run_intent_tests(run_dir)
 
         run.assert_not_called()
@@ -4404,7 +4404,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch("pullwise_worker.review_worker_v1.shutil.which", return_value="npm"), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
             ) as run:
                 result = run_intent_tests(run_dir)
@@ -4428,7 +4428,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+            with patch("pullwise_worker.review_worker_v1.run_polled_intent_process") as run:
                 result = run_intent_tests(run_dir)
 
         run.assert_not_called()
@@ -4453,7 +4453,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("pullwise_worker.review_worker_v1.shutil.which", return_value=None), patch("pullwise_worker.review_worker_v1.subprocess.run") as run:
+            with patch("pullwise_worker.review_worker_v1.shutil.which", return_value=None), patch("pullwise_worker.review_worker_v1.run_polled_intent_process") as run:
                 result = run_intent_tests(run_dir)
 
         run.assert_not_called()
@@ -4548,7 +4548,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 },
                 clear=False,
             ), patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ) as run:
                 result = run_intent_tests(run_dir)
@@ -4602,7 +4602,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value=None,
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
             ) as run:
                 result = run_intent_tests(run_dir)
@@ -4700,7 +4700,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="/usr/bin/bwrap",
             ), patch(
-                "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                 return_value=SimpleNamespace(returncode=1, stdout="", stderr="bwrap: creating new namespace failed"),
             ) as run:
                 result = run_intent_tests(run_dir)
@@ -10586,7 +10586,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     "pullwise_worker.review_worker_v1.shutil.which",
                     return_value="python",
                 ), patch(
-                    "pullwise_worker.review_worker_v1.subprocess.run",
+                "pullwise_worker.review_worker_v1.run_polled_intent_process",
                     return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
                 ) as subprocess_run:
                     raw = run_intent_tests(run_dir)

@@ -4446,6 +4446,7 @@ class ReviewWorkerV1:
         validation_error: object,
         *,
         active: ActiveJob | None = None,
+        deadline_monotonic: float | None = None,
     ) -> None:
         append_jsonl(
             run_dir / "worker.log.jsonl",
@@ -4471,7 +4472,7 @@ class ReviewWorkerV1:
                 prompt=phase_repair_prompt(phase, run_dir, validation_error, job),
                 effort=effort_for_phase(job, phase),
                 read_only=False,
-                timeout_seconds=turn_timeout_for_job(job),
+                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=self.poll_cancel_requested,
             )
             fallback_semantic_artifact(run_dir, job, phase)
@@ -4491,6 +4492,7 @@ class ReviewWorkerV1:
         attempt: int,
         diagnostics: dict[str, Any],
         active: ActiveJob | None = None,
+        deadline_monotonic: float | None = None,
     ) -> bool:
         phase = "intent_test_writing" if stage == "preflight" else "intent_test_running"
         if codex_client is None:
@@ -4540,7 +4542,7 @@ class ReviewWorkerV1:
                 prompt=prompt,
                 effort=effort_for_phase(job, phase),
                 read_only=False,
-                timeout_seconds=turn_timeout_for_job(job),
+                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=self.poll_cancel_requested,
             )
         except JobCancelled:
@@ -4581,6 +4583,7 @@ class ReviewWorkerV1:
         *,
         max_attempts: int = 1,
         active: ActiveJob | None = None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
         validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
@@ -4601,6 +4604,7 @@ class ReviewWorkerV1:
                 attempt=repair_attempt,
                 diagnostics=preflight,
                 active=active,
+                deadline_monotonic=deadline_monotonic,
             ):
                 break
             repair_intent_test_source_artifact(run_dir / "intent" / "intent-test-source.json", run_dir)
@@ -4635,6 +4639,7 @@ class ReviewWorkerV1:
         *,
         max_attempts: int = 1,
         active: ActiveJob | None = None,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         raw_path = run_dir / "intent" / "intent-test-results.raw.json"
         current = read_json(raw_path, {})
@@ -4686,6 +4691,7 @@ class ReviewWorkerV1:
                 attempt=repair_attempt,
                 diagnostics=diagnostics,
                 active=active,
+                deadline_monotonic=deadline_monotonic,
             ):
                 break
             repair_intent_test_source_artifact(run_dir / "intent" / "intent-test-source.json", run_dir)
@@ -4725,7 +4731,13 @@ class ReviewWorkerV1:
                 )
                 break
             current_attempt += 1
-            retry = run_intent_tests(run_dir, only_test_ids=candidate_ids, attempt=current_attempt)
+            retry = run_intent_tests(
+                run_dir,
+                only_test_ids=candidate_ids,
+                attempt=current_attempt,
+                deadline_monotonic=deadline_monotonic,
+                cancel_requested=self.poll_cancel_requested,
+            )
             retry_runs = retry.get("test_runs") if isinstance(retry.get("test_runs"), list) else []
             retry_by_id = {
                 str(item.get("test_id") or "").strip(): item
@@ -4762,6 +4774,7 @@ class ReviewWorkerV1:
         job: dict[str, Any],
         *,
         active: ActiveJob | None = None,
+        deadline_monotonic: float | None = None,
     ) -> None:
         max_repair_attempts = 2
         for repair_attempt in range(max_repair_attempts + 1):
@@ -4778,6 +4791,7 @@ class ReviewWorkerV1:
                     job,
                     validation_exc,
                     active=active,
+                    deadline_monotonic=deadline_monotonic,
                 )
 
     def repair_reviewer_outputs(
@@ -4789,6 +4803,7 @@ class ReviewWorkerV1:
         validation_error: object,
         *,
         active: ActiveJob | None = None,
+        deadline_monotonic: float | None = None,
     ) -> None:
         append_jsonl(
             run_dir / "worker.log.jsonl",
@@ -4814,7 +4829,7 @@ class ReviewWorkerV1:
                 prompt=reviewer_json_repair_prompt(run_dir, validation_error, job),
                 effort=effort_for_phase(job, "reviewer_json_validation"),
                 read_only=False,
-                timeout_seconds=turn_timeout_for_job(job),
+                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=self.poll_cancel_requested,
             )
         except BaseException:
@@ -4831,17 +4846,20 @@ class ReviewWorkerV1:
         *,
         active: ActiveJob | None = None,
         progress: int = 0,
+        deadline_monotonic: float | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
+        check_lifecycle_cancelled(cancel_requested)
+        remaining_wall_time_seconds(deadline_monotonic)
         if phase == "inventory_repository":
             policy = validate_job_policy(job)
             limits = policy["repository_limits"] if isinstance(policy.get("repository_limits"), dict) else {}
-            scan_deadline_seconds = int(policy.get("review_worker", {}).get("scanDeadlineSeconds") or 0)
-            scan_deadline = time.monotonic() + scan_deadline_seconds if scan_deadline_seconds > 0 else None
             inv = inventory(
                 repo_dir,
                 max_files=int(limits.get("maxFiles")) if limits.get("maxFiles") is not None else None,
                 max_bytes=int(limits.get("maxBytes")) if limits.get("maxBytes") is not None else None,
-                deadline_monotonic=scan_deadline,
+                deadline_monotonic=deadline_monotonic,
+                cancel_requested=cancel_requested,
             )
             write_immutable_inventory_baseline(repo_dir, run_dir, inv)
             write_json(run_dir / "inventory.json", inv)
@@ -4867,9 +4885,21 @@ class ReviewWorkerV1:
         elif phase == "location_validation":
             write_json(run_dir / "location-verification.json", location_verification_payload(repo_dir, run_dir))
         elif phase == "validation_workspace_prepare":
-            prepare_validation_workspace(repo_dir, run_dir)
+            prepare_validation_workspace(
+                repo_dir,
+                run_dir,
+                deadline_monotonic=deadline_monotonic,
+                cancel_requested=cancel_requested,
+            )
         elif phase == "intent_test_running":
-            write_json(run_dir / "intent" / "intent-test-results.raw.json", run_intent_tests(run_dir))
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                run_intent_tests(
+                    run_dir,
+                    deadline_monotonic=deadline_monotonic,
+                    cancel_requested=cancel_requested,
+                ),
+            )
             refresh_coverage_intent_counters(run_dir)
         elif phase == "render_markdown_report":
             report = read_json(run_dir / "report.agent.json", default_agent_report(job))
@@ -7266,14 +7296,27 @@ def ensure_immutable_inventory_baseline(repo_dir: Path, run_dir: Path) -> Path:
     return write_immutable_inventory_baseline(repo_dir, run_dir, inventory(repo_dir))
 
 
-def prepare_validation_workspace(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
+def prepare_validation_workspace(
+    repo_dir: Path,
+    run_dir: Path,
+    *,
+    deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    check_lifecycle_cancelled(cancel_requested)
+    remaining_wall_time_seconds(deadline_monotonic)
     ensure_intent_directories(run_dir)
     ensure_immutable_inventory_baseline(repo_dir, run_dir)
     validation_repo = repo_dir.parent / "validation-repo"
     if validation_repo.exists():
         shutil.rmtree(validation_repo)
     validation_repo.mkdir(parents=True, exist_ok=True)
-    copy_tree(repo_dir, validation_repo)
+    copy_tree(
+        repo_dir,
+        validation_repo,
+        deadline_monotonic=deadline_monotonic,
+        cancel_requested=cancel_requested,
+    )
     payload = {
         "schema_version": "validation-workspace/v1",
         "validation_repo_root": str(validation_repo),
@@ -8334,12 +8377,66 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def bounded_process_output(path: Path, *, max_bytes: int = 64 * 1024) -> str:
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+    except OSError:
+        return ""
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+    return data.decode("utf-8", errors="replace")
+
+
+def run_polled_intent_process(
+    args: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    stdout_path: Path,
+    stderr_path: Path,
+    timeout_seconds: int,
+    deadline_monotonic: float | None,
+    cancel_requested: Callable[[], bool] | None,
+) -> subprocess.CompletedProcess[str]:
+    check_lifecycle_cancelled(cancel_requested)
+    remaining_wall_time_seconds(deadline_monotonic)
+    timeout_deadline = time.monotonic() + max(1, int(timeout_seconds))
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+        process = subprocess.Popen(
+            args,
+            cwd=str(cwd),
+            env=env,
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
+        poll_process_communicate(
+            process,
+            args,
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
+            timeout_deadline_monotonic=timeout_deadline,
+        )
+    return subprocess.CompletedProcess(
+        args=args,
+        returncode=int(process.returncode or 0),
+        stdout=bounded_process_output(stdout_path),
+        stderr=bounded_process_output(stderr_path),
+    )
+
+
 def run_intent_tests(
     run_dir: Path,
     *,
     only_test_ids: set[str] | None = None,
     attempt: int = 1,
+    deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    check_lifecycle_cancelled(cancel_requested)
+    remaining_wall_time_seconds(deadline_monotonic)
     ensure_intent_directories(run_dir)
     validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
     validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
@@ -8392,7 +8489,20 @@ def run_intent_tests(
             test_id = _intent_test_id(target, f"ITV-{index + 1:03d}")
             execution_records.append((test_id, {}, target))
     max_tests = max(0, int((config if isinstance(config, dict) else {}).get("max_tests_per_run") or 20))
-    total_deadline = time.monotonic() + max(0, int((config if isinstance(config, dict) else {}).get("max_total_test_run_seconds") or 900))
+    intent_deadline = time.monotonic() + max(
+        0,
+        int(
+            (config if isinstance(config, dict) else {}).get(
+                "max_total_test_run_seconds"
+            )
+            or 900
+        ),
+    )
+    total_deadline = (
+        min(float(deadline_monotonic), intent_deadline)
+        if deadline_monotonic is not None
+        else intent_deadline
+    )
     raw_results = []
     selected_records = [
         record
@@ -8403,6 +8513,8 @@ def run_intent_tests(
     ]
     limited_records = selected_records[:max_tests]
     for generated_index, (test_id, generated, target) in enumerate(limited_records):
+        check_lifecycle_cancelled(cancel_requested)
+        remaining_wall_time_seconds(deadline_monotonic)
         command = _intent_generated_command(
             generated,
             target,
@@ -8524,10 +8636,11 @@ def run_intent_tests(
                 }
             )
             continue
-        remaining_total = total_deadline - time.monotonic()
-        if remaining_total <= 0:
-            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "intent test total timeout budget exhausted"})
-            continue
+        remaining_total = remaining_wall_time_seconds(total_deadline)
+        if remaining_total is None:
+            raise AssertionError("intent test deadline must be bounded")
+        if remaining_total < 1:
+            raise JobPartialCompleted("review wall-time deadline exceeded")
         timeout_seconds = min(_intent_test_timeout(config if isinstance(config, dict) else {}, generated, target), max(1, int(remaining_total)))
         started = time.monotonic()
         stdout_path = _intent_output_path(run_dir, test_id, "stdout", attempt=attempt)
@@ -8537,20 +8650,20 @@ def run_intent_tests(
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": sandbox_skip_reason})
             continue
         try:
-            completed = subprocess.run(
+            completed = run_polled_intent_process(
                 sandbox_command,
-                cwd=str(cwd),
-                env=_intent_test_env(validation_repo, sandboxed=sys.platform.startswith("linux")),
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                timeout=timeout_seconds,
-                check=False,
+                cwd=cwd,
+                env=_intent_test_env(
+                    validation_repo,
+                    sandboxed=sys.platform.startswith("linux"),
+                ),
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                timeout_seconds=timeout_seconds,
+                deadline_monotonic=total_deadline,
+                cancel_requested=cancel_requested,
             )
             duration_ms = int((time.monotonic() - started) * 1000)
-            stdout_path.write_text(completed.stdout or "", encoding="utf-8")
-            stderr_path.write_text(completed.stderr or "", encoding="utf-8")
             if _intent_sandbox_setup_failed(sandbox_command, completed):
                 raw_results.append(
                     {
@@ -8589,8 +8702,10 @@ def run_intent_tests(
                 break
         except subprocess.TimeoutExpired as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
-            stdout_path.write_text(str(exc.stdout or ""), encoding="utf-8")
-            stderr_path.write_text(str(exc.stderr or ""), encoding="utf-8")
+            if not stdout_path.exists():
+                stdout_path.write_text(str(exc.stdout or ""), encoding="utf-8")
+            if not stderr_path.exists():
+                stderr_path.write_text(str(exc.stderr or ""), encoding="utf-8")
             timeout_result, integrity_failed = _intent_result_with_post_execution_integrity(
                 run_dir,
                 {
@@ -13503,14 +13618,27 @@ def git_command_timeout(deadline_monotonic: float | None) -> int | None:
 
 
 def terminate_polled_process(process: Any) -> None:
-    if process.poll() is not None:
+    try:
+        if process.poll() is not None:
+            return
+        process.terminate()
+    except OSError:
         return
-    process.terminate()
     try:
         process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
         process.kill()
+    except OSError:
+        return
+    try:
         process.wait(timeout=1)
+    except (OSError, subprocess.TimeoutExpired):
+        # Cancellation/deadline remains the primary failure even when the OS
+        # cannot synchronously reap a stubborn child.
+        pass
 
 
 def poll_process_communicate(

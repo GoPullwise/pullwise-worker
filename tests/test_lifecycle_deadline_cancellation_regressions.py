@@ -276,7 +276,7 @@ class LifecycleDeadlineCancellationRegressionsTest(unittest.TestCase):
     def test_clone_propagates_cancellation_without_retrying_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            cancel_requested = lambda: True
+            cancel_requested = lambda: False
             with patch(
                 "pullwise_worker.review_worker_v1.run_git",
                 side_effect=JobCancelled("cancel requested"),
@@ -477,18 +477,26 @@ class LifecycleDeadlineCancellationRegressionsTest(unittest.TestCase):
             run_dir = prepare_intent_run(root)
             process = HangingProcess()
             checks = 0
+            process_started = False
 
             def cancel_requested() -> bool:
                 nonlocal checks
+                if not process_started:
+                    return False
                 checks += 1
                 return checks >= 2
+
+            def start_process(*_args: object, **_kwargs: object) -> HangingProcess:
+                nonlocal process_started
+                process_started = True
+                return process
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
                 "pullwise_worker.review_worker_v1.shutil.which",
                 return_value="/usr/bin/python3",
             ), patch(
                 "pullwise_worker.review_worker_v1.subprocess.Popen",
-                return_value=process,
+                side_effect=start_process,
             ):
                 with self.assertRaises(JobCancelled):
                     run_intent_tests(
