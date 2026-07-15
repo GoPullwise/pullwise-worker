@@ -184,6 +184,45 @@ class LifecycleReadinessRegressionTests(unittest.TestCase):
             self.assertEqual(control_plane.calls, ["register", "heartbeat", "claim"])
             self.assertFalse(workspace.exists())
 
+    def test_uninstall_ownership_rejects_unrelated_directory_with_worker_basename(self) -> None:
+        config = SimpleNamespace(
+            worker_id="wk_test",
+            service_home="/var/lib/pullwise-worker/wk_test",
+            worker_root="/var/lib/pullwise-worker/wk_test/workers/wk_test",
+        )
+
+        self.assertFalse(lifecycle.worker_instance_owned_path(Path("/unrelated/wk_test"), config))
+        self.assertFalse(
+            lifecycle.worker_instance_owned_path(
+                Path("/var/log/pullwise-worker/unrelated/wk_test"),
+                config,
+            )
+        )
+        self.assertTrue(
+            lifecycle.worker_instance_owned_path(
+                Path("/var/lib/pullwise-worker/wk_test/checkouts"),
+                config,
+            )
+        )
+        self.assertTrue(
+            lifecycle.worker_instance_owned_path(
+                Path("/var/lib/pullwise-worker/wk_test/workers/wk_test"),
+                config,
+            )
+        )
+        self.assertTrue(
+            lifecycle.worker_instance_owned_path(
+                Path("/var/log/pullwise-worker/wk_test"),
+                config,
+            )
+        )
+        self.assertTrue(
+            lifecycle.worker_instance_owned_path(
+                Path("/etc/pullwise-worker/wk_test"),
+                config,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

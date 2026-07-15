@@ -40,6 +40,14 @@ def reviewer_payload(*, with_location: bool) -> dict:
     finding = {
         "id": "finding-001",
         "title": "Concrete behavior issue",
+        "severity": "medium",
+        "confidence": 0.8,
+        "failure_scenario": "A valid request reaches the incorrect fallback branch.",
+        "evidence": ["The branch returns a value that violates the documented contract."],
+        "impact": "The caller receives an incorrect result.",
+        "recommendation": "Guard the fallback branch and add a regression test.",
+        "false_positive_risk": "Low; the branch and contract are both present in the bundle.",
+        "next_agent_task": "Fix the fallback guard and cover the request path.",
     }
     if with_location:
         finding["locations"] = [
@@ -110,7 +118,7 @@ class OutputContractCheckTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("3 output contract cases passed", result.stdout)
+        self.assertIn("4 output contract cases passed", result.stdout)
 
 
 if __name__ == "__main__":

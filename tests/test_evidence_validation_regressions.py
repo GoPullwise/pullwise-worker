@@ -197,6 +197,20 @@ class EvidenceValidationRegressionsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "raw process evidence"):
                 validate_phase_outputs(run_dir, "intent_test_failure_analysis")
 
+    def test_analyzed_intent_requires_raw_process_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run-1"
+            write_json(
+                run_dir / "intent" / "intent-test-results.json",
+                {
+                    "schema_version": "intent-test-result/v1",
+                    "test_results": [analyzed_result("fabricated")],
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "raw process evidence"):
+                validate_phase_outputs(run_dir, "intent_test_failure_analysis")
+
     def test_passed_raw_intent_run_cannot_be_claimed_as_confirmed_bug(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run-1"

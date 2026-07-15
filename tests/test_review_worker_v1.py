@@ -2678,6 +2678,14 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         {
                             "id": "F-001",
                             "title": "Located candidate",
+                            "severity": "medium",
+                            "confidence": 0.8,
+                            "failure_scenario": "The settings request reaches the incorrect branch.",
+                            "evidence": ["The located branch returns an inconsistent settings value."],
+                            "impact": "The caller observes incorrect settings state.",
+                            "recommendation": "Correct the branch and add a regression test.",
+                            "false_positive_risk": "Low; the branch is directly reachable.",
+                            "next_agent_task": "Fix and test the settings branch.",
                             "path": "src/settings.jsx",
                             "line_evidence": {"start": 12, "end": 18},
                         }
@@ -5075,6 +5083,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [{"test_id": "ITV-001", "status": "failed"}],
+                },
+            )
 
             finding["id"] = "intent-1"
             write_json(run_dir / "validated-findings.json", validation_payload(validation_entry("intent-1", status="confirmed", title="Intent-only signal")))
@@ -5799,7 +5814,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(calls, ["register", "heartbeat", "claim"])
 
-    def test_heartbeat_keeps_ready_when_quota_probe_is_unavailable_but_codex_client_runs(self) -> None:
+    def test_heartbeat_fails_closed_when_quota_probe_is_unavailable_but_codex_client_runs(self) -> None:
         heartbeat_payloads = []
 
         class Client:
@@ -5828,11 +5843,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.heartbeat()
 
         self.assertEqual(heartbeat_payloads[0]["codex_app_server"]["status"], "ready")
-        self.assertTrue(heartbeat_payloads[0]["codex_ready"])
-        self.assertEqual(heartbeat_payloads[0]["doctor_status"], "ok")
-        self.assertEqual(heartbeat_payloads[0]["ready_providers"], ["codex"])
+        self.assertFalse(heartbeat_payloads[0]["codex_ready"])
+        self.assertEqual(heartbeat_payloads[0]["doctor_status"], "degraded")
+        self.assertEqual(heartbeat_payloads[0]["ready_providers"], [])
         self.assertEqual(heartbeat_payloads[0]["codex_quota"]["status"], "unavailable")
         self.assertEqual(heartbeat_payloads[0]["codex_quota"]["reason"], "codex_quota_unavailable")
+        self.assertFalse(heartbeat_payloads[0]["codex_quota"]["ready"])
 
     def test_idle_worker_forces_quota_refresh_command_before_reporting_success(self) -> None:
         events = []
@@ -8753,6 +8769,13 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             (run_dir / "intent").mkdir(parents=True)
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [{"test_id": "ITV-001", "status": "failed"}],
+                },
+            )
             result_path = run_dir / "intent" / "intent-test-results.json"
             result_path.write_text(
                 json.dumps(
@@ -8788,6 +8811,16 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             validate_phase_outputs(run_dir, "intent_test_failure_analysis")
 
+            write_json(
+                run_dir / "intent" / "intent-test-results.raw.json",
+                {
+                    "schema_version": "intent-test-run-results/v1",
+                    "test_runs": [
+                        {"test_id": "ITV-001", "status": "passed"},
+                        {"test_id": "ITV-002", "status": "skipped"},
+                    ],
+                },
+            )
             result_path.write_text(
                 json.dumps(
                     {

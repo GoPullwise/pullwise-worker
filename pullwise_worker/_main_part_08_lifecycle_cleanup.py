@@ -681,13 +681,36 @@ def safe_worker_instance_config_target(config_dir: Path, config: WorkerConfig | 
 
 
 def worker_instance_owned_path(path: Path, config: WorkerConfig) -> bool:
-    service_home = Path(str(getattr(config, "service_home", "") or ""))
-    if service_home.is_absolute() and not path_is_root(service_home) and path_same_or_within(path, service_home):
-        return True
     worker_id = str(getattr(config, "worker_id", "") or "").strip()
     if not worker_id or len(worker_id) > _MAX_JOB_ID_LENGTH or not _SAFE_JOB_ID_RE.match(worker_id):
         return False
-    return bool(worker_id) and path.resolve(strict=False).name == worker_id
+    owned_roots: list[Path] = []
+    service_home_text = str(getattr(config, "service_home", "") or "")
+    service_home = Path(service_home_text)
+    service_home_is_absolute = service_home.is_absolute() or service_home_text.startswith("/")
+    if (
+        service_home_is_absolute
+        and not path_is_root(service_home)
+        and service_home.resolve(strict=False).name == worker_id
+    ):
+        owned_roots.append(service_home)
+    worker_root_text = str(getattr(config, "worker_root", "") or "").strip()
+    if worker_root_text:
+        worker_root = Path(worker_root_text)
+        worker_root_is_absolute = worker_root.is_absolute() or worker_root_text.startswith("/")
+        if (
+            worker_root_is_absolute
+            and not path_is_root(worker_root)
+            and worker_root.resolve(strict=False).name == worker_id
+        ):
+            owned_roots.append(worker_root)
+    owned_roots.extend(
+        (
+            Path("/var/log/pullwise-worker") / worker_id,
+            Path("/etc/pullwise-worker") / worker_id,
+        )
+    )
+    return any(path_same_or_within(path, root) for root in owned_roots)
 
 
 def dedupe_cleanup_targets(targets: list[Path]) -> list[Path]:

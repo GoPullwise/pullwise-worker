@@ -1500,13 +1500,17 @@ class CodexQuotaMonitor:
             if quota_refresh_error_is_exhaustion(exc):
                 self.mark_exhausted(str(exc), checked_at=checked_at)
             else:
+                degraded_next_check_at = checked_at + codex_quota_check_seconds(
+                    self.config,
+                    degraded=True,
+                )
                 self.snapshot = {
                     "provider": "codex",
                     "status": "unavailable",
-                    "ready": True,
+                    "ready": False,
                     "reason": "codex_quota_unavailable",
                     "checkedAt": checked_at,
-                    "nextCheckAt": next_check_at,
+                    "nextCheckAt": degraded_next_check_at,
                     "thresholdPercent": threshold,
                     "lastError": quota_text(exc, 500),
                 }
@@ -2443,6 +2447,8 @@ class ReviewWorkerV1:
         self._machine_metrics_collected_at = 0.0
         self._heartbeat_lock = threading.RLock()
         self._progress_lock = threading.RLock()
+        self._last_workspace_cleanup_monotonic = 0.0
+        self._persisted_unfinished_workspace_names: set[str] = set()
 
     def default_codex_events_path(self) -> Path:
         return self.isolation.logs / "codex-sdk-events.jsonl"
@@ -2487,6 +2493,189 @@ class ReviewWorkerV1:
         self._machine_metrics_collected_at = current_time
         return payload
 
+    def _persisted_submit_marker(self, run_name: str, marker_name: str) -> dict[str, Any]:
+        payload = read_json(self.isolation.artifacts / run_name / marker_name, {})
+        if not isinstance(payload, dict):
+            return {}
+        marker_run_id = str(payload.get("run_id") or "").strip()
+        if marker_run_id and marker_run_id != run_name:
+            return {}
+        return payload
+
+    def _persisted_run_is_terminal(self, run_name: str, run_state: dict[str, Any]) -> bool:
+        if self._persisted_submit_marker(run_name, "result-submit-succeeded.json"):
+            return True
+        progress = run_state.get("progress") if isinstance(run_state.get("progress"), dict) else {}
+        return (
+            str(progress.get("current_phase") or "") == "cleanup_active_job"
+            and str(progress.get("current_phase_status") or "") == "completed"
+        )
+
+    def _persisted_unfinished_runs(self) -> list[dict[str, Any]]:
+        records: dict[str, dict[str, Any]] = {}
+        try:
+            workspaces = list(self.isolation.workspaces.iterdir())
+        except OSError:
+            workspaces = []
+        for workspace in workspaces:
+            try:
+                if workspace.is_symlink() or not workspace.is_dir():
+                    continue
+            except OSError:
+                continue
+            run_name = workspace.name
+            run_dir = workspace / "repo" / ".codex-review" / "runs" / run_name
+            run_state = read_json(run_dir / "run-state.json", {})
+            if not isinstance(run_state, dict):
+                run_state = {}
+            if self._persisted_run_is_terminal(run_name, run_state):
+                from ._main_part_08_lifecycle_cleanup import cleanup_v1_workspace_path
+
+                cleanup_v1_workspace_path(self.isolation.workspaces, workspace)
+                continue
+            active_job = run_state.get("active_job") if isinstance(run_state.get("active_job"), dict) else {}
+            failed_marker = self._persisted_submit_marker(run_name, "result-submit-failed.json")
+            blocked_marker = self._persisted_submit_marker(run_name, "result-submit-blocked.json")
+            submit_marker = failed_marker or blocked_marker
+            persisted_state = str(active_job.get("state") or "").strip().lower()
+            if not submit_marker and persisted_state not in ACTIVE_HEARTBEAT_STATUSES:
+                continue
+            evidence_path = (
+                self.isolation.artifacts
+                / run_name
+                / ("result-submit-failed.json" if failed_marker else "result-submit-blocked.json")
+                if submit_marker
+                else run_dir / "run-state.json"
+            )
+            try:
+                evidence_mtime = evidence_path.stat().st_mtime
+            except OSError:
+                evidence_mtime = 0.0
+            records[run_name] = {
+                "run_name": run_name,
+                "run_dir": run_dir,
+                "run_state": run_state,
+                "active_job": active_job,
+                "submit_marker": submit_marker,
+                "evidence_mtime": evidence_mtime,
+            }
+
+        try:
+            artifact_runs = list(self.isolation.artifacts.iterdir())
+        except OSError:
+            artifact_runs = []
+        for artifact_run in artifact_runs:
+            try:
+                if artifact_run.is_symlink() or not artifact_run.is_dir():
+                    continue
+            except OSError:
+                continue
+            run_name = artifact_run.name
+            if run_name in records or self._persisted_submit_marker(run_name, "result-submit-succeeded.json"):
+                continue
+            failed_marker = self._persisted_submit_marker(run_name, "result-submit-failed.json")
+            blocked_marker = self._persisted_submit_marker(run_name, "result-submit-blocked.json")
+            submit_marker = failed_marker or blocked_marker
+            if not submit_marker:
+                continue
+            evidence_path = artifact_run / (
+                "result-submit-failed.json" if failed_marker else "result-submit-blocked.json"
+            )
+            try:
+                evidence_mtime = evidence_path.stat().st_mtime
+            except OSError:
+                evidence_mtime = 0.0
+            run_dir = self.isolation.workspaces / run_name / "repo" / ".codex-review" / "runs" / run_name
+            records[run_name] = {
+                "run_name": run_name,
+                "run_dir": run_dir,
+                "run_state": {},
+                "active_job": {},
+                "submit_marker": submit_marker,
+                "evidence_mtime": evidence_mtime,
+            }
+        return sorted(records.values(), key=lambda item: (float(item["evidence_mtime"]), item["run_name"]), reverse=True)
+
+    def recover_persisted_active_job(self) -> ActiveJob | None:
+        records = self._persisted_unfinished_runs()
+        self._persisted_unfinished_workspace_names = {str(record["run_name"]) for record in records}
+        if not records:
+            return None
+        record = records[0]
+        active_payload = record["active_job"]
+        submit_marker = record["submit_marker"]
+        run_name = str(record["run_name"])
+
+        def persisted_id(value: object, fallback: str) -> str:
+            raw = str(value or "").strip()
+            return safe_id(raw, fallback) if raw else safe_id(fallback, fallback)
+
+        run_id = persisted_id(
+            submit_marker.get("run_id") or active_payload.get("run_id") or run_name,
+            f"recovered_run_{run_name}",
+        )
+        active = ActiveJob(
+            job_id=persisted_id(
+                submit_marker.get("job_id") or active_payload.get("job_id"),
+                f"recovered_job_{run_id}",
+            ),
+            run_id=run_id,
+            lease_id=persisted_id(
+                submit_marker.get("lease_id") or active_payload.get("lease_id"),
+                f"recovered_lease_{run_id}",
+            ),
+            attempt_id=persisted_id(
+                submit_marker.get("attempt_id"),
+                f"{self.config.worker_id}-recovered",
+            ),
+            state="finishing",
+        )
+        active.run_dir = record["run_dir"] if Path(record["run_dir"]).is_dir() else None
+        progress = record["run_state"].get("progress") if isinstance(record["run_state"].get("progress"), dict) else {}
+        active.current_phase = str(
+            progress.get("current_phase")
+            or active_payload.get("current_phase")
+            or "submit_result_envelope"
+        )
+        active.current_phase_status = str(progress.get("current_phase_status") or "blocked")
+        active.message = str(
+            progress.get("message")
+            or "Recovered unfinished run; operator intervention is required before this slot can be reused."
+        )
+        try:
+            active.overall_percent = max(0.0, min(100.0, float(progress.get("overall_percent") or 0.0)))
+            active.current_phase_percent = max(
+                0.0,
+                min(100.0, float(progress.get("current_phase_percent") or 0.0)),
+            )
+            active.last_event_sequence = max(0, int(progress.get("last_event_sequence") or 0))
+        except (TypeError, ValueError, OverflowError):
+            pass
+        counters = progress.get("counters") if isinstance(progress.get("counters"), dict) else {}
+        active.apply_progress_data(counters)
+        self.state.set_active(active)
+        self.state.state = "finishing"
+        return active
+
+    def cleanup_idle_v1_workspaces_if_due(self, *, force: bool = False) -> list[Path]:
+        if self.state.active_job is not None or self.state.state != "idle":
+            return []
+        now_monotonic = time.monotonic()
+        interval = max(1, int(getattr(self.config, "cleanup_interval_seconds", 3600) or 3600))
+        if (
+            not force
+            and self._last_workspace_cleanup_monotonic > 0
+            and now_monotonic - self._last_workspace_cleanup_monotonic < interval
+        ):
+            return []
+        self._last_workspace_cleanup_monotonic = now_monotonic
+        from ._main_part_08_lifecycle_cleanup import cleanup_v1_workspaces
+
+        return cleanup_v1_workspaces(
+            self.isolation.workspaces,
+            protected_run_ids=self._persisted_unfinished_workspace_names,
+        )
+
     def run(self, *, once: bool = False) -> None:
         if not sys.platform.startswith("linux"):
             raise RuntimeError("Pullwise review worker v1 is Linux only")
@@ -2495,13 +2684,17 @@ class ReviewWorkerV1:
         try:
             if hasattr(self.client, "register"):
                 self.client.register()
-            self.state.state = "idle"
+            if self.recover_persisted_active_job() is None:
+                self.state.state = "idle"
             while True:
                 self.heartbeat()
+                ran_job = False
                 if self.state.can_lease():
                     job = self.client.claim()
                     if job:
+                        ran_job = True
                         self.run_job(job)
+                self.cleanup_idle_v1_workspaces_if_due(force=ran_job)
                 if once:
                     return
                 time.sleep(max(1, int(getattr(self.config, "poll_seconds", 5) or 5)))
@@ -2522,7 +2715,18 @@ class ReviewWorkerV1:
             except Exception as exc:
                 codex_client_error = quota_text(exc, 500)
         quota = self.quota_monitor.snapshot_if_due(active=active is not None)
-        quota_ready = bool((quota or {}).get("ready", True))
+        if not isinstance(quota, dict):
+            checked_at = int(time.time())
+            quota = {
+                "provider": "codex",
+                "status": "unavailable",
+                "ready": False,
+                "reason": "codex_quota_unavailable",
+                "checkedAt": checked_at,
+                "nextCheckAt": checked_at + codex_quota_check_seconds(self.config, degraded=True),
+                "thresholdPercent": codex_quota_threshold_percent(self.config),
+            }
+        quota_ready = quota.get("ready") is True
         codex_client_ready = self.codex_client is not None and self.codex_client.is_running()
         provider_ready = codex_client_ready and quota_ready
         self.state.provider_ready = provider_ready
@@ -3313,6 +3517,24 @@ class ReviewWorkerV1:
             with self._progress_lock:
                 active.terminal_result_in_flight = False
                 active.terminal_result_submitted = True
+            try:
+                write_json(
+                    artifact_dir / "result-submit-succeeded.json",
+                    {
+                        "run_id": active.run_id,
+                        "job_id": active.job_id,
+                        "lease_id": active.lease_id,
+                        "attempt_id": active.attempt_id,
+                        "result_status": result_status_from_envelope(envelope),
+                        "status": "result_submit_succeeded",
+                        "created_at": iso_time(time.time()),
+                    },
+                )
+            except Exception:
+                # The control plane has already accepted the terminal result.
+                # A local marker failure must not be reclassified as a failed
+                # submission; recovery remains conservatively blocked instead.
+                pass
             return True
         except Exception as exc:
             with self._progress_lock:
@@ -4502,6 +4724,9 @@ class ReviewWorkerV1:
         manifest = result_artifact_manifest_items(artifact_dir)
         now = time.time()
         error_payload = failure_payload_for_error(error, status=status, phase=phase) if error else None
+        bundle_plan = read_json(run_dir / "bundle-plan.json", {})
+        planned_bundles = bundle_plan.get("bundles") if isinstance(bundle_plan, dict) else []
+        bundle_count = len(planned_bundles) if isinstance(planned_bundles, list) else 0
         return {
             "protocol_version": PROTOCOL_VERSION,
             "message_type": "review_run_result",
@@ -4532,7 +4757,7 @@ class ReviewWorkerV1:
             "quality_gate": read_json(run_dir / "qa.json", {"status": "fail", "errors": ["run did not reach qa gate"], "warnings": []}),
             "preflight": read_json(run_dir / "preflight.json", {}),
             "artifact_manifest": manifest,
-            "extensions": {"worker_internal": {"bundle_count": 1}},
+            "extensions": {"worker_internal": {"bundle_count": bundle_count}},
         }
 
 
@@ -9263,7 +9488,11 @@ def intent_test_result_errors(payload: Any, run_dir: Path | None = None) -> list
     if run_dir is not None:
         errors.extend(_linked_finding_errors(run_dir, "intent-test-results.json", "test_results", results, required=False))
         raw_path = run_dir / 'intent' / 'intent-test-results.raw.json'
-        if raw_path.is_file():
+        if results and not raw_path.is_file():
+            errors.append(
+                'intent-test-results.json has analyzed results but no raw process evidence artifact'
+            )
+        elif raw_path.is_file():
             raw_by_id = _raw_intent_runs_by_id(run_dir)
             result_by_id = {
                 str(result.get('test_id') or '').strip(): result
@@ -9408,26 +9637,18 @@ def uploaded_artifact_manifest_items(artifact_dir: Path) -> list[dict[str, Any]]
 
 
 def result_artifact_manifest_items(artifact_dir: Path) -> list[dict[str, Any]]:
-    current = [copy.deepcopy(item) for item in artifact_manifest_items(read_json(artifact_dir / "artifact-manifest.json", {}))]
-    uploaded = uploaded_artifact_manifest_items(artifact_dir)
-    if not uploaded:
-        return current
-    uploaded_by_id = {str(item.get("artifact_id") or "").strip(): item for item in uploaded if str(item.get("artifact_id") or "").strip()}
-    merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in current:
-        artifact_id = str(item.get("artifact_id") or "").strip()
-        if artifact_id and artifact_id in uploaded_by_id:
-            merged.append(copy.deepcopy(uploaded_by_id[artifact_id]))
-            seen.add(artifact_id)
-        else:
-            merged.append(item)
-    for item in uploaded:
-        artifact_id = str(item.get("artifact_id") or "").strip()
-        if artifact_id and artifact_id not in seen:
-            merged.append(copy.deepcopy(item))
-            seen.add(artifact_id)
-    return merged
+    snapshot_path = uploaded_artifact_manifest_path(artifact_dir)
+    if snapshot_path.is_file():
+        # The worker-owned upload snapshot is the exact set accepted by the
+        # control plane. Re-merging the pre-upload manifest would advertise
+        # optional artifacts whose upload failed.
+        return uploaded_artifact_manifest_items(artifact_dir)
+    return [
+        copy.deepcopy(item)
+        for item in artifact_manifest_items(
+            read_json(artifact_dir / "artifact-manifest.json", {})
+        )
+    ]
 
 
 def reconcile_envelope_artifact_manifest_with_uploads(envelope: dict[str, Any], artifact_dir: Path) -> None:
@@ -9971,7 +10192,13 @@ def qa_gate_payload(
                 if matching_entry is None:
                     errors.append(f"finding[{index}] is not backed by confirmed/plausible validation")
                 else:
-                    matched_validation_entries.add(id(matching_entry))
+                    entry_identity = id(matching_entry)
+                    if entry_identity in matched_validation_entries:
+                        errors.append(
+                            f'finding[{index}] reuses validation evidence already bound to another main finding'
+                        )
+                    else:
+                        matched_validation_entries.add(entry_identity)
     if validation_ok:
         for index, entry in enumerate(accepted_validation):
             if id(entry) not in matched_validation_entries:
@@ -10333,6 +10560,12 @@ def phase_progress_data(run_dir: Path, phase: str, artifact_dir: Path | None = N
             name = str(item.get("name") or "").strip()
             if name and (manifest_dir / name).is_file():
                 uploadable += 1
+        snapshot_path = uploaded_artifact_manifest_path(manifest_dir)
+        if snapshot_path.is_file():
+            return {
+                'artifacts_total': uploadable,
+                'artifacts_uploaded': len(uploaded_artifact_manifest_items(manifest_dir)),
+            }
         return {"artifacts_total": uploadable, "artifacts_uploaded": uploadable}
     return {}
 
@@ -11382,12 +11615,14 @@ def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     _valid_validation, accepted_validation = validation_binding_entries(run_dir)
     findings: list[dict[str, Any]] = []
     demoted_findings: list[dict[str, Any]] = []
+    used_validation_entries: set[int] = set()
     for raw_finding in raw_findings:
         finding = normalized_agent_report_finding(raw_finding)
         if finding is None:
             continue
         validation_entry = matching_validation_entry(finding, accepted_validation)
-        if validation_entry is not None:
+        if validation_entry is not None and id(validation_entry) not in used_validation_entries:
+            used_validation_entries.add(id(validation_entry))
             if not str(finding.get("id") or "").strip():
                 finding["id"] = f"finding-{len(findings) + 1:03d}"
             finding["validator_status"] = validation_entry_status(validation_entry)
@@ -11514,6 +11749,62 @@ def _coverage_summary(coverage: object) -> str:
     return "; ".join(parts) if parts else "recorded without file counts"
 
 
+def intent_test_process_started(record: object) -> bool:
+    if not isinstance(record, dict):
+        return False
+    explicit = record.get('process_started')
+    if isinstance(explicit, bool):
+        return explicit
+    status = str(record.get('status') or '').strip().lower()
+    return status not in {
+        '',
+        'skipped',
+        'not_run',
+        'not_started',
+        'unavailable',
+    }
+
+
+def _append_markdown_secondary_findings(
+    lines: list[str],
+    title: str,
+    raw_findings: object,
+) -> None:
+    findings = raw_findings if isinstance(raw_findings, list) else []
+    if not findings:
+        return
+    lines.extend([f'## {title}', ''])
+    for index, finding in enumerate(findings, start=1):
+        if not isinstance(finding, dict):
+            continue
+        finding_title = _markdown_text(finding.get('title'), 'Untitled finding')
+        severity = _markdown_text(finding.get('severity'), 'unknown')
+        lines.extend([f'### {index}. [{severity}] {finding_title}', ''])
+        status = _markdown_text(
+            finding.get('validator_status')
+            or finding.get('validation_status')
+            or finding.get('status')
+        )
+        if status:
+            lines.append(f'- Validation status: {status}')
+        locations = finding.get('locations') if isinstance(finding.get('locations'), list) else []
+        location_text = ', '.join(
+            item for item in (_markdown_location(location) for location in locations[:3]) if item
+        )
+        if location_text:
+            lines.append(f'- Location: {location_text}')
+        for field, label in (
+            ('impact', 'Impact'),
+            ('recommendation', 'Recommendation'),
+            ('demoted_reason', 'Appendix reason'),
+            ('disproof_reason', 'Disproof reason'),
+        ):
+            detail = _markdown_text(finding.get(field))
+            if detail:
+                lines.append(f'- {label}: {detail}')
+        lines.append('')
+
+
 def _zh_cn_markdown(lines: list[str]) -> list[str]:
     exact = {
         "# Codex Full Repository Review Report": "# Codex 全仓库审查报告",
@@ -11553,6 +11844,12 @@ def _zh_cn_markdown(lines: list[str]) -> list[str]:
     }
     localized: list[str] = []
     for line in lines:
+        if line == '## Appendix Findings':
+            localized.append('## 附录问题')
+            continue
+        if line == '## Disproven Findings':
+            localized.append('## 已排除问题')
+            continue
         if line.startswith("This review completed with"):
             localized.append("本次审查已完成；已确认和可能问题的数量及最高风险见上方摘要。")
             continue
@@ -11739,7 +12036,11 @@ def render_markdown(report: dict[str, Any], *, output_language: str = "") -> str
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     intent = report.get("intent_test_validation") if isinstance(report.get("intent_test_validation"), dict) else {}
     tests = intent.get("test_results") if isinstance(intent.get("test_results"), list) else []
+    recorded_tests = tests
+    tests = [test for test in recorded_tests if intent_test_process_started(test)]
     lines = [
+        # The summary reports processes that actually started. Keep all
+        # records for the detailed section so skipped attempts remain visible.
         "# Codex Full Repository Review Report",
         "",
         "## Summary",
@@ -11754,6 +12055,7 @@ def render_markdown(report: dict[str, Any], *, output_language: str = "") -> str
         f"- Coverage: {_coverage_summary(report.get('coverage'))}",
         "",
     ]
+    tests = recorded_tests
     if confirmed_findings:
         highest = _markdown_text(findings[0].get("severity") if isinstance(findings[0], dict) else "", "unknown")
         finding_sentence = (
@@ -11867,6 +12169,16 @@ def render_markdown(report: dict[str, Any], *, output_language: str = "") -> str
         lines.append("")
 
     tasks = report.get("next_agent_tasks") if isinstance(report.get("next_agent_tasks"), list) else []
+    _append_markdown_secondary_findings(
+        lines,
+        'Appendix Findings',
+        report.get('appendix_findings'),
+    )
+    _append_markdown_secondary_findings(
+        lines,
+        'Disproven Findings',
+        report.get('disproven_findings'),
+    )
     task_texts = [_markdown_text(task) for task in tasks]
     if not task_texts:
         task_texts = [_markdown_text(finding.get("next_agent_task")) for finding in findings if isinstance(finding, dict)]
@@ -12928,6 +13240,7 @@ def ensure_repository_mirror(
     env: dict[str, str],
     deadline_monotonic: float | None,
 ) -> None:
+    clone_url = repository_mirror_identity_url(clone_url)
     cache_root = mirror_dir.parent
     if cache_root.is_symlink():
         raise RuntimeError("repository mirror cache root must not be a symlink")

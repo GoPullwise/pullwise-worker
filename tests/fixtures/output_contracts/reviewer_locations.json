@@ -16,6 +16,14 @@
             {
               "id": "finding-canonical",
               "title": "Canonical location",
+              "severity": "medium",
+              "confidence": 0.8,
+              "failure_scenario": "The request reaches the incorrect service branch.",
+              "evidence": ["The branch returns a value that violates the service contract."],
+              "impact": "The caller receives an incorrect result.",
+              "recommendation": "Correct the branch and add a regression test.",
+              "false_positive_risk": "Low; the branch and contract are in the reviewed path.",
+              "next_agent_task": "Fix and test the service branch.",
               "locations": [
                 {
                   "path": "src/service.py",
@@ -51,6 +59,14 @@
             {
               "id": "finding-code-locations",
               "title": "Common model alias",
+              "severity": "medium",
+              "confidence": 0.8,
+              "failure_scenario": "The request reaches the incorrect service branch.",
+              "evidence": ["The branch returns a value that violates the service contract."],
+              "impact": "The caller receives an incorrect result.",
+              "recommendation": "Correct the branch and add a regression test.",
+              "false_positive_risk": "Low; the branch and contract are in the reviewed path.",
+              "next_agent_task": "Fix and test the service branch.",
               "code_locations": [
                 {
                   "file_path": "src/service.py",
@@ -86,7 +102,42 @@
           "findings": [
             {
               "id": "finding-locationless",
-              "title": "No source location"
+              "title": "No source location",
+              "severity": "medium",
+              "confidence": 0.8,
+              "failure_scenario": "The request reaches the incorrect service branch.",
+              "evidence": ["The branch returns a value that violates the service contract."],
+              "impact": "The caller receives an incorrect result.",
+              "recommendation": "Correct the branch and add a regression test.",
+              "false_positive_risk": "Low; the branch and contract are in the reviewed path.",
+              "next_agent_task": "Fix and test the service branch."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "reviewer-location-only-finding-remains-invalid",
+      "phase": "reviewer_json_validation",
+      "expect": "invalid",
+      "expected_error": "findings[0].title is required",
+      "files": {
+        "raw-reviewers/p2-bundle-008.correctness-lite.json": {
+          "schema_version": "codex-reviewer-output/v1",
+          "bundle_id": "p2-bundle-008",
+          "reviewer": "correctness_lite",
+          "reviewed_paths": ["src/service.py"],
+          "review_summary": "Reviewed the assigned source path.",
+          "uncertainties": [],
+          "findings": [
+            {
+              "locations": [
+                {
+                  "path": "src/service.py",
+                  "start_line": 12,
+                  "end_line": 18
+                }
+              ]
             }
           ]
         }
