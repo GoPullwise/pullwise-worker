@@ -2146,6 +2146,56 @@ def _intent_preflight_classification(reason: str) -> str:
     return "skipped_not_runnable"
 
 
+AGENT_TEST_COMMAND_MARKERS = ("test", "spec", "check", "verify", "behavior", "intent")
+
+
+def _generic_agent_test_command_allowed(
+    argv: list[str],
+    cwd: Path,
+    validation_repo: Path,
+) -> tuple[bool, str]:
+    """Admit safe agent-proposed tests without encoding a framework matrix."""
+
+    if not argv:
+        return False, "agent-proposed command is empty"
+    executable_path = Path(argv[0])
+    contained_executable = (
+        executable_path.is_absolute()
+        and executable_path.is_file()
+        and not executable_path.is_symlink()
+        and path_is_under(executable_path, validation_repo)
+    )
+    test_intent = any(
+        marker in normalized_executable_name(argv[0])
+        for marker in AGENT_TEST_COMMAND_MARKERS
+    )
+    for raw_argument in argv[1:]:
+        argument = str(raw_argument).strip()
+        lowered = argument.lower()
+        if not argument or argument.startswith("-"):
+            continue
+        if re.match(r"^[a-z][a-z0-9+.-]*://", lowered):
+            return False, "agent-proposed test commands may not contain network URLs"
+        candidate = Path(argument)
+        path_like = candidate.is_absolute() or "/" in argument or "\" in argument
+        if path_like:
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            if candidate.exists() and not path_is_under(candidate, validation_repo):
+                return False, "agent-proposed command references a path outside the validation workspace"
+            if candidate.exists() and path_is_under(candidate, validation_repo):
+                test_intent = test_intent or any(
+                    marker in candidate.name.lower()
+                    for marker in AGENT_TEST_COMMAND_MARKERS
+                )
+        test_intent = test_intent or any(marker in lowered for marker in AGENT_TEST_COMMAND_MARKERS)
+    if contained_executable and test_intent:
+        return True, "contained agent-proposed test runner is allowed"
+    if test_intent:
+        return True, "agent-proposed test command is allowed"
+    return False, "agent-proposed command does not identify a contained test or test operation"
+
+
 def _is_python_intent_executable(executable: str) -> bool:
     return executable in {"python", "python3", "py"} or re.fullmatch(r"python3(?:\.\d+)+", executable) is not None
 
@@ -2205,7 +2255,99 @@ def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: P
         return ("test" in lowered[1:] or any(part.endswith(":test") for part in lowered[1:]), "gradle command must run test")
     if executable == "make":
         return ("test" in lowered[1:], "make command must run test")
-    return False, f"{executable} is not an allowed generated test command"
+    return _generic_agent_test_command_allowed(argv, cwd, validation_repo)
+
+
+def _intent_blocked_execution_diagnostic(
+    reason: str,
+    *,
+    reason_code: str = "not_runnable",
+    classification: str = "skipped_not_runnable",
+    agent_repairable: bool = True,
+    missing_capabilities: list[str] | None = None,
+) -> dict[str, Any]:
+    lowered = reason.lower()
+    missing = list(missing_capabilities or [])
+    local_runner = re.search(r"unavailable local executable ([^\s]+)", reason)
+    unavailable_executable = re.search(r"dependency_missing:\s*([^\s]+) executable is not available", reason)
+    if local_runner:
+        runner = local_runner.group(1)
+        reason_code = "package_local_runner_missing"
+        classification = "dependency_missing"
+        missing = [f"node_modules/.bin/{runner}"]
+    elif unavailable_executable:
+        executable = unavailable_executable.group(1)
+        reason_code = "executable_missing"
+        classification = "dependency_missing"
+        missing = [executable]
+    elif reason.startswith("dependency_missing:"):
+        reason_code = "project_dependency_missing"
+        classification = "dependency_missing"
+        if "pytest" in lowered:
+            missing = ["python module pytest"]
+    elif "package.json is missing" in lowered:
+        reason_code = "package_manifest_missing"
+    elif "no test script" in lowered:
+        reason_code = "package_test_script_missing"
+    elif "command is empty" in lowered or "no generated test command" in lowered:
+        reason_code = "command_missing"
+    elif "cwd escapes" in lowered:
+        reason_code = "cwd_escape"
+    elif "cwd does not exist" in lowered:
+        reason_code = "cwd_missing"
+    elif "sandbox" in lowered:
+        reason_code = "sandbox_unavailable"
+        classification = "environment_error"
+        agent_repairable = False
+    return {
+        "status": "blocked",
+        "reason_code": reason_code,
+        "reason": reason.split(": ", 1)[-1] if reason else "not runnable",
+        "classification": classification,
+        "agent_repairable": bool(agent_repairable),
+        "missing_capabilities": missing,
+    }
+
+
+def intent_execution_preflight(
+    command: list[str],
+    cwd: Path,
+    validation_repo: Path,
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    argv = [str(part) for part in command if str(part).strip()]
+    if not argv:
+        return _intent_blocked_execution_diagnostic(
+            "no generated test command was produced",
+            reason_code="command_missing",
+        )
+    if not path_is_under(cwd, validation_repo):
+        return _intent_blocked_execution_diagnostic(
+            "generated test cwd escapes validation workspace",
+            reason_code="cwd_escape",
+        )
+    if not cwd.is_dir():
+        return _intent_blocked_execution_diagnostic(
+            "generated test cwd does not exist",
+            reason_code="cwd_missing",
+        )
+    allowed, policy_reason = intent_test_command_policy(argv, cwd, validation_repo)
+    if not allowed:
+        return _intent_blocked_execution_diagnostic(
+            f"generated test command is not allowed by worker policy: {policy_reason}",
+            reason_code="command_policy_denied",
+        )
+    runnable, runnable_reason = intent_command_is_runnable_for_repo(argv, cwd, validation_repo, profile)
+    if not runnable:
+        return _intent_blocked_execution_diagnostic(runnable_reason)
+    return {
+        "status": "ready",
+        "reason_code": "runnable",
+        "reason": "command passed policy and runtime capability checks",
+        "classification": "",
+        "agent_repairable": False,
+        "missing_capabilities": [],
+    }
 
 
 def result_status_from_envelope(envelope: dict[str, Any]) -> str:
@@ -3945,6 +4087,7 @@ class ReviewWorkerV1:
         elif phase == "intent_test_validation":
             ensure_intent_directories(run_dir)
             write_json(run_dir / "intent" / "intent-test-validation.json", intent_validation_config(job))
+            refresh_agentic_execution_capabilities(repo_dir, run_dir)
         elif phase == "bundle_planning":
             write_json(run_dir / "bundle-plan.json", bundle_plan_payload(run_dir))
         elif phase == "bundle_packing":
@@ -4445,23 +4588,27 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
     "intent_test_planning": {
         "role": "Intent Test Planner",
         "prompt_files": ["intent/05_intent_test_planner.md"],
-        "inputs": ["clusters.json", "intent/intent-map.json", "validation-input.json"],
+        "inputs": ["clusters.json", "intent/intent-map.json", "validation-input.json", "intent/execution-capabilities.json"],
         "outputs": ["intent/intent-test-plan.json"],
         "instructions": [
             "Select only high-value P0/P1 candidate findings for temporary tests.",
             "Every test target must link to finding IDs and behavioral contract IDs.",
+            "For each target, propose one or more execution_candidates with command and cwd. These are Agent hypotheses for the Worker to verify, not selections from a fixed framework template list.",
+            "Prefer faithful execution of repository code over dependency-free imitation. Include alternate candidates when different available runtimes can preserve the same oracle.",
             'Write JSON only using intent-test-plan/v1 with a top-level "test_targets" array. Each target must include test_id, title, linked_finding_ids, contract_ids, and expected_result_before_fix set to fail, pass, or unknown.',
         ],
     },
     "intent_test_writing": {
         "role": "Intent Test Writer",
         "prompt_files": ["intent/06_intent_test_writer.md"],
-        "inputs": ["intent/intent-test-plan.json", "target snippets", "existing tests", "disposable validation workspace"],
+        "inputs": ["intent/intent-test-plan.json", "intent/execution-capabilities.json", "target snippets", "existing tests", "disposable validation workspace"],
         "outputs": ["intent/intent-test-source.json", "intent/generated-tests/** or disposable validation workspace tests"],
         "instructions": [
             "Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**.",
             "Return JSON only using intent-test-source/v1. Put every executable test record in the top-level generated_tests array, not only in aliases such as generated_test_files, created_test_files, or test_sources.",
             "Every generated test record must include path, command, and target_test_ids linking it to the intent-test-plan target(s) it implements.",
+            "Use the observed capability and candidate preflight data, but remain free to propose a different safe command or test approach when it preserves the behavioral oracle and executes real repository code.",
+            "If no faithful runnable approach exists, record an explicit top-level skip_reason instead of copying or reimplementing application logic in a self-contained imitation.",
             "Verify each expected outcome against AGENTS instructions, documentation, types, API contracts, and existing tests. If the intended behavior remains uncertain, do not encode it as an asserted oracle.",
             "For Python unittest entry points, do not leave imported TestCase subclasses at module scope where unittest.main() can discover unrelated repository suites; import the module under an alias or explicitly load only the generated test class or method.",
             "Prefer the repository's existing runnable test framework. If a JavaScript target is dependency-free and the package-local runner is unavailable, use Node's built-in node --test runner; otherwise record the dependency limitation instead of inventing a runnable command.",
@@ -4617,6 +4764,24 @@ def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -
     adaptive_context = _adaptive_prompt_context(run_dir)
     if adaptive_context:
         lines.extend(adaptive_context)
+    if phase in {"intent_test_planning", "intent_test_writing"}:
+        capabilities_path = run_dir / "intent" / "execution-capabilities.json"
+        capabilities = read_json(capabilities_path, {})
+        runtimes = capabilities.get("runtimes") if isinstance(capabilities, dict) else []
+        available_runtimes = [
+            str(runtime.get("name") or "")
+            for runtime in runtimes
+            if isinstance(runtime, dict) and runtime.get("available") is True and str(runtime.get("name") or "")
+        ]
+        lines.extend(
+            [
+                "Agentic execution contract:",
+                "- Read intent/execution-capabilities.json as observed evidence, not as a fixed language template list.",
+                "- Agent-proposed commands and fallback strategies are allowed when Worker policy and preflight accept them.",
+                "- Keep every fallback faithful to the real repository behavior and behavioral oracle; do not test a copied implementation.",
+                f"- Currently observed executable names: {', '.join(available_runtimes) if available_runtimes else 'none'}.",
+            ]
+        )
     if prompt_files:
         lines.append("Prompt templates:")
         for name in prompt_files:
@@ -5994,6 +6159,44 @@ def ensure_intent_directories(run_dir: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
+def refresh_agentic_execution_capabilities(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
+    ensure_intent_directories(run_dir)
+    proposal_sources = [
+        read_json(run_dir / "intent" / "intent-test-plan.json", {}),
+        read_json(run_dir / "intent" / "intent-test-source.json", {}),
+    ]
+    sandbox_available = (
+        not sys.platform.startswith("linux")
+        or shutil.which("bwrap") is not None
+        or shutil.which("bubblewrap") is not None
+    )
+    payload = build_execution_capabilities(
+        repo_dir,
+        proposal_sources=proposal_sources,
+        sandbox_available=sandbox_available,
+    )
+    profile = read_json(run_dir / "repo-profile.json", {})
+    payload["repository_profile"] = {
+        "primary_languages": _profile_list(profile, "primary_languages") if isinstance(profile, dict) else [],
+        "test_frameworks": _profile_list(profile, "test_frameworks") if isinstance(profile, dict) else [],
+    }
+    for candidate in payload.get("agent_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        raw_cwd = str(candidate.get("cwd") or ".").strip() or "."
+        cwd = Path(raw_cwd)
+        if not cwd.is_absolute():
+            cwd = repo_dir / cwd
+        candidate["preflight"] = intent_execution_preflight(
+            [str(part) for part in candidate.get("command") or []],
+            cwd.resolve(strict=False),
+            repo_dir,
+            profile if isinstance(profile, dict) else {},
+        )
+    write_json(run_dir / "intent" / "execution-capabilities.json", payload)
+    return payload
+
+
 def prepare_validation_workspace(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
     validation_repo = repo_dir.parent / "validation-repo"
@@ -6008,6 +6211,7 @@ def prepare_validation_workspace(repo_dir: Path, run_dir: Path) -> dict[str, Any
         "created_at": iso_time(time.time()),
     }
     write_json(run_dir / "intent" / "validation-workspace.json", payload)
+    refresh_agentic_execution_capabilities(validation_repo, run_dir)
     return payload
 
 
@@ -6650,6 +6854,107 @@ def materialize_generated_intent_test_sources(
         except OSError as exc:
             errors[test_id] = f"generated test source could not be materialized: {exc}"
     return errors
+
+
+def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
+    validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+    validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+    validation_repo = Path(validation_root) if validation_root else None
+    plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
+    targets = plan.get("test_targets") if isinstance(plan, dict) and isinstance(plan.get("test_targets"), list) else []
+    source = read_json(run_dir / "intent" / "intent-test-source.json", {})
+    generated_tests = source.get("generated_tests") if isinstance(source, dict) and isinstance(source.get("generated_tests"), list) else []
+    profile = read_json(run_dir / "repo-profile.json", {})
+    target_by_id = {
+        _intent_test_id(target, f"ITP-{index + 1:03d}"): target
+        for index, target in enumerate(targets)
+        if isinstance(target, dict)
+    }
+    materialized_paths: dict[str, str] = {}
+    materialization_errors = materialize_generated_intent_test_sources(
+        run_dir,
+        validation_repo,
+        validation if isinstance(validation, dict) else {},
+        source if isinstance(source, dict) else {},
+        materialized_paths=materialized_paths,
+    )
+    records = _intent_generated_execution_records(generated_tests)
+    tests: list[dict[str, Any]] = []
+    for index, generated in enumerate(records):
+        test_id = str(generated.get("_source_test_id") or "").strip() or _intent_test_id(generated, f"ITV-{index + 1:03d}")
+        related_ids = _intent_related_test_ids(generated)
+        target = target_by_id.get(test_id)
+        if not isinstance(target, dict):
+            target = next((target_by_id[item] for item in related_ids if item in target_by_id), {})
+        command = _intent_generated_command(
+            generated,
+            target,
+            validation_repo,
+            source=source if isinstance(source, dict) else {},
+            generated_index=index,
+            generated_total=len(records),
+        )
+        command = _intent_normalized_execution_command(
+            command,
+            declared_path=_intent_source_path_from_entry(generated),
+            materialized_path=materialized_paths.get(test_id, ""),
+        )
+        cwd = _intent_test_cwd(validation_repo, generated, target) if validation_repo is not None else None
+        if validation_repo is None:
+            diagnostic = _intent_blocked_execution_diagnostic(
+                "validation workspace was not prepared",
+                reason_code="validation_workspace_missing",
+                classification="environment_error",
+                agent_repairable=False,
+            )
+        elif materialization_errors.get(test_id):
+            diagnostic = _intent_blocked_execution_diagnostic(
+                materialization_errors[test_id],
+                reason_code="generated_test_materialization_failed",
+                classification="test_harness_error",
+            )
+        elif cwd is None:
+            diagnostic = _intent_blocked_execution_diagnostic(
+                "generated test cwd escapes validation workspace",
+                reason_code="cwd_escape",
+            )
+        else:
+            diagnostic = intent_execution_preflight(
+                command,
+                cwd,
+                validation_repo,
+                profile if isinstance(profile, dict) else {},
+            )
+            compile_error = _intent_generated_python_compile_error(validation_repo, generated, target)
+            if compile_error:
+                diagnostic = _intent_blocked_execution_diagnostic(
+                    compile_error,
+                    reason_code="generated_test_invalid",
+                    classification="test_harness_error",
+                )
+        tests.append(
+            {
+                "test_id": test_id,
+                "target_test_ids": related_ids,
+                "command": command,
+                "cwd": str(cwd) if cwd is not None else "",
+                **diagnostic,
+            }
+        )
+    ready = sum(1 for item in tests if item.get("status") == "ready")
+    repairable = sum(1 for item in tests if item.get("status") == "blocked" and item.get("agent_repairable") is True)
+    return {
+        "schema_version": "intent-test-preflight/v1",
+        "run_id": run_dir.name,
+        "tests": tests,
+        "skip_reason": _intent_skip_reason_from_payload(source),
+        "summary": {
+            "total": len(tests),
+            "ready": ready,
+            "blocked": len(tests) - ready,
+            "agent_repairable": repairable,
+        },
+    }
 
 
 def run_intent_tests(run_dir: Path) -> dict[str, Any]:
