@@ -772,8 +772,11 @@ class CodexSdkClient:
         self._events_lock = self._runtime_resources.events_lock
         self._rate_limit_callback_lock = threading.Lock()
         self._threads_lock = self._runtime_resources.threads_lock
+        self._health_lock = threading.Lock()
+        self._unhealthy_reason: str | None = None
 
     def start(self) -> None:
+        self._raise_if_unhealthy()
         if self.is_running():
             return
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -798,7 +801,8 @@ class CodexSdkClient:
         self._client = client
 
     def is_running(self) -> bool:
-        return self._codex is not None
+        with self._health_lock:
+            return self._codex is not None and self._unhealthy_reason is None
 
     def runtime_metadata(self) -> dict[str, Any]:
         def distribution_version(name: str) -> str:
@@ -850,6 +854,7 @@ class CodexSdkClient:
         timeout_seconds: int = 30,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> str:
+        self._raise_if_unhealthy()
         if self._codex is None:
             self.start()
         if self._codex is None or self._runtime is None:
@@ -877,21 +882,27 @@ class CodexSdkClient:
         if not thread_id:
             return
         try:
-            run_bounded_call(
-                lambda: self._archive_thread(thread_id),
-                timeout_seconds=CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS,
-                timeout_message=f"codex thread archive timed out: {thread_id}",
-            )
+            self._raise_if_unhealthy()
+            archive = getattr(self._codex, "thread_archive", None)
+            if callable(archive):
+                run_bounded_call(
+                    lambda: archive(thread_id),
+                    timeout_seconds=CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS,
+                    timeout_message=f"codex thread archive timed out: {thread_id}",
+                )
+            else:
+                if self._client is None:
+                    raise RuntimeError("Codex SDK client is not running for thread archive")
+                self.request(
+                    "thread/archive",
+                    {"threadId": thread_id},
+                    timeout_seconds=CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS,
+                )
+        except TimeoutError as exc:
+            self._mark_unhealthy(str(exc))
+            raise
         finally:
             self._runtime_resources.release_thread(thread_id)
-
-    def _archive_thread(self, thread_id: str) -> Any:
-        archive = getattr(self._codex, "thread_archive", None)
-        if callable(archive):
-            return archive(thread_id)
-        if self._client is None:
-            raise RuntimeError("Codex SDK client is not running for thread archive")
-        return self.request("thread/archive", {"threadId": thread_id})
 
     def _archive_late_thread(self, thread: Any) -> None:
         thread_id = str(getattr(thread, "id", "") or "").strip()
@@ -1175,11 +1186,15 @@ class CodexSdkClient:
     def request(self, method: str, params: dict[str, Any] | None = None, timeout_seconds: float = 30) -> dict[str, Any]:
         client = self._sdk_client()
         if hasattr(client, "_request_raw"):
-            result = run_bounded_call(
-                lambda: client._request_raw(method, params or {}),
-                timeout_seconds=timeout_seconds,
-                timeout_message=f"Codex raw request timed out: {method}",
-            )
+            try:
+                result = run_bounded_call(
+                    lambda: client._request_raw(method, params or {}),
+                    timeout_seconds=timeout_seconds,
+                    timeout_message=f"Codex raw request timed out: {method}",
+                )
+            except TimeoutError as exc:
+                self._mark_unhealthy(str(exc))
+                raise
             return result if isinstance(result, dict) else {}
         raise RuntimeError(f"Codex SDK client does not expose raw request support: {method}")
 
@@ -1189,6 +1204,7 @@ class CodexSdkClient:
             client.notify(method, params or {})
 
     def login_chatgpt(self) -> Any:
+        self._raise_if_unhealthy()
         if self._codex is None:
             self.start()
         if self._codex is None:
@@ -1196,6 +1212,7 @@ class CodexSdkClient:
         return self._codex.login_chatgpt()
 
     def login_chatgpt_device_code(self) -> Any:
+        self._raise_if_unhealthy()
         if self._codex is None:
             self.start()
         if self._codex is None:
@@ -1203,6 +1220,7 @@ class CodexSdkClient:
         return self._codex.login_chatgpt_device_code()
 
     def login_api_key(self, api_key: str) -> None:
+        self._raise_if_unhealthy()
         if self._codex is None:
             self.start()
         if self._codex is None:
@@ -1210,6 +1228,7 @@ class CodexSdkClient:
         self._codex.login_api_key(api_key)
 
     def account(self, *, refresh_token: bool = False) -> Any:
+        self._raise_if_unhealthy()
         if self._codex is None:
             self.start()
         if self._codex is None:
@@ -1225,6 +1244,7 @@ class CodexSdkClient:
             codex.close()
 
     def _sdk_client(self) -> Any:
+        self._raise_if_unhealthy()
         if self._client is None:
             if self._codex is None:
                 self.start()
@@ -1232,6 +1252,18 @@ class CodexSdkClient:
         if self._client is None:
             raise RuntimeError("Codex SDK client is not running")
         return self._client
+
+    def _mark_unhealthy(self, reason: str) -> None:
+        normalized_reason = str(reason or "Codex SDK runtime failure").strip()
+        with self._health_lock:
+            if self._unhealthy_reason is None:
+                self._unhealthy_reason = normalized_reason
+
+    def _raise_if_unhealthy(self) -> None:
+        with self._health_lock:
+            reason = self._unhealthy_reason
+        if reason is not None:
+            raise RuntimeError(f"Codex SDK runtime is unhealthy after {reason}")
 
     def _approval_handler(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
         return approval_response_for_request({"method": method, "params": params or {}}, self._approval_workspace)

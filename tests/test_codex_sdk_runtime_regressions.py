@@ -6,7 +6,9 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import pullwise_worker.review_worker_v1 as review_worker_v1
 from pullwise_worker.review_worker_v1 import CodexSdkClient, JobCancelled
 
 
@@ -114,7 +116,7 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
         self.assertEqual(calls, [("thread/archive", {"threadId": "thread-1"})])
         self.assertEqual(server._threads, {})
 
-    def test_raw_request_is_bounded_and_late_result_cannot_contaminate_next_request(self) -> None:
+    def test_raw_request_timeout_marks_runtime_unhealthy_and_blocks_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
             entered = threading.Event()
@@ -140,6 +142,8 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
 
             server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
             server._client = Client()
+            server._codex = SimpleNamespace(account=lambda **_kwargs: {"type": "chatgpt"})
+            self.assertTrue(server.is_running())
             outcome: list[BaseException] = []
             returned: list[dict[str, object]] = []
 
@@ -159,17 +163,75 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
                 self.assertEqual(returned, [])
                 self.assertEqual(len(outcome), 1)
                 self.assertIsInstance(outcome[0], TimeoutError)
+                self.assertEqual(str(outcome[0]), "Codex raw request timed out: test/block")
                 self.assertLess(time.monotonic() - started_at, 0.6)
+                with self.assertRaisesRegex(RuntimeError, "unhealthy.*test/block"):
+                    server.request("test/next", timeout_seconds=1)
+                with self.assertRaisesRegex(RuntimeError, "unhealthy.*test/block"):
+                    server.account()
+                self.assertEqual(server._client.call_count, 1)
+                self.assertFalse(server.is_running())
             finally:
                 release.set()
                 runner.join(1)
 
             self.assertTrue(late_request_finished.wait(1), "timed-out raw request never settled")
             self.assertEqual(returned, [])
-            self.assertEqual(
-                server.request("test/next", timeout_seconds=1),
-                {"call_number": 2},
-            )
+
+    def test_raw_request_preserves_sdk_exception_without_poisoning_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            failure = LookupError("raw rpc failed")
+
+            class Client:
+                def _request_raw(self, _method: str, _params: dict[str, object]) -> dict[str, object]:
+                    raise failure
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            client = Client()
+            server._client = client
+
+            with self.assertRaises(LookupError) as raised:
+                server.request("test/failure", timeout_seconds=1)
+
+            self.assertIs(raised.exception, failure)
+            self.assertIs(server._client, client)
+
+    def test_fallback_archive_uses_one_bounded_rpc_and_timeout_invalidates_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            entered = threading.Event()
+            release = threading.Event()
+            calls: list[tuple[str, dict[str, object]]] = []
+
+            class Client:
+                def _request_raw(self, method: str, params: dict[str, object]) -> dict[str, object]:
+                    calls.append((method, params))
+                    entered.set()
+                    release.wait(5)
+                    return {}
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+            server._runtime_resources.register_thread("thread-1", object())
+
+            try:
+                with patch.object(review_worker_v1, "CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS", 0.05), patch.object(
+                    review_worker_v1,
+                    "run_bounded_call",
+                    wraps=review_worker_v1.run_bounded_call,
+                ) as bounded_call:
+                    with self.assertRaisesRegex(TimeoutError, "thread/archive"):
+                        server.release_thread("thread-1")
+
+                self.assertTrue(entered.is_set())
+                self.assertEqual(calls, [("thread/archive", {"threadId": "thread-1"})])
+                self.assertEqual(bounded_call.call_count, 1)
+                self.assertEqual(server._threads, {})
+                with self.assertRaisesRegex(RuntimeError, "unhealthy.*thread/archive"):
+                    server.request("test/next", timeout_seconds=1)
+            finally:
+                release.set()
 
     def test_turn_start_without_turn_id_is_a_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
