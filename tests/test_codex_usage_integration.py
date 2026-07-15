@@ -134,6 +134,22 @@ class CodexUsageIntegrationTests(unittest.TestCase):
                 run_dir,
             )
 
+            failed_envelope = worker.build_envelope(
+                {
+                    "job_id": "job-1",
+                    "run_id": "run-1",
+                    "lease_id": "lease-1",
+                    "repo": "acme/repo",
+                },
+                "run-1",
+                "failed",
+                1.0,
+                artifact_dir,
+                run_dir,
+                error="failure after a measured Codex turn",
+                phase="validator_disproof",
+            )
+
             UsageClient.events_path = root / "other-run" / "codex-events.jsonl"
             unrelated_envelope = worker.build_envelope(
                 {
@@ -151,6 +167,7 @@ class CodexUsageIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(envelope["usage"]["tokens"]["total_tokens"], 1_099_277)
+        self.assertEqual(failed_envelope["usage"]["tokens"]["total_tokens"], 1_099_277)
         self.assertNotIn("usage", unrelated_envelope)
 
 

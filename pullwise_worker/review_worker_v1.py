@@ -14338,24 +14338,108 @@ def _semantic_output_repair_count(run_dir: Path) -> int:
 def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
     raw_files = sorted((run_dir / "raw-reviewers").glob("*.json"))
     verified_files = sorted((run_dir / "verified-reviewers").glob("*.json"))
+    planned_assignments = _planned_reviewer_assignments(run_dir)
+    reviewer_execution = read_json(run_dir / "reviewer-execution.json", {})
+    if not isinstance(reviewer_execution, dict):
+        reviewer_execution = {}
 
-    def reviewer_finding_count(paths: list[Path]) -> tuple[int, int]:
+    def valid_reviewer_payload(payload: object) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("schema_version") != REVIEWER_OUTPUT_SCHEMA_VERSION:
+            return False
+        if not str(payload.get("bundle_id") or "").strip():
+            return False
+        if _normalized_reviewer_id(payload.get("reviewer")) not in {
+            "security",
+            "correctness",
+            "test_gap",
+            "correctness_lite",
+        }:
+            return False
+        reviewed_paths = payload.get("reviewed_paths")
+        if (
+            not isinstance(reviewed_paths, list)
+            or not reviewed_paths
+            or any(not isinstance(item, str) or not item.strip() for item in reviewed_paths)
+        ):
+            return False
+        review_summary = payload.get("review_summary")
+        summary_present = (
+            isinstance(review_summary, str) and bool(review_summary.strip())
+        ) or (
+            isinstance(review_summary, (dict, list)) and bool(review_summary)
+        )
+        findings = payload.get("findings")
+        return (
+            summary_present
+            and isinstance(payload.get("uncertainties"), list)
+            and isinstance(findings, list)
+            and all(isinstance(finding, dict) for finding in findings)
+        )
+
+    def reviewer_file_stats(
+        paths: list[Path],
+    ) -> tuple[int, int, int, int, set[tuple[str, str]]]:
         findings = 0
         empty_outputs = 0
+        malformed_outputs = 0
+        valid_outputs = 0
+        covered_assignments: set[tuple[str, str]] = set()
         for path in paths:
             payload = read_json(path, {})
             output_findings = _diagnostic_list(payload, "findings")
             findings += len(output_findings)
             if not output_findings:
                 empty_outputs += 1
-        return findings, empty_outputs
+            if not valid_reviewer_payload(payload):
+                malformed_outputs += 1
+                continue
+            valid_outputs += 1
+            covered_assignments.update(
+                _reviewer_output_assignments(payload, path, planned_assignments)
+            )
+        return (
+            findings,
+            empty_outputs,
+            malformed_outputs,
+            valid_outputs,
+            covered_assignments,
+        )
 
-    raw_findings, empty_raw_outputs = reviewer_finding_count(raw_files)
-    verified_findings, _empty_verified_outputs = reviewer_finding_count(verified_files)
-    planned_assignments = _planned_reviewer_assignments(run_dir)
-    reviewer_execution = read_json(run_dir / "reviewer-execution.json", {})
-    if not isinstance(reviewer_execution, dict):
-        reviewer_execution = {}
+    (
+        raw_findings,
+        empty_raw_outputs,
+        malformed_raw_outputs,
+        valid_raw_outputs,
+        raw_assignments,
+    ) = reviewer_file_stats(raw_files)
+    (
+        verified_findings,
+        _empty_verified_outputs,
+        malformed_verified_outputs,
+        valid_verified_outputs,
+        verified_assignments,
+    ) = reviewer_file_stats(verified_files)
+
+    planned_count = len(planned_assignments)
+    execution_complete = (
+        planned_count > 0
+        and reviewer_execution.get("strategy") == "one_turn_per_assignment"
+        and _qa_int(reviewer_execution.get("assignments_total")) == planned_count
+        and _qa_int(reviewer_execution.get("assignments_completed")) == planned_count
+    )
+    clean_empty_reviewer_completion = (
+        execution_complete
+        and malformed_raw_outputs == 0
+        and malformed_verified_outputs == 0
+        and valid_raw_outputs > 0
+        and valid_verified_outputs > 0
+        and raw_assignments == planned_assignments
+        and verified_assignments == planned_assignments
+        and raw_findings == 0
+        and verified_findings == 0
+    )
 
     locations = read_json(run_dir / "location-verification.json", {})
     location_items = _diagnostic_list(locations, "items", "locations", "results", "verified_locations")
@@ -14434,7 +14518,17 @@ def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
 
     repair_count = _semantic_output_repair_count(run_dir)
     blocker_codes: list[str] = []
-    if raw_files and raw_findings == 0:
+    if planned_assignments and (not raw_files or not verified_files):
+        blocker_codes.append("reviewer_outputs_missing")
+    if malformed_raw_outputs or malformed_verified_outputs:
+        blocker_codes.append("reviewer_outputs_malformed")
+    if planned_assignments and (
+        not execution_complete
+        or raw_assignments != planned_assignments
+        or verified_assignments != planned_assignments
+    ):
+        blocker_codes.append("reviewer_assignments_incomplete")
+    if raw_files and raw_findings == 0 and not clean_empty_reviewer_completion:
         blocker_codes.append("all_reviewer_outputs_empty")
     if len(planned_assignments) > 1 and not reviewer_execution:
         blocker_codes.append("reviewer_execution_untracked")
@@ -14460,9 +14554,13 @@ def pipeline_diagnostics_payload(run_dir: Path) -> dict[str, Any]:
             "assignments_planned": len(planned_assignments),
             "assignments_completed": _qa_int(reviewer_execution.get("assignments_completed")),
             "raw_outputs": len(raw_files),
+            "valid_raw_outputs": valid_raw_outputs,
+            "malformed_raw_outputs": malformed_raw_outputs,
             "empty_raw_outputs": empty_raw_outputs,
             "raw_findings": raw_findings,
             "verified_outputs": len(verified_files),
+            "valid_verified_outputs": valid_verified_outputs,
+            "malformed_verified_outputs": malformed_verified_outputs,
             "verified_findings": verified_findings,
             "execution_artifact": "run/reviewer-execution.json" if reviewer_execution else "",
         },
@@ -15582,6 +15680,22 @@ def upload_log_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, 
     return ""
 
 
+def _unique_uploaded_artifact_items_by_id(artifact_dir: Path) -> dict[str, dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    duplicate_ids: set[str] = set()
+    for item in uploaded_artifact_manifest_items(artifact_dir):
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        if artifact_id in unique:
+            duplicate_ids.add(artifact_id)
+            continue
+        unique[artifact_id] = item
+    for artifact_id in duplicate_ids:
+        unique.pop(artifact_id, None)
+    return unique
+
+
 def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Path, artifact_dir: Path) -> None:
     manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
     if not isinstance(manifest_payload, dict):
@@ -15590,11 +15704,13 @@ def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Pat
     manifest = artifact_manifest_items(manifest_payload)
     if not manifest:
         raise RuntimeError("artifact manifest must contain artifact items before final log upload")
-    uploaded = 0
+    accepted_items = _unique_uploaded_artifact_items_by_id(artifact_dir)
+    candidates = 0
     for item in manifest:
         name = str(item.get("name") or "").strip()
         if name not in FINAL_REFRESH_ARTIFACT_NAMES:
             continue
+        candidates += 1
         artifact_id = str(item.get("artifact_id") or "").strip()
         if not artifact_id:
             raise RuntimeError(f"final refresh artifact manifest entry requires artifact_id: {name}")
@@ -15604,6 +15720,8 @@ def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Pat
             raise RuntimeError(f"final refresh artifact sha256 mismatch before upload: {name}")
         if int(item.get("size_bytes") if item.get("size_bytes") is not None else -1) != len(data):
             raise RuntimeError(f"final refresh artifact size mismatch before upload: {name}")
+        if accepted_items.get(artifact_id) == item:
+            continue
         client.artifact(
             job_id,
             artifact_id,
@@ -15616,8 +15734,7 @@ def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Pat
                 "final_log_upload": True,
             },
         )
-        uploaded += 1
-    if uploaded == 0:
+    if candidates == 0:
         raise RuntimeError("artifact manifest contains no final refresh artifacts before final log upload")
 
 def upload_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, artifact_dir: Path) -> str:

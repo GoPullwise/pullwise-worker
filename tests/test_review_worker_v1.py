@@ -5599,11 +5599,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 for warning in disabled["warnings"]
             )
         )
-        self.assertEqual(malformed["status"], "pass")
+        self.assertEqual(malformed["status"], "fail")
         self.assertTrue(
             any(
-                "intent-test-results.json is missing" in warning
-                for warning in malformed["warnings"]
+                "intent-test-results.json is missing" in error
+                for error in malformed["errors"]
             )
         )
 
