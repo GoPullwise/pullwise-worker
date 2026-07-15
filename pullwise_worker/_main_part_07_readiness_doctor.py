@@ -6,7 +6,7 @@ from ._main_part_01_bootstrap import *  # noqa: F403
 
 import posixpath
 
-from .review_worker_v1 import CodexSdkClient
+from .review_worker_v1 import CodexSdkClient, Isolation
 
 
 AGENT_CONFIG_TEXT_MAX_LENGTH = 128
@@ -520,6 +520,7 @@ def run_codex_device_login(config: WorkerConfig) -> bool:
         if not scope_ok:
             print(scope_detail)
             return False
+    Isolation(config).prepare()
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         provider_env = provider_process_env(config)
@@ -545,4 +546,3 @@ def run_codex_device_login(config: WorkerConfig) -> bool:
             server.close()
 
 __all__ = [name for name in globals() if name == "__version__" or not (name.startswith("__") and name.endswith("__"))]
-

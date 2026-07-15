@@ -4434,7 +4434,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(qa["status"], "fail")
         self.assertIn("finding[0] is not backed by confirmed/plausible validation", qa["errors"])
-    def test_effective_routing_preserves_semantic_routes_and_explains_fallbacks(self) -> None:
+    def test_effective_routing_uses_only_agent_routes_or_agent_default(self) -> None:
         inv = {
             "schema_version": "inventory/v1",
             "files": [
@@ -4452,18 +4452,25 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         }
         profile = {"schema_version": "repo-profile/v1", "adapter_ids": ["python", "python-backend"]}
 
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "risk-routing.json does not cover eligible path.*app/auth/session.py",
+        ):
+            effective_routing(semantic, profile, inv)
+
+        semantic["default_depth"] = "P1"
         effective = effective_routing(semantic, profile, inv)
         routes = {item["path"]: item for item in effective["routes"]}
 
         self.assertEqual(routes["app/users/service.py"]["tier"], "P2")
         self.assertEqual(routes["app/users/service.py"]["source"], "semantic")
-        self.assertEqual(routes["app/auth/session.py"]["tier"], "P0")
-        self.assertEqual(routes["app/auth/session.py"]["source"], "profile_fallback")
-        self.assertIn("python_backend_auth_path", routes["app/auth/session.py"]["reasons"])
+        self.assertEqual(routes["app/auth/session.py"]["tier"], "P1")
+        self.assertEqual(routes["app/auth/session.py"]["source"], "semantic_default")
+        self.assertIn("semantic_default_depth", routes["app/auth/session.py"]["reasons"])
         self.assertEqual(routes["dist/app.min.js"]["tier"], "SKIP")
         self.assertEqual(routes["dist/app.min.js"]["source"], "hard_skip")
         self.assertGreaterEqual(effective["sources"]["semantic_routes"], 1)
-        self.assertGreaterEqual(effective["sources"]["profile_fallback_routes"], 1)
+        self.assertGreaterEqual(effective["sources"]["semantic_default_routes"], 1)
         self.assertGreaterEqual(effective["sources"]["hard_skip_routes"], 1)
 
     def test_risk_routing_normalizes_risk_alias_inside_existing_routes(self) -> None:
@@ -4497,6 +4504,50 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(normalized["routes"][0]["tier"], "P0")
 
+    def test_risk_routing_requires_agent_coverage_or_explicit_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [
+                        {
+                            "path": path,
+                            "is_source_like": True,
+                            "is_binary": False,
+                            "is_generated_candidate": False,
+                        }
+                        for path in ("src/covered.py", "src/uncovered.py")
+                    ],
+                },
+            )
+            routing_path = run_dir / "risk-routing.json"
+            write_json(
+                routing_path,
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": "src/covered.py", "tier": "P0"}],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "does not cover eligible path.*src/uncovered.py",
+            ):
+                validate_phase_outputs(run_dir, "risk_routing")
+
+            write_json(
+                routing_path,
+                {
+                    "schema_version": "risk-routing/v1",
+                    "default_depth": "P2",
+                    "routes": [{"path": "src/covered.py", "tier": "P0"}],
+                },
+            )
+            validate_phase_outputs(run_dir, "risk_routing")
+
     def test_bundle_plan_uses_effective_routing_without_overwriting_semantic_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
@@ -4511,6 +4562,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             }
             semantic_payload = {
                 "schema_version": "risk-routing/v1",
+                "default_depth": "P1",
                 "routes": [
                     {"path": "app/users/service.py", "tier": "P2", "reasons": ["semantic exact"]},
                     {"path": "dist/", "tier": "P0", "reasons": ["semantic broad"]},
@@ -4528,15 +4580,15 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             semantic_after = (run_dir / "risk-routing.json").read_text(encoding="utf-8")
 
         bundled_paths = [path for bundle in plan["bundles"] for path in bundle["paths"]]
-        p0_bundle = next(bundle for bundle in plan["bundles"] if bundle["tier"] == "P0")
-        self.assertIn("app/auth/session.py", p0_bundle["paths"])
+        p1_bundle = next(bundle for bundle in plan["bundles"] if bundle["tier"] == "P1")
+        self.assertIn("app/auth/session.py", p1_bundle["paths"])
         self.assertIn("app/users/service.py", bundled_paths)
         self.assertNotIn("dist/app.min.js", bundled_paths)
         self.assertEqual(coverage["skipped_files"], 1)
         self.assertEqual(semantic_after, original_semantic)
         self.assertEqual(effective_payload["schema_version"], "effective-risk-routing/v1")
         self.assertIn("routing_sources", plan)
-        self.assertGreaterEqual(plan["routing_sources"]["profile_fallback_routes"], 1)
+        self.assertGreaterEqual(plan["routing_sources"]["semantic_default_routes"], 1)
 
     def test_intent_tests_run_in_disposable_validation_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -8690,6 +8742,17 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     self.assertIn("Inputs:", prompt)
                     self.assertIn("Required outputs:", prompt)
                     self.assertIn("Phase instructions:", prompt)
+
+    def test_risk_router_prompt_owns_complete_tier_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            prompt = phase_prompt("risk_routing", run_dir)
+
+        self.assertIn("every non-hard-skipped inventory path", prompt)
+        self.assertIn("default_depth", prompt)
+        self.assertIn("will not infer", prompt)
+        self.assertIn("repository profile", prompt)
 
     def test_phase_prompt_names_reviewer_outputs_and_exact_intent_classifications(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

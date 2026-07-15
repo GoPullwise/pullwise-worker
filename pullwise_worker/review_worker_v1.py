@@ -5760,6 +5760,8 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "outputs": ["risk-routing.json", "coverage.json when coverage is refined"],
         "instructions": [
             "Classify files and directories into P0/P1/P2/P3/SKIP using role, entrypoint, trust boundary, auth/payment/data/upload/config/concurrency signals.",
+            "Cover every non-hard-skipped inventory path with an explicit route or provide an intentional default_depth in P0/P1/P2/P3/SKIP for all unmatched paths.",
+            "The Worker will not infer an unmatched tier from path names, repository profile, file suffixes, or risk hints; make the route set or default complete.",
             "Do not report findings in this phase.",
             "Write JSON only using risk-routing/v1.",
         ],
@@ -6792,14 +6794,45 @@ def risk_routing_contract_errors(payload: dict[str, Any], run_dir: Path) -> list
             errors.append(f"risk-routing.json routes[{index}] has an invalid tier")
         if not route_patterns(raw_route):
             errors.append(f"risk-routing.json routes[{index}] has no path pattern")
+    default_keys = (
+        "default_depth",
+        "defaultDepth",
+        "default_tier",
+        "defaultTier",
+        "default",
+    )
+    default_tier = risk_routing_default_tier(payload)
+    if any(key in payload for key in default_keys) and not default_tier:
+        errors.append(
+            "risk-routing.json default tier must be P0, P1, P2, P3, or SKIP"
+        )
     inventory = read_json(run_dir / "inventory.json", {})
-    source_like = [
+    inventory_files = [
         item
         for item in inventory.get("files", [])
-        if isinstance(item, dict) and item.get("is_source_like") is True
+        if isinstance(item, dict)
     ] if isinstance(inventory, dict) else []
-    if source_like and not routes:
-        errors.append("risk-routing.json routes must not be empty for a non-empty source inventory")
+    source_like = [
+        item for item in inventory_files if item.get("is_source_like") is True
+    ]
+    if source_like and not routes and not default_tier:
+        errors.append(
+            "risk-routing.json must provide routes or an explicit default tier "
+            "for a non-empty source inventory"
+        )
+    if not default_tier:
+        uncovered_paths = [
+            str(item.get("path") or "").strip()
+            for item in inventory_files
+            if str(item.get("path") or "").strip()
+            and not is_hard_skip_item(item)
+            and semantic_file_route(item, payload) is None
+        ]
+        if uncovered_paths:
+            errors.append(
+                "risk-routing.json does not cover eligible path(s): "
+                + ", ".join(uncovered_paths[:20])
+            )
     return errors
 
 
@@ -6888,52 +6921,6 @@ def is_hard_skip_item(item: dict[str, Any]) -> bool:
     return False
 
 
-def generic_file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None) -> str:
-    if isinstance(routing, dict) and routing:
-        default_tier = risk_routing_default_tier(routing)
-        if default_tier:
-            return default_tier
-    if item.get("risk_hints"):
-        return "P0"
-    path = str(item.get("path") or "").lower()
-    if item.get("is_source_like") and any(part in path for part in ("src/", "app/", "server/", "api/", "lib/")):
-        return "P1"
-    if item.get("is_source_like"):
-        return "P2"
-    return "P3"
-
-
-def profile_fallback_route_for_item(item: dict[str, Any], profile: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(profile, dict) or profile.get("schema_version") != "repo-profile/v1":
-        return None
-    path = str(item.get("path") or "").replace("\\", "/").lower().lstrip("./")
-    adapters = set(str(adapter) for adapter in profile.get("adapter_ids", []) if isinstance(adapter, str))
-    primary_languages = set(str(language) for language in profile.get("primary_languages", []) if isinstance(language, str))
-    reasons: list[str] = []
-    tier = ""
-    if "python-backend" in adapters or "python" in primary_languages:
-        if any(part in path for part in ("auth", "session", "permission", "tenant", "webhook", "migration", "migrations")):
-            tier = "P0"
-            if "auth" in path or "session" in path or "permission" in path:
-                reasons.append("python_backend_auth_path")
-            if "webhook" in path:
-                reasons.append("python_backend_webhook_path")
-            if "migration" in path:
-                reasons.append("python_backend_migration_path")
-    if "frontend" in adapters or "node" in adapters:
-        if any(part in path for part in ("/api/", "api/", "route.ts", "route.js", "server-action", "middleware", ".env")):
-            tier = "P1" if tier != "P0" else tier
-            reasons.append("frontend_server_boundary_path")
-    if not tier:
-        return None
-    return {"path": str(item.get("path") or ""), "tier": tier, "source": "profile_fallback", "reasons": sorted(set(reasons)) or ["profile_fallback_path"]}
-
-
-def profile_fallback_file_tier(item: dict[str, Any], profile: dict[str, Any] | None) -> str:
-    route = profile_fallback_route_for_item(item, profile)
-    return str(route.get("tier") or "") if isinstance(route, dict) else ""
-
-
 def _semantic_effective_route(item: dict[str, Any], routing: dict[str, Any]) -> dict[str, Any] | None:
     route = semantic_file_route(item, routing)
     if not isinstance(route, dict):
@@ -6951,11 +6938,17 @@ def _semantic_effective_route(item: dict[str, Any], routing: dict[str, Any]) -> 
 
 
 def effective_routing(semantic_routing: dict[str, Any] | None, profile: dict[str, Any] | None, inventory_payload: dict[str, Any] | None) -> dict[str, Any]:
+    del profile
     routing = semantic_routing if isinstance(semantic_routing, dict) and semantic_routing.get("schema_version") == "risk-routing/v1" else {}
     inv = inventory_payload if isinstance(inventory_payload, dict) else {}
     files = inv.get("files") if isinstance(inv.get("files"), list) else []
     routes: list[dict[str, Any]] = []
-    sources = {"semantic_routes": 0, "profile_fallback_routes": 0, "hard_skip_routes": 0}
+    sources = {
+        "semantic_routes": 0,
+        "semantic_default_routes": 0,
+        "hard_skip_routes": 0,
+    }
+    default_tier = risk_routing_default_tier(routing)
     for item in files:
         if not isinstance(item, dict):
             continue
@@ -6969,26 +6962,34 @@ def effective_routing(semantic_routing: dict[str, Any] | None, profile: dict[str
             routes.append(semantic_route)
             sources["semantic_routes"] += 1
             continue
-        fallback_route = profile_fallback_route_for_item(item, profile)
-        if fallback_route:
-            routes.append(fallback_route)
-            sources["profile_fallback_routes"] += 1
-            continue
-        routes.append({"path": path, "tier": generic_file_tier(item, routing), "source": "generic", "reasons": ["generic_default"]})
+        if not default_tier:
+            raise RuntimeError(
+                "risk-routing.json does not cover eligible path and has no "
+                f"explicit default tier: {path}"
+            )
+        routes.append(
+            {
+                "path": path,
+                "tier": default_tier,
+                "source": "semantic_default",
+                "reasons": ["semantic_default_depth"],
+            }
+        )
+        sources["semantic_default_routes"] += 1
     return {"schema_version": "effective-risk-routing/v1", "run_id": "", "sources": sources, "routes": routes}
 
 
-def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None, profile: dict[str, Any] | None = None) -> str:
+def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None) -> str:
     if is_hard_skip_item(item):
         return "SKIP"
     if isinstance(routing, dict) and routing:
         semantic_tier = semantic_file_tier(item, routing)
         if semantic_tier:
             return semantic_tier
-    fallback_tier = profile_fallback_file_tier(item, profile)
-    if fallback_tier:
-        return fallback_tier
-    return generic_file_tier(item, routing)
+    raise RuntimeError(
+        "effective risk routing does not contain an authoritative tier for "
+        f"{str(item.get('path') or '').strip()}"
+    )
 
 
 def _bundle_planning_context(
@@ -7042,7 +7043,7 @@ def _bundle_planning_context(
         item = dict(raw_item)
         path = str(item.get("path") or "").strip()
         item["_routing_source"] = route_source_by_path.get(path, "")
-        grouped[file_tier(item, routing, profile)].append(item)
+        grouped[file_tier(item, routing)].append(item)
     return repo_dir, inventory_payload, routing, grouped
 
 
@@ -10238,6 +10239,8 @@ def _intent_test_ordinal(value: object) -> int | None:
 
 
 def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
+    if not path.is_file():
+        return
     payload = read_json(path, {})
     if not isinstance(payload, dict):
         payload = {}
@@ -10499,6 +10502,8 @@ def _intent_result_artifacts(result: dict[str, Any], raw_result: dict[str, Any])
 
 
 def repair_intent_test_results_artifact(path: Path, run_dir: Path) -> None:
+    if not path.is_file():
+        return
     payload = read_json(path, {})
     raw_by_id = _raw_intent_runs_by_id(run_dir)
     if not isinstance(payload, dict):
@@ -11477,6 +11482,8 @@ def _normalized_validation_entry(entry: object, *, default_status: str = "") -> 
 
 
 def repair_validation_output_artifact(path: Path) -> None:
+    if not path.is_file():
+        return
     payload = read_json(path, {})
     if not isinstance(payload, dict):
         return
@@ -12508,7 +12515,12 @@ def write_review_instruction_tree(repo_dir: Path) -> None:
 def prompt_template_for_name(name: str) -> str:
     templates = {
         "00_repo_mapper.md": "You are the Repo Mapper. Produce repo-map.json. Do not report bugs. Return JSON only using repo-map/v1.\n",
-        "01_risk_router.md": "You are the Risk Router. Classify files and directories into P0/P1/P2/P3/SKIP. Return JSON only using risk-routing/v1.\n",
+        "01_risk_router.md": (
+            "You are the Risk Router. Classify files and directories into P0/P1/P2/P3/SKIP. Cover every "
+            "non-hard-skipped inventory path with an explicit route, or set an intentional default_depth for "
+            "every unmatched path. The Worker will not infer missing tiers from paths, profiles, suffixes, or "
+            "risk hints. Return JSON only using risk-routing/v1.\n"
+        ),
         "02_bundle_planner.md": (
             "You are the Semantic Bundle Planner. Read bundle-planning-input.json and group every eligible path "
             "exactly once by feature, entrypoint, trust boundary, state flow, and implementation/test affinity. "
@@ -12593,29 +12605,8 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
                 "materialized_prompts": sum(1 for name in REQUIRED_PROMPT_FILES if (prompts_dir / name).is_file()),
             },
         )
-    elif phase == "repo_map" and not (run_dir / "repo-map.json").exists():
-        write_json(run_dir / "repo-map.json", {"schema_version": "repo-map/v1", "areas": [], "notes": "Codex repo_map phase did not materialize an artifact."})
-    elif phase == "risk_routing" and not (run_dir / "risk-routing.json").exists():
-        write_json(run_dir / "risk-routing.json", {"schema_version": "risk-routing/v1", "routes": [], "default_depth": "P1"})
-        if not (run_dir / "coverage.json").exists():
-            inv = read_json(run_dir / "inventory.json", {})
-            summary = inv.get("summary") if isinstance(inv.get("summary"), dict) else {}
-            write_json(
-                run_dir / "coverage.json",
-                {
-                    "schema_version": "coverage/v1",
-                    "source_like_files_total": int(summary.get("source_like_files") or 0),
-                    "deep_reviewed_files": 0,
-                    "standard_reviewed_files": 0,
-                    "light_reviewed_files": 0,
-                    "inventory_only_files": 0,
-                    "skipped_files": 0,
-                },
-            )
     elif phase == "bundle_planning":
         materialize_agent_bundle_plan(run_dir, job)
-    elif phase == "reviewer_fanout":
-        (run_dir / "raw-reviewers").mkdir(parents=True, exist_ok=True)
     elif phase == "clustering_and_voting":
         clusters_path = run_dir / 'clusters.json'
         if clusters_path.exists():
@@ -12624,33 +12615,23 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
         intent_map_path = run_dir / "intent" / "intent-map.json"
         if intent_map_path.exists():
             repair_intent_map_artifact(intent_map_path)
-        else:
-            write_json(intent_map_path, {"schema_version": "intent-map/v1", "bundle_id": "all", "behavioral_contracts": [], "unknowns": ["No high-value intent targets were materialized."]})
     elif phase == "intent_test_planning":
         intent_plan_path = run_dir / "intent" / "intent-test-plan.json"
         if intent_plan_path.exists():
             repair_intent_test_plan_artifact(intent_plan_path, run_dir)
-        else:
-            write_json(intent_plan_path, {"schema_version": "intent-test-plan/v1", "test_targets": []})
     elif phase == "intent_test_writing":
         intent_source_path = run_dir / "intent" / "intent-test-source.json"
         if intent_source_path.exists():
             repair_intent_test_source_artifact(intent_source_path, run_dir)
-        else:
-            write_json(intent_source_path, {"schema_version": "intent-test-source/v1", "generated_tests": []})
     elif phase == "intent_test_failure_analysis":
         intent_results_path = run_dir / "intent" / "intent-test-results.json"
         if intent_results_path.exists():
             repair_intent_test_results_artifact(intent_results_path, run_dir)
-        else:
-            write_json(intent_results_path, fallback_intent_test_results(run_dir))
     elif phase == "validator_disproof":
         validation_path = run_dir / "validated-findings.json"
         if validation_path.exists():
             repair_validation_output_artifact(validation_path)
     elif phase == "final_report_json":
-        if not (run_dir / "report.agent.json").exists():
-            write_json(run_dir / "report.agent.json", agent_report_payload(run_dir, job))
         repair_agent_report_artifact(run_dir, job)
 
 
@@ -13215,7 +13196,9 @@ def enrich_finding_intent_evidence(run_dir: Path, finding: dict[str, Any]) -> No
 
 def repair_agent_report_artifact(run_dir: Path, job: dict[str, Any]) -> None:
     path = run_dir / "report.agent.json"
-    raw = read_json(path, {}) if path.exists() else {}
+    if not path.is_file():
+        return
+    raw = read_json(path, {})
     report = default_agent_report(job)
     if isinstance(raw, dict):
         report.update(raw)
