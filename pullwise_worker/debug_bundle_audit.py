@@ -1125,6 +1125,13 @@ class BundleAudit:
             and name.startswith(self.run_prefix + "/bundles/")
             and name.endswith(".md")
         }
+        packed_bundle_count = len(bundle_ids.intersection(packed_names))
+        if bundle_ids and not packed_names and self.debug_name:
+            # Production debug bundles deliberately exclude run/bundles/**
+            # because those Markdown files embed repository source. In that
+            # representation the canonical, validated bundle plan is the
+            # available persisted evidence for the packed-bundle count.
+            packed_bundle_count = len(bundle_ids)
         validation_input = self.json_at(self.run_name("validation-input.json"))
         validation_output = self.json_at(self.run_name("validated-findings.json"))
         candidates = list_value(
@@ -1151,7 +1158,7 @@ class BundleAudit:
             "source_like_files_total": len(source_paths),
             "source_like_files_classified": len(source_paths.intersection(route_paths)) if route_paths else 0,
             "bundles_total": len(bundles),
-            "bundles_packed": len(bundle_ids.intersection(packed_names)),
+            "bundles_packed": packed_bundle_count,
             "reviewer_runs_total": reviewer_counts["total"],
             "reviewer_runs_completed": reviewer_counts["completed"],
             "intent_tests_total": intent_counts["total"],

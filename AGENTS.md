@@ -639,6 +639,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - The UI must disable or omit debug bundle actions when no real debug_bundle artifact/server debug bundle endpoint exists. Do not substitute /scans/{scanId}/audit-bundle.zip as a debug zip URL.
 - Tests should protect this contract: missing debugBundleUrl must not produce an audit-bundle URL, and server/worker tests must verify failed runs still expose a real debug_bundle artifact or explicit absence.
 - Treat `run/bundles/**` as repository source because packed review bundles embed source text. Never include that tree in a debug bundle, even though other run-local phase outputs are diagnostic evidence.
+- When auditing a debug bundle that intentionally omits `run/bundles/**`, derive the packed-bundle counter from the canonical `bundle-plan.json`; only compare individual bundle Markdown names when that source-bearing tree is actually present.
 
 ## Execution And Validation Resilience
 

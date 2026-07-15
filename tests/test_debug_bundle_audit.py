@@ -192,6 +192,32 @@ class DebugBundleAuditTest(unittest.TestCase):
         self.assertEqual(directory_result["facts"]["terminal_status"], "completed")
         self.assertEqual(directory_result["facts"]["findings"], 1)
 
+    def test_debug_bundle_uses_plan_as_packed_evidence_when_source_bundles_are_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "bundle"
+            self.write_good_bundle(root)
+            write_json(
+                root,
+                "worker/run/bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {"bundle_id": "b1", "paths": ["src/a.py"]},
+                        {"bundle_id": "b2", "paths": ["src/b.py"]},
+                        {"bundle_id": "b3", "paths": ["README.md"]},
+                    ],
+                },
+            )
+            progress = json.loads((root / "worker/run/progress.json").read_text(encoding="utf-8"))
+            progress["counters"].update({"bundles_total": 3, "bundles_packed": 3})
+            write_json(root, "worker/run/progress.json", progress)
+            (root / "worker/run/bundles/b1.md").unlink()
+            (root / "worker/run/bundles").rmdir()
+
+            result = audit_bundle(root)
+
+        self.assertNotIn("progress_counter_mismatch", issue_codes(result), result["issues"])
+
     def test_artifact_audit_does_not_fall_back_to_run_copy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir) / "bundle"
