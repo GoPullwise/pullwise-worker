@@ -338,6 +338,8 @@ class CodexThreadLifecycleBoundaryTests(unittest.TestCase):
                         "allow_network": False,
                         "helper_scripts_standard_library_only": True,
                         "turn_timeout_seconds": 30,
+                        "max_bundles": 24,
+                        "max_reviewer_assignments": 48,
                         "reviewer_concurrency": 1,
                     },
                     "budget": {"max_wall_time_seconds": 60},

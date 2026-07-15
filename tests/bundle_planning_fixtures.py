@@ -13,7 +13,30 @@ from pullwise_worker.review_worker_v1 import (
 def materialize_test_bundle_plan(run_dir: Path) -> dict[str, Any]:
     """Materialize a valid Agent grouping for renderer-focused tests."""
 
-    planning_input = prepare_bundle_planning_input(run_dir)
+    job = {
+        "model_profile": {
+            "default_model": "gpt-5.5",
+            "core_effort": "high",
+        },
+        "review_request": {
+            "policy": {
+                "allow_source_modification": False,
+                "allow_dependency_install": False,
+                "allow_network": False,
+                "helper_scripts_standard_library_only": True,
+                "turn_timeout_seconds": 1800,
+                "reviewer_concurrency": 2,
+                "max_bundles": 64,
+                "max_reviewer_assignments": 128,
+            },
+            "budget": {"max_wall_time_seconds": 14400},
+        },
+        "repositoryLimits": {
+            "maxFiles": 2000,
+            "maxBytes": 50 * 1024 * 1024,
+        },
+    }
+    planning_input = prepare_bundle_planning_input(run_dir, job)
     items = planning_input.get("items")
     items = items if isinstance(items, list) else []
     groups = []
@@ -46,4 +69,4 @@ def materialize_test_bundle_plan(run_dir: Path) -> dict[str, Any]:
             "groups": groups,
         },
     )
-    return materialize_agent_bundle_plan(run_dir)
+    return materialize_agent_bundle_plan(run_dir, job)

@@ -889,6 +889,8 @@ class CodexSdkClient:
         archive = getattr(self._codex, "thread_archive", None)
         if callable(archive):
             return archive(thread_id)
+        if self._client is None:
+            raise RuntimeError("Codex SDK client is not running for thread archive")
         return self.request("thread/archive", {"threadId": thread_id})
 
     def _archive_late_thread(self, thread: Any) -> None:
@@ -3451,7 +3453,7 @@ class ReviewWorkerV1:
                         )
                     try:
                         if phase == "bundle_planning":
-                            materialize_agent_bundle_plan(run_dir)
+                            materialize_agent_bundle_plan(run_dir, job)
                         validate_phase_outputs(run_dir, phase, artifact_dir)
                     except Exception as validation_exc:
                         if phase not in SEMANTIC_PHASES:
@@ -3648,7 +3650,41 @@ class ReviewWorkerV1:
             heartbeat_stop.set()
             heartbeat_thread.join()
             if codex_client is not None:
-                codex_client.set_events_path(self.default_codex_events_path())
+                cleanup_error: BaseException | None = None
+                is_running = getattr(codex_client, "is_running", None)
+                runtime_is_running = not callable(is_running) or bool(is_running())
+                if runtime_is_running and active.thread_id:
+                    try:
+                        release_codex_thread_reference(
+                            codex_client,
+                            active.thread_id,
+                            suppress_errors=False,
+                        )
+                    except BaseException as exc:
+                        cleanup_error = exc
+                        if run_dir is not None:
+                            append_jsonl(
+                                run_dir / "worker.log.jsonl",
+                                {
+                                    "event": "codex_root_thread_archive_failed",
+                                    "thread_id": active.thread_id,
+                                    "error": quota_text(exc, 500),
+                                    "time": iso_time(time.time()),
+                                },
+                            )
+                elif not runtime_is_running:
+                    cleanup_error = RuntimeError("Codex runtime is not healthy")
+                if cleanup_error is not None:
+                    close = getattr(codex_client, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            pass
+                    if self.codex_client is codex_client:
+                        self.codex_client = None
+                else:
+                    codex_client.set_events_path(self.default_codex_events_path())
             if terminal_state in TERMINAL_STATES and terminal_result_confirmed:
                 self.clear_active_run_marker(active)
                 self.state.clear_active(terminal_state)
@@ -3861,7 +3897,7 @@ class ReviewWorkerV1:
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
         if phase == "bundle_planning":
-            prepare_bundle_planning_input(run_dir)
+            prepare_bundle_planning_input(run_dir, job)
         effort = effort_for_phase(job, phase)
         prompt = phase_prompt(phase, run_dir, job)
         codex_client.run_turn(
@@ -3957,11 +3993,18 @@ class ReviewWorkerV1:
         thread_id = str(state.get("thread_id") or "")
         if not thread_id:
             raise RuntimeError("Codex thread is missing")
+        bundle_plan = read_json(run_dir / "bundle-plan.json", {})
+        enforce_review_plan_resource_limits(bundle_plan, job)
         assignments = planned_reviewer_assignment_sequence(run_dir)
         if not assignments:
             raise RuntimeError("reviewer_fanout has no planned reviewer assignments")
 
-        max_concurrency = reviewer_concurrency_for_job(job)
+        (
+            max_concurrency,
+            initial_effective_concurrency,
+            concurrency_limit_reason,
+            memory_snapshot,
+        ) = reviewer_concurrency_decision_for_job(job)
         raw_dir = run_dir / "raw-reviewers"
         raw_dir.mkdir(parents=True, exist_ok=True)
         staging_root = run_dir / "reviewer-staging"
@@ -3971,7 +4014,6 @@ class ReviewWorkerV1:
         execution_path = run_dir / "reviewer-execution.json"
         expected_assignments = set(assignments)
         bundle_weights: dict[str, float] = {}
-        bundle_plan = read_json(run_dir / "bundle-plan.json", {})
         raw_bundles = bundle_plan.get("bundles") if isinstance(bundle_plan, dict) else []
         if isinstance(raw_bundles, list):
             for bundle in raw_bundles:
@@ -4028,7 +4070,7 @@ class ReviewWorkerV1:
             estimator.set_resource_pool(
                 "reviewer",
                 configured_concurrency=max_concurrency,
-                effective_concurrency=max_concurrency,
+                effective_concurrency=initial_effective_concurrency,
             )
             fanout_barrier_unit_id = phase_estimate_unit_id("reviewer_fanout")
             dependencies: tuple[str, ...] = ()
@@ -4060,13 +4102,27 @@ class ReviewWorkerV1:
             "scheduler": "bounded_parallel",
             "root_thread_id": thread_id,
             "max_concurrency": max_concurrency,
-            "effective_concurrency": max_concurrency,
+            "effective_concurrency": initial_effective_concurrency,
+            "concurrency_limit_reason": concurrency_limit_reason,
+            "memory_at_start": memory_snapshot,
             "max_observed_concurrency": 0,
             "assignments_total": len(assignments),
             "assignments_completed": 0,
             "assignments": records,
         }
         write_json(execution_path, execution)
+        if concurrency_limit_reason:
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "reviewer_concurrency_reduced",
+                    "reason": concurrency_limit_reason,
+                    "from": max_concurrency,
+                    "to": initial_effective_concurrency,
+                    "memory": memory_snapshot,
+                    "time": iso_time(time.time()),
+                },
+            )
 
         pending = deque(works)
         active_futures: dict[
@@ -4085,12 +4141,34 @@ class ReviewWorkerV1:
 
         completed = 0
         finished = 0
-        effective_concurrency = max_concurrency
+        effective_concurrency = initial_effective_concurrency
         fatal_error: BaseException | None = None
         max_rate_limit_retries = 1
+        runtime_marked_unhealthy = False
+
+        def mark_codex_runtime_unhealthy(error: BaseException, reviewer_thread_id: str) -> None:
+            nonlocal runtime_marked_unhealthy
+            if runtime_marked_unhealthy:
+                return
+            runtime_marked_unhealthy = True
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "codex_thread_archive_failed",
+                    "thread_id": reviewer_thread_id,
+                    "error": quota_text(error, 500),
+                    "time": iso_time(time.time()),
+                },
+            )
+            close = getattr(codex_client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
         with ThreadPoolExecutor(
-            max_workers=max_concurrency,
+            max_workers=initial_effective_concurrency,
             thread_name_prefix="pullwise-reviewer",
         ) as executor:
             while (pending and fatal_error is None) or active_futures:
@@ -4192,7 +4270,17 @@ class ReviewWorkerV1:
                             deadline_monotonic=deadline_monotonic,
                         )
                     except BaseException as exc:
-                        release_codex_thread_reference(codex_client, reviewer_thread_id)
+                        try:
+                            release_codex_thread_reference(
+                                codex_client,
+                                reviewer_thread_id,
+                                suppress_errors=False,
+                            )
+                        except BaseException as cleanup_exc:
+                            mark_codex_runtime_unhealthy(
+                                cleanup_exc,
+                                reviewer_thread_id,
+                            )
                         if estimator is not None:
                             estimator.finish_work_unit(
                                 estimate_unit_id(work, attempt),
@@ -4254,11 +4342,6 @@ class ReviewWorkerV1:
                             attempt=int(attempt_record["attempt"]),
                             error=exc,
                         )
-                    finally:
-                        release_codex_thread_reference(
-                            codex_client,
-                            str(attempt_record["thread_id"]),
-                        )
 
                     if outcome.valid_output:
                         try:
@@ -4269,6 +4352,25 @@ class ReviewWorkerV1:
                         except OSError as exc:
                             outcome.error = exc
                             outcome.valid_output = False
+
+                    reviewer_thread_id = str(attempt_record["thread_id"])
+                    try:
+                        release_codex_thread_reference(
+                            codex_client,
+                            reviewer_thread_id,
+                            suppress_errors=False,
+                        )
+                    except BaseException as cleanup_exc:
+                        mark_codex_runtime_unhealthy(
+                            cleanup_exc,
+                            reviewer_thread_id,
+                        )
+                        outcome.error = RuntimeError(
+                            "Codex reviewer thread archive failed: "
+                            f"{quota_text(cleanup_exc, 500)}"
+                        )
+                        outcome.valid_output = False
+                        cancel_event.set()
 
                     duration_ms = max(0, int(outcome.duration_ms or 0))
                     attempt_record["duration_ms"] = duration_ms
@@ -4300,8 +4402,12 @@ class ReviewWorkerV1:
                                     "error": error_text,
                                 }
                             )
+                            previous_effective_concurrency = effective_concurrency
                             effective_concurrency = 1
                             execution["effective_concurrency"] = 1
+                            execution["concurrency_limit_reason"] = (
+                                "transient_capacity_error"
+                            )
                             if estimator is not None:
                                 retry_attempt = outcome.attempt + 1
                                 estimator.set_resource_pool(
@@ -4337,7 +4443,7 @@ class ReviewWorkerV1:
                                 {
                                     "event": "reviewer_concurrency_reduced",
                                     "reason": "transient_capacity_error",
-                                    "from": max_concurrency,
+                                    "from": previous_effective_concurrency,
                                     "to": 1,
                                     "bundle_id": work.bundle_id,
                                     "reviewer_id": work.reviewer_id,
@@ -5193,16 +5299,22 @@ def start_codex_thread_with_lifecycle(
     return str(result or "").strip()
 
 
-def release_codex_thread_reference(codex_client: Any, thread_id: str) -> None:
+def release_codex_thread_reference(
+    codex_client: Any,
+    thread_id: str,
+    *,
+    suppress_errors: bool = True,
+) -> bool:
     release_thread = getattr(codex_client, "release_thread", None)
     if not callable(release_thread) or not thread_id:
-        return
+        return False
     try:
         release_thread(thread_id)
     except Exception:
-        # Thread references are local cleanup state. Cleanup failures must not
-        # replace the reviewer outcome that the worker still needs to record.
-        pass
+        if not suppress_errors:
+            raise
+        return False
+    return True
 
 
 class RepositoryLimitExceeded(RuntimeError):
@@ -7311,6 +7423,41 @@ def _bundle_metadata(files: list[dict[str, Any]]) -> dict[str, Any]:
     routing_sources = sorted({str(item.get("_routing_source") or "") for item in files if str(item.get("_routing_source") or "")})
     if routing_sources:
         metadata["routing_sources"] = routing_sources
+    semantic_groups: dict[str, dict[str, Any]] = {}
+    for item in files:
+        group_id = str(item.get("_semantic_group_id") or "").strip()
+        if not group_id:
+            continue
+        group = semantic_groups.setdefault(
+            group_id,
+            {
+                "group_id": group_id,
+                "title": str(item.get("_semantic_group_title") or group_id).strip(),
+                "grouping_reasons": [],
+                "paths": [],
+            },
+        )
+        path = str(item.get("path") or "").strip()
+        if path and path not in group["paths"]:
+            group["paths"].append(path)
+        for reason in (
+            item.get("_semantic_group_reasons")
+            if isinstance(item.get("_semantic_group_reasons"), list)
+            else []
+        ):
+            reason_text = str(reason or "").strip()
+            if reason_text and reason_text not in group["grouping_reasons"]:
+                group["grouping_reasons"].append(reason_text)
+            if reason_text and reason_text not in grouping_reasons:
+                grouping_reasons.append(reason_text)
+    if grouping_reasons:
+        metadata["grouping_reasons"] = grouping_reasons
+    if semantic_groups:
+        group_payloads = list(semantic_groups.values())
+        metadata["semantic_groups"] = group_payloads
+        metadata["semantic_group_ids"] = list(semantic_groups)
+        if len(group_payloads) == 1:
+            metadata["semantic_group_id"] = group_payloads[0]["group_id"]
     return metadata
 
 def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated_tokens: int) -> dict[str, Any]:
@@ -7319,10 +7466,33 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
         "P1": ["correctness", "test_gap"],
         "P2": ["correctness_lite"],
     }[tier]
+    metadata = _bundle_metadata(files)
+    semantic_groups = (
+        metadata.get("semantic_groups")
+        if isinstance(metadata.get("semantic_groups"), list)
+        else []
+    )
+    semantic_titles = [
+        str(group.get("title") or "").strip()
+        for group in semantic_groups
+        if isinstance(group, dict) and str(group.get("title") or "").strip()
+    ]
+    if len(semantic_titles) == 1:
+        title = semantic_titles[0]
+    elif semantic_titles:
+        visible_titles = semantic_titles[:3]
+        suffix = (
+            f" + {len(semantic_titles) - len(visible_titles)} more"
+            if len(semantic_titles) > len(visible_titles)
+            else ""
+        )
+        title = " / ".join(visible_titles) + suffix
+    else:
+        title = f"{tier} review bundle {index}"
     payload = {
         "bundle_id": f"{tier.lower()}-bundle-{index:03d}",
         "tier": tier,
-        "title": f"{tier} review bundle {index}",
+        "title": title,
         "estimated_tokens": estimated_tokens,
         "paths": list(dict.fromkeys(str(item.get("path")) for item in files if item.get("path"))),
         "reviewers": reviewers,
@@ -7352,7 +7522,7 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
     ]
     if file_ranges:
         payload["file_ranges"] = file_ranges
-    payload.update(_bundle_metadata(files))
+    payload.update(metadata)
     return payload
 
 
@@ -7397,8 +7567,31 @@ def _render_bundle_markdown(repo_dir: Path, bundle: dict[str, Any]) -> str:
         "## Files",
         "",
     ]
+    semantic_group_by_path: dict[str, dict[str, Any]] = {}
+    for group in (
+        bundle.get("semantic_groups")
+        if isinstance(bundle.get("semantic_groups"), list)
+        else []
+    ):
+        if not isinstance(group, dict):
+            continue
+        for raw_path in group.get("paths") or []:
+            path = str(raw_path or "").strip()
+            if path:
+                semantic_group_by_path[path] = group
+    active_group_id = ""
     for entry in _bundle_entries(bundle):
         rel = str(entry.get("path") or "")
+        semantic_group = semantic_group_by_path.get(rel)
+        semantic_group_id = (
+            str(semantic_group.get("group_id") or "").strip()
+            if isinstance(semantic_group, dict)
+            else ""
+        )
+        if semantic_group_id and semantic_group_id != active_group_id:
+            active_group_id = semantic_group_id
+            group_title = str(semantic_group.get("title") or semantic_group_id).strip()
+            lines.extend((f"### Semantic group: {group_title}", ""))
         path = repo_dir / rel
         start_line = max(1, int(entry.get("start_line") or 1))
         end_line = (
@@ -7415,7 +7608,8 @@ def _render_bundle_markdown(repo_dir: Path, bundle: dict[str, Any]) -> str:
         range_label = f":{start_line}-{end_line}" if end_line else ""
         if entry.get("start_char") is not None and entry.get("end_char") is not None:
             range_label += f" chars {start_char}-{end_char}"
-        lines.append(f"### {rel}{range_label}")
+        heading = "####" if semantic_group_id else "###"
+        lines.append(f"{heading} {rel}{range_label}")
         lines.append("")
         if not path.is_file():
             lines.extend(("```text", "<missing>", "```", ""))
@@ -12443,7 +12637,7 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
                 },
             )
     elif phase == "bundle_planning":
-        materialize_agent_bundle_plan(run_dir)
+        materialize_agent_bundle_plan(run_dir, job)
     elif phase == "reviewer_fanout":
         (run_dir / "raw-reviewers").mkdir(parents=True, exist_ok=True)
     elif phase == "clustering_and_voting":

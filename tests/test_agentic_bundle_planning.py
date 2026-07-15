@@ -300,6 +300,8 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                         "allow_network": False,
                         "helper_scripts_standard_library_only": True,
                         "turn_timeout_seconds": 60,
+                        "max_bundles": 24,
+                        "max_reviewer_assignments": 48,
                         "reviewer_concurrency": 2,
                     },
                     "budget": {"max_wall_time_seconds": 600},
@@ -317,7 +319,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                 job,
                 "bundle_planning",
             )
-            plan = materialize_agent_bundle_plan(run_dir)
+            plan = materialize_agent_bundle_plan(run_dir, job)
 
         self.assertEqual(observed["thread_id"], "root-thread")
         self.assertEqual(observed["effort"], "medium")
@@ -349,7 +351,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                     ],
                 },
             )
-            planning_input = prepare_bundle_planning_input(run_dir)
+            planning_input = prepare_bundle_planning_input(run_dir, _job())
             write_json(
                 run_dir / "bundle-grouping.json",
                 {
@@ -369,7 +371,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                 },
             )
 
-            plan = materialize_agent_bundle_plan(run_dir)
+            plan = materialize_agent_bundle_plan(run_dir, _job())
             pack_bundles(repo_dir, run_dir)
 
         self.assertEqual(
@@ -405,7 +407,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                     "routes": [{"path": path, "tier": "P1"} for path in paths],
                 },
             )
-            prepare_bundle_planning_input(run_dir)
+            prepare_bundle_planning_input(run_dir, _job())
             write_json(
                 run_dir / "bundle-grouping.json",
                 {
@@ -426,7 +428,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                 RuntimeError,
                 "duplicate path.*src/a.py.*missing eligible path.*src/b.py",
             ):
-                materialize_agent_bundle_plan(run_dir)
+                materialize_agent_bundle_plan(run_dir, _job())
 
     def test_worker_splits_an_oversized_agent_group_without_changing_its_tier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -462,7 +464,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                     "routes": [{"path": path, "tier": "P0"}],
                 },
             )
-            prepare_bundle_planning_input(run_dir)
+            prepare_bundle_planning_input(run_dir, _job())
             write_json(
                 run_dir / "bundle-grouping.json",
                 {
@@ -479,7 +481,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                 },
             )
 
-            plan = materialize_agent_bundle_plan(run_dir)
+            plan = materialize_agent_bundle_plan(run_dir, _job())
             pack_bundles(repo_dir, run_dir)
             packed_sizes = [
                 max(len(payload), len(payload.encode("utf-8")))

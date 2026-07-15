@@ -29,6 +29,8 @@ def reviewer_job() -> dict:
                 "allow_network": False,
                 "helper_scripts_standard_library_only": True,
                 "turn_timeout_seconds": 1_800,
+                "max_bundles": 24,
+                "max_reviewer_assignments": 48,
                 "reviewer_concurrency": 2,
             },
         },
