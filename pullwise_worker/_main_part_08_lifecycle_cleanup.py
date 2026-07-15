@@ -702,6 +702,8 @@ def worker_instance_owned_path(path: Path, config: WorkerConfig) -> bool:
             worker_root_is_absolute
             and not path_is_root(worker_root)
             and worker_root.resolve(strict=False).name == worker_id
+            and service_home in owned_roots
+            and path_same_or_within(worker_root, service_home)
         ):
             owned_roots.append(worker_root)
     owned_roots.extend(

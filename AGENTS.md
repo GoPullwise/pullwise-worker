@@ -413,6 +413,13 @@ retry sleep or cleanup IO.
 - Cleanup should run only when the worker is idle or on a low-priority
   background path. Do not run checkout/log cleanup before heartbeat/claim in the
   hot loop.
+- Persist the active slot under the instance runtime directory before checkout
+  starts. On restart, restore unfinished active/result-submission state before
+  the first heartbeat or lease attempt; never claim around a recovered run and
+  never invent a result resubmission path.
+- Clean `worker_root/workspaces` only from the idle low-priority path after
+  heartbeat/claim. Protect every workspace with unfinished persisted evidence,
+  and remove only direct children of the instance-scoped workspace root.
 
 ## Checkout And Cache Discipline
 
@@ -548,6 +555,10 @@ Do not share mutable runtime files between worker instances.
 - Cleanup/update/doctor helpers must operate inside the configured worker roots.
 - Avoid fixed global paths for checkouts, logs, provider state, or auth files
   unless they are only base directories containing per-worker subdirectories.
+- Destructive instance cleanup must prove containment in an explicit instance
+  root such as the instance `service_home`, its contained `worker_root`, or the
+  canonical per-worker log/config roots. A matching worker-id basename alone is
+  never ownership evidence.
 
 ## Delete Instance Cleanup
 

@@ -130,6 +130,37 @@ class LifecycleReadinessRegressionTests(unittest.TestCase):
             self.assertEqual(heartbeat["concurrency"]["available_job_slots"], 0)
             self.assertTrue(run_dir.parent.parent.parent.parent.exists())
 
+    def test_restart_recovers_active_slot_persisted_before_workspace_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runtime_dir = root / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "active-run.json").write_text(
+                json.dumps(
+                    {
+                        "job_id": "job_checkout",
+                        "run_id": "run_checkout",
+                        "lease_id": "lease_checkout",
+                        "attempt_id": "wk_1-1",
+                        "state": "leased",
+                        "current_phase": "prepare_workspace",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            control_plane = RecordingControlPlane()
+            worker = ReviewWorkerV1(worker_config(root), client=control_plane)
+            disable_posix_lock(worker)
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
+                worker.run(once=True)
+
+            self.assertEqual(control_plane.calls, ["register", "heartbeat"])
+            self.assertEqual(control_plane.heartbeats[0]["status"], "finishing")
+            self.assertEqual(control_plane.heartbeats[0]["active_run_id"], "run_checkout")
+
     def test_unauthenticated_quota_probe_is_not_ready_and_cannot_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -192,6 +223,17 @@ class LifecycleReadinessRegressionTests(unittest.TestCase):
         )
 
         self.assertFalse(lifecycle.worker_instance_owned_path(Path("/unrelated/wk_test"), config))
+        misconfigured = SimpleNamespace(
+            worker_id="wk_test",
+            service_home="/var/lib/pullwise-worker/wk_test",
+            worker_root="/unrelated/wk_test",
+        )
+        self.assertFalse(
+            lifecycle.worker_instance_owned_path(
+                Path("/unrelated/wk_test"),
+                misconfigured,
+            )
+        )
         self.assertFalse(
             lifecycle.worker_instance_owned_path(
                 Path("/var/log/pullwise-worker/unrelated/wk_test"),

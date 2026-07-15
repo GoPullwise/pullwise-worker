@@ -3,9 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pullwise_worker.review_worker_v1 import (
+    ReviewWorkerV1,
     ensure_repository_mirror,
     phase_progress_data,
     render_markdown,
@@ -43,6 +45,48 @@ def finding(finding_id: str, title: str) -> dict:
 
 
 class ResultTruthfulnessRegressionTests(unittest.TestCase):
+    def test_result_envelope_reports_actual_bundle_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_dir = root / 'repo' / '.codex-review' / 'runs' / 'run-1'
+            artifact_dir = root / 'artifacts' / 'run-1'
+            run_dir.mkdir(parents=True)
+            artifact_dir.mkdir(parents=True)
+            write_json(
+                run_dir / 'bundle-plan.json',
+                {
+                    'schema_version': 'bundle-plan/v1',
+                    'bundles': [
+                        {'bundle_id': 'b1'},
+                        {'bundle_id': 'b2'},
+                        {'bundle_id': 'b3'},
+                    ],
+                },
+            )
+            write_json(
+                artifact_dir / 'artifact-manifest.json',
+                {
+                    'schema_version': 'artifact-manifest/v1',
+                    'run_id': 'run-1',
+                    'items': [],
+                },
+            )
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id='wk-1', service_home=str(root)),
+                client=object(),
+            )
+
+            envelope = worker.build_envelope(
+                {'job_id': 'job-1', 'run_id': 'run-1'},
+                'run-1',
+                'completed',
+                1.0,
+                artifact_dir,
+                run_dir,
+            )
+
+        self.assertEqual(envelope['extensions']['worker_internal']['bundle_count'], 3)
+
     def test_uploaded_snapshot_is_the_exact_result_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             artifact_dir = Path(tmpdir) / 'run-1'

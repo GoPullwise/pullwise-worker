@@ -29,6 +29,7 @@ from typing import Any, Callable
 from . import __version__
 from ._main_part_01_bootstrap import REPOSITORY_MIRROR_CACHE_DIR_NAME, worker_machine_metrics_payload
 from .agentic_execution import build_execution_capabilities
+from .codex_sdk_runtime import CodexRuntimeResources, TurnEventScope, require_identifier, run_bounded_call
 from .current_run_eta import CurrentRunEstimator
 
 try:
@@ -744,16 +745,17 @@ class CodexSdkClient:
         self.command = str(command or "").strip()
         self.env = env
         self.cwd = cwd
-        self.events_path = events_path
+        self._runtime_resources = CodexRuntimeResources(events_path)
+        self.events_path = self._runtime_resources.events_path
         self.rate_limit_callback = rate_limit_callback
         self._runtime: CodexSdkRuntime | None = None
         self._codex: Any | None = None
         self._client: Any | None = None
-        self._threads: dict[str, Any] = {}
+        self._threads = self._runtime_resources.threads
         self._approval_workspace = cwd
-        self._events_lock = threading.Lock()
+        self._events_lock = self._runtime_resources.events_lock
         self._rate_limit_callback_lock = threading.Lock()
-        self._threads_lock = threading.Lock()
+        self._threads_lock = self._runtime_resources.threads_lock
 
     def start(self) -> None:
         if self.is_running():
@@ -821,26 +823,37 @@ class CodexSdkClient:
         return payload
 
     def set_events_path(self, events_path: Path) -> None:
-        self.events_path = events_path
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        self._runtime_resources.switch_run(events_path)
+        self.events_path = self._runtime_resources.events_path
 
-    def start_thread(self, repo_dir: Path, model: str) -> str:
+    def start_thread(
+        self,
+        repo_dir: Path,
+        model: str,
+        *,
+        timeout_seconds: int = 30,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> str:
         if self._codex is None:
             self.start()
         if self._codex is None or self._runtime is None:
             raise RuntimeError("Codex SDK is not running")
         self._approval_workspace = repo_dir
-        thread = self._codex.thread_start(
-            approval_mode=self._runtime.ApprovalMode.deny_all,
-            cwd=str(repo_dir),
-            sandbox=self._runtime.Sandbox.workspace_write,
-            service_name="codex_repo_review_worker",
-            model=model or None,
+        thread = run_bounded_call(
+            lambda: self._codex.thread_start(
+                approval_mode=self._runtime.ApprovalMode.deny_all,
+                cwd=str(repo_dir),
+                sandbox=self._runtime.Sandbox.workspace_write,
+                service_name="codex_repo_review_worker",
+                model=model or None,
+            ),
+            timeout_seconds=max(1, int(timeout_seconds)),
+            timeout_message="codex thread start timed out",
+            cancel_requested=cancel_requested,
+            cancelled_error=lambda: JobCancelled("cancel requested"),
         )
-        thread_id = str(getattr(thread, "id", "") or "")
-        if thread_id:
-            with self._threads_lock:
-                self._threads[thread_id] = thread
+        thread_id = require_identifier(getattr(thread, "id", ""), label="thread id")
+        self._runtime_resources.register_thread(thread_id, thread)
         return thread_id
 
     def run_turn(
@@ -857,6 +870,7 @@ class CodexSdkClient:
     ) -> CodexTurnMetrics:
         turn_started_monotonic = time.monotonic()
         client = self._sdk_client()
+        event_scope = self._runtime_resources.begin_turn()
         self._approval_workspace = repo_dir
         params = {
             "cwd": str(repo_dir),
@@ -920,11 +934,10 @@ class CodexSdkClient:
             raise start_error
         started = start_state.get("started")
         turn = getattr(started, "turn", None)
-        turn_id = str(getattr(turn, "id", "") or getattr(started, "turn_id", "") or "")
-        if not turn_id:
-            return CodexTurnMetrics(
-                duration_ms=max(0, int((time.monotonic() - turn_started_monotonic) * 1000))
-            )
+        turn_id = require_identifier(
+            getattr(turn, "id", "") or getattr(started, "turn_id", ""),
+            label="turn id",
+        )
 
         completed = threading.Event()
         abandoned = threading.Event()
@@ -937,7 +950,9 @@ class CodexSdkClient:
                     notification = client.next_turn_notification(turn_id)
                     if abandoned.is_set():
                         break
-                    self._record_sdk_notification(notification)
+                    self._record_sdk_notification(notification, event_scope=event_scope)
+                    if abandoned.is_set():
+                        break
                     payload = getattr(notification, 'payload', None)
                     payload_data = self._model_to_dict(payload)
                     turn_data = payload_data.get('turn')
@@ -990,6 +1005,7 @@ class CodexSdkClient:
             except BaseException as exc:  # noqa: BLE001 - surfaced to the worker phase as a Codex turn failure.
                 error["message"] = str(exc)
             finally:
+                self._runtime_resources.abandon_turn(event_scope)
                 try:
                     client.unregister_turn_notifications(turn_id)
                 except Exception:
@@ -1002,12 +1018,14 @@ class CodexSdkClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 abandoned.set()
+                self._runtime_resources.abandon_turn(event_scope)
                 self.interrupt(thread_id, turn_id)
                 raise TimeoutError(f"codex turn timed out: {turn_id}")
             if completed.wait(min(0.5, remaining)):
                 break
             if cancel_requested is not None and cancel_requested():
                 abandoned.set()
+                self._runtime_resources.abandon_turn(event_scope)
                 self.interrupt(thread_id, turn_id)
                 raise JobCancelled("cancel requested")
         if error.get("message"):
@@ -1109,8 +1127,7 @@ class CodexSdkClient:
         codex = self._codex
         self._codex = None
         self._client = None
-        with self._threads_lock:
-            self._threads.clear()
+        self._runtime_resources.clear()
         if codex is not None:
             codex.close()
 
@@ -1126,11 +1143,16 @@ class CodexSdkClient:
     def _approval_handler(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
         return approval_response_for_request({"method": method, "params": params or {}}, self._approval_workspace)
 
-    def _record_sdk_notification(self, notification: Any) -> None:
+    def _record_sdk_notification(
+        self,
+        notification: Any,
+        *,
+        event_scope: TurnEventScope | None = None,
+    ) -> bool:
         method = str(getattr(notification, "method", "") or "")
         payload = self._model_to_dict(getattr(notification, "payload", None))
-        with self._events_lock:
-            append_jsonl(self.events_path, {"method": method, "params": payload})
+        scope = event_scope or self._runtime_resources.begin_turn()
+        return self._runtime_resources.record_event(scope, method, payload)
 
     def _model_to_dict(self, value: Any) -> dict[str, Any]:
         if value is None:
@@ -3160,7 +3182,16 @@ class ReviewWorkerV1:
                         if callable(runtime_metadata):
                             write_json(run_dir / "codex-runtime.json", runtime_metadata())
                     elif phase == "initialize_codex_connection":
-                        thread_id = codex_client.start_thread(repo_dir, model_for_job(job)) if codex_client else ""
+                        thread_id = (
+                            codex_client.start_thread(
+                                repo_dir,
+                                model_for_job(job),
+                                timeout_seconds=turn_timeout_for_job(job),
+                                cancel_requested=self.poll_cancel_requested,
+                            )
+                            if codex_client
+                            else ""
+                        )
                         active.thread_id = thread_id
                         run_state = read_json(run_dir / "run-state.json", {})
                         if not isinstance(run_state, dict):
