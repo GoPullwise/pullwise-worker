@@ -1377,7 +1377,13 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             dotnet = str(Path(shutil.which("dotnet") or "dotnet").resolve())
-            build_root = root / "dotnet-build"
+            build_root = (
+                root
+                / "validation-repo"
+                / ".codex-review"
+                / "build"
+                / "dotnet"
+            )
             run_dir, validation_repo = _write_intent_run(
                 root,
                 plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},

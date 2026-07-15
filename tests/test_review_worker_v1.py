@@ -62,6 +62,7 @@ from pullwise_worker.review_worker_v1 import (
     default_agent_report,
     effort_for_phase,
     effective_routing,
+    ensure_immutable_inventory_baseline,
     fallback_semantic_artifact,
     intent_test_artifact_counts,
     intent_validation_missing_results_error,
@@ -92,7 +93,7 @@ from pullwise_worker.review_worker_v1 import (
     repair_intent_test_results_artifact,
     repair_intent_test_source_artifact,
     repair_validation_output_artifact,
-    run_intent_tests,
+    run_intent_tests as _run_intent_tests,
     safe_id,
     scoped_codex_command,
     summary_payload,
@@ -204,6 +205,203 @@ def write_basic_qa_inputs(repo: Path, run_dir: Path) -> None:
         },
     )
     write_json(run_dir / "intent" / "intent-test-validation.json", {"schema_version": "intent-test-validation/v1", "enabled": False})
+
+
+def _path_relative_to(path: Path, root: Path) -> Path | None:
+    try:
+        return path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return None
+
+
+def _replace_fixture_command_path(
+    value: object,
+    original: str,
+    replacement: str,
+) -> object:
+    if isinstance(value, list):
+        return [
+            replacement if str(part) == original else part
+            for part in value
+        ]
+    if isinstance(value, str):
+        return value.replace(original, replacement)
+    return value
+
+
+def _finalize_legacy_intent_fixture(run_dir: Path) -> None:
+    repo = run_dir.parent.parent.parent
+    intent_dir = run_dir / "intent"
+    workspace_path = intent_dir / "validation-workspace.json"
+    workspace = (
+        json.loads(workspace_path.read_text(encoding="utf-8"))
+        if workspace_path.is_file()
+        else {}
+    )
+    if not isinstance(workspace, dict):
+        workspace = {}
+    validation_root = str(workspace.get("validation_repo_root") or "").strip()
+    if not validation_root:
+        return
+    validation_repo = Path(validation_root)
+    validation_repo.mkdir(parents=True, exist_ok=True)
+    workspace["schema_version"] = "validation-workspace/v1"
+    workspace["source_repo_root"] = str(repo)
+    write_json(workspace_path, workspace)
+
+    source_path = intent_dir / "intent-test-source.json"
+    source = (
+        json.loads(source_path.read_text(encoding="utf-8"))
+        if source_path.is_file()
+        else {}
+    )
+    generated_tests = (
+        source.get("generated_tests")
+        if isinstance(source, dict)
+        and isinstance(source.get("generated_tests"), list)
+        else []
+    )
+    canonical_root = repo / ".codex-review" / "generated-tests"
+    run_generation_root = intent_dir / "generated-tests"
+    path_replacements: dict[str, str] = {}
+    for generated in generated_tests:
+        if not isinstance(generated, dict):
+            continue
+        raw_path = str(
+            generated.get("path")
+            or generated.get("artifact_path")
+            or generated.get("artifactPath")
+            or ""
+        ).strip()
+        if not raw_path:
+            continue
+        replacement = path_replacements.get(raw_path)
+        if replacement is None:
+            declared_path = Path(raw_path)
+            candidates = (
+                declared_path
+                if declared_path.is_absolute()
+                else repo / declared_path,
+                declared_path
+                if declared_path.is_absolute()
+                else run_dir / declared_path,
+            )
+            source_candidate: Path | None = None
+            relative_path: Path | None = None
+            for candidate in candidates:
+                canonical_relative = _path_relative_to(candidate, canonical_root)
+                if (
+                    canonical_relative is not None
+                    and candidate.is_file()
+                    and not candidate.is_symlink()
+                ):
+                    source_candidate = candidate
+                    relative_path = (
+                        Path(".codex-review")
+                        / "generated-tests"
+                        / canonical_relative
+                    )
+                    break
+                run_relative = _path_relative_to(candidate, run_generation_root)
+                if (
+                    run_relative is not None
+                    and candidate.is_file()
+                    and not candidate.is_symlink()
+                ):
+                    source_candidate = candidate
+                    relative_path = (
+                        Path("intent") / "generated-tests" / run_relative
+                    )
+                    break
+            validation_candidate = (
+                declared_path
+                if declared_path.is_absolute()
+                else validation_repo / declared_path
+            )
+            if source_candidate is None and validation_candidate.is_file():
+                validation_relative = _path_relative_to(
+                    validation_candidate,
+                    validation_repo,
+                )
+                if validation_relative is not None:
+                    if tuple(validation_relative.parts[:2]) == (
+                        ".codex-review",
+                        "generated-tests",
+                    ):
+                        relative_path = validation_relative
+                        source_candidate = repo / relative_path
+                    elif tuple(validation_relative.parts[:2]) == (
+                        "intent",
+                        "generated-tests",
+                    ):
+                        relative_path = validation_relative
+                        source_candidate = run_dir / relative_path
+                    else:
+                        relative_path = (
+                            Path(".codex-review")
+                            / "generated-tests"
+                            / "legacy-fixtures"
+                            / validation_relative
+                        )
+                        source_candidate = repo / relative_path
+                    source_candidate.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(
+                        validation_candidate,
+                        source_candidate,
+                        follow_symlinks=False,
+                    )
+                    validation_candidate.unlink()
+            if source_candidate is None or relative_path is None:
+                continue
+            replacement = relative_path.as_posix()
+            path_replacements[raw_path] = replacement
+        generated["path"] = replacement
+        for key in (
+            "command",
+            "test_command",
+            "testCommand",
+            "run_command",
+            "runCommand",
+        ):
+            if key in generated:
+                generated[key] = _replace_fixture_command_path(
+                    generated[key],
+                    raw_path,
+                    replacement,
+                )
+    if isinstance(source, dict):
+        for key in ("test_commands", "commands", "intended_commands"):
+            commands = source.get(key)
+            if not isinstance(commands, list):
+                continue
+            for command_entry in commands:
+                if not isinstance(command_entry, dict):
+                    continue
+                for command_key in (
+                    "command",
+                    "test_command",
+                    "testCommand",
+                    "run_command",
+                    "runCommand",
+                ):
+                    if command_key not in command_entry:
+                        continue
+                    command_value = command_entry[command_key]
+                    for original, replacement in path_replacements.items():
+                        command_value = _replace_fixture_command_path(
+                            command_value,
+                            original,
+                            replacement,
+                        )
+                    command_entry[command_key] = command_value
+        write_json(source_path, source)
+    ensure_immutable_inventory_baseline(repo, run_dir)
+
+
+def run_intent_tests(run_dir: Path, *args: object, **kwargs: object) -> dict:
+    _finalize_legacy_intent_fixture(run_dir)
+    return _run_intent_tests(run_dir, *args, **kwargs)
+
 
 class ReviewWorkerV1ContractsTest(unittest.TestCase):
     def test_validator_output_repair_normalizes_common_collection_aliases(self) -> None:
@@ -2947,7 +3145,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 raw = run_intent_tests(run_dir)
 
         self.assertEqual(raw["test_runs"][0]["status"], "passed")
-        self.assertEqual(raw["test_runs"][0]["command"], "python3 -m unittest test_delegated.py")
+        self.assertEqual(
+            raw["test_runs"][0]["command"],
+            "python3 -m unittest discover "
+            "-s .codex-review/generated-tests/legacy-fixtures "
+            "-p test_delegated.py",
+        )
         run.assert_called_once()
 
     def test_run_intent_tests_maps_explicit_source_command_to_materialized_path(self) -> None:
@@ -3349,7 +3552,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 raw = run_intent_tests(run_dir)
 
         self.assertEqual(len(raw["test_runs"]), 1)
-        self.assertEqual(raw["test_runs"][0]["command"], "python3 -m unittest test_first.py")
+        self.assertEqual(
+            raw["test_runs"][0]["command"],
+            "python3 -m unittest discover "
+            "-s .codex-review/generated-tests/legacy-fixtures "
+            "-p test_first.py",
+        )
         run.assert_called_once()
 
     def test_repair_intent_test_source_maps_single_top_level_test_command(self) -> None:
@@ -3424,7 +3632,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             ):
                 raw = run_intent_tests(run_dir)
 
-        self.assertEqual(raw["test_runs"][0]["command"], "python3 -m unittest test_generated.py")
+        self.assertEqual(
+            raw["test_runs"][0]["command"],
+            "python3 -m unittest discover "
+            "-s .codex-review/generated-tests/legacy-fixtures "
+            "-p test_generated.py",
+        )
 
     def test_run_intent_tests_rejects_module_scope_imported_project_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
