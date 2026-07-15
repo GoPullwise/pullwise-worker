@@ -13,6 +13,7 @@ from unittest.mock import patch
 from pullwise_worker.agentic_execution import build_execution_capabilities
 from pullwise_worker.review_worker_v1 import (
     ReviewWorkerV1,
+    _intent_test_sandbox_command,
     intent_execution_repair_prompt,
     intent_runtime_repair_diagnostics,
     intent_test_command_policy,
@@ -200,6 +201,55 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertTrue(allowed, reason)
         self.assertIn("agent-proposed", reason)
 
+    def test_relative_contained_agent_runner_passes_executable_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "checks/behavior.spec.custom",
+                            "command": ["tools/bespoke-test", "checks/behavior.spec.custom"],
+                        }
+                    ],
+                },
+            )
+            runner = validation_repo / "tools" / "bespoke-test"
+            test_file = validation_repo / "checks" / "behavior.spec.custom"
+            runner.parent.mkdir(parents=True)
+            test_file.parent.mkdir(parents=True)
+            runner.write_text("contained runner", encoding="utf-8")
+            test_file.write_text("case", encoding="utf-8")
+
+            payload = intent_test_source_preflight_payload(run_dir)
+
+        self.assertEqual(payload["tests"][0]["status"], "ready")
+
+    def test_linux_sandbox_rewrites_absolute_contained_runner_to_workspace_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            runner = validation_repo / "tools" / "bespoke-test"
+            runner.parent.mkdir(parents=True)
+            runner.write_text("runner", encoding="utf-8")
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                side_effect=lambda name: "/usr/bin/bwrap" if name in {"bwrap", "bubblewrap"} else None,
+            ):
+                command, sandbox_cwd, skip_reason = _intent_test_sandbox_command(
+                    [str(runner), "behavior.spec"],
+                    validation_repo,
+                    validation_repo,
+                )
+
+        self.assertEqual(skip_reason, "")
+        self.assertEqual(sandbox_cwd, "/workspace")
+        self.assertEqual(command[-2], "/workspace/tools/bespoke-test")
+
     def test_generic_agent_runner_still_rejects_network_install_and_shell_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             validation_repo = Path(tmp_dir)
@@ -207,6 +257,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 ["curl", "https://example.invalid/test"],
                 ["custom-test", "install"],
                 ["custom-test", "&&", "other-test"],
+                ["npm", "test", "--", "https://example.invalid/intent.test.js"],
             )
             for command in cases:
                 with self.subTest(command=command):
@@ -222,6 +273,17 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             allowed, reason = intent_test_command_policy(
                 ["dotnet", "test", "../../../outside/intent-tests.dll"],
                 nested,
+                validation_repo,
+            )
+
+        self.assertFalse(allowed)
+        self.assertIn("outside", reason)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            validation_repo = Path(tmp_dir)
+            allowed, reason = intent_test_command_policy(
+                ["npm", "test", "--", "../outside/intent.test.js"],
+                validation_repo,
                 validation_repo,
             )
 
@@ -579,6 +641,92 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertEqual(payload["summary"]["ready"], 1)
         self.assertEqual(payload["summary"]["blocked"], 0)
 
+    def test_preflight_agent_repair_attempts_are_strictly_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "generated.custom",
+                        }
+                    ],
+                },
+            )
+            (validation_repo / "generated.custom").write_text("candidate\n", encoding="utf-8")
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+
+            class NonRepairingCodex:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def run_turn(self, **_kwargs):
+                    self.calls += 1
+                    return SimpleNamespace(duration_ms=1)
+
+            codex = NonRepairingCodex()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch("pullwise_worker.review_worker_v1.effort_for_phase", return_value="medium"), patch(
+                "pullwise_worker.review_worker_v1.turn_timeout_for_job",
+                return_value=30,
+            ):
+                payload = worker.repair_intent_test_preflight(
+                    codex,
+                    root / "repo",
+                    run_dir,
+                    {},
+                    max_attempts=2,
+                )
+
+        self.assertEqual(codex.calls, 2)
+        self.assertEqual(payload["tests"][0]["reason_code"], "command_missing")
+
+    def test_failed_optional_repair_turn_degrades_to_structured_blocked_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "generated.custom",
+                        }
+                    ],
+                },
+            )
+            (validation_repo / "generated.custom").write_text("candidate\n", encoding="utf-8")
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+
+            class FailingCodex:
+                def run_turn(self, **_kwargs):
+                    raise TimeoutError("repair turn timed out")
+
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch("pullwise_worker.review_worker_v1.effort_for_phase", return_value="medium"), patch(
+                "pullwise_worker.review_worker_v1.turn_timeout_for_job",
+                return_value=30,
+            ):
+                payload = worker.repair_intent_test_preflight(
+                    FailingCodex(),
+                    root / "repo",
+                    run_dir,
+                    {},
+                    max_attempts=2,
+                )
+            log = (run_dir / "worker.log.jsonl").read_text(encoding="utf-8")
+
+        self.assertEqual(payload["tests"][0]["reason_code"], "command_missing")
+        self.assertIn("intent_test_execution_repair_failed", log)
+
     def test_worker_repairs_real_runtime_harness_failure_and_preserves_attempt_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -650,6 +798,85 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertEqual(repaired["test_runs"][0]["status"], "passed")
         self.assertEqual(repaired["test_runs"][0]["attempt"], 2)
         self.assertEqual(history["attempts"][0]["test_runs"][0]["status"], "failed")
+
+    def test_runtime_repair_reruns_only_repairable_tests_and_preserves_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={
+                    "schema_version": "intent-test-plan/v1",
+                    "test_targets": [{"test_id": "ITP-pass"}, {"test_id": "ITP-repair"}],
+                },
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-pass",
+                            "target_test_ids": ["ITP-pass"],
+                            "path": "test_pass.py",
+                            "command": [sys.executable, "-m", "unittest", "test_pass.py"],
+                        },
+                        {
+                            "test_id": "ITV-repair",
+                            "target_test_ids": ["ITP-repair"],
+                            "path": "test_repair.py",
+                            "command": [sys.executable, "-m", "unittest", "test_repair.py"],
+                        },
+                    ],
+                },
+            )
+            (validation_repo / "test_pass.py").write_text(
+                "import unittest\n"
+                "class PassTest(unittest.TestCase):\n"
+                "    def test_behavior(self): self.assertEqual(3 * 3, 9)\n",
+                encoding="utf-8",
+            )
+            repair_path = validation_repo / "test_repair.py"
+            repair_path.write_text(
+                "import unittest\n"
+                "import unavailable_harness_helper\n"
+                "class RepairTest(unittest.TestCase):\n"
+                "    def test_behavior(self): self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                initial = run_intent_tests(run_dir)
+            write_json(run_dir / "intent" / "intent-test-results.raw.json", initial)
+
+            class SelectiveRepairCodex:
+                def run_turn(self, **_kwargs):
+                    repair_path.write_text(
+                        "import unittest\n"
+                        "class RepairTest(unittest.TestCase):\n"
+                        "    def test_behavior(self): self.assertTrue(True)\n",
+                        encoding="utf-8",
+                    )
+                    return SimpleNamespace(duration_ms=5)
+
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.effort_for_phase",
+                return_value="medium",
+            ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
+                repaired = worker.repair_intent_test_runtime(
+                    SelectiveRepairCodex(),
+                    root / "repo",
+                    run_dir,
+                    {},
+                    max_attempts=1,
+                )
+            history = json.loads(
+                (run_dir / "intent" / "intent-test-execution-history.json").read_text(encoding="utf-8")
+            )
+
+        by_id = {item["test_id"]: item for item in repaired["test_runs"]}
+        self.assertEqual(by_id["ITV-pass"]["status"], "passed")
+        self.assertEqual(by_id["ITV-pass"]["attempt"], 1)
+        self.assertEqual(by_id["ITV-repair"]["status"], "passed")
+        self.assertEqual(by_id["ITV-repair"]["attempt"], 2)
+        self.assertEqual([item["test_id"] for item in history["attempts"][1]["test_runs"]], ["ITV-repair"])
 
     def test_runtime_repair_is_rejected_when_agent_modifies_repository_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -756,8 +983,16 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
                 result = run_intent_tests(run_dir)
+            stderr = Path(result["test_runs"][0].get("stderr_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+            stdout = Path(result["test_runs"][0].get("stdout_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
 
-        self.assertEqual(result["test_runs"][0]["status"], "passed")
+        self.assertEqual(result["test_runs"][0]["status"], "passed", stdout + "\n" + stderr)
         self.assertEqual(result["test_runs"][0]["exit_code"], 0)
         self.assertEqual(result["test_runs"][0]["preflight"]["status"], "ready")
 
@@ -794,10 +1029,121 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
                 result = run_intent_tests(run_dir)
+            stderr = Path(result["test_runs"][0].get("stderr_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
 
-        self.assertEqual(result["test_runs"][0]["status"], "passed")
+        self.assertEqual(result["test_runs"][0]["status"], "passed", stderr)
         self.assertEqual(result["test_runs"][0]["exit_code"], 0)
         self.assertEqual(result["test_runs"][0]["cwd"], str(workspace))
+
+    @unittest.skipUnless(shutil.which("go"), "Go is required for the real agentic runner test")
+    def test_real_go_test_executes_in_nested_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            go = str(Path(shutil.which("go") or "go").resolve())
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "services/math/value_test.go",
+                            "cwd": "services/math",
+                            "command": [go, "test", "./..."],
+                        }
+                    ],
+                },
+            )
+            workspace = validation_repo / "services" / "math"
+            workspace.mkdir(parents=True)
+            (workspace / "go.mod").write_text("module example.com/intentmath\n\ngo 1.20\n", encoding="utf-8")
+            (workspace / "value.go").write_text(
+                "package intentmath\n\nfunc Value() int { return 7 }\n",
+                encoding="utf-8",
+            )
+            (workspace / "value_test.go").write_text(
+                "package intentmath\n\n"
+                'import "testing"\n\n'
+                "func TestValue(t *testing.T) {\n"
+                "    if Value() != 7 { t.Fatalf(\"unexpected value: %d\", Value()) }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                result = run_intent_tests(run_dir)
+            stderr = Path(result["test_runs"][0].get("stderr_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
+        self.assertEqual(result["test_runs"][0]["status"], "passed", stderr)
+        self.assertEqual(result["test_runs"][0]["exit_code"], 0)
+
+    @unittest.skipUnless(shutil.which("dotnet"), ".NET SDK is required for the generic real runner test")
+    def test_real_dotnet_agent_proposal_executes_without_a_framework_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            dotnet = str(Path(shutil.which("dotnet") or "dotnet").resolve())
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "services/dotnet/Program.cs",
+                            "cwd": "services/dotnet",
+                            "command": [
+                                dotnet,
+                                "run",
+                                "--project",
+                                "IntentTest.csproj",
+                                "--configuration",
+                                "Release",
+                            ],
+                        }
+                    ],
+                },
+            )
+            workspace = validation_repo / "services" / "dotnet"
+            workspace.mkdir(parents=True)
+            (workspace / "IntentTest.csproj").write_text(
+                '<Project Sdk="Microsoft.NET.Sdk">\n'
+                "  <PropertyGroup>\n"
+                "    <OutputType>Exe</OutputType>\n"
+                "    <TargetFramework>net8.0</TargetFramework>\n"
+                "    <ImplicitUsings>enable</ImplicitUsings>\n"
+                "  </PropertyGroup>\n"
+                "</Project>\n",
+                encoding="utf-8",
+            )
+            (workspace / "Program.cs").write_text(
+                "if (2 + 3 != 5) Environment.Exit(1);\n"
+                'Console.WriteLine("agentic intent check passed");\n',
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                result = run_intent_tests(run_dir)
+            stderr = Path(result["test_runs"][0].get("stderr_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+            stdout = Path(result["test_runs"][0].get("stdout_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
+        self.assertEqual(result["test_runs"][0]["status"], "passed", stdout + "\n" + stderr)
+        self.assertEqual(result["test_runs"][0]["exit_code"], 0)
 
 
 if __name__ == "__main__":

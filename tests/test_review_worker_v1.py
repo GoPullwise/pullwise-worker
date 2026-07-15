@@ -1973,8 +1973,20 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
+            preflight = json.loads(
+                (
+                    root
+                    / "repo"
+                    / ".codex-review"
+                    / "runs"
+                    / "run_1"
+                    / "intent"
+                    / "intent-test-preflight.json"
+                ).read_text(encoding="utf-8")
+            )
 
         self.assertEqual(repaired["generated_tests"][0]["artifact_refs"], ["art_intent_test_source"])
+        self.assertEqual(preflight["schema_version"], "intent-test-preflight/v1")
 
     def test_completed_run_preserves_codex_events(self) -> None:
         calls = []

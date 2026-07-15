@@ -135,7 +135,7 @@ def _candidate_from_value(
 
 def collect_execution_candidates(*sources: object) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, tuple[str, ...], str]] = set()
+    seen: set[tuple[str, tuple[str, ...], str, tuple[str, ...]]] = set()
 
     def add(candidate: dict[str, Any] | None) -> None:
         if candidate is None:
@@ -144,6 +144,7 @@ def collect_execution_candidates(*sources: object) -> list[dict[str, Any]]:
             str(candidate.get("test_id") or ""),
             tuple(str(part) for part in candidate.get("command") or []),
             str(candidate.get("cwd") or "."),
+            tuple(str(path) for path in candidate.get("required_paths") or []),
         )
         if key in seen:
             return
@@ -294,4 +295,3 @@ def build_execution_capabilities(
         "runtimes": runtimes,
         "agent_candidates": candidate_payloads,
     }
-

@@ -2073,7 +2073,7 @@ def node_package_script_dependency_error(package_json_path: Path, command: list[
     return f"dependency_missing: package test script requires unavailable local executable {executable_name}"
 
 
-def _command_executable_available(command: list[str]) -> tuple[bool, str]:
+def _command_executable_available(command: list[str], cwd: Path) -> tuple[bool, str]:
     if not command:
         return False, "command is empty"
     executable = str(command[0])
@@ -2081,6 +2081,10 @@ def _command_executable_available(command: list[str]) -> tuple[bool, str]:
     path = Path(executable)
     if path.is_absolute() and path.exists():
         return True, ""
+    if not path.is_absolute() and ("/" in executable or chr(92) in executable):
+        contained_candidate = cwd / path
+        if contained_candidate.is_file() and not contained_candidate.is_symlink():
+            return True, ""
     if shutil.which(executable) is not None:
         return True, ""
     return False, f"dependency_missing: {executable_name} executable is not available"
@@ -2105,7 +2109,7 @@ def intent_command_is_runnable_for_repo(command: list[str], cwd: Path, validatio
         return False, "skipped_not_runnable: command is empty"
     executable = normalized_executable_name(argv[0])
     lowered = [part.lower() for part in argv]
-    available, reason = _command_executable_available(argv)
+    available, reason = _command_executable_available(argv, cwd)
     if not available:
         return False, reason
     if executable in {"npm", "pnpm", "yarn"}:
@@ -2215,6 +2219,18 @@ def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: P
     denied = sorted(set(lowered).intersection(DENIED_COMMAND_TOKENS))
     if denied:
         return False, f"command contains denied token {denied[0]}"
+    for raw_argument in argv[1:]:
+        argument = str(raw_argument).strip()
+        if re.search(r"[a-z][a-z0-9+.-]*://", argument, flags=re.IGNORECASE):
+            return False, "test commands may not contain network URLs"
+        if not argument or argument.startswith("-"):
+            continue
+        candidate = Path(argument)
+        if candidate.is_absolute() or "/" in argument or chr(92) in argument:
+            if not candidate.is_absolute():
+                candidate = cwd / candidate
+            if not path_is_under(candidate, validation_repo):
+                return False, "test command references a path outside the validation workspace"
     if executable == "pytest":
         return True, "pytest is allowed"
     if _is_python_intent_executable(executable):
@@ -6493,12 +6509,40 @@ def refresh_agentic_execution_capabilities(repo_dir: Path, run_dir: Path) -> dic
         cwd = Path(raw_cwd)
         if not cwd.is_absolute():
             cwd = repo_dir / cwd
-        candidate["preflight"] = intent_execution_preflight(
+        candidate_preflight = intent_execution_preflight(
             [str(part) for part in candidate.get("command") or []],
             cwd.resolve(strict=False),
             repo_dir,
             profile if isinstance(profile, dict) else {},
         )
+        escaped_required_paths: list[str] = []
+        missing_required_paths: list[str] = []
+        for raw_required_path in candidate.get("required_paths") or []:
+            required_path_text = str(raw_required_path or "").strip()
+            if not required_path_text:
+                continue
+            required_path = Path(required_path_text)
+            if not required_path.is_absolute():
+                required_path = cwd / required_path
+            if not path_is_under(required_path, repo_dir):
+                escaped_required_paths.append(required_path_text)
+            elif not required_path.exists():
+                missing_required_paths.append(required_path_text)
+        if escaped_required_paths:
+            candidate_preflight = _intent_blocked_execution_diagnostic(
+                "agent-proposed required path escapes the validation workspace",
+                reason_code="required_path_escape",
+                classification="environment_error",
+                agent_repairable=False,
+                missing_capabilities=escaped_required_paths,
+            )
+        elif missing_required_paths:
+            candidate_preflight = _intent_blocked_execution_diagnostic(
+                "agent-proposed required paths are missing",
+                reason_code="required_path_missing",
+                missing_capabilities=missing_required_paths,
+            )
+        candidate["preflight"] = candidate_preflight
     write_json(run_dir / "intent" / "execution-capabilities.json", payload)
     return payload
 
@@ -6948,6 +6992,12 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
     sandbox_home = validation_repo / ".intent-test-home"
     sandbox_tmp = sandbox_home / "tmp"
     sandbox_tmp.mkdir(parents=True, exist_ok=True)
+    if sandboxed:
+        runtime_cache = "/tmp/pullwise-intent-cache"
+    else:
+        runtime_cache_path = sandbox_home / "cache"
+        runtime_cache_path.mkdir(parents=True, exist_ok=True)
+        runtime_cache = str(runtime_cache_path)
     env.update(
         {
             "CI": "true",
@@ -6956,6 +7006,19 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
             "TMPDIR": "/tmp" if sandboxed else str(sandbox_tmp),
             "TMP": "/tmp" if sandboxed else str(sandbox_tmp),
             "TEMP": "/tmp" if sandboxed else str(sandbox_tmp),
+            "XDG_CACHE_HOME": runtime_cache,
+            "XDG_CONFIG_HOME": f"{runtime_cache}/config",
+            "XDG_DATA_HOME": f"{runtime_cache}/data",
+            "APPDATA": f"{runtime_cache}/appdata",
+            "LOCALAPPDATA": f"{runtime_cache}/localappdata",
+            "GOCACHE": f"{runtime_cache}/go-build",
+            "GOMODCACHE": f"{runtime_cache}/go-mod",
+            "DOTNET_CLI_HOME": f"{runtime_cache}/dotnet-home",
+            "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
+            "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+            "DOTNET_NOLOGO": "1",
+            "NUGET_PACKAGES": f"{runtime_cache}/nuget",
+            "CARGO_HOME": f"{runtime_cache}/cargo",
             "NO_PROXY": "*",
             "PYTHONPATH": "/workspace" if sandboxed else str(validation_repo),
             "PULLWISE_INTENT_TEST": "1",
@@ -7031,6 +7094,16 @@ def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo:
     except ValueError:
         return [], "", "generated test cwd escapes validation workspace"
     sandbox_cwd = "/workspace" if rel_cwd == Path(".") else "/workspace/" + rel_cwd.as_posix()
+    sandboxed_command: list[str] = []
+    for argument in command:
+        argument_path = Path(argument)
+        if argument_path.is_absolute() and path_is_under(argument_path, validation_root):
+            relative_argument = argument_path.resolve(strict=False).relative_to(validation_root)
+            sandboxed_command.append(
+                "/workspace" if relative_argument == Path(".") else "/workspace/" + relative_argument.as_posix()
+            )
+        else:
+            sandboxed_command.append(argument)
     argv = [
         bwrap,
         "--die-with-parent",
@@ -7054,12 +7127,18 @@ def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo:
     for host_path in ("/usr", "/bin", "/lib", "/lib64", "/opt"):
         if Path(host_path).exists():
             argv.extend(["--ro-bind", host_path, host_path])
-    runtime_bind_root, runtime_bind_error = _intent_private_runtime_bind_root(command)
+    executable_path = Path(command[0]) if command else Path()
+    contained_executable = executable_path.is_absolute() and path_is_under(executable_path, validation_root)
+    runtime_bind_root, runtime_bind_error = (
+        (None, "")
+        if contained_executable
+        else _intent_private_runtime_bind_root(command)
+    )
     if runtime_bind_error:
         return [], "", runtime_bind_error
     if runtime_bind_root is not None:
         _append_sandbox_bind(argv, runtime_bind_root)
-    argv.extend(["--", *command])
+    argv.extend(["--", *sandboxed_command])
     return argv, sandbox_cwd, ""
 
 
@@ -7596,6 +7675,8 @@ def run_intent_tests(
                 cwd=str(cwd),
                 env=_intent_test_env(validation_repo, sandboxed=sys.platform.startswith("linux")),
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
                 timeout=timeout_seconds,
                 check=False,
