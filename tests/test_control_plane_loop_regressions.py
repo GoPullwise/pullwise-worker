@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from pullwise_worker._main_part_01_bootstrap import PullwiseHTTPError, PullwiseRequestError
-from pullwise_worker.review_worker_v1 import ReviewWorkerV1
+from pullwise_worker.review_worker_v1 import ReviewWorkerV1, control_plane_error_is_retryable
 
 
 class StopLoop(BaseException):
@@ -28,7 +28,13 @@ class RunningCodexClient:
             raise self.close_error
 
 
-def worker_config(root: Path, *, poll_seconds: int = 1, jitter_seconds: float = 0, max_backoff_seconds: int = 4) -> SimpleNamespace:
+def worker_config(
+    root: Path,
+    *,
+    poll_seconds: int = 1,
+    jitter_seconds: float = 0,
+    max_backoff_seconds: int = 4,
+) -> SimpleNamespace:
     return SimpleNamespace(
         worker_id="wk_control_plane",
         service_home=str(root),
@@ -40,7 +46,12 @@ def worker_config(root: Path, *, poll_seconds: int = 1, jitter_seconds: float = 
     )
 
 
-def prepare_worker(root: Path, client: object, *, config: SimpleNamespace | None = None) -> tuple[ReviewWorkerV1, list[str]]:
+def prepare_worker(
+    root: Path,
+    client: object,
+    *,
+    config: SimpleNamespace | None = None,
+) -> tuple[ReviewWorkerV1, list[str]]:
     worker = ReviewWorkerV1(config or worker_config(root), client=client)
     releases: list[str] = []
     worker.lock.acquire = lambda: None  # type: ignore[method-assign]
@@ -53,6 +64,24 @@ def prepare_worker(root: Path, client: object, *, config: SimpleNamespace | None
 
 
 class ControlPlaneLoopRegressionTests(unittest.TestCase):
+    def test_only_retryable_control_plane_errors_are_retried(self) -> None:
+        self.assertTrue(control_plane_error_is_retryable(PullwiseRequestError("transport")))
+        for status_code in (408, 429, 500, 503, 599):
+            with self.subTest(status_code=status_code):
+                self.assertTrue(
+                    control_plane_error_is_retryable(
+                        PullwiseHTTPError("temporary", status_code)
+                    )
+                )
+        for status_code in (400, 401, 403, 404, 409, 600):
+            with self.subTest(status_code=status_code):
+                self.assertFalse(
+                    control_plane_error_is_retryable(
+                        PullwiseHTTPError("permanent", status_code)
+                    )
+                )
+        self.assertFalse(control_plane_error_is_retryable(RuntimeError("programming error")))
+
     def test_continuous_loop_retries_transient_register_heartbeat_and_claim_in_safe_order(self) -> None:
         calls: list[str] = []
 
@@ -231,7 +260,9 @@ class ControlPlaneLoopRegressionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker, releases = prepare_worker(Path(tmp_dir), Client())
-            worker.codex_client = RunningCodexClient(close_error=RuntimeError("close failed"))  # type: ignore[assignment]
+            worker.codex_client = RunningCodexClient(  # type: ignore[assignment]
+                close_error=RuntimeError("close failed")
+            )
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 with self.assertRaisesRegex(RuntimeError, "close failed"):
                     worker.run(once=True)
@@ -248,7 +279,9 @@ class ControlPlaneLoopRegressionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker, releases = prepare_worker(Path(tmp_dir), Client())
-            worker.codex_client = RunningCodexClient(close_error=RuntimeError("close failed"))  # type: ignore[assignment]
+            worker.codex_client = RunningCodexClient(  # type: ignore[assignment]
+                close_error=RuntimeError("close failed")
+            )
             with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
                 with self.assertRaisesRegex(RuntimeError, "heartbeat failed"):
                     worker.run(once=True)

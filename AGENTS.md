@@ -641,6 +641,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 
 ## Execution And Validation Resilience
 
+- Keep the continuous control-plane loop alive across retryable transport failures and HTTP 408/429/5xx from registration, heartbeat, or lease by using the configured bounded exponential backoff and jitter; empty leases back off independently. Never lease after a failed heartbeat, never retry permanent HTTP failures or ordinary programming errors, and keep `once=True` to one pass with no retry sleep. Always release the worker lock even when Codex shutdown raises.
 - Keep an independent active-job heartbeat/cancellation supervisor running from immediately after a job becomes active until terminal cleanup finishes, including checkout and other blocking setup work. The supervisor must not start a second Codex client while a job is active.
 - Codex turn cancellation callbacks must read only the local active-job cancellation state. The independent active-job supervisor owns server polling; never issue a synchronous heartbeat from the 0.5-second Codex turn wait loop.
 - A Codex turn deadline starts before `turn_start`. Both turn start and interruption RPCs must remain bounded from the worker's perspective, and a timed-out/cancelled notification consumer must not write run artifacts after `run_turn` returns.
