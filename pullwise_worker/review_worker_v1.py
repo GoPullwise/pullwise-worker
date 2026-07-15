@@ -4126,19 +4126,45 @@ class ReviewWorkerV1:
                             "time": iso_time(time.time()),
                         },
                     )
-                    future = executor.submit(
-                        self._execute_reviewer_assignment,
-                        codex_client,
-                        repo_dir,
-                        run_dir,
-                        job,
-                        attempt_work,
-                        thread_id=reviewer_thread_id,
-                        attempt=attempt,
-                        expected_assignments=expected_assignments,
-                        cancel_event=cancel_event,
-                        deadline_monotonic=deadline_monotonic,
-                    )
+                    try:
+                        future = executor.submit(
+                            self._execute_reviewer_assignment,
+                            codex_client,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            attempt_work,
+                            thread_id=reviewer_thread_id,
+                            attempt=attempt,
+                            expected_assignments=expected_assignments,
+                            cancel_event=cancel_event,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                    except BaseException as exc:
+                        release_codex_thread_reference(codex_client, reviewer_thread_id)
+                        if estimator is not None:
+                            estimator.finish_work_unit(
+                                estimate_unit_id(work, attempt),
+                                state="failed",
+                            )
+                        attempt_record.update(
+                            {
+                                "status": "failed",
+                                "completed_at": iso_time(time.time()),
+                                "error": quota_text(exc, 500),
+                            }
+                        )
+                        record.update(
+                            {
+                                "status": "failed",
+                                "completed_at": attempt_record["completed_at"],
+                                "error": attempt_record["error"],
+                            }
+                        )
+                        fatal_error = exc
+                        cancel_event.set()
+                        write_json(execution_path, execution)
+                        break
                     active_futures[future] = (work, attempt_work, record, attempt_record)
                     self.progress_phase(
                         active,

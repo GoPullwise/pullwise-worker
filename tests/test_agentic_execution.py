@@ -78,6 +78,43 @@ def _establish_immutable_validation_baseline(
     ensure_immutable_inventory_baseline(repo, run_dir)
 
 
+def _canonical_generated_test_path(relative_path: str) -> str:
+    return (
+        Path(".codex-review") / "generated-tests" / relative_path
+    ).as_posix()
+
+
+def _write_canonical_generated_test(
+    run_dir: Path,
+    validation_repo: Path,
+    relative_path: str,
+    content: str,
+) -> tuple[Path, Path]:
+    declared_path = _canonical_generated_test_path(relative_path)
+    source_payload = json.loads(
+        (run_dir / "intent" / "intent-test-source.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for generated in source_payload.get("generated_tests", []):
+        if not isinstance(generated, dict):
+            continue
+        if str(generated.get("path") or "") != relative_path:
+            continue
+        generated["path"] = declared_path
+        command = generated.get("command")
+        if isinstance(command, list):
+            generated["command"] = [
+                declared_path if str(part) == relative_path else part
+                for part in command
+            ]
+    write_json(run_dir / "intent" / "intent-test-source.json", source_payload)
+    source_path = run_dir.parent.parent.parent / declared_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(content, encoding="utf-8")
+    return source_path, validation_repo / declared_path
+
+
 class AgenticExecutionContractsTest(unittest.TestCase):
     def test_capability_snapshot_is_driven_by_agent_candidates_and_nested_workspaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -187,7 +224,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 json.dumps({"scripts": {"test": "vitest run"}}),
                 encoding="utf-8",
             )
-            (validation_repo / "generated.test.js").write_text("export {};\n", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated.test.js",
+                "export {};\n",
+            )
             _establish_immutable_validation_baseline(
                 run_dir,
                 validation_repo,
@@ -245,12 +287,15 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 },
             )
             runner = validation_repo / "tools" / "bespoke-test"
-            test_file = validation_repo / "checks" / "behavior.spec.custom"
             runner.parent.mkdir(parents=True)
-            test_file.parent.mkdir(parents=True)
             runner.write_text("contained runner", encoding="utf-8")
             runner.chmod(0o755)
-            test_file.write_text("case", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "checks/behavior.spec.custom",
+                "case",
+            )
 
             payload = intent_test_source_preflight_payload(run_dir)
 
@@ -427,7 +472,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     ],
                 },
             )
-            (validation_repo / "generated_test.custom").write_text("generated test\n", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated_test.custom",
+                "generated test\n",
+            )
 
             payload = intent_test_source_preflight_payload(run_dir)
 
@@ -459,10 +509,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             (source_repo / "app.py").write_bytes(original)
             ensure_immutable_inventory_baseline(source_repo, run_dir)
             (validation_repo / "app.py").write_text("def value(): return 999\n", encoding="utf-8")
-            (validation_repo / "generated_test.py").write_text(
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated_test.py",
                 "from pathlib import Path\n"
                 "Path('executed.marker').write_text('executed')\n",
-                encoding="utf-8",
             )
             write_json(
                 run_dir / "inventory.json",
@@ -511,14 +563,16 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             (source_repo / "app.py").write_bytes(original)
             ensure_immutable_inventory_baseline(source_repo, run_dir)
             (validation_repo / "app.py").write_bytes(original)
-            (validation_repo / "generated_test.py").write_text(
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated_test.py",
                 "import unittest\n"
                 "from pathlib import Path\n"
                 "class GeneratedTest(unittest.TestCase):\n"
                 "    def test_mutating_pass(self):\n"
                 "        Path('app.py').write_text('def value(): return 999\\n')\n"
                 "        self.assertTrue(True)\n",
-                encoding="utf-8",
             )
             write_json(
                 run_dir / "inventory.json",
@@ -742,7 +796,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     ],
                 },
             )
-            (validation_repo / "generated.custom").write_text("candidate\n", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated.custom",
+                "candidate\n",
+            )
             write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
 
             class RepairingCodex:
@@ -751,7 +810,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
                 def run_turn(self, **kwargs):
                     self.prompts.append(kwargs["prompt"])
-                    (validation_repo / "generated_test.py").write_text(
+                    declared_path = _canonical_generated_test_path(
+                        "generated_test.py"
+                    )
+                    source_path = root / "repo" / declared_path
+                    source_path.parent.mkdir(parents=True, exist_ok=True)
+                    source_path.write_text(
                         "import unittest\n"
                         "class GeneratedTest(unittest.TestCase):\n"
                         "    def test_behavior(self): self.assertTrue(True)\n",
@@ -765,8 +829,13 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                                 {
                                     "test_id": "ITV-001",
                                     "target_test_ids": ["ITP-001"],
-                                    "path": "generated_test.py",
-                                    "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                                    "path": declared_path,
+                                    "command": [
+                                        sys.executable,
+                                        "-m",
+                                        "unittest",
+                                        declared_path,
+                                    ],
                                 }
                             ],
                         },
@@ -809,7 +878,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     ],
                 },
             )
-            (validation_repo / "generated.custom").write_text("candidate\n", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated.custom",
+                "candidate\n",
+            )
             write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
 
             class NonRepairingCodex:
@@ -854,7 +928,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     ],
                 },
             )
-            (validation_repo / "generated.custom").write_text("candidate\n", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated.custom",
+                "candidate\n",
+            )
             write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
 
             class FailingCodex:
@@ -903,14 +982,15 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 validation_repo,
                 ["app.py"],
             )
-            generated_path = validation_repo / "generated_test.py"
-            generated_path.write_text(
+            generated_source, generated_path = _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated_test.py",
                 "import unittest\n"
                 "import unneeded_project_dependency\n"
                 "from app import value\n"
                 "class GeneratedTest(unittest.TestCase):\n"
                 "    def test_behavior(self): self.assertEqual(value(), 7)\n",
-                encoding="utf-8",
             )
             write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -924,11 +1004,18 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
                 def run_turn(self, **_kwargs):
                     self.calls += 1
-                    generated_path.write_text(
+                    repaired_source = (
                         "import unittest\n"
                         "from app import value\n"
                         "class GeneratedTest(unittest.TestCase):\n"
-                        "    def test_behavior(self): self.assertEqual(value(), 7)\n",
+                        "    def test_behavior(self): self.assertEqual(value(), 7)\n"
+                    )
+                    generated_source.write_text(
+                        repaired_source,
+                        encoding="utf-8",
+                    )
+                    generated_path.write_text(
+                        repaired_source,
                         encoding="utf-8",
                     )
                     return SimpleNamespace(duration_ms=5)
@@ -983,19 +1070,22 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     ],
                 },
             )
-            (validation_repo / "test_pass.py").write_text(
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "test_pass.py",
                 "import unittest\n"
                 "class PassTest(unittest.TestCase):\n"
                 "    def test_behavior(self): self.assertEqual(3 * 3, 9)\n",
-                encoding="utf-8",
             )
-            repair_path = validation_repo / "test_repair.py"
-            repair_path.write_text(
+            repair_source, repair_path = _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "test_repair.py",
                 "import unittest\n"
                 "import unavailable_harness_helper\n"
                 "class RepairTest(unittest.TestCase):\n"
                 "    def test_behavior(self): self.assertTrue(True)\n",
-                encoding="utf-8",
             )
             write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1004,10 +1094,17 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
             class SelectiveRepairCodex:
                 def run_turn(self, **_kwargs):
-                    repair_path.write_text(
+                    repaired_source = (
                         "import unittest\n"
                         "class RepairTest(unittest.TestCase):\n"
-                        "    def test_behavior(self): self.assertTrue(True)\n",
+                        "    def test_behavior(self): self.assertTrue(True)\n"
+                    )
+                    repair_source.write_text(
+                        repaired_source,
+                        encoding="utf-8",
+                    )
+                    repair_path.write_text(
+                        repaired_source,
                         encoding="utf-8",
                     )
                     return SimpleNamespace(duration_ms=5)
@@ -1061,14 +1158,15 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             ensure_immutable_inventory_baseline(source_repo, run_dir)
             validation_app = validation_repo / "app.py"
             validation_app.write_bytes(original)
-            generated_path = validation_repo / "generated_test.py"
-            generated_path.write_text(
+            generated_source, generated_path = _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated_test.py",
                 "import unittest\n"
                 "import unneeded_project_dependency\n"
                 "from app import value\n"
                 "class GeneratedTest(unittest.TestCase):\n"
                 "    def test_behavior(self): self.assertEqual(value(), 7)\n",
-                encoding="utf-8",
             )
             write_json(
                 run_dir / "inventory.json",
@@ -1085,11 +1183,18 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             class SourceMutatingCodex:
                 def run_turn(self, **_kwargs):
                     validation_app.write_text("def value(): return 7  # agent changed source\n", encoding="utf-8")
-                    generated_path.write_text(
+                    repaired_source = (
                         "import unittest\n"
                         "from app import value\n"
                         "class GeneratedTest(unittest.TestCase):\n"
-                        "    def test_behavior(self): self.assertEqual(value(), 7)\n",
+                        "    def test_behavior(self): self.assertEqual(value(), 7)\n"
+                    )
+                    generated_source.write_text(
+                        repaired_source,
+                        encoding="utf-8",
+                    )
+                    generated_path.write_text(
+                        repaired_source,
                         encoding="utf-8",
                     )
                     return SimpleNamespace(duration_ms=5)
@@ -1132,12 +1237,14 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     ],
                 },
             )
-            (validation_repo / "generated_test.py").write_text(
+            _write_canonical_generated_test(
+                run_dir,
+                validation_repo,
+                "generated_test.py",
                 "import unittest\n"
                 "class GeneratedTest(unittest.TestCase):\n"
                 "    def test_real_process(self):\n"
                 "        self.assertEqual(sum([1, 2, 3]), 6)\n",
-                encoding="utf-8",
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1170,6 +1277,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                             "test_id": "ITV-001",
                             "target_test_ids": ["ITP-001"],
                             "path": "packages/web/generated.intent.test.mjs",
+                            "reuse_existing": True,
                             "cwd": "packages/web",
                             "command": [node, "--test", "generated.intent.test.mjs"],
                         }
@@ -1189,7 +1297,10 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             _establish_immutable_validation_baseline(
                 run_dir,
                 validation_repo,
-                ["packages/web/package.json"],
+                [
+                    "packages/web/package.json",
+                    "packages/web/generated.intent.test.mjs",
+                ],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1218,6 +1329,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                             "test_id": "ITV-001",
                             "target_test_ids": ["ITP-001"],
                             "path": "services/math/value_test.go",
+                            "reuse_existing": True,
                             "cwd": "services/math",
                             "command": [go, "test", "./..."],
                         }
@@ -1243,7 +1355,11 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             _establish_immutable_validation_baseline(
                 run_dir,
                 validation_repo,
-                ["services/math/go.mod", "services/math/value.go"],
+                [
+                    "services/math/go.mod",
+                    "services/math/value.go",
+                    "services/math/value_test.go",
+                ],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1261,6 +1377,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             dotnet = str(Path(shutil.which("dotnet") or "dotnet").resolve())
+            build_root = root / "dotnet-build"
             run_dir, validation_repo = _write_intent_run(
                 root,
                 plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
@@ -1271,6 +1388,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                             "test_id": "ITV-001",
                             "target_test_ids": ["ITP-001"],
                             "path": "services/dotnet/Program.cs",
+                            "reuse_existing": True,
                             "cwd": "services/dotnet",
                             "command": [
                                 dotnet,
@@ -1279,6 +1397,21 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                                 "IntentTest.csproj",
                                 "--configuration",
                                 "Release",
+                                (
+                                    "--property:BaseOutputPath="
+                                    + str(build_root / "bin")
+                                    + os.sep
+                                ),
+                                (
+                                    "--property:BaseIntermediateOutputPath="
+                                    + str(build_root / "obj")
+                                    + os.sep
+                                ),
+                                (
+                                    "--property:MSBuildProjectExtensionsPath="
+                                    + str(build_root / "obj")
+                                    + os.sep
+                                ),
                             ],
                         }
                     ],
@@ -1292,20 +1425,25 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 "  <PropertyGroup>\n"
                 "    <OutputType>Exe</OutputType>\n"
                 "    <TargetFramework>net8.0</TargetFramework>\n"
-                "    <ImplicitUsings>enable</ImplicitUsings>\n"
+                "    <ImplicitUsings>disable</ImplicitUsings>\n"
+                "    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>\n"
+                "    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>\n"
                 "  </PropertyGroup>\n"
                 "</Project>\n",
                 encoding="utf-8",
             )
             (workspace / "Program.cs").write_text(
-                "if (2 + 3 != 5) Environment.Exit(1);\n"
-                'Console.WriteLine("agentic intent check passed");\n',
+                "if (2 + 3 != 5) System.Environment.Exit(1);\n"
+                'System.Console.WriteLine("agentic intent check passed");\n',
                 encoding="utf-8",
             )
             _establish_immutable_validation_baseline(
                 run_dir,
                 validation_repo,
-                ["services/dotnet/IntentTest.csproj"],
+                [
+                    "services/dotnet/IntentTest.csproj",
+                    "services/dotnet/Program.cs",
+                ],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1319,7 +1457,18 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 errors="replace",
             )
 
-        self.assertEqual(result["test_runs"][0]["status"], "passed", stdout + "\n" + stderr)
+        self.assertEqual(
+            result["test_runs"][0]["status"],
+            "passed",
+            stdout
+            + "\n"
+            + stderr
+            + "\n"
+            + json.dumps(
+                result["test_runs"][0].get("workspace_integrity", {}),
+                sort_keys=True,
+            ),
+        )
         self.assertEqual(result["test_runs"][0]["exit_code"], 0)
 
     @unittest.skipIf(
@@ -1346,6 +1495,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                             "test_id": "ITV-001",
                             "target_test_ids": ["ITP-001"],
                             "path": "crates/math/src/lib.rs",
+                            "reuse_existing": True,
                             "cwd": "crates/math",
                             "command": [cargo, "test", "--offline"],
                         }
@@ -1372,7 +1522,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             _establish_immutable_validation_baseline(
                 run_dir,
                 validation_repo,
-                ["crates/math/Cargo.toml"],
+                ["crates/math/Cargo.toml", "crates/math/src/lib.rs"],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):

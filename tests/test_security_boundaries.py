@@ -8,6 +8,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pullwise_worker.review_worker_v1 import (
     ActiveJob,
@@ -234,7 +235,7 @@ class ValidationWorkspaceIntegrityBoundaryTests(unittest.TestCase):
 
 
 class CodexThreadLifecycleBoundaryTests(unittest.TestCase):
-    def test_reviewer_retry_releases_every_same_run_thread_object(self) -> None:
+    def test_reviewer_threads_are_released_after_retry_and_submit_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             repo = root / "repo"
@@ -307,40 +308,58 @@ class CodexThreadLifecycleBoundaryTests(unittest.TestCase):
                 client=object(),
             )
             worker.progress_phase = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+            job = {
+                "model_profile": {
+                    "default_model": "gpt-5.5",
+                    "core_effort": "high",
+                    "non_core_effort": "medium",
+                },
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 30,
+                        "reviewer_concurrency": 1,
+                    },
+                    "budget": {"max_wall_time_seconds": 60},
+                },
+                "repositoryLimits": {
+                    "maxFiles": 1000,
+                    "maxBytes": 10 * 1024 * 1024,
+                },
+            }
             codex = CodexClient()
             worker.run_reviewer_fanout_phase(
                 codex,
                 repo,
                 run_dir,
-                {
-                    "model_profile": {
-                        "default_model": "gpt-5.5",
-                        "core_effort": "high",
-                        "non_core_effort": "medium",
-                    },
-                    "review_request": {
-                        "policy": {
-                            "allow_source_modification": False,
-                            "allow_dependency_install": False,
-                            "allow_network": False,
-                            "helper_scripts_standard_library_only": True,
-                            "turn_timeout_seconds": 30,
-                            "reviewer_concurrency": 1,
-                        },
-                        "budget": {"max_wall_time_seconds": 60},
-                    },
-                    "repositoryLimits": {
-                        "maxFiles": 1000,
-                        "maxBytes": 10 * 1024 * 1024,
-                    },
-                },
+                job,
                 active=ActiveJob("job_1", "run_1", "lease_1", "wk_1-1"),
                 progress=70,
             )
 
+            submit_failure_codex = CodexClient()
+            with patch(
+                "pullwise_worker.review_worker_v1.ThreadPoolExecutor.submit",
+                side_effect=RuntimeError("executor unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "executor unavailable"):
+                    worker.run_reviewer_fanout_phase(
+                        submit_failure_codex,
+                        repo,
+                        run_dir,
+                        job,
+                        active=ActiveJob("job_2", "run_1", "lease_2", "wk_1-2"),
+                        progress=70,
+                    )
+
         self.assertEqual(codex.turns, 2)
         self.assertEqual(set(codex.threads), {"root-thread"})
         self.assertEqual(codex.released, ["reviewer-1", "reviewer-2"])
+        self.assertEqual(set(submit_failure_codex.threads), {"root-thread"})
+        self.assertEqual(submit_failure_codex.released, ["reviewer-1"])
 
 
 if __name__ == "__main__":
