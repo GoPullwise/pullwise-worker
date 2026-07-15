@@ -6966,7 +6966,6 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (review_root / "tools" / REQUIRED_TOOL_FILES[0]).write_text("# ok\n", encoding="utf-8")
 
             fallback_semantic_artifact(run_dir, {}, "bootstrap_helper_scripts")
-            validate_phase_outputs(run_dir, "bootstrap_helper_scripts")
 
             summary = json.loads((run_dir / "bootstrap_helper_scripts.summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["schema_version"], "bootstrap-helper-summary/v1")
@@ -7000,11 +6999,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
     def test_bootstrap_helper_scripts_fallback_repairs_wrong_schema_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
-            review_root = run_dir.parent.parent
-            (review_root / "tools").mkdir(parents=True)
-            (review_root / "schemas").mkdir(parents=True)
-            (review_root / "prompts").mkdir(parents=True)
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_review_instruction_tree(repo_dir)
             write_json(
                 run_dir / "bootstrap_helper_scripts.summary.json",
                 {
@@ -7024,6 +7022,18 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(summary["schema_version"], "bootstrap-helper-summary/v1")
         self.assertEqual(summary["status"], "completed")
+
+    def test_bootstrap_helper_scripts_validation_rejects_an_incomplete_worker_asset_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_review_instruction_tree(repo_dir)
+            (repo_dir / ".codex-review" / "tools" / REQUIRED_TOOL_FILES[0]).unlink()
+            fallback_semantic_artifact(run_dir, {}, "bootstrap_helper_scripts")
+
+            with self.assertRaisesRegex(RuntimeError, "bootstrap helper asset.*missing"):
+                validate_phase_outputs(run_dir, "bootstrap_helper_scripts")
 
     def test_artifact_manifest_contains_required_completed_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -8972,7 +8982,6 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             reviewer_prompt = phase_prompt("reviewer_fanout", run_dir)
             failure_prompt = phase_prompt("intent_test_failure_analysis", run_dir)
             reporter_prompt = phase_prompt("final_report_json", run_dir)
-            bootstrap_prompt = phase_prompt("bootstrap_helper_scripts", run_dir)
 
         self.assertIn("raw-reviewers/*.json", reviewer_prompt)
         self.assertIn("reviewers/security.md", reviewer_prompt)
@@ -8984,8 +8993,6 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertIn("skipped_not_runnable", failure_prompt)
         self.assertNotIn("flaky_nondeterministic", failure_prompt)
         self.assertIn("top-level appendix_findings", reporter_prompt)
-        self.assertIn("self-contained", bootstrap_prompt)
-        self.assertNotIn("v1.2 worker spec", bootstrap_prompt)
 
     def test_validate_phase_outputs_rejects_missing_or_wrong_schema_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

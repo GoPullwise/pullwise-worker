@@ -87,7 +87,6 @@ PIPELINE_PHASES = (
     ("cleanup_active_job", 100),
 )
 SEMANTIC_PHASES = {
-    "bootstrap_helper_scripts",
     "repo_map",
     "risk_routing",
     "bundle_planning",
@@ -164,7 +163,7 @@ def current_run_estimator_for_job(
     return estimator
 
 
-CORE_EFFORT_PHASES = SEMANTIC_PHASES - {"bootstrap_helper_scripts", "bundle_planning"}
+CORE_EFFORT_PHASES = SEMANTIC_PHASES - {"bundle_planning"}
 MECHANICAL_PHASES = {phase for phase, _progress in PIPELINE_PHASES} - SEMANTIC_PHASES
 REQUIRED_COMPLETED_ARTIFACTS = {
     "report.human",
@@ -5147,7 +5146,9 @@ class ReviewWorkerV1:
     ) -> None:
         check_lifecycle_cancelled(cancel_requested)
         remaining_wall_time_seconds(deadline_monotonic)
-        if phase == "inventory_repository":
+        if phase == "bootstrap_helper_scripts":
+            write_bootstrap_helper_summary(run_dir)
+        elif phase == "inventory_repository":
             policy = validate_job_policy(job)
             limits = policy["repository_limits"] if isinstance(policy.get("repository_limits"), dict) else {}
             inv = inventory(
@@ -5811,21 +5812,6 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
 
 
 SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
-    "bootstrap_helper_scripts": {
-        "role": "Bootstrap Helper Script Maintainer",
-        "prompt_files": [],
-        "inputs": [
-            ".codex-review/AGENTS.review.md",
-            "self-contained required helper, schema, and prompt files already materialized under .codex-review",
-        ],
-        "outputs": [".codex-review/tools/*.py", ".codex-review/schemas/*.schema.json", ".codex-review/prompts/*.md"],
-        "instructions": [
-            "Create or repair only review helper tools, schemas, and prompt templates.",
-            "Use only the self-contained .codex-review contract in this checkout; do not search for or depend on a parent-workspace specification file.",
-            "Helper scripts must use Python 3 standard library only and perform mechanical tasks only.",
-            "Return a concise implementation summary; do not include secrets.",
-        ],
-    },
     "repo_map": {
         "role": "Repo Mapper",
         "prompt_files": ["00_repo_mapper.md"],
@@ -12325,6 +12311,27 @@ def validate_phase_outputs(run_dir: Path, phase: str, artifact_dir: Path | None 
         payload = parse_required_json_output(path)
         if expected_schema and str(payload.get("schema_version") or "").strip() != expected_schema:
             raise RuntimeError(f"required phase output {path.name} must use schema_version {expected_schema}")
+        if rel == "bootstrap_helper_scripts.summary.json":
+            if str(payload.get("status") or "").strip() != "completed":
+                raise RuntimeError("bootstrap helper summary status must be completed")
+            review_root = run_dir.parent.parent
+            asset_groups = (
+                ("tools", review_root / "tools", REQUIRED_TOOL_FILES),
+                ("schemas", review_root / "schemas", REQUIRED_SCHEMA_FILES),
+                ("prompts", review_root / "prompts", REQUIRED_PROMPT_FILES),
+            )
+            for label, root, names in asset_groups:
+                missing = [name for name in names if not (root / name).is_file() or (root / name).is_symlink()]
+                if missing:
+                    raise RuntimeError(
+                        f"bootstrap helper asset {label} missing: {', '.join(missing)}"
+                    )
+                required_key = f"required_{label}"
+                materialized_key = f"materialized_{label}"
+                if payload.get(required_key) != len(names) or payload.get(materialized_key) != len(names):
+                    raise RuntimeError(
+                        f"bootstrap helper summary {label} counts must equal {len(names)}"
+                    )
         if rel == "report.agent.json":
             errors = agent_report_contract_errors(payload)
             if errors:
@@ -12669,26 +12676,30 @@ def prompt_template_for_name(name: str) -> str:
     return "# Pullwise Codex Full Repository Review Phase\n\n" + templates.get(name, "Follow .codex-review/AGENTS.review.md. Return the requested artifact.\n") + discipline
 
 
+def write_bootstrap_helper_summary(run_dir: Path) -> None:
+    review_root = run_dir.parent.parent
+    tools_dir = review_root / "tools"
+    schemas_dir = review_root / "schemas"
+    prompts_dir = review_root / "prompts"
+    write_json(
+        run_dir / "bootstrap_helper_scripts.summary.json",
+        {
+            "schema_version": "bootstrap-helper-summary/v1",
+            "status": "completed",
+            "required_tools": len(REQUIRED_TOOL_FILES),
+            "materialized_tools": sum(1 for name in REQUIRED_TOOL_FILES if (tools_dir / name).is_file()),
+            "required_schemas": len(REQUIRED_SCHEMA_FILES),
+            "materialized_schemas": sum(1 for name in REQUIRED_SCHEMA_FILES if (schemas_dir / name).is_file()),
+            "required_prompts": len(REQUIRED_PROMPT_FILES),
+            "materialized_prompts": sum(1 for name in REQUIRED_PROMPT_FILES if (prompts_dir / name).is_file()),
+        },
+    )
+
+
 def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -> None:
     ensure_intent_directories(run_dir)
     if phase == "bootstrap_helper_scripts":
-        review_root = run_dir.parent.parent
-        tools_dir = review_root / "tools"
-        schemas_dir = review_root / "schemas"
-        prompts_dir = review_root / "prompts"
-        write_json(
-            run_dir / "bootstrap_helper_scripts.summary.json",
-            {
-                "schema_version": "bootstrap-helper-summary/v1",
-                "status": "completed",
-                "required_tools": len(REQUIRED_TOOL_FILES),
-                "materialized_tools": sum(1 for name in REQUIRED_TOOL_FILES if (tools_dir / name).is_file()),
-                "required_schemas": len(REQUIRED_SCHEMA_FILES),
-                "materialized_schemas": sum(1 for name in REQUIRED_SCHEMA_FILES if (schemas_dir / name).is_file()),
-                "required_prompts": len(REQUIRED_PROMPT_FILES),
-                "materialized_prompts": sum(1 for name in REQUIRED_PROMPT_FILES if (prompts_dir / name).is_file()),
-            },
-        )
+        write_bootstrap_helper_summary(run_dir)
     elif phase == "bundle_planning":
         materialize_agent_bundle_plan(run_dir, job)
     elif phase == "clustering_and_voting":
