@@ -272,11 +272,10 @@ Review pipeline rules:
   suites. Generated-Python preflight rejects module-scope `from` imports of
   test-like objects from project test modules as `test_harness_error`; import
   the module and access any reused helper through that module instead.
-- Semantic artifact repair must also overwrite existing malformed phase outputs
-  when a common schema alias can be normalized. For example, a Codex-created
-  `bootstrap_helper_scripts.summary.json` with
-  `bootstrap-helper-scripts-summary/v1` must be rewritten to canonical
-  `bootstrap-helper-summary/v1` before strict phase validation is retried.
+- Semantic artifact repair may normalize an existing malformed agent-written
+  phase output when a known schema alias can be converted without inventing
+  missing semantic content. Worker-owned mechanical outputs, including the
+  bootstrap helper summary, must not enter the semantic repair path.
 - Report repair must normalize `recommended_fix`/`recommended_action`/
   `remediation` into `recommendation`; accept singular `location`, plural
   `affected_locations`, and top-level path/line aliases; and swap reversed
@@ -646,6 +645,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Codex turn cancellation callbacks must read only the local active-job cancellation state. The independent active-job supervisor owns server polling; never issue a synchronous heartbeat from the 0.5-second Codex turn wait loop.
 - A Codex turn deadline starts before `turn_start`. Both turn start and interruption RPCs must remain bounded from the worker's perspective, and a timed-out/cancelled notification consumer must not write run artifacts after `run_turn` returns.
 - Give each blocking raw App Server RPC exactly one caller-visible bounded wait; do not nest a bounded `request()` inside another timeout wrapper. A raw RPC timeout permanently marks that `CodexSdkClient` instance unhealthy, blocks every later SDK operation on it, and lets the existing worker cleanup close and replace the runtime before further use.
+- Classify quota-probe authentication, transport, timeout, and endpoint failures as quota unavailable, never quota exhausted. Only explicit rate-limit evidence may mark exhaustion; readiness may remain degraded without lying about the user's quota state.
 - Treat missing SDK thread or turn identifiers as protocol failures. Scope event sinks to a run generation and turn, synchronize abandonment before timeout/cancellation returns, and invalidate old scopes plus transient thread references whenever the run sink changes or the SDK client closes.
 - Treat `turn/completed` as successful only when its payload identifies the active turn and reports `status = completed`. Parse both SDK model objects and dictionary payloads, fail closed on missing ids or every other status, preserve terminal error details, and propagate notification-stream exceptions without erasing their type or leaving an empty diagnostic.
 - Execute reviewer fanout as one fresh independent Codex thread and one turn per planned `(bundle_id, reviewer_id)` assignment inside the existing worker-owned App Server. Schedule assignments in deterministic plan order with server-owned concurrency `1..2`, but reduce effective concurrency to `1` from phase start when total or available memory is in the low-memory class; the coordinator alone may update progress, logs, and `reviewer-execution.json`, including the effective concurrency decision and memory evidence. Give each attempt a unique staging writable root, validate its exact assignment output, then atomically publish `raw-reviewers/<bundle>.<reviewer>.json`. Never batch logical reviewers into one turn or start another Codex runtime. On transient 429/overload capacity failures, retry once on a fresh thread after reducing effective concurrency to `1`; on a fatal failure, cancel active siblings and do not start pending assignments.

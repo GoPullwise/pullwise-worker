@@ -1580,6 +1580,8 @@ def quota_refresh_error_is_exhaustion(error: object) -> bool:
         "unknown method",
         "not found",
         "failed to read",
+        "failed to fetch",
+        "error sending request",
     )
     return not any(marker in lowered for marker in fetch_failure_markers)
 
@@ -5147,6 +5149,7 @@ class ReviewWorkerV1:
         check_lifecycle_cancelled(cancel_requested)
         remaining_wall_time_seconds(deadline_monotonic)
         if phase == "bootstrap_helper_scripts":
+            write_review_instruction_tree(repo_dir)
             write_bootstrap_helper_summary(run_dir)
         elif phase == "inventory_repository":
             policy = validate_job_policy(job)
