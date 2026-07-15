@@ -349,7 +349,7 @@ class CurrentRunEstimator:
     def _sample_rates(self) -> dict[str, list[float]]:
         samples: dict[str, list[float]] = {}
         for unit in self._units.values():
-            if unit.state not in FINISHED_STATES:
+            if unit.state != 'completed':
                 continue
             if unit.duration_seconds is None or unit.duration_seconds <= 0:
                 continue

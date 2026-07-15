@@ -333,7 +333,7 @@ Rules:
 - Do not modify application source files.
 - Do not install dependencies.
 - Do not call external review/scanning tools.
-- Every main finding must have path, line range, evidence, impact, recommendation, severity, confidence, and next_agent_task.
+- Every main finding must have path, line range, evidence, failure_scenario, impact, recommendation, severity, confidence, false_positive_risk, and next_agent_task.
 - Weak findings go to appendix.
 - Disproven findings do not appear in main findings.
 - Coverage and skipped scope must be reported.
@@ -4394,6 +4394,7 @@ class ReviewWorkerV1:
                 max_bytes=int(limits.get("maxBytes")) if limits.get("maxBytes") is not None else None,
                 deadline_monotonic=scan_deadline,
             )
+            write_immutable_inventory_baseline(repo_dir, run_dir, inv)
             write_json(run_dir / "inventory.json", inv)
             try:
                 write_json(run_dir / "repo-profile.json", minimal_repo_profile_payload(inv, repo_dir))
@@ -5175,7 +5176,7 @@ def reviewer_assignment_prompt(
         "Existing tests are contract evidence, not proof that the implementation is correct.",
         "Actively look for concrete failure scenarios before concluding that findings is empty.",
         "Before reporting an async UI race or duplicate mutation, inspect disabled state, synchronous ref/lock guards, event ordering, and server idempotency; prove that the second action reaches a harmful non-idempotent operation.",
-        "Every finding must include id, title, severity, confidence, impact, recommendation, false_positive_risk, and next_agent_task.",
+        "Every finding must include id, title, severity, confidence, failure_scenario, evidence, impact, recommendation, false_positive_risk, and next_agent_task.",
         'Every finding must include a non-empty locations array. Each location must use the exact shape {"path": "relative/source/path", "start_line": 1, "end_line": 1} with positive repository line numbers.',
         "If findings is empty, review_summary must document concrete areas examined, checks performed, and rejected candidates with source-backed reasons.",
         "Write one JSON object only using schema_version codex-reviewer-output/v1.",
@@ -6325,6 +6326,121 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
 
 
 
+def _reviewer_text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ''
+
+
+def _reviewer_evidence_items(finding: dict[str, Any]) -> list[object]:
+    raw_evidence: object = finding.get('evidence')
+    if raw_evidence in (None, '', []):
+        for alias in ('supporting_evidence', 'supportingEvidence', 'evidence_summary', 'evidenceSummary'):
+            candidate = finding.get(alias)
+            if candidate not in (None, '', []):
+                raw_evidence = candidate
+                break
+    if isinstance(raw_evidence, (str, dict)):
+        candidates: list[object] = [raw_evidence]
+    elif isinstance(raw_evidence, list):
+        candidates = raw_evidence
+    else:
+        candidates = []
+    evidence: list[object] = []
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            if candidate.strip():
+                evidence.append(candidate.strip())
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        if any(
+            _reviewer_text(candidate.get(field))
+            for field in (
+                'summary',
+                'evidence',
+                'text',
+                'reason',
+                'description',
+                'observation',
+                'explanation',
+                'snippet',
+            )
+        ):
+            evidence.append(dict(candidate))
+    return evidence
+
+
+def _canonical_reviewer_finding(
+    raw_finding: dict[str, Any],
+    index: int,
+) -> tuple[dict[str, Any] | None, str]:
+    finding = dict(raw_finding)
+    if not _reviewer_text(finding.get('title')):
+        return None, f'findings[{index}].title is required'
+    finding_id = next(
+        (
+            candidate
+            for field in ('id', 'finding_id', 'local_id')
+            if (candidate := _reviewer_text(finding.get(field)))
+        ),
+        '',
+    )
+    if not finding_id:
+        return None, f'findings[{index}].id is required'
+    finding['id'] = finding_id
+    if not _reviewer_text(finding.get('severity')):
+        return None, f'findings[{index}].severity is required'
+    confidence = finding.get('confidence')
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(float(confidence))
+        or not 0 <= float(confidence) <= 1
+    ):
+        return None, f'findings[{index}].confidence must be a number in 0..1'
+
+    failure_scenario = next(
+        (
+            candidate
+            for field in ('failure_scenario', 'failureScenario', 'scenario', 'failure_mode', 'failureMode')
+            if (candidate := _reviewer_text(finding.get(field)))
+        ),
+        '',
+    )
+    if not failure_scenario:
+        return None, f'findings[{index}].failure_scenario is required'
+    finding['failure_scenario'] = failure_scenario
+    for field in ('failureScenario', 'scenario', 'failure_mode', 'failureMode'):
+        finding.pop(field, None)
+
+    evidence = _reviewer_evidence_items(finding)
+    if not evidence:
+        return None, f'findings[{index}].evidence must contain substantive evidence'
+    finding['evidence'] = evidence
+    for field in ('supporting_evidence', 'supportingEvidence', 'evidence_summary', 'evidenceSummary'):
+        finding.pop(field, None)
+
+    for field in ('impact', 'false_positive_risk', 'next_agent_task'):
+        if not _reviewer_text(finding.get(field)):
+            return None, f'findings[{index}].{field} is required'
+
+    recommendation = _reviewer_text(finding.get('recommendation'))
+    if not recommendation:
+        recommendation = next(
+            (
+                candidate
+                for alias in ('recommended_fix', 'recommended_action', 'remediation')
+                if (candidate := _reviewer_text(finding.get(alias)))
+            ),
+            '',
+        )
+    if not recommendation:
+        return None, f'findings[{index}].recommendation is required'
+    finding['recommendation'] = recommendation
+    for alias in ('recommended_fix', 'recommended_action', 'remediation'):
+        finding.pop(alias, None)
+    return finding, ''
+
+
 def validate_reviewer_outputs(run_dir: Path) -> None:
     raw_dir = run_dir / "raw-reviewers"
     verified_dir = run_dir / "verified-reviewers"
@@ -6387,11 +6503,13 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
             if not isinstance(raw_finding, dict):
                 finding_error = f"findings[{index}] must be an object"
                 break
-            locations = agent_report_locations(raw_finding)
+            finding, finding_error = _canonical_reviewer_finding(raw_finding, index)
+            if finding_error or finding is None:
+                break
+            locations = agent_report_locations(finding)
             if not locations:
                 finding_error = f"findings[{index}].locations is missing or invalid"
                 break
-            finding = dict(raw_finding)
             finding["locations"] = locations
             for alias in (
                 "location",
@@ -6580,11 +6698,74 @@ def refresh_agentic_execution_capabilities(repo_dir: Path, run_dir: Path) -> dic
     return payload
 
 
+def _source_repository_for_run_dir(run_dir: Path) -> Path:
+    review_root = run_dir.parent.parent
+    if run_dir.parent.name != "runs" or review_root.name != ".codex-review":
+        raise RuntimeError("run directory is outside the canonical repository review tree")
+    return review_root.parent
+
+
+def immutable_inventory_baseline_path(run_dir: Path) -> Path:
+    repo_dir = _source_repository_for_run_dir(run_dir)
+    return repo_dir.parent / ".pullwise-integrity" / "inventory.json"
+
+
+def _valid_inventory_payload(payload: object) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == "inventory/v1"
+        and isinstance(payload.get("files"), list)
+    )
+
+
+def write_immutable_inventory_baseline(
+    repo_dir: Path,
+    run_dir: Path,
+    payload: dict[str, Any],
+) -> Path:
+    expected_repo = _source_repository_for_run_dir(run_dir)
+    if repo_dir.resolve(strict=False) != expected_repo.resolve(strict=False):
+        raise RuntimeError("immutable inventory repository does not match the run directory")
+    if not _valid_inventory_payload(payload):
+        raise RuntimeError("immutable inventory baseline must use inventory/v1")
+    baseline_path = immutable_inventory_baseline_path(run_dir)
+    control_root = baseline_path.parent
+    if control_root.is_symlink() or baseline_path.is_symlink():
+        raise RuntimeError("immutable inventory baseline path must not be a symlink")
+    control_root.mkdir(parents=True, exist_ok=True)
+    if baseline_path.exists():
+        existing = read_json(baseline_path, {})
+        if not _valid_inventory_payload(existing):
+            raise RuntimeError("immutable inventory baseline is invalid")
+        return baseline_path
+    write_json(baseline_path, payload)
+    try:
+        control_root.chmod(0o700)
+        baseline_path.chmod(0o600)
+    except OSError:
+        pass
+    return baseline_path
+
+
+def ensure_immutable_inventory_baseline(repo_dir: Path, run_dir: Path) -> Path:
+    baseline_path = immutable_inventory_baseline_path(run_dir)
+    if baseline_path.is_symlink():
+        raise RuntimeError("immutable inventory baseline path must not be a symlink")
+    if baseline_path.exists():
+        payload = read_json(baseline_path, {})
+        if not _valid_inventory_payload(payload):
+            raise RuntimeError("immutable inventory baseline is invalid")
+        return baseline_path
+    return write_immutable_inventory_baseline(repo_dir, run_dir, inventory(repo_dir))
+
+
 def prepare_validation_workspace(repo_dir: Path, run_dir: Path) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
+    ensure_immutable_inventory_baseline(repo_dir, run_dir)
     validation_repo = repo_dir.parent / "validation-repo"
     if validation_repo.exists():
         shutil.rmtree(validation_repo)
+    validation_repo.mkdir(parents=True, exist_ok=True)
     copy_tree(repo_dir, validation_repo)
     payload = {
         "schema_version": "validation-workspace/v1",
@@ -7345,52 +7526,123 @@ def materialize_generated_intent_test_sources(
     return errors
 
 
-def intent_validation_workspace_integrity_payload(run_dir: Path) -> dict[str, Any]:
-    validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
-    validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
-    validation_repo = Path(validation_root) if validation_root else None
-    inventory_payload = read_json(run_dir / "inventory.json", {})
-    inventory_files = (
-        inventory_payload.get("files")
-        if isinstance(inventory_payload, dict) and isinstance(inventory_payload.get("files"), list)
+def _declared_generated_test_paths(run_dir: Path, validation_repo: Path) -> set[str]:
+    source = read_json(run_dir / "intent" / "intent-test-source.json", {})
+    generated_tests = (
+        source.get("generated_tests")
+        if isinstance(source, dict) and isinstance(source.get("generated_tests"), list)
         else []
     )
+    allowed: set[str] = set()
+    validation_root = validation_repo.resolve(strict=False)
+    for generated in generated_tests:
+        if not isinstance(generated, dict):
+            continue
+        raw_path = str(
+            generated.get("path")
+            or generated.get("test_file")
+            or generated.get("filename")
+            or ""
+        ).strip()
+        if not raw_path:
+            continue
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = validation_repo / candidate
+        try:
+            relative = candidate.resolve(strict=False).relative_to(validation_root)
+        except ValueError:
+            continue
+        allowed.add(relative.as_posix())
+    return allowed
+
+
+def intent_validation_workspace_integrity_payload(run_dir: Path) -> dict[str, Any]:
     violations: list[dict[str, str]] = []
-    if validation_repo is not None:
-        for item in inventory_files:
-            if not isinstance(item, dict):
-                continue
-            relative = str(item.get("path") or "").strip()
-            expected_sha = str(item.get("sha256") or "").strip().lower()
-            if not relative or not expected_sha:
-                continue
-            candidate = validation_repo / relative
-            if not path_is_under(candidate, validation_repo):
-                violations.append({"path": relative, "reason": "inventory path escapes validation workspace"})
-                continue
-            if candidate.is_symlink() or not candidate.is_file():
-                violations.append({"path": relative, "reason": "repository file is missing or no longer regular"})
-                continue
-            try:
-                actual_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
-            except OSError as exc:
-                violations.append({"path": relative, "reason": f"repository file could not be read: {exc}"})
-                continue
-            if actual_sha != expected_sha:
-                violations.append({"path": relative, "reason": "repository file content differs from immutable inventory"})
-    status = "ok"
-    if validation_repo is None or not inventory_files:
-        status = "unavailable"
-    if violations:
-        status = "violation"
+    source_repo = _source_repository_for_run_dir(run_dir)
+    expected_validation_repo = source_repo.parent / "validation-repo"
+    validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+    validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+    if not validation_root:
+        violations.append({"path": "", "reason": "validation workspace metadata is missing"})
+    else:
+        declared_validation_repo = Path(validation_root)
+        if declared_validation_repo.resolve(strict=False) != expected_validation_repo.resolve(strict=False):
+            violations.append({"path": validation_root, "reason": "validation workspace root differs from the worker-owned path"})
+
+    baseline_path = immutable_inventory_baseline_path(run_dir)
+    if not baseline_path.exists() and not baseline_path.is_symlink():
+        try:
+            ensure_immutable_inventory_baseline(source_repo, run_dir)
+        except RuntimeError:
+            pass
+    baseline_payload = read_json(baseline_path, {}) if not baseline_path.is_symlink() else {}
+    inventory_files = baseline_payload.get("files") if _valid_inventory_payload(baseline_payload) else []
+    if not inventory_files and not _valid_inventory_payload(baseline_payload):
+        violations.append({"path": str(baseline_path), "reason": "immutable inventory baseline is missing or invalid"})
+
+    validation_repo = expected_validation_repo
+    current_files: list[dict[str, Any]] = []
+    if validation_repo.is_symlink() or not validation_repo.is_dir():
+        violations.append({"path": str(validation_repo), "reason": "validation workspace is missing or is not a real directory"})
+    else:
+        try:
+            current_payload = inventory(validation_repo)
+            current_files = (
+                current_payload.get("files")
+                if isinstance(current_payload, dict) and isinstance(current_payload.get("files"), list)
+                else []
+            )
+        except Exception as exc:
+            violations.append({"path": str(validation_repo), "reason": f"validation workspace could not be inventoried: {exc}"})
+
+    current_by_path = {
+        str(item.get("path") or "").strip(): item
+        for item in current_files
+        if isinstance(item, dict) and str(item.get("path") or "").strip()
+    }
+    baseline_paths: set[str] = set()
+    for item in inventory_files:
+        if not isinstance(item, dict):
+            continue
+        relative = str(item.get("path") or "").strip()
+        expected_sha = str(item.get("sha256") or "").strip().lower()
+        if not relative or not expected_sha:
+            violations.append({"path": relative, "reason": "immutable inventory entry is missing path or sha256"})
+            continue
+        baseline_paths.add(relative)
+        candidate = validation_repo / relative
+        if not path_is_under(candidate, validation_repo):
+            violations.append({"path": relative, "reason": "immutable inventory path escapes validation workspace"})
+            continue
+        current_item = current_by_path.get(relative)
+        if current_item is None or candidate.is_symlink() or not _is_regular_file_no_follow(candidate):
+            violations.append({"path": relative, "reason": "repository file is missing or no longer regular"})
+            continue
+        actual_sha = str(current_item.get("sha256") or "").strip().lower()
+        if actual_sha != expected_sha:
+            violations.append({"path": relative, "reason": "repository file content differs from immutable inventory"})
+
+    allowed_generated_paths = _declared_generated_test_paths(run_dir, validation_repo)
+    unexpected_source_files = 0
+    for relative, item in sorted(current_by_path.items()):
+        if relative in baseline_paths or relative in allowed_generated_paths:
+            continue
+        if item.get("is_source_like") is not True:
+            continue
+        unexpected_source_files += 1
+        violations.append({"path": relative, "reason": "undeclared source file was added to validation workspace"})
+
+    status = "violation" if violations else "ok"
     return {
         "schema_version": "intent-validation-workspace-integrity/v1",
         "status": status,
-        "validation_repo_root": str(validation_repo) if validation_repo is not None else "",
+        "validation_repo_root": str(validation_repo),
         "checked_files": len(inventory_files),
         "violations": violations,
         "summary": {
             "checked_files": len(inventory_files),
+            "unexpected_source_files": unexpected_source_files,
             "violations": len(violations),
         },
     }
@@ -9010,6 +9262,38 @@ def intent_test_result_errors(payload: Any, run_dir: Path | None = None) -> list
                 errors.append(f"intent-test-results.json test_results[{index}].{field} must be a list")
     if run_dir is not None:
         errors.extend(_linked_finding_errors(run_dir, "intent-test-results.json", "test_results", results, required=False))
+        raw_path = run_dir / 'intent' / 'intent-test-results.raw.json'
+        if raw_path.is_file():
+            raw_by_id = _raw_intent_runs_by_id(run_dir)
+            result_by_id = {
+                str(result.get('test_id') or '').strip(): result
+                for result in results
+                if isinstance(result, dict) and str(result.get('test_id') or '').strip()
+            }
+            for test_id in sorted(result_by_id.keys() - raw_by_id.keys()):
+                errors.append(
+                    'intent-test-results.json test result '
+                    f'{test_id} has no matching raw process evidence'
+                )
+            for test_id in sorted(raw_by_id.keys() - result_by_id.keys()):
+                errors.append(
+                    'intent-test-results.raw.json raw process evidence '
+                    f'{test_id} has no matching analyzed result'
+                )
+            for test_id in sorted(raw_by_id.keys() & result_by_id.keys()):
+                raw_status = str(raw_by_id[test_id].get('status') or '').strip()
+                result_status = str(result_by_id[test_id].get('status') or '').strip()
+                classification = str(result_by_id[test_id].get('classification') or '').strip()
+                if raw_status == 'passed' and classification in {'confirmed_bug', 'plausible_bug'}:
+                    errors.append(
+                        f'intent-test-results.json {test_id} cannot use {classification} '
+                        'for a passed raw process'
+                    )
+                if raw_status in INTENT_TEST_STATUSES and result_status != raw_status:
+                    errors.append(
+                        f'intent-test-results.json {test_id} status {result_status or "missing"} '
+                        f'does not match raw process status {raw_status}'
+                    )
     return errors
 
 
@@ -9641,8 +9925,25 @@ def qa_gate_payload(
                 location_path.relative_to(repo_dir.resolve(strict=False))
             except ValueError:
                 location_path = repo_dir / "__invalid__"
-            if not rel or start <= 0 or end < start or not location_path.is_file():
-                errors.append(f"finding[{index}] has invalid location")
+            line_count = 0
+            if location_path.is_file():
+                try:
+                    line_count = len(
+                        location_path.read_text(
+                            encoding='utf-8',
+                            errors='replace',
+                        ).splitlines()
+                    )
+                except OSError:
+                    line_count = 0
+            if (
+                not rel
+                or start <= 0
+                or end < start
+                or not location_path.is_file()
+                or end > line_count
+            ):
+                errors.append(f"finding[{index}] has invalid location line range")
         confidence = finding.get("confidence")
         if not isinstance(confidence, (int, float)) or not 0 <= float(confidence) <= 1:
             errors.append(f"finding[{index}].confidence is outside 0..1")
@@ -9943,6 +10244,8 @@ def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
         *,
         planned: set[str] | None = None,
         include_record: Any = None,
+        related_ids_by_test_id: dict[str, set[str]] | None = None,
+        allowed_test_ids: set[str] | None = None,
     ) -> set[str]:
         ids: set[str] = set()
         if not isinstance(records, list):
@@ -9953,17 +10256,32 @@ def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
             if include_record is not None and not include_record(record):
                 continue
             test_id = _intent_test_id(record, f"{prefix}-{index + 1:03d}")
+            if allowed_test_ids is not None and test_id not in allowed_test_ids:
+                continue
             candidates = [test_id, *_intent_related_test_ids(record)]
+            if related_ids_by_test_id is not None:
+                candidates.extend(sorted(related_ids_by_test_id.get(test_id, set())))
             candidates = list(dict.fromkeys(candidate for candidate in candidates if candidate))
-            planned_matches = [candidate for candidate in candidates if planned and candidate in planned]
-            if planned_matches:
-                ids.update(planned_matches)
+            if planned is not None:
+                ids.update(candidate for candidate in candidates if candidate in planned)
             elif test_id:
                 ids.add(test_id)
         return ids
 
     executable_generated = _intent_generated_execution_records(generated if isinstance(generated, list) else [])
     planned_ids = logical_ids(plan_targets, "ITP")
+    raw_plan_ids_by_test_id: dict[str, set[str]] = {}
+    if isinstance(raw_runs, list):
+        for index, record in enumerate(raw_runs):
+            if not isinstance(record, dict):
+                continue
+            test_id = _intent_test_id(record, f'ITR-{index + 1:03d}')
+            candidates = [test_id, *_intent_related_test_ids(record)]
+            raw_plan_ids_by_test_id[test_id] = {
+                candidate
+                for candidate in candidates
+                if candidate in planned_ids
+            }
     written_ids = logical_ids(executable_generated, "ITV", planned=planned_ids)
     attempted_ids = logical_ids(raw_runs, "ITR", planned=planned_ids)
     run_ids = logical_ids(
@@ -9973,15 +10291,23 @@ def intent_test_artifact_counts(run_dir: Path) -> dict[str, int]:
         include_record=lambda record: str(record.get("status") or "").strip().lower() != "skipped"
         and bool(str(record.get("command") or record.get("sandbox_command") or "").strip()),
     )
-    analyzed_ids = logical_ids(analyzed_runs, "ITA", planned=planned_ids)
+    analyzed_ids = logical_ids(
+        analyzed_runs,
+        "ITA",
+        planned=planned_ids,
+        related_ids_by_test_id=raw_plan_ids_by_test_id,
+        allowed_test_ids=set(raw_plan_ids_by_test_id),
+    )
     assertion_ids = logical_ids(
         analyzed_runs,
         "ITA",
         planned=planned_ids,
+        related_ids_by_test_id=raw_plan_ids_by_test_id,
+        allowed_test_ids=set(raw_plan_ids_by_test_id),
         include_record=lambda record: str(record.get("classification") or "").strip()
         in {"confirmed_bug", "plausible_bug", "test_oracle_wrong", "passed_no_bug_reproduced"},
     )
-    all_ids = planned_ids or (written_ids | attempted_ids | analyzed_ids)
+    all_ids = planned_ids
     total = len(all_ids)
     return {
         "intent_tests_total": total,
@@ -10427,9 +10753,10 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
             )
     elif phase == "reviewer_fanout":
         (run_dir / "raw-reviewers").mkdir(parents=True, exist_ok=True)
-    elif phase == "clustering_and_voting" and not (run_dir / "clusters.json").exists():
-        write_json(run_dir / "clusters.json", {"schema_version": "cluster-output/v1", "clusters": [], "candidate_findings": []})
-        write_json(run_dir / "validation-input.json", {"schema_version": "validation-input/v1", "candidates": []})
+    elif phase == "clustering_and_voting":
+        clusters_path = run_dir / 'clusters.json'
+        if clusters_path.exists():
+            normalize_cluster_output_artifact(clusters_path)
     elif phase == "intent_mining":
         intent_map_path = run_dir / "intent" / "intent-map.json"
         if intent_map_path.exists():
@@ -10456,17 +10783,8 @@ def fallback_semantic_artifact(run_dir: Path, job: dict[str, Any], phase: str) -
             write_json(intent_results_path, fallback_intent_test_results(run_dir))
     elif phase == "validator_disproof":
         validation_path = run_dir / "validated-findings.json"
-        if not validation_path.exists():
-            write_json(
-                validation_path,
-                {
-                    "schema_version": "validation-output/v1",
-                    "validated_findings": [],
-                    "weak_findings": [],
-                    "disproven_findings": [],
-                },
-            )
-        repair_validation_output_artifact(validation_path)
+        if validation_path.exists():
+            repair_validation_output_artifact(validation_path)
     elif phase == "final_report_json":
         if not (run_dir / "report.agent.json").exists():
             write_json(run_dir / "report.agent.json", agent_report_payload(run_dir, job))
@@ -11590,10 +11908,12 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
         ("progress.log.jsonl", ""),
     ):
         src = run_dir / name
+        if src.is_symlink():
+            raise RuntimeError(f"artifact source must be a contained regular file in run directory: {name}")
         if not src.exists():
             src.parent.mkdir(parents=True, exist_ok=True)
             src.write_text(content, encoding="utf-8")
-        shutil.copy2(src, artifact_dir / name)
+        _copy_run_artifact_source(run_dir, name, artifact_dir, destination_name=name)
     qa_status = "warn" if status in {"cancelled", "partial_completed"} else "fail"
     qa_message = (
         "Run was cancelled before full repository scan completed."
@@ -11608,17 +11928,18 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
     else:
         qa_payload["warnings"].append(qa_message)
     write_json(run_dir / "qa.json", qa_payload)
-    shutil.copy2(run_dir / "qa.json", artifact_dir / "qa.json")
+    _copy_run_artifact_source(run_dir, "qa.json", artifact_dir, destination_name="qa.json")
     error_report = {
         "status": status,
         "error": error,
         "created_at": iso_time(time.time()),
     }
     write_json(run_dir / "error-report.json", error_report)
-    shutil.copy2(run_dir / "error-report.json", artifact_dir / "error-report.json")
+    _copy_run_artifact_source(run_dir, "error-report.json", artifact_dir, destination_name="error-report.json")
     terminal_report_path = run_dir / "report.agent.json"
     include_terminal_report = False
     if terminal_report_path.exists():
+        _contained_run_artifact_source(run_dir, "report.agent.json")
         report = read_json(terminal_report_path, {})
         if isinstance(report, dict):
             summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
@@ -11627,7 +11948,7 @@ def materialize_terminal_artifacts(run_dir: Path, artifact_dir: Path, status: st
             summary["result_status"] = "incomplete"
             report["summary"] = summary
             write_json(terminal_report_path, report)
-            shutil.copy2(terminal_report_path, artifact_dir / "report.agent.json")
+            _copy_run_artifact_source(run_dir, "report.agent.json", artifact_dir, destination_name="report.agent.json")
             include_terminal_report = True
     manifest = [
         artifact_item(artifact_dir / "worker.log.jsonl", "worker_log", "application/jsonl", "worker-log", True),
@@ -11650,17 +11971,60 @@ def _refresh_manifest_item(item: dict[str, Any], path: Path) -> None:
     item["size_bytes"] = len(data)
 
 
+def _contained_run_artifact_source(run_dir: Path, relative: str | Path) -> Path:
+    run_root = run_dir.resolve(strict=True)
+    candidate = run_dir / Path(relative)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"artifact source is missing from run directory: {relative}") from exc
+    try:
+        resolved.relative_to(run_root)
+    except ValueError as exc:
+        raise RuntimeError(f"artifact source escapes run directory: {relative}") from exc
+    if candidate.is_symlink() or not _is_regular_file_no_follow(candidate):
+        raise RuntimeError(f"artifact source must be a contained regular file in run directory: {relative}")
+    return candidate
+
+
+def _copy_run_artifact_source(
+    run_dir: Path,
+    relative: str | Path,
+    artifact_dir: Path,
+    *,
+    destination_name: str | None = None,
+) -> Path:
+    source = _contained_run_artifact_source(run_dir, relative)
+    name = destination_name or source.name
+    if not name or Path(name).is_absolute() or Path(name).name != name:
+        raise RuntimeError(f"artifact destination name is invalid: {name}")
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    destination = artifact_dir / name
+    if destination.is_symlink():
+        raise RuntimeError(f"artifact destination must not be a symlink: {name}")
+    try:
+        destination.resolve(strict=False).relative_to(artifact_dir.resolve(strict=True))
+    except ValueError as exc:
+        raise RuntimeError(f"artifact destination escapes artifact directory: {name}") from exc
+    shutil.copy2(source, destination, follow_symlinks=False)
+    return destination
+
+
 
 def _debug_bundle_files(directory: Path, prefix: str) -> list[tuple[Path, str]]:
     if not directory.is_dir():
         return []
+    directory_root = directory.resolve(strict=True)
     files: list[tuple[Path, str]] = []
     for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.is_symlink() or path.name == DEBUG_BUNDLE_NAME:
+        if path.is_symlink() or not _is_regular_file_no_follow(path) or path.name == DEBUG_BUNDLE_NAME:
             continue
         try:
             rel = path.relative_to(directory).as_posix()
-        except ValueError:
+            path.resolve(strict=True).relative_to(directory_root)
+        except (OSError, ValueError):
+            continue
+        if prefix == "run" and (rel == "bundles" or rel.startswith("bundles/")):
             continue
         files.append((path, f"{prefix}/{rel}"))
     return files
@@ -11923,10 +12287,12 @@ def refresh_log_artifacts(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     for name in LOG_ARTIFACT_NAMES:
         src = run_dir / name
+        if src.is_symlink():
+            raise RuntimeError(f"artifact source must be a contained regular file in run directory: {name}")
         if not src.exists():
             src.parent.mkdir(parents=True, exist_ok=True)
             src.write_text("", encoding="utf-8")
-        shutil.copy2(src, artifact_dir / name)
+        _copy_run_artifact_source(run_dir, name, artifact_dir, destination_name=name)
     payload = manifest_payload if isinstance(manifest_payload, dict) else read_json(artifact_dir / "artifact-manifest.json", {})
     if not isinstance(payload, dict):
         return
@@ -11964,12 +12330,13 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
     }
     for name, content in optional_defaults.items():
         src = run_dir / name
+        if src.is_symlink():
+            raise RuntimeError(f"artifact source must be a contained regular file in run directory: {name}")
         if not src.exists():
             src.parent.mkdir(parents=True, exist_ok=True)
             src.write_text(content, encoding="utf-8")
     for name in (*required_files, *optional_defaults.keys()):
-        src = run_dir / name
-        shutil.copy2(src, artifact_dir / name)
+        _copy_run_artifact_source(run_dir, name, artifact_dir, destination_name=name)
     manifest = []
     for name, kind, media_type, schema_id, required in (
         ("report.md", "report.human", "text/markdown", "human-markdown-report", True),
@@ -12003,18 +12370,22 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
     )
     for rel, kind, media_type, schema_id in optional_artifacts:
         src = run_dir / rel
-        if not src.exists():
+        if not src.exists() and not src.is_symlink():
             continue
-        dest = artifact_dir / src.name
-        shutil.copy2(src, dest)
+        dest = _copy_run_artifact_source(run_dir, rel, artifact_dir, destination_name=src.name)
         manifest.append(artifact_item(dest, kind, media_type, schema_id, False))
     for source_dir, name_prefix, artifact_prefix, kind in (
         (run_dir / "raw-reviewers", "raw-reviewer", "art_raw_reviewer_output", "raw_reviewer_output"),
         (run_dir / "verified-reviewers", "verified-reviewer", "art_verified_reviewer_output", "verified_reviewer_output"),
     ):
         for src in sorted(source_dir.glob("*.json")) if source_dir.is_dir() else []:
-            dest = artifact_dir / f"{name_prefix}-{src.name}"
-            shutil.copy2(src, dest)
+            rel = src.relative_to(run_dir)
+            dest = _copy_run_artifact_source(
+                run_dir,
+                rel,
+                artifact_dir,
+                destination_name=f"{name_prefix}-{src.name}",
+            )
             manifest.append(
                 artifact_item(
                     dest,
@@ -12026,10 +12397,15 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
                 )
             )
     for src in sorted((run_dir / "intent" / "test-output").glob("*.log")):
-        if not src.is_file():
+        if not src.is_file() and not src.is_symlink():
             continue
-        dest = artifact_dir / f"intent-test-output-{src.name}"
-        shutil.copy2(src, dest)
+        rel = src.relative_to(run_dir)
+        dest = _copy_run_artifact_source(
+            run_dir,
+            rel,
+            artifact_dir,
+            destination_name=f"intent-test-output-{src.name}",
+        )
         manifest.append(
             artifact_item(
                 dest,
@@ -12788,6 +13164,29 @@ def active_attempt_id(config: Any, job: dict[str, Any]) -> str:
     return f"{config.worker_id}-{attempt}"
 
 
+def _contained_artifact_upload_path(artifact_dir: Path, name: str, *, final_refresh: bool = False) -> Path:
+    raw_name = Path(name)
+    prefix = "final refresh artifact" if final_refresh else "artifact"
+    if not name or raw_name.is_absolute() or raw_name.name != name:
+        raise RuntimeError(f"{prefix} path escapes artifact directory before upload: {name}")
+    path = artifact_dir / raw_name
+    try:
+        path.resolve(strict=False).relative_to(artifact_dir.resolve(strict=True))
+    except ValueError as exc:
+        raise RuntimeError(f"{prefix} path escapes artifact directory before upload: {name}") from exc
+    if not path.exists():
+        raise RuntimeError(f"{prefix} listed in manifest is missing or not a regular file before upload: {name}")
+    try:
+        path.resolve(strict=True).relative_to(artifact_dir.resolve(strict=True))
+    except OSError as exc:
+        raise RuntimeError(f"{prefix} listed in manifest is missing or not a regular file before upload: {name}") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"{prefix} path escapes artifact directory before upload: {name}") from exc
+    if path.is_symlink() or not _is_regular_file_no_follow(path):
+        raise RuntimeError(f"{prefix} listed in manifest is missing or not a regular file before upload: {name}")
+    return path
+
+
 def upload_log_artifacts_best_effort(client: Any, job_id: str, attempt_id: str, run_dir: Path, artifact_dir: Path) -> str:
     try:
         upload_log_artifacts(client, job_id, attempt_id, run_dir, artifact_dir)
@@ -12813,13 +13212,7 @@ def upload_log_artifacts(client: Any, job_id: str, attempt_id: str, run_dir: Pat
         artifact_id = str(item.get("artifact_id") or "").strip()
         if not artifact_id:
             raise RuntimeError(f"final refresh artifact manifest entry requires artifact_id: {name}")
-        path = artifact_dir / name
-        try:
-            path.resolve(strict=False).relative_to(artifact_dir.resolve(strict=False))
-        except ValueError as exc:
-            raise RuntimeError(f"final refresh artifact path escapes artifact directory before upload: {name}") from exc
-        if not path.is_file():
-            raise RuntimeError(f"final refresh artifact listed in manifest is missing before upload: {name}")
+        path = _contained_artifact_upload_path(artifact_dir, name, final_refresh=True)
         data = path.read_bytes()
         if str(item.get("sha256") or "").lower() != hashlib.sha256(data).hexdigest():
             raise RuntimeError(f"final refresh artifact sha256 mismatch before upload: {name}")
@@ -12885,13 +13278,7 @@ def upload_artifacts(
         expected_storage_url = f"/v1/review-runs/{artifact_dir.name}/artifacts/{artifact_id}"
         if storage.get("type") != "server_artifact" or str(storage.get("url") or "") != expected_storage_url:
             raise RuntimeError(f"artifact manifest storage does not match upload run before upload: {artifact_id}")
-        path = artifact_dir / name
-        try:
-            path.resolve(strict=False).relative_to(artifact_dir.resolve(strict=False))
-        except ValueError as exc:
-            raise RuntimeError(f"artifact path escapes artifact directory before upload: {name}") from exc
-        if not path.is_file():
-            raise RuntimeError(f"artifact listed in manifest is missing before upload: {name}")
+        path = _contained_artifact_upload_path(artifact_dir, name)
         uploadable.append((item, path))
     uploadable.sort(key=lambda pair: 1 if pair[0].get("artifact_id") == DEBUG_BUNDLE_ARTIFACT_ID else 0)
     total = len(uploadable)
@@ -12904,10 +13291,12 @@ def upload_artifacts(
         if source_run_dir is not None and artifact_id == DEBUG_BUNDLE_ARTIFACT_ID:
             for log_name in LOG_ARTIFACT_NAMES:
                 src = source_run_dir / log_name
+                if src.is_symlink():
+                    raise RuntimeError(f"artifact source must be a contained regular file in run directory: {log_name}")
                 if not src.exists():
                     src.parent.mkdir(parents=True, exist_ok=True)
                     src.write_text("", encoding="utf-8")
-                shutil.copy2(src, artifact_dir / log_name)
+                _copy_run_artifact_source(source_run_dir, log_name, artifact_dir, destination_name=log_name)
             write_debug_bundle(source_run_dir, artifact_dir, status="completed")
             _refresh_manifest_item(item, artifact_dir / DEBUG_BUNDLE_NAME)
             write_json(artifact_dir / "artifact-manifest.json", manifest_payload)

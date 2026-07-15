@@ -714,6 +714,45 @@ class DebugBundleAuditTest(unittest.TestCase):
             ), self.assertRaisesRegex(ValueError, "too large"):
                 BundleFiles(root)
 
+    def test_summary_only_bundle_is_rejected_as_insufficient_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / 'bundle'
+            write_json(
+                root,
+                'worker/debug-summary.json',
+                {
+                    'schema_version': 'pullwise-debug-bundle/v1',
+                    'run_id': 'run_1',
+                    'status': 'completed',
+                },
+            )
+
+            result = audit_bundle(root)
+
+        self.assertIn('debug_bundle_summary_only', issue_codes(result))
+
+    def test_progress_reports_nonzero_counter_when_artifacts_prove_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / 'bundle'
+            self.write_good_bundle(root)
+            progress_path = root / 'worker/run/progress.json'
+            progress = json.loads(progress_path.read_text(encoding='utf-8'))
+            progress['counters']['reviewer_runs_total'] = 7
+            progress['counters']['reviewer_runs_completed'] = 7
+            write_json(root, 'worker/run/progress.json', progress)
+
+            result = audit_bundle(root)
+
+        mismatch = next(
+            issue
+            for issue in result['issues']
+            if issue.get('code') == 'progress_counter_mismatch'
+        )
+        self.assertEqual(
+            mismatch['details']['counters']['reviewer_runs_total'],
+            {'recorded': 7, 'expected': 0},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

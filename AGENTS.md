@@ -604,6 +604,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Server-side evidence should include only scoped records for the same scan/job/run: scan/job/attempt/run identifiers, phase/progress/error snapshots, review-run events, artifact metadata/storage references, quota state, and relevant timestamps. It must not include full database dumps, secrets, other users' data, or unrelated scans.
 - The UI must disable or omit debug bundle actions when no real debug_bundle artifact/server debug bundle endpoint exists. Do not substitute /scans/{scanId}/audit-bundle.zip as a debug zip URL.
 - Tests should protect this contract: missing debugBundleUrl must not produce an audit-bundle URL, and server/worker tests must verify failed runs still expose a real debug_bundle artifact or explicit absence.
+- Treat `run/bundles/**` as repository source because packed review bundles embed source text. Never include that tree in a debug bundle, even though other run-local phase outputs are diagnostic evidence.
 
 ## Execution And Validation Resilience
 
@@ -630,3 +631,4 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Treat `review_request.output_language` as required execution context for every semantic/reviewer/repair prompt, `report.agent.json`, rendered Markdown, and QA. Natural-language content must use the requested language while schema keys, code, paths, and commands remain unchanged.
 - Intent counters distinguish planned, written, attempted, process-started (`intent_tests_run`), assertion-level, and analyzed evidence. Skipped or dependency-missing records are attempted but not run; generated IDs must map back to plan target IDs without inflating logical totals.
 - Review bundles must not exceed `MAX_BUNDLE_ESTIMATED_TOKENS`. Split oversized source files into bounded line ranges, or character ranges for a single oversized line, and preserve original line numbers in packed bundles.
+- Keep the intent-validation inventory baseline in a worker-controlled workspace path outside both the source repository `.codex-review/**` write root and the disposable validation repository. Integrity checks must ignore the mutable run-local `inventory.json`, compare all baseline hashes, and reject undeclared added source files while allowing explicitly declared generated-test paths.

@@ -7,6 +7,45 @@ from pullwise_worker.current_run_eta import CurrentRunEstimator
 
 
 class CurrentRunEstimatorTest(unittest.TestCase):
+    def test_failed_and_cancelled_units_do_not_bias_success_service_time(self) -> None:
+        estimator = CurrentRunEstimator()
+        estimator.set_resource_pool(
+            'reviewer',
+            configured_concurrency=1,
+            effective_concurrency=1,
+        )
+        estimator.add_work_unit(
+            'fast-429',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+            state='failed',
+            duration_seconds=1,
+        )
+        estimator.add_work_unit(
+            'fast-cancel',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+            state='cancelled',
+            duration_seconds=2,
+        )
+        estimator.add_work_unit(
+            'successful-sample',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+            state='completed',
+            duration_seconds=20,
+        )
+        estimator.add_work_unit(
+            'pending',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+        )
+        estimator.mark_plan_ready()
+
+        estimate = estimator.snapshot()
+
+        self.assertEqual(estimate['remainingSeconds'], 20)
+
     def test_dynamic_updates_are_serialized_with_concurrent_snapshots(self) -> None:
         entered_values = threading.Event()
         release_values = threading.Event()
@@ -263,6 +302,13 @@ class CurrentRunEstimatorTest(unittest.TestCase):
             'reviewer',
             configured_concurrency=1,
             effective_concurrency=1,
+        )
+        estimator.add_work_unit(
+            'successful-baseline',
+            kind='reviewer_turn',
+            resource_pool='reviewer',
+            state='completed',
+            duration_seconds=10,
         )
         estimator.add_work_unit(
             'attempt-1',

@@ -1629,6 +1629,29 @@ def cleanup_repository_mirror_cache_candidates(cache_root: Path) -> list[tuple[f
     return sorted(candidates, key=lambda item: item[0])
 
 
+def remove_checkout_dir(checkout_dir: Path) -> None:
+    """Remove one already-vetted checkout/cache directory."""
+    if checkout_dir.is_symlink():
+        raise ValueError(f"refusing to remove symlinked checkout directory: {checkout_dir}")
+    if path_is_root(checkout_dir):
+        raise ValueError(f"refusing to remove filesystem root: {checkout_dir}")
+    if not checkout_dir.exists():
+        return
+    if not checkout_dir.is_dir():
+        raise ValueError(f"refusing to remove non-directory checkout path: {checkout_dir}")
+
+    def retry_readonly_remove(function, path, _exc_info):
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        except OSError:
+            pass
+        function(path)
+
+    shutil.rmtree(checkout_dir, onerror=retry_readonly_remove)
+    if checkout_dir.exists():
+        raise OSError(f"failed to remove checkout directory: {checkout_dir}")
+
+
 def cleanup_repository_mirror_cache_path(path: Path) -> bool:
     try:
         if path.is_symlink() or path.is_file():
@@ -1648,6 +1671,48 @@ def cleanup_checkout_path(checkout: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def cleanup_v1_workspace_path(workspace_root: Path, workspace: Path) -> bool:
+    """Remove one direct child of the instance-scoped v1 workspace root."""
+    if workspace_root.is_symlink() or path_is_root(workspace_root):
+        return False
+    try:
+        if workspace.parent.resolve(strict=False) != workspace_root.resolve(strict=False):
+            return False
+    except OSError:
+        return False
+    if not workspace.name or workspace.name in {".", ".."}:
+        return False
+    return cleanup_checkout_path(workspace)
+
+
+def cleanup_v1_workspaces(
+    workspace_root: Path,
+    *,
+    protected_run_ids: set[str] | None = None,
+) -> list[Path]:
+    """Delete unprotected v1 workspaces from an idle worker instance."""
+    protected = set(protected_run_ids or set())
+    if workspace_root.is_symlink() or not workspace_root.is_dir():
+        return []
+    try:
+        entries = list(workspace_root.iterdir())
+    except OSError:
+        return []
+    removed: list[Path] = []
+    for workspace in entries:
+        if workspace.name in protected:
+            continue
+        try:
+            mode = workspace.lstat().st_mode
+        except OSError:
+            continue
+        if not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+            continue
+        if cleanup_v1_workspace_path(workspace_root, workspace):
+            removed.append(workspace)
+    return removed
 
 
 def _unlink_path_ignore_errors(path: Path) -> None:

@@ -426,8 +426,24 @@ class BundleAudit:
         except (OSError, ValueError, KeyError):
             return ""
 
+    def audit_evidence_presence(self) -> None:
+        evidence_names = [
+            name
+            for name in self.files.names
+            if name != self.debug_name
+        ]
+        if evidence_names:
+            return
+        self.issue(
+            'error',
+            'debug_bundle_summary_only',
+            'Debug bundle contains only debug-summary.json and cannot substantiate the run state',
+            self.debug_name,
+        )
+
     def audit(self) -> dict[str, Any]:
         debug = self.json_at(self.debug_name, required=True)
+        self.audit_evidence_presence()
         progress_name = self.run_name("progress.json")
         progress = self.json_at(progress_name)
         self.audit_status(debug, progress, progress_name)
@@ -1147,7 +1163,7 @@ class BundleAudit:
         mismatches = {
             key: {"recorded": integer(counters.get(key)), "expected": value}
             for key, value in expected.items()
-            if value and integer(counters.get(key)) != value
+            if integer(counters.get(key)) != value
         }
         if mismatches:
             self.issue(
