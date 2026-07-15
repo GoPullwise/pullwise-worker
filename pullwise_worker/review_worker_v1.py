@@ -2898,21 +2898,22 @@ class ReviewWorkerV1:
             with self._progress_lock:
                 heartbeat_payload["progress"] = active.progress_snapshot()
         response = self.client.heartbeat(**heartbeat_payload)
-        with self._progress_lock:
-            terminal_result_committing = bool(
-                active
-                and (active.terminal_result_in_flight or active.terminal_result_submitted)
-            )
         cancelled = response.get("cancelled_job_ids") if isinstance(response, dict) else []
-        if active and not terminal_result_committing and active.job_id in (cancelled or []):
-            self.request_cancel(active, reason="server_cancelled")
+        cancellation_accepted = False
+        if active and active.job_id in (cancelled or []):
+            cancellation_accepted = self.request_cancel(active, reason="server_cancelled")
         commands = response.get("commands") if isinstance(response, dict) and isinstance(response.get("commands"), list) else []
-        if active and not terminal_result_committing:
+        if active and not cancellation_accepted:
             for command in commands:
                 if not isinstance(command, dict):
                     continue
                 if command.get("type") == "cancel_run" and str(command.get("run_id") or "") == active.run_id:
-                    self.request_cancel(active, reason=str(command.get("reason") or "server_cancelled"))
+                    cancellation_accepted = self.request_cancel(
+                        active,
+                        reason=str(command.get("reason") or "server_cancelled"),
+                    )
+                    if cancellation_accepted:
+                        break
         if process_worker_command:
             self.handle_worker_command(response)
         return response if isinstance(response, dict) else {}
@@ -3055,8 +3056,10 @@ class ReviewWorkerV1:
                     )
             return event
 
-    def request_cancel(self, active: ActiveJob, *, reason: str = "server_cancelled") -> None:
+    def request_cancel(self, active: ActiveJob, *, reason: str = "server_cancelled") -> bool:
         with self._progress_lock:
+            if active.terminal_result_in_flight or active.terminal_result_submitted:
+                return False
             reason_text = str(reason or "server_cancelled").strip() or "server_cancelled"
             active.cancel_requested = True
             active.cancel_reason = reason_text
@@ -3065,6 +3068,7 @@ class ReviewWorkerV1:
             self.persist_active_run_marker(active)
             if active.run_dir is not None:
                 self.emit_cancel_requested(active, active.run_dir)
+            return True
 
     def emit_cancel_requested(self, active: ActiveJob, run_dir: Path) -> None:
         with self._progress_lock:

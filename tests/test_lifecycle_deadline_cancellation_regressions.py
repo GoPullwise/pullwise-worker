@@ -239,6 +239,119 @@ class LifecycleDeadlineCancellationRegressionsTest(unittest.TestCase):
             self.assertFalse(active.terminal_result_in_flight)
             self.assertFalse((artifact_dir / "result-submit-failed.json").exists())
 
+    def test_terminal_result_commit_atomically_rejects_stale_heartbeat_cancellation(self) -> None:
+        cancel_call_entered = threading.Event()
+        allow_cancel_call = threading.Event()
+        result_call_entered = threading.Event()
+        allow_result_call = threading.Event()
+
+        class Client:
+            def heartbeat(self, **_kwargs: object) -> dict:
+                return {"cancelled_job_ids": ["job_1"]}
+
+            def result(self, _job_id: str, _payload: dict) -> None:
+                result_call_entered.set()
+                if not allow_result_call.wait(5):
+                    raise TimeoutError("test did not release result commit")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            artifact_dir = root / "artifacts" / "run_1"
+            run_dir = root / "workspaces" / "run_1" / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            worker = ReviewWorkerV1(worker_config(root), client=Client())
+            worker.codex_client = SimpleNamespace(is_running=lambda: True)  # type: ignore[assignment]
+            worker.quota_monitor.snapshot_if_due = lambda **_kwargs: {  # type: ignore[method-assign]
+                "provider": "codex",
+                "status": "ready",
+                "ready": True,
+            }
+            worker.machine_metrics_payload = lambda: None  # type: ignore[method-assign]
+            persisted_states: list[str] = []
+            emitted_cancellations: list[str] = []
+            worker.persist_active_run_marker = (  # type: ignore[method-assign]
+                lambda active: persisted_states.append(active.state)
+            )
+            worker.emit_cancel_requested = (  # type: ignore[method-assign]
+                lambda active, _run_dir: emitted_cancellations.append(active.cancel_reason)
+            )
+            active = ActiveJob("job_1", "run_1", "lease_1", "wk_1-1")
+            active.run_dir = run_dir
+            worker.state.set_active(active)
+            initial_state = active.state
+            original_request_cancel = worker.request_cancel
+            cancellation_results: list[object] = []
+
+            def delayed_request_cancel(active_job: ActiveJob, *, reason: str) -> object:
+                cancel_call_entered.set()
+                if not allow_cancel_call.wait(5):
+                    raise TimeoutError("test did not release cancellation attempt")
+                accepted = original_request_cancel(active_job, reason=reason)
+                cancellation_results.append(accepted)
+                return accepted
+
+            worker.request_cancel = delayed_request_cancel  # type: ignore[method-assign]
+            heartbeat_errors: list[BaseException] = []
+            result_errors: list[BaseException] = []
+            submitted: list[bool] = []
+
+            def heartbeat_call() -> None:
+                try:
+                    worker._heartbeat_once(process_worker_command=False)
+                except BaseException as exc:  # noqa: BLE001 - asserted below.
+                    heartbeat_errors.append(exc)
+
+            def result_call() -> None:
+                try:
+                    submitted.append(
+                        worker.submit_result_or_record_failure(
+                            active,
+                            "job_1",
+                            {"status": "done"},
+                            artifact_dir,
+                            {
+                                "protocol_version": "review-worker-protocol/v1",
+                                "execution": {"status": "completed"},
+                            },
+                        )
+                    )
+                except BaseException as exc:  # noqa: BLE001 - asserted below.
+                    result_errors.append(exc)
+
+            heartbeat_thread = threading.Thread(target=heartbeat_call, daemon=True)
+            result_thread = threading.Thread(target=result_call, daemon=True)
+            try:
+                heartbeat_thread.start()
+                self.assertTrue(
+                    cancel_call_entered.wait(2),
+                    "heartbeat never reached its stale cancellation decision",
+                )
+                result_thread.start()
+                self.assertTrue(
+                    result_call_entered.wait(2),
+                    "completed result never entered its in-flight commit",
+                )
+                self.assertTrue(active.terminal_result_in_flight)
+                allow_cancel_call.set()
+                heartbeat_thread.join(2)
+                self.assertFalse(heartbeat_thread.is_alive())
+                self.assertFalse(active.cancel_requested)
+                self.assertEqual(active.state, initial_state)
+                self.assertEqual(persisted_states, [])
+                self.assertEqual(emitted_cancellations, [])
+                self.assertEqual(cancellation_results, [False])
+            finally:
+                allow_cancel_call.set()
+                allow_result_call.set()
+                heartbeat_thread.join(2)
+                result_thread.join(2)
+
+            self.assertFalse(result_thread.is_alive())
+            self.assertEqual(heartbeat_errors, [])
+            self.assertEqual(result_errors, [])
+            self.assertEqual(submitted, [True])
+            self.assertTrue(active.terminal_result_submitted)
+
     def test_cancelled_result_can_commit_after_cancellation_was_recorded(self) -> None:
         class Client:
             def __init__(self) -> None:
