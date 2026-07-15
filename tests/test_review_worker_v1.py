@@ -2629,6 +2629,20 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             inv = inventory(repo)
             (run_dir / "inventory.json").write_text(__import__("json").dumps(inv), encoding="utf-8")
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "default_depth": "P3",
+                    "routes": [
+                        {
+                            "path": "src/auth/session.py",
+                            "tier": "P0",
+                            "reasons": ["session trust boundary"],
+                        }
+                    ],
+                },
+            )
             plan = materialize_test_bundle_plan(run_dir)
             (run_dir / "bundle-plan.json").write_text(__import__("json").dumps(plan), encoding="utf-8")
             pack_bundles(repo, run_dir)
@@ -2825,6 +2839,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": "risk-routing/v1",
+                        "default_depth": "P2",
                         "routes": [
                             {"path": "app/users/", "tier": "P1", "reasons": ["users component"]},
                             {"path": "tests/users/", "tier": "P1", "reasons": ["users tests"]},
@@ -10005,7 +10020,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             ("repair:repo_map:2",),
         )
 
-    def test_semantic_phase_output_repair_falls_back_when_codex_omits_output(self) -> None:
+    def test_semantic_phase_output_repair_stays_failed_when_codex_omits_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             repo = root / "repo"
@@ -10039,7 +10054,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "repo-map.json"):
                 validate_phase_outputs(run_dir, "repo_map")
             worker.repair_semantic_phase_outputs(FakeCodexClient(), repo, run_dir, job, "repo_map", RuntimeError("missing output"))
-            validate_phase_outputs(run_dir, "repo_map")
+            with self.assertRaisesRegex(RuntimeError, "repo-map.json"):
+                validate_phase_outputs(run_dir, "repo_map")
 
         self.assertEqual(len(calls), 1)
 
