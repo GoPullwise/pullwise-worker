@@ -6655,6 +6655,7 @@ def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None, profi
 
 
 def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
+    repo_dir = run_dir.parent.parent.parent
     inv = read_json(run_dir / "inventory.json", {})
     files = inv.get("files") if isinstance(inv.get("files"), list) else []
     semantic_routing = read_json(run_dir / "risk-routing.json", {})
@@ -6684,7 +6685,7 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
             (
                 segment
                 for item in grouped[tier]
-                for segment in split_oversized_bundle_item(item)
+                for segment in split_oversized_bundle_item(item, repo_dir)
             ),
             key=lambda item: (
                 _bundle_component_key(str(item.get("path") or "")),
@@ -6697,13 +6698,13 @@ def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
         for item in tier_files:
             item_tokens = int(item.get("estimated_tokens") or 0)
             if chunk and (len(chunk) >= 25 or token_count + item_tokens > MAX_BUNDLE_ESTIMATED_TOKENS):
-                bundles.append(bundle_payload(tier, len(bundles) + 1, chunk, token_count))
+                _append_render_fitted_bundle_chunks(repo_dir, tier, chunk, bundles)
                 chunk = []
                 token_count = 0
             chunk.append(item)
             token_count += item_tokens
         if chunk:
-            bundles.append(bundle_payload(tier, len(bundles) + 1, chunk, token_count))
+            _append_render_fitted_bundle_chunks(repo_dir, tier, chunk, bundles)
     coverage = {
         "schema_version": "coverage/v1",
         "source_like_files_total": sum(1 for item in files if isinstance(item, dict) and item.get("is_source_like")),
@@ -6735,14 +6736,30 @@ def _bundle_component_key(path: str) -> str:
     return normalized
 
 
-def split_oversized_bundle_item(item: dict[str, Any]) -> list[dict[str, Any]]:
+def split_oversized_bundle_item(
+    item: dict[str, Any],
+    repo_dir: Path | None = None,
+) -> list[dict[str, Any]]:
     estimated_tokens = max(0, int(item.get("estimated_tokens") or 0))
     line_count = max(0, int(item.get("line_count") or 0))
     if estimated_tokens <= MAX_BUNDLE_ESTIMATED_TOKENS:
         return [item]
     segment_count = max(2, math.ceil(estimated_tokens / MAX_BUNDLE_ESTIMATED_TOKENS))
+    source_lines: list[str] | None = None
+    if repo_dir is not None:
+        source_path = repo_dir / str(item.get("path") or "")
+        if source_path.is_file():
+            source_lines = source_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).splitlines()
+            line_count = len(source_lines)
     if line_count <= 1:
-        estimated_characters = max(1, estimated_tokens * 4)
+        estimated_characters = (
+            max(1, len(source_lines[0]))
+            if source_lines
+            else max(1, estimated_tokens * 4)
+        )
         characters_per_segment = math.ceil(estimated_characters / segment_count)
         segments: list[dict[str, Any]] = []
         for index in range(segment_count):
@@ -6848,6 +6865,257 @@ def bundle_payload(tier: str, index: int, files: list[dict[str, Any]], estimated
     return payload
 
 
+def _bundle_entries(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    file_ranges = (
+        bundle.get("file_ranges")
+        if isinstance(bundle.get("file_ranges"), list)
+        else []
+    )
+    ranges_by_path: dict[str, list[dict[str, Any]]] = {}
+    for entry in file_ranges:
+        if not isinstance(entry, dict):
+            continue
+        rel = str(entry.get("path") or "")
+        if rel:
+            ranges_by_path.setdefault(rel, []).append(entry)
+    entries: list[dict[str, Any]] = []
+    planned_paths: set[str] = set()
+    for raw_path in bundle.get("paths") or []:
+        rel = str(raw_path or "")
+        if not rel or rel in planned_paths:
+            continue
+        planned_paths.add(rel)
+        entries.extend(ranges_by_path.get(rel) or [{"path": rel}])
+    for rel, ranges in ranges_by_path.items():
+        if rel not in planned_paths:
+            entries.extend(ranges)
+    return entries
+
+
+def _render_bundle_markdown(repo_dir: Path, bundle: dict[str, Any]) -> str:
+    bundle_id = safe_id(bundle.get("bundle_id"), "bundle")
+    lines = [
+        f"# Bundle: {bundle_id}",
+        "",
+        f"Tier: {bundle.get('tier') or 'P1'}  ",
+        f"Title: {bundle.get('title') or bundle_id}  ",
+        f"Estimated tokens: {bundle.get('estimated_tokens') or 0}  ",
+        f"Reviewers: {', '.join(bundle.get('reviewers') or [])}  ",
+        f"Intent test eligible: {str(bool(bundle.get('intent_test_eligible'))).lower()}",
+        "",
+        "## Files",
+        "",
+    ]
+    for entry in _bundle_entries(bundle):
+        rel = str(entry.get("path") or "")
+        path = repo_dir / rel
+        start_line = max(1, int(entry.get("start_line") or 1))
+        end_line = (
+            max(start_line, int(entry.get("end_line") or 0))
+            if entry.get("end_line")
+            else 0
+        )
+        start_char = max(0, int(entry.get("start_char") or 0))
+        end_char = (
+            max(start_char, int(entry.get("end_char") or 0))
+            if entry.get("end_char") is not None
+            else 0
+        )
+        range_label = f":{start_line}-{end_line}" if end_line else ""
+        if entry.get("start_char") is not None and entry.get("end_char") is not None:
+            range_label += f" chars {start_char}-{end_char}"
+        lines.append(f"### {rel}{range_label}")
+        lines.append("")
+        if not path.is_file():
+            lines.extend(("```text", "<missing>", "```", ""))
+            continue
+        suffix = path.suffix.lstrip(".") or "text"
+        lines.append(f"```{suffix}")
+        source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        selected_lines = source_lines[start_line - 1 : end_line or None]
+        if (
+            entry.get("start_char") is not None
+            and entry.get("end_char") is not None
+            and selected_lines
+        ):
+            selected_lines = [selected_lines[0][start_char:end_char]]
+        for index, source_line in enumerate(selected_lines, start=start_line):
+            lines.append(f"{index} | {source_line}")
+        lines.extend(("```", ""))
+    return "\n".join(lines)
+
+
+def _rendered_bundle_size(payload: str) -> int:
+    return max(len(payload), len(payload.encode("utf-8")))
+
+
+def _render_fitted_bundle_candidate(
+    repo_dir: Path,
+    tier: str,
+    index: int,
+    files: list[dict[str, Any]],
+) -> tuple[dict[str, Any], int]:
+    payload = bundle_payload(
+        tier,
+        index,
+        files,
+        MAX_BUNDLE_ESTIMATED_TOKENS,
+    )
+    conservative_size = _rendered_bundle_size(
+        _render_bundle_markdown(repo_dir, payload)
+    )
+    while True:
+        payload["estimated_tokens"] = conservative_size
+        rendered_size = _rendered_bundle_size(
+            _render_bundle_markdown(repo_dir, payload)
+        )
+        if rendered_size <= conservative_size:
+            return payload, rendered_size
+        conservative_size = rendered_size
+
+
+def _bisect_bundle_item(
+    repo_dir: Path,
+    item: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    rel = str(item.get("path") or "")
+    source_path = repo_dir / rel
+    source_lines = (
+        source_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if source_path.is_file()
+        else []
+    )
+    start_line = max(1, int(item.get("_segment_start_line") or 1))
+    end_line = max(
+        start_line,
+        int(item.get("_segment_end_line") or max(1, len(source_lines))),
+    )
+    if source_lines:
+        end_line = min(end_line, len(source_lines))
+
+    original_estimate = max(1, int(item.get("estimated_tokens") or 1))
+    child_estimate = max(1, math.ceil(original_estimate / 2))
+    if start_line < end_line:
+        midpoint = (start_line + end_line) // 2
+        left = dict(item)
+        left["estimated_tokens"] = child_estimate
+        left["_segment_start_line"] = start_line
+        left["_segment_end_line"] = midpoint
+        left.pop("_segment_start_char", None)
+        left.pop("_segment_end_char", None)
+        right = dict(item)
+        right["estimated_tokens"] = child_estimate
+        right["_segment_start_line"] = midpoint + 1
+        right["_segment_end_line"] = end_line
+        right.pop("_segment_start_char", None)
+        right.pop("_segment_end_char", None)
+        return left, right
+
+    source_line = (
+        source_lines[start_line - 1]
+        if 0 < start_line <= len(source_lines)
+        else ""
+    )
+    has_character_range = (
+        item.get("_segment_start_char") is not None
+        and item.get("_segment_end_char") is not None
+    )
+    start_char = (
+        max(0, min(int(item.get("_segment_start_char") or 0), len(source_line)))
+        if has_character_range
+        else 0
+    )
+    end_char = (
+        max(
+            start_char,
+            min(int(item.get("_segment_end_char") or 0), len(source_line)),
+        )
+        if has_character_range
+        else len(source_line)
+    )
+    if end_char - start_char <= 1:
+        raise RuntimeError(
+            "source item cannot be split below the hard bundle limit: "
+            f"{rel}:{start_line} chars {start_char}-{end_char}"
+        )
+    midpoint = (start_char + end_char) // 2
+    left = dict(item)
+    left["estimated_tokens"] = child_estimate
+    left["_segment_start_line"] = start_line
+    left["_segment_end_line"] = start_line
+    left["_segment_start_char"] = start_char
+    left["_segment_end_char"] = midpoint
+    right = dict(item)
+    right["estimated_tokens"] = child_estimate
+    right["_segment_start_line"] = start_line
+    right["_segment_end_line"] = start_line
+    right["_segment_start_char"] = midpoint
+    right["_segment_end_char"] = end_char
+    return left, right
+
+
+def _append_render_fitted_bundle_chunks(
+    repo_dir: Path,
+    tier: str,
+    files: list[dict[str, Any]],
+    bundles: list[dict[str, Any]],
+) -> None:
+    pending = deque(files)
+    current: list[dict[str, Any]] = []
+    while pending:
+        item = pending.popleft()
+        candidate = [*current, item]
+        payload, rendered_size = _render_fitted_bundle_candidate(
+            repo_dir,
+            tier,
+            len(bundles) + 1,
+            candidate,
+        )
+        if (
+            len(candidate) <= 25
+            and rendered_size <= MAX_BUNDLE_ESTIMATED_TOKENS
+            and int(payload.get("estimated_tokens") or 0)
+            <= MAX_BUNDLE_ESTIMATED_TOKENS
+        ):
+            current = candidate
+            continue
+        if current:
+            completed, completed_size = _render_fitted_bundle_candidate(
+                repo_dir,
+                tier,
+                len(bundles) + 1,
+                current,
+            )
+            if (
+                completed_size > MAX_BUNDLE_ESTIMATED_TOKENS
+                or int(completed.get("estimated_tokens") or 0)
+                > MAX_BUNDLE_ESTIMATED_TOKENS
+            ):
+                raise RuntimeError("fitted bundle exceeds hard bundle limit")
+            bundles.append(completed)
+            current = []
+            pending.appendleft(item)
+            continue
+        left, right = _bisect_bundle_item(repo_dir, item)
+        pending.appendleft(right)
+        pending.appendleft(left)
+
+    if current:
+        completed, completed_size = _render_fitted_bundle_candidate(
+            repo_dir,
+            tier,
+            len(bundles) + 1,
+            current,
+        )
+        if (
+            completed_size > MAX_BUNDLE_ESTIMATED_TOKENS
+            or int(completed.get("estimated_tokens") or 0)
+            > MAX_BUNDLE_ESTIMATED_TOKENS
+        ):
+            raise RuntimeError("fitted bundle exceeds hard bundle limit")
+        bundles.append(completed)
+
+
 def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
     plan = read_json(run_dir / "bundle-plan.json", {})
     bundles = plan.get("bundles") if isinstance(plan.get("bundles"), list) else []
@@ -6857,51 +7125,20 @@ def pack_bundles(repo_dir: Path, run_dir: Path) -> None:
         if not isinstance(bundle, dict):
             continue
         bundle_id = safe_id(bundle.get("bundle_id"), "bundle")
-        lines = [
-            f"# Bundle: {bundle_id}",
-            "",
-            f"Tier: {bundle.get('tier') or 'P1'}  ",
-            f"Title: {bundle.get('title') or bundle_id}  ",
-            f"Estimated tokens: {bundle.get('estimated_tokens') or 0}  ",
-            f"Reviewers: {', '.join(bundle.get('reviewers') or [])}  ",
-            f"Intent test eligible: {str(bool(bundle.get('intent_test_eligible'))).lower()}",
-            "",
-            "## Files",
-            "",
-        ]
-        file_ranges = bundle.get("file_ranges") if isinstance(bundle.get("file_ranges"), list) else []
-        entries = file_ranges or [{"path": rel} for rel in bundle.get("paths") or []]
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            rel = str(entry.get("path") or "")
-            path = repo_dir / str(rel)
-            start_line = max(1, int(entry.get("start_line") or 1))
-            end_line = max(start_line, int(entry.get("end_line") or 0)) if entry.get("end_line") else 0
-            start_char = max(0, int(entry.get("start_char") or 0))
-            end_char = max(start_char, int(entry.get("end_char") or 0)) if entry.get("end_char") is not None else 0
-            range_label = f":{start_line}-{end_line}" if end_line else ""
-            if entry.get("start_char") is not None and entry.get("end_char") is not None:
-                range_label += f" chars {start_char}-{end_char}"
-            lines.append(f"### {rel}{range_label}")
-            lines.append("")
-            if not path.is_file():
-                lines.append("```text")
-                lines.append("<missing>")
-                lines.append("```")
-                lines.append("")
-                continue
-            suffix = path.suffix.lstrip(".") or "text"
-            lines.append(f"```{suffix}")
-            source_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            selected_lines = source_lines[start_line - 1 : end_line or None]
-            if entry.get("start_char") is not None and entry.get("end_char") is not None and selected_lines:
-                selected_lines = [selected_lines[0][start_char:end_char]]
-            for index, source_line in enumerate(selected_lines, start=start_line):
-                lines.append(f"{index} | {source_line}")
-            lines.append("```")
-            lines.append("")
-        (bundle_dir / f"{bundle_id}.md").write_text("\n".join(lines), encoding="utf-8")
+        rendered = _render_bundle_markdown(repo_dir, bundle)
+        rendered_size = _rendered_bundle_size(rendered)
+        estimated_tokens = max(0, int(bundle.get("estimated_tokens") or 0))
+        if rendered_size > MAX_BUNDLE_ESTIMATED_TOKENS:
+            raise RuntimeError(
+                f"packed bundle exceeds hard limit: {bundle_id} "
+                f"({rendered_size} > {MAX_BUNDLE_ESTIMATED_TOKENS})"
+            )
+        if rendered_size > estimated_tokens:
+            raise RuntimeError(
+                f"packed bundle exceeds conservative plan estimate: {bundle_id} "
+                f"({rendered_size} > {estimated_tokens})"
+            )
+        (bundle_dir / f"{bundle_id}.md").write_bytes(rendered.encode("utf-8"))
 
 
 
@@ -8301,6 +8538,63 @@ def _intent_result_with_post_execution_integrity(
     )
 
 
+def _intent_raw_required_paths(
+    generated: dict[str, Any],
+    target: dict[str, Any],
+) -> list[str]:
+    for source in (generated, target):
+        for key in ("required_paths", "requiredPaths"):
+            if key not in source:
+                continue
+            raw_paths = source.get(key)
+            values = raw_paths if isinstance(raw_paths, list) else [raw_paths]
+            return [
+                str(value).strip()
+                for value in values
+                if str(value or "").strip()
+            ]
+    return []
+
+
+def _intent_required_paths_preflight(
+    generated: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    cwd: Path,
+    validation_repo: Path,
+) -> tuple[list[str], dict[str, Any] | None]:
+    canonical_paths: list[str] = []
+    escaped_paths: list[str] = []
+    missing_paths: list[str] = []
+    for raw_path in _intent_raw_required_paths(generated, target):
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        candidate = candidate.resolve(strict=False)
+        canonical = str(candidate)
+        if canonical not in canonical_paths:
+            canonical_paths.append(canonical)
+        if not path_is_under(candidate, validation_repo):
+            escaped_paths.append(raw_path)
+        elif not candidate.exists():
+            missing_paths.append(raw_path)
+    if escaped_paths:
+        return canonical_paths, _intent_blocked_execution_diagnostic(
+            "generated test required path escapes the validation workspace",
+            reason_code="required_path_escape",
+            classification="environment_error",
+            agent_repairable=False,
+            missing_capabilities=escaped_paths,
+        )
+    if missing_paths:
+        return canonical_paths, _intent_blocked_execution_diagnostic(
+            "generated test required path is missing",
+            reason_code="required_path_missing",
+            missing_capabilities=missing_paths,
+        )
+    return canonical_paths, None
+
+
 def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
     validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
     validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
@@ -8348,6 +8642,7 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
             materialized_path=materialized_paths.get(test_id, ""),
         )
         cwd = _intent_test_cwd(validation_repo, generated, target) if validation_repo is not None else None
+        required_paths: list[str] = []
         if integrity_violations:
             diagnostic = _intent_blocked_execution_diagnostic(
                 "validation workspace repository files differ from the immutable inventory",
@@ -8380,25 +8675,35 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
                 reason_code="cwd_escape",
             )
         else:
-            diagnostic = intent_execution_preflight(
-                command,
-                cwd,
-                validation_repo,
-                profile if isinstance(profile, dict) else {},
+            required_paths, required_paths_diagnostic = _intent_required_paths_preflight(
+                generated,
+                target,
+                cwd=cwd,
+                validation_repo=validation_repo,
             )
-            compile_error = _intent_generated_python_compile_error(validation_repo, generated, target)
-            if compile_error:
-                diagnostic = _intent_blocked_execution_diagnostic(
-                    compile_error,
-                    reason_code="generated_test_invalid",
-                    classification="test_harness_error",
+            if required_paths_diagnostic is not None:
+                diagnostic = required_paths_diagnostic
+            else:
+                diagnostic = intent_execution_preflight(
+                    command,
+                    cwd,
+                    validation_repo,
+                    profile if isinstance(profile, dict) else {},
                 )
+                compile_error = _intent_generated_python_compile_error(validation_repo, generated, target)
+                if compile_error:
+                    diagnostic = _intent_blocked_execution_diagnostic(
+                        compile_error,
+                        reason_code="generated_test_invalid",
+                        classification="test_harness_error",
+                    )
         tests.append(
             {
                 "test_id": test_id,
                 "target_test_ids": related_ids,
                 "command": command,
                 "cwd": str(cwd) if cwd is not None else "",
+                "required_paths": required_paths,
                 **diagnostic,
             }
         )
@@ -8469,6 +8774,42 @@ def run_polled_intent_process(
     )
 
 
+def _approved_intent_preflight_test(
+    payload: object,
+    test_id: str,
+) -> dict[str, Any] | None:
+    tests = payload.get("tests") if isinstance(payload, dict) else None
+    if not isinstance(tests, list):
+        return None
+    matches = [
+        item
+        for item in tests
+        if isinstance(item, dict)
+        and str(item.get("test_id") or "").strip() == test_id
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _intent_preflight_candidate_matches(
+    approved: dict[str, Any] | None,
+    *,
+    command: list[str],
+    cwd: Path,
+    required_paths: list[str],
+) -> bool:
+    if approved is None:
+        return False
+    approved_command = approved.get("command")
+    approved_required_paths = approved.get("required_paths", [])
+    return (
+        isinstance(approved_command, list)
+        and [str(part) for part in approved_command] == command
+        and str(approved.get("cwd") or "") == str(cwd)
+        and isinstance(approved_required_paths, list)
+        and [str(path) for path in approved_required_paths] == required_paths
+    )
+
+
 def run_intent_tests(
     run_dir: Path,
     *,
@@ -8495,6 +8836,16 @@ def run_intent_tests(
     targets = plan.get("test_targets") if isinstance(plan.get("test_targets"), list) else []
     source = read_json(run_dir / "intent" / "intent-test-source.json", {})
     generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
+    approved_preflight_path = run_dir / "intent" / "intent-test-preflight.json"
+    if approved_preflight_path.is_symlink():
+        approved_preflight = {}
+    elif approved_preflight_path.is_file():
+        approved_preflight = read_json(approved_preflight_path, {})
+    elif approved_preflight_path.exists():
+        approved_preflight = {}
+    else:
+        approved_preflight = intent_test_source_preflight_payload(run_dir)
+        write_json(approved_preflight_path, approved_preflight)
     materialized_paths: dict[str, str] = {}
     materialization_errors = materialize_generated_intent_test_sources(
         run_dir,
@@ -8648,6 +8999,54 @@ def run_intent_tests(
         if cwd is None:
             preflight = _intent_blocked_execution_diagnostic("generated test cwd escapes validation workspace", reason_code="cwd_escape")
             raw_results.append({**base_result, "status": "skipped", "classification": preflight["classification"], "preflight": preflight, "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": preflight["reason"]})
+            continue
+        required_paths, required_paths_diagnostic = _intent_required_paths_preflight(
+            generated,
+            target,
+            cwd=cwd,
+            validation_repo=validation_repo,
+        )
+        base_result["required_paths"] = required_paths
+        approved_test = _approved_intent_preflight_test(approved_preflight, test_id)
+        if not _intent_preflight_candidate_matches(
+            approved_test,
+            command=command,
+            cwd=cwd,
+            required_paths=required_paths,
+        ):
+            preflight = _intent_blocked_execution_diagnostic(
+                "generated test command, cwd, or required paths differ from the approved preflight candidate",
+                reason_code="preflight_candidate_mismatch",
+                classification="environment_error",
+                agent_repairable=False,
+            )
+            base_result["preflight"] = preflight
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "skipped",
+                    "classification": preflight["classification"],
+                    "exit_code": None,
+                    "duration_ms": 0,
+                    "timed_out": False,
+                    "skip_reason": preflight["reason"],
+                }
+            )
+            continue
+        if required_paths_diagnostic is not None:
+            preflight = required_paths_diagnostic
+            base_result["preflight"] = preflight
+            raw_results.append(
+                {
+                    **base_result,
+                    "status": "skipped",
+                    "classification": preflight["classification"],
+                    "exit_code": None,
+                    "duration_ms": 0,
+                    "timed_out": False,
+                    "skip_reason": preflight["reason"],
+                }
+            )
             continue
         preflight = intent_execution_preflight(command, cwd, validation_repo, profile)
         base_result["preflight"] = preflight
