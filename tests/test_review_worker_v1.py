@@ -5430,6 +5430,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 },
             )
             materialize_artifacts(run_dir, artifact_dir)
+            complete_qa = qa_gate_payload(repo, run_dir, artifact_dir)
             manifest = read_json(artifact_dir / "artifact-manifest.json", {})
             manifest["items"] = [
                 item
@@ -5441,6 +5442,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             qa = qa_gate_payload(repo, run_dir, artifact_dir)
 
+        self.assertEqual(complete_qa["status"], "pass", complete_qa["errors"])
         self.assertEqual(qa["status"], "fail")
         self.assertIn(
             "report.agent.json artifact reference is missing from artifact-manifest.json: location-verification.json",
