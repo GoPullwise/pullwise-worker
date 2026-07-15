@@ -5040,7 +5040,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(result["test_runs"][0]["status"], "skipped")
         self.assertEqual(result["test_runs"][0]["classification"], "environment_error")
         self.assertIn("sandbox runner failed to initialize", result["test_runs"][0]["skip_reason"])
-    def test_intent_failure_analysis_fallback_classifies_raw_runs_conservatively(self) -> None:
+    def test_intent_failure_analysis_does_not_synthesize_missing_agent_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             (run_dir / "intent").mkdir(parents=True)
@@ -5066,19 +5066,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
 
             fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_test_failure_analysis")
-            payload = json.loads((run_dir / "intent" / "intent-test-results.json").read_text(encoding="utf-8"))
-
-        classes = {result["test_id"]: result["classification"] for result in payload["test_results"]}
-        self.assertEqual(classes["ITV-pass"], "unclear_requirement")
-        self.assertEqual(classes["ITV-fail"], "unclear_requirement")
-        self.assertEqual(classes["ITV-timeout"], "test_harness_error")
-        self.assertEqual(classes["ITV-skip"], "test_harness_error")
-        self.assertTrue(all(result["finding_confidence_impact"] == "none" for result in payload["test_results"]))
-        self.assertFalse({"confirmed_bug", "plausible_bug"} & set(classes.values()))
-        fallback_by_id = {result["test_id"]: result for result in payload["test_results"]}
-        self.assertEqual(fallback_by_id["ITV-pass"]["status"], "passed")
-        self.assertEqual(fallback_by_id["ITV-pass"]["confidence"], 0.0)
-        self.assertEqual(fallback_by_id["ITV-pass"]["artifact_refs"], ["art_intent_test_output_ITV_pass_stdout_log"])
+            result_path = run_dir / "intent" / "intent-test-results.json"
+            self.assertFalse(result_path.exists())
 
     def test_qa_gate_rejects_invalid_main_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -9444,7 +9433,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             stderr_path.write_text("failed\n", encoding="utf-8")
             validate_phase_outputs(run_dir, "intent_test_running")
 
-    def test_fallback_semantic_outputs_satisfy_phase_output_gate(self) -> None:
+    def test_semantic_repair_fallback_does_not_synthesize_missing_agent_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
@@ -9456,8 +9445,25 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "repo_map")
             fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "risk_routing")
 
-            validate_phase_outputs(run_dir, "repo_map")
-            validate_phase_outputs(run_dir, "risk_routing")
+            repo_map_path = run_dir / "repo-map.json"
+            risk_routing_path = run_dir / "risk-routing.json"
+            self.assertFalse(repo_map_path.exists())
+            self.assertFalse(risk_routing_path.exists())
+
+    def test_semantic_normalizers_do_not_create_missing_agent_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            intent_source = run_dir / "intent" / "intent-test-source.json"
+            validation = run_dir / "validated-findings.json"
+            report = run_dir / "report.agent.json"
+
+            repair_intent_test_source_artifact(intent_source, run_dir)
+            repair_validation_output_artifact(validation)
+            repair_agent_report_artifact(run_dir, {"job_id": "job_1"})
+            self.assertFalse(intent_source.exists())
+            self.assertFalse(validation.exists())
+            self.assertFalse(report.exists())
 
     def test_final_report_fallback_repairs_model_output_to_full_repo_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
