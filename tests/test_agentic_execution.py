@@ -527,6 +527,29 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
         self.assertEqual(payload["summary"], {"repairable": 0, "non_repairable": 1})
 
+    def test_runtime_diagnostics_respect_explicit_nonrepairable_integrity_failures(self) -> None:
+        payload = intent_runtime_repair_diagnostics(
+            {
+                "test_runs": [
+                    {
+                        "test_id": "ITV-001",
+                        "status": "error",
+                        "exit_code": 1,
+                        "stderr": "ModuleNotFoundError: No module named 'helper'",
+                        "preflight": {
+                            "status": "blocked",
+                            "reason_code": "validation_workspace_modified",
+                            "classification": "environment_error",
+                            "agent_repairable": False,
+                        },
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(payload["summary"], {"repairable": 0, "non_repairable": 1})
+        self.assertEqual(payload["non_repairable"][0]["reason_code"], "validation_workspace_modified")
+
     def test_writer_prompt_exposes_capabilities_without_forcing_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
@@ -1128,6 +1151,67 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             (workspace / "Program.cs").write_text(
                 "if (2 + 3 != 5) Environment.Exit(1);\n"
                 'Console.WriteLine("agentic intent check passed");\n',
+                encoding="utf-8",
+            )
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                result = run_intent_tests(run_dir)
+            stderr = Path(result["test_runs"][0].get("stderr_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+            stdout = Path(result["test_runs"][0].get("stdout_path") or "").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
+        self.assertEqual(result["test_runs"][0]["status"], "passed", stdout + "\n" + stderr)
+        self.assertEqual(result["test_runs"][0]["exit_code"], 0)
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Rust leaves transient toolchain handles on Windows; the worker production target is Linux",
+    )
+    @unittest.skipUnless(
+        shutil.which("cargo") and shutil.which("rustc"),
+        "Rust is required for the real agentic runner test",
+    )
+    def test_real_rust_test_executes_with_isolated_runtime_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            # Preserve the cargo shim basename; resolving it can turn a rustup
+            # multicall proxy into an explicit rustup invocation.
+            cargo = str(Path(shutil.which("cargo") or "cargo").absolute())
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "crates/math/src/lib.rs",
+                            "cwd": "crates/math",
+                            "command": [cargo, "test", "--offline"],
+                        }
+                    ],
+                },
+            )
+            workspace = validation_repo / "crates" / "math"
+            (workspace / "src").mkdir(parents=True)
+            (workspace / "Cargo.toml").write_text(
+                "[package]\nname = \"intent_math\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                encoding="utf-8",
+            )
+            (workspace / "src" / "lib.rs").write_text(
+                "pub fn value() -> i32 { 7 }\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::*;\n"
+                "    #[test]\n"
+                "    fn behavior() { assert_eq!(value(), 7); }\n"
+                "}\n",
                 encoding="utf-8",
             )
 

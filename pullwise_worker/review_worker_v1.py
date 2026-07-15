@@ -4158,6 +4158,23 @@ class ReviewWorkerV1:
             refresh_agentic_execution_capabilities(execution_repo, run_dir)
             preflight = intent_test_source_preflight_payload(run_dir)
             write_json(run_dir / "intent" / "intent-test-preflight.json", preflight)
+            workspace_integrity = (
+                preflight.get("workspace_integrity")
+                if isinstance(preflight.get("workspace_integrity"), dict)
+                else {}
+            )
+            if workspace_integrity.get("status") == "violation":
+                append_jsonl(
+                    run_dir / "worker.log.jsonl",
+                    {
+                        "event": "intent_test_execution_repair_rejected",
+                        "stage": "preflight",
+                        "attempt": repair_attempt,
+                        "reason": "validation workspace repository files differ from the immutable inventory",
+                        "time": iso_time(time.time()),
+                    },
+                )
+                break
         return preflight
 
     def repair_intent_test_runtime(
@@ -4297,18 +4314,22 @@ class ReviewWorkerV1:
         *,
         active: ActiveJob | None = None,
     ) -> None:
-        try:
-            validate_reviewer_outputs(run_dir)
-        except RuntimeError as validation_exc:
-            self.repair_reviewer_outputs(
-                codex_client,
-                repo_dir,
-                run_dir,
-                job,
-                validation_exc,
-                active=active,
-            )
-            validate_reviewer_outputs(run_dir)
+        max_repair_attempts = 2
+        for repair_attempt in range(max_repair_attempts + 1):
+            try:
+                validate_reviewer_outputs(run_dir)
+                return
+            except RuntimeError as validation_exc:
+                if repair_attempt >= max_repair_attempts:
+                    raise
+                self.repair_reviewer_outputs(
+                    codex_client,
+                    repo_dir,
+                    run_dir,
+                    job,
+                    validation_exc,
+                    active=active,
+                )
 
     def repair_reviewer_outputs(
         self,
@@ -5088,6 +5109,7 @@ def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -
         capabilities_path = run_dir / "intent" / "execution-capabilities.json"
         capabilities = read_json(capabilities_path, {})
         runtimes = capabilities.get("runtimes") if isinstance(capabilities, dict) else []
+        runtimes = runtimes if isinstance(runtimes, list) else []
         available_runtimes = [
             str(runtime.get("name") or "")
             for runtime in runtimes
@@ -6981,6 +7003,12 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
         "SYSTEMROOT",
         "WINDIR",
         "COMSPEC",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -7017,6 +7045,9 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
             "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
             "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
             "DOTNET_NOLOGO": "1",
+            "DOTNET_CLI_USE_MSBUILD_SERVER": "0",
+            "MSBUILDDISABLENODEREUSE": "1",
+            "UseSharedCompilation": "false",
             "NUGET_PACKAGES": f"{runtime_cache}/nuget",
             "CARGO_HOME": f"{runtime_cache}/cargo",
             "NO_PROXY": "*",
@@ -7826,7 +7857,15 @@ def intent_runtime_repair_diagnostics(raw_payload: Any) -> dict[str, Any]:
         }
         if status == "passed":
             continue
-        if preflight.get("agent_repairable") is True:
+        if preflight.get("status") == "blocked" and preflight.get("agent_repairable") is False:
+            non_repairable.append(
+                {
+                    **diagnostic,
+                    "reason_code": str(preflight.get("reason_code") or "non_repairable_preflight"),
+                    "classification": str(preflight.get("classification") or "environment_error"),
+                }
+            )
+        elif preflight.get("agent_repairable") is True:
             repair_candidates.append(
                 {
                     **diagnostic,

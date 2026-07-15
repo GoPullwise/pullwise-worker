@@ -1,0 +1,96 @@
+{
+  "cases": [
+    {
+      "case_id": "reviewer-canonical-locations",
+      "phase": "reviewer_json_validation",
+      "expect": "valid",
+      "files": {
+        "raw-reviewers/p2-bundle-008.correctness-lite.json": {
+          "schema_version": "codex-reviewer-output/v1",
+          "bundle_id": "p2-bundle-008",
+          "reviewer": "correctness_lite",
+          "reviewed_paths": ["src/service.py"],
+          "review_summary": "Reviewed the assigned source path.",
+          "uncertainties": [],
+          "findings": [
+            {
+              "id": "finding-canonical",
+              "title": "Canonical location",
+              "locations": [
+                {
+                  "path": "src/service.py",
+                  "start_line": 12,
+                  "end_line": 18
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "assertions": {
+        "verified-reviewers/p2-bundle-008.correctness-lite.json": {
+          "findings.0.locations.0.path": "src/service.py",
+          "findings.0.locations.0.start_line": 12,
+          "findings.0.locations.0.end_line": 18
+        }
+      }
+    },
+    {
+      "case_id": "reviewer-common-code-locations-alias",
+      "phase": "reviewer_json_validation",
+      "expect": "valid",
+      "files": {
+        "raw-reviewers/p2-bundle-008.correctness-lite.json": {
+          "schema_version": "codex-reviewer-output/v1",
+          "bundle_id": "p2-bundle-008",
+          "reviewer": "correctness_lite",
+          "reviewed_paths": ["src/service.py"],
+          "review_summary": "Reviewed the assigned source path.",
+          "uncertainties": [],
+          "findings": [
+            {
+              "id": "finding-code-locations",
+              "title": "Common model alias",
+              "code_locations": [
+                {
+                  "file_path": "src/service.py",
+                  "line_start": 21,
+                  "line_end": 24
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "assertions": {
+        "verified-reviewers/p2-bundle-008.correctness-lite.json": {
+          "findings.0.locations.0.path": "src/service.py",
+          "findings.0.locations.0.start_line": 21,
+          "findings.0.locations.0.end_line": 24
+        }
+      }
+    },
+    {
+      "case_id": "reviewer-locationless-finding-remains-invalid",
+      "phase": "reviewer_json_validation",
+      "expect": "invalid",
+      "expected_error": "findings[0].locations is missing or invalid",
+      "files": {
+        "raw-reviewers/p2-bundle-008.correctness-lite.json": {
+          "schema_version": "codex-reviewer-output/v1",
+          "bundle_id": "p2-bundle-008",
+          "reviewer": "correctness_lite",
+          "reviewed_paths": ["src/service.py"],
+          "review_summary": "Reviewed the assigned source path.",
+          "uncertainties": [],
+          "findings": [
+            {
+              "id": "finding-locationless",
+              "title": "No source location"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
