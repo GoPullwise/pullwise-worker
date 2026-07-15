@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from pullwise_worker.review_worker_v1 import (
     MAX_BUNDLE_ESTIMATED_TOKENS,
+    ReviewWorkerV1,
     SEMANTIC_PHASES,
     materialize_agent_bundle_plan,
     pack_bundles,
@@ -46,6 +47,98 @@ class AgenticBundlePlanningTest(unittest.TestCase):
         self.assertIn("bundle-grouping/v1", prompt)
         self.assertIn("exactly once", prompt)
         self.assertIn("Do not assign reviewers", prompt)
+
+    def test_semantic_turn_receives_worker_owned_planning_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_dir, run_dir = self._run_dir(root)
+            path = "src/app.py"
+            write_json(
+                run_dir / "run-state.json",
+                {"thread_id": "root-thread"},
+            )
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [_inventory_item(path)],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": path, "tier": "P1"}],
+                },
+            )
+            observed: dict[str, object] = {}
+
+            class FakeCodexClient:
+                def run_turn(self, **kwargs: object) -> None:
+                    observed.update(kwargs)
+                    planning_input = (
+                        run_dir / "bundle-planning-input.json"
+                    ).read_text(encoding="utf-8")
+                    self_test.assertIn(path, planning_input)
+                    write_json(
+                        run_dir / "bundle-grouping.json",
+                        {
+                            "schema_version": "bundle-grouping/v1",
+                            "run_id": "run_1",
+                            "groups": [
+                                {
+                                    "group_id": "application-entrypoint",
+                                    "tier": "P1",
+                                    "title": "Application entrypoint",
+                                    "paths": [path],
+                                    "grouping_reasons": ["entrypoint cohesion"],
+                                }
+                            ],
+                        },
+                    )
+
+            self_test = self
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            job = {
+                "job_id": "job_1",
+                "model_profile": {
+                    "default_model": "gpt-5.5",
+                    "core_effort": "high",
+                    "non_core_effort": "medium",
+                },
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 60,
+                        "reviewer_concurrency": 2,
+                    },
+                    "budget": {"max_wall_time_seconds": 600},
+                },
+                "repositoryLimits": {
+                    "maxFiles": 100,
+                    "maxBytes": 1024 * 1024,
+                },
+            }
+
+            worker.run_semantic_phase(
+                FakeCodexClient(),
+                repo_dir,
+                run_dir,
+                job,
+                "bundle_planning",
+            )
+            plan = materialize_agent_bundle_plan(run_dir)
+
+        self.assertEqual(observed["thread_id"], "root-thread")
+        self.assertEqual(observed["effort"], "medium")
+        self.assertIn("bundle-grouping.json", str(observed["prompt"]))
+        self.assertEqual(plan["semantic_group_count"], 1)
 
     def test_agent_grouping_is_compiled_into_worker_owned_bundle_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

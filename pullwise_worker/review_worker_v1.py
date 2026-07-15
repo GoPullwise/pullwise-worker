@@ -5524,6 +5524,8 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Place every item from bundle-planning-input.json in exactly one group; do not omit or duplicate paths.",
             "Keep every group within one tier and copy each path's P0/P1/P2 tier exactly.",
             "Minimize the number of groups while preserving semantic cohesion by feature, entrypoint, trust boundary, state flow, and implementation/test affinity.",
+            "Avoid singleton or tiny groups unless the path is genuinely isolated or combining it would materially reduce semantic coherence.",
+            "Use estimated_tokens and the supplied constraints to make groups substantial; the Worker may split only when the rendered payload exceeds a hard safety boundary.",
             "Use only repository evidence exposed by the inputs and paths; do not build dependency graphs or call graphs.",
             "Do not assign reviewers, file ranges, bundle ids, token estimates, or final size limits; the Worker derives and enforces those fields.",
         ],
@@ -6731,6 +6733,323 @@ def file_tier(item: dict[str, Any], routing: dict[str, Any] | None = None, profi
     return generic_file_tier(item, routing)
 
 
+def _bundle_planning_context(
+    run_dir: Path,
+) -> tuple[
+    Path,
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, list[dict[str, Any]]],
+]:
+    repo_dir = run_dir.parent.parent.parent
+    inventory_payload = read_json(run_dir / "inventory.json", {})
+    files = (
+        inventory_payload.get("files")
+        if isinstance(inventory_payload, dict)
+        and isinstance(inventory_payload.get("files"), list)
+        else []
+    )
+    semantic_routing = read_json(run_dir / "risk-routing.json", {})
+    semantic_routing = (
+        semantic_routing
+        if isinstance(semantic_routing, dict)
+        and semantic_routing.get("schema_version") == "risk-routing/v1"
+        else {}
+    )
+    profile = read_json(run_dir / "repo-profile.json", {})
+    profile = (
+        profile
+        if isinstance(profile, dict)
+        and profile.get("schema_version") == "repo-profile/v1"
+        else {}
+    )
+    routing = effective_routing(semantic_routing, profile, inventory_payload)
+    routing["run_id"] = run_dir.name
+    write_json(run_dir / "effective-risk-routing.json", routing)
+    route_source_by_path = {
+        str(route.get("path") or ""): str(route.get("source") or "")
+        for route in routing.get("routes", [])
+        if isinstance(route, dict)
+    }
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "P0": [],
+        "P1": [],
+        "P2": [],
+        "P3": [],
+        "SKIP": [],
+    }
+    for raw_item in files:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        path = str(item.get("path") or "").strip()
+        item["_routing_source"] = route_source_by_path.get(path, "")
+        grouped[file_tier(item, routing, profile)].append(item)
+    return repo_dir, inventory_payload, routing, grouped
+
+
+def _write_bundle_coverage(
+    run_dir: Path,
+    inventory_payload: dict[str, Any],
+    grouped: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    files = (
+        inventory_payload.get("files")
+        if isinstance(inventory_payload.get("files"), list)
+        else []
+    )
+    source_like_by_tier = {
+        tier: [
+            item
+            for item in grouped[tier]
+            if isinstance(item, dict) and item.get("is_source_like")
+        ]
+        for tier in grouped
+    }
+    coverage = {
+        "schema_version": "coverage/v1",
+        "source_like_files_total": sum(
+            1
+            for item in files
+            if isinstance(item, dict) and item.get("is_source_like")
+        ),
+        "deep_reviewed_files": len(source_like_by_tier["P0"]),
+        "standard_reviewed_files": len(source_like_by_tier["P1"]),
+        "light_reviewed_files": len(source_like_by_tier["P2"]),
+        "inventory_only_files": len(source_like_by_tier["P3"]),
+        "skipped_files": len(source_like_by_tier["SKIP"]),
+        "intent_tests_planned": 0,
+        "intent_tests_run": 0,
+        "intent_tests_supporting_findings": 0,
+        "skipped_scope": [
+            item.get("path") for item in source_like_by_tier["SKIP"][:100]
+        ],
+    }
+    if source_like_by_tier["SKIP"]:
+        coverage["skipped_reasons"] = {
+            "semantic_or_inventory_skip": coverage["skipped_scope"]
+        }
+    write_json(run_dir / "coverage.json", coverage)
+    return coverage
+
+
+def prepare_bundle_planning_input(run_dir: Path) -> dict[str, Any]:
+    _repo_dir, inventory_payload, routing, grouped = _bundle_planning_context(run_dir)
+    _write_bundle_coverage(run_dir, inventory_payload, grouped)
+    items: list[dict[str, Any]] = []
+    for tier in ("P0", "P1", "P2"):
+        for item in grouped[tier]:
+            path = str(item.get("path") or "").strip()
+            if not path:
+                continue
+            risk_hints = (
+                item.get("risk_hints")
+                if isinstance(item.get("risk_hints"), list)
+                else []
+            )
+            items.append(
+                {
+                    "path": path,
+                    "tier": tier,
+                    "estimated_tokens": max(
+                        0, int(item.get("estimated_tokens") or 0)
+                    ),
+                    "line_count": max(0, int(item.get("line_count") or 0)),
+                    "is_test_candidate": item.get("is_test_candidate") is True,
+                    "risk_hints": [
+                        str(value)
+                        for value in risk_hints
+                        if str(value).strip()
+                    ][:12],
+                    "component_hint": _bundle_component_key(path),
+                    "routing_source": str(item.get("_routing_source") or ""),
+                }
+            )
+    payload = {
+        "schema_version": "bundle-planning-input/v1",
+        "run_id": run_dir.name,
+        "constraints": {
+            "max_files_per_bundle": 25,
+            "max_rendered_size": MAX_BUNDLE_ESTIMATED_TOKENS,
+            "allowed_tiers": ["P0", "P1", "P2"],
+            "worker_may_split_oversized_groups": True,
+        },
+        "routing_sources": routing.get("sources", {}),
+        "items": items,
+    }
+    write_json(run_dir / "bundle-planning-input.json", payload)
+    return payload
+
+
+def bundle_grouping_contract_errors(
+    run_dir: Path,
+    payload: object,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return ["bundle-grouping.json must be an object"]
+    if payload.get("schema_version") != "bundle-grouping/v1":
+        errors.append(
+            "bundle-grouping.json must use schema_version bundle-grouping/v1"
+        )
+    run_id = str(payload.get("run_id") or "").strip()
+    if run_id and run_id != run_dir.name:
+        errors.append("bundle-grouping.json run_id must match the active run")
+    planning_input = read_json(run_dir / "bundle-planning-input.json", {})
+    raw_items = (
+        planning_input.get("items")
+        if isinstance(planning_input, dict)
+        and isinstance(planning_input.get("items"), list)
+        else []
+    )
+    eligible_tiers = {
+        str(item.get("path") or ""): str(item.get("tier") or "")
+        for item in raw_items
+        if isinstance(item, dict) and str(item.get("path") or "").strip()
+    }
+    groups = payload.get("groups")
+    if not isinstance(groups, list):
+        return [*errors, "bundle-grouping.json groups must be a list"]
+    if eligible_tiers and not groups:
+        errors.append(
+            "bundle-grouping.json groups must not be empty when eligible paths exist"
+        )
+    seen_group_ids: set[str] = set()
+    seen_paths: set[str] = set()
+    for index, group in enumerate(groups):
+        label = f"bundle-grouping.json groups[{index}]"
+        if not isinstance(group, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        group_id = str(group.get("group_id") or "").strip()
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", group_id) is None:
+            errors.append(f"{label}.group_id must be a stable lowercase identifier")
+        elif group_id in seen_group_ids:
+            errors.append(f"{label} has duplicate group_id {group_id}")
+        else:
+            seen_group_ids.add(group_id)
+        tier = str(group.get("tier") or "").strip().upper()
+        if tier not in {"P0", "P1", "P2"}:
+            errors.append(f"{label}.tier must be P0, P1, or P2")
+        if not str(group.get("title") or "").strip():
+            errors.append(f"{label}.title must be non-empty")
+        reasons = group.get("grouping_reasons")
+        if (
+            not isinstance(reasons, list)
+            or not any(str(reason).strip() for reason in reasons)
+        ):
+            errors.append(f"{label}.grouping_reasons must be a non-empty list")
+        paths = group.get("paths")
+        if not isinstance(paths, list) or not paths:
+            errors.append(f"{label}.paths must be a non-empty list")
+            continue
+        for raw_path in paths:
+            path = str(raw_path or "").strip()
+            if not path:
+                errors.append(f"{label} contains an empty path")
+                continue
+            if path not in eligible_tiers:
+                errors.append(f"{label} contains unknown or ineligible path {path}")
+                continue
+            if path in seen_paths:
+                errors.append(f"{label} contains duplicate path {path}")
+                continue
+            seen_paths.add(path)
+            if tier in {"P0", "P1", "P2"} and eligible_tiers[path] != tier:
+                errors.append(
+                    f"{label} tier {tier} does not match {path} tier "
+                    f"{eligible_tiers[path]}"
+                )
+    missing_paths = sorted(set(eligible_tiers) - seen_paths)
+    if missing_paths:
+        errors.append(
+            "bundle-grouping.json missing eligible path(s): "
+            + ", ".join(missing_paths)
+        )
+    return errors
+
+
+def materialize_agent_bundle_plan(run_dir: Path) -> dict[str, Any]:
+    repo_dir = run_dir.parent.parent.parent
+    planning_input = prepare_bundle_planning_input(run_dir)
+    grouping = parse_required_json_output(run_dir / "bundle-grouping.json")
+    errors = bundle_grouping_contract_errors(run_dir, grouping)
+    if errors:
+        raise RuntimeError("invalid bundle grouping: " + "; ".join(errors))
+    inventory_payload = read_json(run_dir / "inventory.json", {})
+    raw_inventory = (
+        inventory_payload.get("files")
+        if isinstance(inventory_payload, dict)
+        and isinstance(inventory_payload.get("files"), list)
+        else []
+    )
+    inventory_by_path = {
+        str(item.get("path") or ""): item
+        for item in raw_inventory
+        if isinstance(item, dict) and str(item.get("path") or "").strip()
+    }
+    input_by_path = {
+        str(item.get("path") or ""): item
+        for item in planning_input.get("items", [])
+        if isinstance(item, dict) and str(item.get("path") or "").strip()
+    }
+    bundles: list[dict[str, Any]] = []
+    groups = grouping.get("groups")
+    assert isinstance(groups, list)
+    for group in groups:
+        assert isinstance(group, dict)
+        tier = str(group["tier"]).upper()
+        group_id = str(group["group_id"])
+        title = str(group["title"]).strip()
+        semantic_reasons = [
+            str(reason).strip()
+            for reason in group["grouping_reasons"]
+            if str(reason).strip()
+        ]
+        grouped_items: list[dict[str, Any]] = []
+        for path in group["paths"]:
+            item = dict(inventory_by_path[str(path)])
+            item["_routing_source"] = str(
+                input_by_path[str(path)].get("routing_source") or ""
+            )
+            grouped_items.extend(split_oversized_bundle_item(item, repo_dir))
+        first_bundle_index = len(bundles)
+        _append_render_fitted_bundle_chunks(
+            repo_dir,
+            tier,
+            grouped_items,
+            bundles,
+            payload_overrides={
+                "title": title,
+                "semantic_group_id": group_id,
+            },
+        )
+        materialized = bundles[first_bundle_index:]
+        for bundle in materialized:
+            bundle["grouping_reasons"] = list(
+                dict.fromkeys(
+                    [
+                        *(
+                            bundle.get("grouping_reasons")
+                            if isinstance(bundle.get("grouping_reasons"), list)
+                            else []
+                        ),
+                        *semantic_reasons,
+                    ]
+                )
+            )
+    plan = {
+        "schema_version": "bundle-plan/v1",
+        "run_id": run_dir.name,
+        "routing_sources": planning_input.get("routing_sources", {}),
+        "planning_strategy": "codex_semantic_grouping_then_worker_bounded_split",
+        "semantic_group_count": len(groups),
+        "bundles": bundles,
+    }
+    write_json(run_dir / "bundle-plan.json", plan)
+    return plan
+
+
 def bundle_plan_payload(run_dir: Path) -> dict[str, Any]:
     repo_dir = run_dir.parent.parent.parent
     inv = read_json(run_dir / "inventory.json", {})
@@ -7027,6 +7346,8 @@ def _render_fitted_bundle_candidate(
     tier: str,
     index: int,
     files: list[dict[str, Any]],
+    *,
+    payload_overrides: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], int]:
     payload = bundle_payload(
         tier,
@@ -7034,6 +7355,8 @@ def _render_fitted_bundle_candidate(
         files,
         MAX_BUNDLE_ESTIMATED_TOKENS,
     )
+    if payload_overrides:
+        payload.update(payload_overrides)
     conservative_size = _rendered_bundle_size(
         _render_bundle_markdown(repo_dir, payload)
     )
@@ -7132,6 +7455,8 @@ def _append_render_fitted_bundle_chunks(
     tier: str,
     files: list[dict[str, Any]],
     bundles: list[dict[str, Any]],
+    *,
+    payload_overrides: dict[str, Any] | None = None,
 ) -> None:
     pending = deque(files)
     current: list[dict[str, Any]] = []
@@ -7143,6 +7468,7 @@ def _append_render_fitted_bundle_chunks(
             tier,
             len(bundles) + 1,
             candidate,
+            payload_overrides=payload_overrides,
         )
         if (
             len(candidate) <= 25
@@ -7158,6 +7484,7 @@ def _append_render_fitted_bundle_chunks(
                 tier,
                 len(bundles) + 1,
                 current,
+                payload_overrides=payload_overrides,
             )
             if (
                 completed_size > MAX_BUNDLE_ESTIMATED_TOKENS
@@ -7179,6 +7506,7 @@ def _append_render_fitted_bundle_chunks(
             tier,
             len(bundles) + 1,
             current,
+            payload_overrides=payload_overrides,
         )
         if (
             completed_size > MAX_BUNDLE_ESTIMATED_TOKENS
@@ -11916,7 +12244,14 @@ def prompt_template_for_name(name: str) -> str:
     templates = {
         "00_repo_mapper.md": "You are the Repo Mapper. Produce repo-map.json. Do not report bugs. Return JSON only using repo-map/v1.\n",
         "01_risk_router.md": "You are the Risk Router. Classify files and directories into P0/P1/P2/P3/SKIP. Return JSON only using risk-routing/v1.\n",
-        "02_bundle_planner.md": "You may adjust mechanical bundle boundaries without changing the review policy. Return JSON only using bundle-plan/v1.\n",
+        "02_bundle_planner.md": (
+            "You are the Semantic Bundle Planner. Read bundle-planning-input.json and group every eligible path "
+            "exactly once by feature, entrypoint, trust boundary, state flow, and implementation/test affinity. "
+            "Keep groups tier-homogeneous, minimize unnecessary groups, and avoid tiny or singleton groups unless "
+            "they are semantically isolated. Write only bundle-grouping.json using "
+            "bundle-grouping/v1. Do not assign reviewers, ranges, bundle ids, or final size limits; the Worker owns "
+            "validation and bounded splitting.\n"
+        ),
         "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Demonstrate an end-to-end attacker-controlled path, account for producer-side validation and containment, and classify unproven reachability as defense-in-depth rather than high/critical. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/test_gap.md": "You are the Test Gap Reviewer. Report missing or weak tests only for important P0/P1 behavior. Return JSON only using codex-reviewer-output/v1.\n",
