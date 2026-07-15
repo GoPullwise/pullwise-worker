@@ -2177,7 +2177,7 @@ def _generic_agent_test_command_allowed(
         if re.match(r"^[a-z][a-z0-9+.-]*://", lowered):
             return False, "agent-proposed test commands may not contain network URLs"
         candidate = Path(argument)
-        path_like = candidate.is_absolute() or "/" in argument or "\" in argument
+        path_like = candidate.is_absolute() or "/" in argument or chr(92) in argument
         if path_like:
             if not candidate.is_absolute():
                 candidate = cwd / candidate
@@ -4777,7 +4777,7 @@ def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -
             [
                 "Agentic execution contract:",
                 "- Read intent/execution-capabilities.json as observed evidence, not as a fixed language template list.",
-                "- Agent-proposed commands and fallback strategies are allowed when Worker policy and preflight accept them.",
+                "- agent-proposed commands and fallback strategies are allowed when Worker policy and preflight accept them.",
                 "- Keep every fallback faithful to the real repository behavior and behavioral oracle; do not test a copied implementation.",
                 f"- Currently observed executable names: {', '.join(available_runtimes) if available_runtimes else 'none'}.",
             ]
@@ -6451,14 +6451,7 @@ def _intent_command_path_matches_materialized(
     stripped = _strip_validation_workspace_prefix(candidate)
     if stripped and stripped == materialized:
         return True
-    candidate_path = PurePosixPath(candidate)
-    declared_path_value = PurePosixPath(declared) if declared else None
-    materialized_path_value = PurePosixPath(materialized)
-    return bool(
-        declared_path_value
-        and candidate_path.name == declared_path_value.name == materialized_path_value.name
-        and candidate_path.suffix
-    )
+    return False
 
 
 def _intent_normalized_execution_command(
@@ -6616,9 +6609,10 @@ def _intent_module_scope_project_test_import_error(tree: ast.AST) -> str:
     )
 
 
-def _intent_output_path(run_dir: Path, test_id: str, suffix: str) -> Path:
+def _intent_output_path(run_dir: Path, test_id: str, suffix: str, *, attempt: int = 1) -> Path:
     safe = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in test_id).strip("._")
-    return run_dir / "intent" / "test-output" / f"{safe or 'intent-test'}.{suffix}.log"
+    attempt_suffix = "" if attempt <= 1 else f".attempt-{attempt}"
+    return run_dir / "intent" / "test-output" / f"{safe or 'intent-test'}{attempt_suffix}.{suffix}.log"
 
 
 def _intent_output_artifact_id(name: str) -> str:
@@ -6957,7 +6951,12 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
     }
 
 
-def run_intent_tests(run_dir: Path) -> dict[str, Any]:
+def run_intent_tests(
+    run_dir: Path,
+    *,
+    only_test_ids: set[str] | None = None,
+    attempt: int = 1,
+) -> dict[str, Any]:
     ensure_intent_directories(run_dir)
     validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
     validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
@@ -7009,7 +7008,14 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
     max_tests = max(0, int((config if isinstance(config, dict) else {}).get("max_tests_per_run") or 20))
     total_deadline = time.monotonic() + max(0, int((config if isinstance(config, dict) else {}).get("max_total_test_run_seconds") or 900))
     raw_results = []
-    limited_records = execution_records[:max_tests]
+    selected_records = [
+        record
+        for record in execution_records
+        if only_test_ids is None
+        or record[0] in only_test_ids
+        or bool(set(_intent_related_test_ids(record[1])).intersection(only_test_ids))
+    ]
+    limited_records = selected_records[:max_tests]
     for generated_index, (test_id, generated, target) in enumerate(limited_records):
         command = _intent_generated_command(
             generated,
@@ -7024,7 +7030,7 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             declared_path=_intent_source_path_from_entry(generated),
             materialized_path=materialized_paths.get(test_id, ""),
         )
-        base_result = {"schema_version": "project-test-run/v1", "test_id": test_id}
+        base_result = {"schema_version": "project-test-run/v1", "test_id": test_id, "attempt": max(1, int(attempt))}
         related_ids = _intent_related_test_ids(generated)
         if related_ids:
             base_result["target_test_ids"] = related_ids
@@ -7060,26 +7066,31 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             raw_results.append(skipped_result)
             continue
         if not command:
-            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "no generated test command was produced"})
+            preflight = _intent_blocked_execution_diagnostic(
+                "no generated test command was produced",
+                reason_code="command_missing",
+            )
+            raw_results.append({**base_result, "status": "skipped", "classification": preflight["classification"], "preflight": preflight, "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": preflight["reason"]})
             continue
         cwd = _intent_test_cwd(validation_repo, generated, target)
         if cwd is None:
-            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "generated test cwd escapes validation workspace"})
+            preflight = _intent_blocked_execution_diagnostic("generated test cwd escapes validation workspace", reason_code="cwd_escape")
+            raw_results.append({**base_result, "status": "skipped", "classification": preflight["classification"], "preflight": preflight, "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": preflight["reason"]})
             continue
-        if not cwd.is_dir():
-            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": "generated test cwd does not exist"})
-            continue
-        allowed, policy_reason = intent_test_command_policy(command, cwd, validation_repo)
-        if not allowed:
-            raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": f"generated test command is not allowed by worker policy: {policy_reason}"})
-            continue
-        runnable, runnable_reason = intent_command_is_runnable_for_repo(command, cwd, validation_repo, profile)
-        if not runnable:
-            raw_results.append({**base_result, "status": "skipped", "classification": _intent_preflight_classification(runnable_reason), "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": runnable_reason.split(": ", 1)[-1]})
+        preflight = intent_execution_preflight(command, cwd, validation_repo, profile)
+        base_result["preflight"] = preflight
+        if preflight["status"] != "ready":
+            raw_results.append({**base_result, "status": "skipped", "classification": preflight["classification"], "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": preflight["reason"]})
             continue
         compile_error = _intent_generated_python_compile_error(validation_repo, generated, target)
         if compile_error:
-            stderr_path = _intent_output_path(run_dir, test_id, "stderr")
+            preflight = _intent_blocked_execution_diagnostic(
+                compile_error,
+                reason_code="generated_test_invalid",
+                classification="test_harness_error",
+            )
+            base_result["preflight"] = preflight
+            stderr_path = _intent_output_path(run_dir, test_id, "stderr", attempt=attempt)
             stderr_path.write_text(compile_error, encoding="utf-8")
             raw_results.append(
                 {
@@ -7101,8 +7112,8 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
             continue
         timeout_seconds = min(_intent_test_timeout(config if isinstance(config, dict) else {}, generated, target), max(1, int(remaining_total)))
         started = time.monotonic()
-        stdout_path = _intent_output_path(run_dir, test_id, "stdout")
-        stderr_path = _intent_output_path(run_dir, test_id, "stderr")
+        stdout_path = _intent_output_path(run_dir, test_id, "stdout", attempt=attempt)
+        stderr_path = _intent_output_path(run_dir, test_id, "stderr", attempt=attempt)
         sandbox_command, sandbox_cwd, sandbox_skip_reason = _intent_test_sandbox_command(command, cwd, validation_repo)
         if sandbox_skip_reason:
             raw_results.append({**base_result, "status": "skipped", "exit_code": None, "duration_ms": 0, "timed_out": False, "skip_reason": sandbox_skip_reason})
@@ -7190,6 +7201,132 @@ def run_intent_tests(run_dir: Path) -> dict[str, Any]:
                 }
             )
     return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": raw_results}
+
+
+def _intent_runtime_diagnostic_text(raw_result: dict[str, Any]) -> str:
+    parts = [
+        str(raw_result.get(key) or "")
+        for key in ("error", "skip_reason", "stderr", "stdout")
+        if str(raw_result.get(key) or "").strip()
+    ]
+    for key in ("stderr_path", "stdout_path"):
+        raw_path = str(raw_result.get(key) or "").strip()
+        if not raw_path:
+            continue
+        try:
+            parts.append(Path(raw_path).read_text(encoding="utf-8", errors="replace")[:8192])
+        except OSError:
+            continue
+    return "\n".join(parts)
+
+
+def intent_runtime_repair_diagnostics(raw_payload: Any) -> dict[str, Any]:
+    raw_runs = raw_payload.get("test_runs") if isinstance(raw_payload, dict) else []
+    raw_runs = raw_runs if isinstance(raw_runs, list) else []
+    repair_candidates: list[dict[str, Any]] = []
+    non_repairable: list[dict[str, Any]] = []
+    dependency_markers = (
+        "modulenotfounderror",
+        "no module named",
+        "cannot find module",
+        "cannot find package",
+        "err_module_not_found",
+        "package not found",
+        "command not found",
+        "not found",
+    )
+    harness_markers = (
+        "syntaxerror",
+        "importerror",
+        "no such file or directory",
+        "enoent",
+        "no tests found",
+        "unknown option",
+        "unrecognized option",
+        "collection error",
+        "could not import",
+    )
+    for index, raw_run in enumerate(raw_runs):
+        if not isinstance(raw_run, dict):
+            continue
+        test_id = str(raw_run.get("test_id") or f"ITV-{index + 1:03d}").strip()
+        status = str(raw_run.get("status") or "").strip().lower()
+        text = _intent_runtime_diagnostic_text(raw_run)
+        lowered = text.lower()
+        preflight = raw_run.get("preflight") if isinstance(raw_run.get("preflight"), dict) else {}
+        diagnostic = {
+            "test_id": test_id,
+            "status": status,
+            "exit_code": raw_run.get("exit_code"),
+            "summary": text[:2000],
+        }
+        if status == "passed":
+            continue
+        if preflight.get("agent_repairable") is True:
+            repair_candidates.append(
+                {
+                    **diagnostic,
+                    "reason_code": str(preflight.get("reason_code") or "preflight_blocked"),
+                    "classification": str(preflight.get("classification") or "test_harness_error"),
+                }
+            )
+        elif any(marker in lowered for marker in dependency_markers) or raw_run.get("exit_code") == 127:
+            repair_candidates.append(
+                {
+                    **diagnostic,
+                    "reason_code": "project_dependency_missing",
+                    "classification": "dependency_missing",
+                }
+            )
+        elif any(marker in lowered for marker in harness_markers):
+            repair_candidates.append(
+                {
+                    **diagnostic,
+                    "reason_code": "test_harness_error",
+                    "classification": "test_harness_error",
+                }
+            )
+        else:
+            non_repairable.append(
+                {
+                    **diagnostic,
+                    "reason_code": "product_signal_or_non_repairable_environment",
+                }
+            )
+    return {
+        "schema_version": "intent-test-runtime-diagnostics/v1",
+        "repair_candidates": repair_candidates,
+        "non_repairable": non_repairable,
+        "summary": {
+            "repairable": len(repair_candidates),
+            "non_repairable": len(non_repairable),
+        },
+    }
+
+
+def intent_execution_repair_prompt(
+    run_dir: Path,
+    *,
+    stage: str,
+    attempt: int,
+    job: dict[str, Any] | None = None,
+) -> str:
+    lines = [
+        "You are the Intent Test Execution Repair Agent.",
+        f"Repair stage: {stage}; bounded attempt: {attempt}.",
+        f"Run artifact directory: {run_dir}",
+        "Read intent/execution-capabilities.json and intent/intent-test-preflight.json.",
+        "For runtime repair also read intent/intent-test-runtime-diagnostics.json and the referenced stdout/stderr logs.",
+        "Modify only generated tests in the disposable validation workspace or .codex-review/generated-tests/** and intent/intent-test-source.json.",
+        "You may choose a different agent-proposed command, runtime, cwd, import strategy, or faithful test harness when Worker policy can verify it.",
+        "You must preserve the behavioral oracle, test_id/target_test_ids linkage, and execution of real repository behavior.",
+        "Do not copy or reimplement application logic to manufacture a dependency-free passing test.",
+        "Do not modify application source, install dependencies, access network, use production secrets, or weaken sandboxing.",
+        "If no faithful runnable strategy exists, set a precise top-level skip_reason and retain the blocked evidence instead of fabricating execution.",
+        "Finish by updating intent/intent-test-source.json; do not return a prose-only answer.",
+    ]
+    lines.extend(output_language_prompt_lines(job))
+    return "\n".join(lines)
 
 
 def _fallback_intent_classification(raw_result: dict[str, Any]) -> str:

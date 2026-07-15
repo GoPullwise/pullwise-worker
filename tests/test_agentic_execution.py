@@ -6,10 +6,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pullwise_worker.agentic_execution import build_execution_capabilities
 from pullwise_worker.review_worker_v1 import (
+    ReviewWorkerV1,
     intent_execution_repair_prompt,
     intent_runtime_repair_diagnostics,
     intent_test_command_policy,
@@ -188,12 +190,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         {
                             "test_id": "ITV-001",
                             "target_test_ids": ["ITP-001"],
-                            "path": "generated_test.py",
+                            "path": "generated_test.custom",
                         }
                     ],
                 },
             )
-            (validation_repo / "generated_test.py").write_text("import unittest\n", encoding="utf-8")
+            (validation_repo / "generated_test.custom").write_text("generated test\n", encoding="utf-8")
 
             payload = intent_test_source_preflight_payload(run_dir)
 
@@ -273,6 +275,145 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertIn("Do not copy or reimplement application logic", prompt)
         self.assertIn("intent-test-preflight.json", prompt)
         self.assertIn("execution-capabilities.json", prompt)
+
+    def test_worker_uses_agent_feedback_to_repair_preflight_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "generated.custom",
+                        }
+                    ],
+                },
+            )
+            (validation_repo / "generated.custom").write_text("candidate\n", encoding="utf-8")
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+
+            class RepairingCodex:
+                def __init__(self) -> None:
+                    self.prompts: list[str] = []
+
+                def run_turn(self, **kwargs):
+                    self.prompts.append(kwargs["prompt"])
+                    (validation_repo / "generated_test.py").write_text(
+                        "import unittest\n"
+                        "class GeneratedTest(unittest.TestCase):\n"
+                        "    def test_behavior(self): self.assertTrue(True)\n",
+                        encoding="utf-8",
+                    )
+                    write_json(
+                        run_dir / "intent" / "intent-test-source.json",
+                        {
+                            "schema_version": "intent-test-source/v1",
+                            "generated_tests": [
+                                {
+                                    "test_id": "ITV-001",
+                                    "target_test_ids": ["ITP-001"],
+                                    "path": "generated_test.py",
+                                    "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                                }
+                            ],
+                        },
+                    )
+                    return SimpleNamespace(duration_ms=5)
+
+            codex = RepairingCodex()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch("pullwise_worker.review_worker_v1.effort_for_phase", return_value="medium"), patch(
+                "pullwise_worker.review_worker_v1.turn_timeout_for_job",
+                return_value=30,
+            ):
+                payload = worker.repair_intent_test_preflight(
+                    codex,
+                    root / "repo",
+                    run_dir,
+                    {},
+                    max_attempts=1,
+                )
+
+        self.assertEqual(len(codex.prompts), 1)
+        self.assertIn("command_missing", codex.prompts[0])
+        self.assertEqual(payload["summary"]["ready"], 1)
+        self.assertEqual(payload["summary"]["blocked"], 0)
+
+    def test_worker_repairs_real_runtime_harness_failure_and_preserves_attempt_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "generated_test.py",
+                            "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                        }
+                    ],
+                },
+            )
+            (validation_repo / "app.py").write_text("def value(): return 7\n", encoding="utf-8")
+            generated_path = validation_repo / "generated_test.py"
+            generated_path.write_text(
+                "import unittest\n"
+                "import unneeded_project_dependency\n"
+                "from app import value\n"
+                "class GeneratedTest(unittest.TestCase):\n"
+                "    def test_behavior(self): self.assertEqual(value(), 7)\n",
+                encoding="utf-8",
+            )
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                initial = run_intent_tests(run_dir)
+            self.assertEqual(initial["test_runs"][0]["status"], "failed")
+            write_json(run_dir / "intent" / "intent-test-results.raw.json", initial)
+
+            class RepairingCodex:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def run_turn(self, **_kwargs):
+                    self.calls += 1
+                    generated_path.write_text(
+                        "import unittest\n"
+                        "from app import value\n"
+                        "class GeneratedTest(unittest.TestCase):\n"
+                        "    def test_behavior(self): self.assertEqual(value(), 7)\n",
+                        encoding="utf-8",
+                    )
+                    return SimpleNamespace(duration_ms=5)
+
+            codex = RepairingCodex()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.effort_for_phase",
+                return_value="medium",
+            ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
+                repaired = worker.repair_intent_test_runtime(
+                    codex,
+                    root / "repo",
+                    run_dir,
+                    {},
+                    max_attempts=1,
+                )
+
+            history = json.loads(
+                (run_dir / "intent" / "intent-test-execution-history.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(codex.calls, 1)
+        self.assertEqual(repaired["test_runs"][0]["status"], "passed")
+        self.assertEqual(repaired["test_runs"][0]["attempt"], 2)
+        self.assertEqual(history["attempts"][0]["test_runs"][0]["status"], "failed")
 
     def test_real_python_unittest_executes_through_agentic_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
