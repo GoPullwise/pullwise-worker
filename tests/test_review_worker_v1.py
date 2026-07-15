@@ -1607,6 +1607,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "max_tests_per_bundle": 1,
                         "max_test_run_seconds_per_test": 45,
                         "max_total_test_run_seconds": 315,
+                        "max_preflight_repair_attempts": 2,
+                        "max_runtime_repair_attempts": 3,
                     },
                 },
             },
@@ -1622,6 +1624,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         parsed = validate_job_policy(job)["intent_test_validation"]
         self.assertEqual(parsed["max_tests_per_run"], 7)
         self.assertEqual(parsed["max_test_run_seconds_per_test"], 45)
+        self.assertEqual(parsed["max_preflight_repair_attempts"], 2)
+        self.assertEqual(parsed["max_runtime_repair_attempts"], 3)
         fallback_job = dict(job)
         fallback_job["review_request"] = {
             "budget": {"max_wall_time_seconds": 14400},
@@ -1652,6 +1656,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(fallback_policy["only_tiers"], ["P0", "P1"])
         self.assertEqual(fallback_policy["max_tests_per_run"], 20)
         self.assertEqual(fallback_policy["max_test_run_seconds_per_test"], 60)
+        self.assertEqual(fallback_policy["max_preflight_repair_attempts"], 1)
+        self.assertEqual(fallback_policy["max_runtime_repair_attempts"], 1)
 
     def test_job_policy_rejects_reviewer_concurrency_outside_bounded_range(self) -> None:
         for reviewer_concurrency in (0, 3):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import sys
 import tempfile
@@ -178,6 +179,17 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     )
                     self.assertFalse(allowed)
 
+            nested = validation_repo / "packages" / "api"
+            nested.mkdir(parents=True)
+            allowed, reason = intent_test_command_policy(
+                ["dotnet", "test", "../../../outside/intent-tests.dll"],
+                nested,
+                validation_repo,
+            )
+
+        self.assertFalse(allowed)
+        self.assertIn("outside", reason)
+
     def test_source_preflight_marks_missing_command_as_agent_repairable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -201,6 +213,56 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
         self.assertEqual(payload["tests"][0]["reason_code"], "command_missing")
         self.assertTrue(payload["tests"][0]["agent_repairable"])
+
+    def test_validation_workspace_source_mutation_blocks_execution_without_agent_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={"schema_version": "intent-test-plan/v1", "test_targets": [{"test_id": "ITP-001"}]},
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": "generated_test.py",
+                            "command": [sys.executable, "-m", "unittest", "generated_test.py"],
+                        }
+                    ],
+                },
+            )
+            source_repo = root / "repo"
+            source_repo.mkdir(parents=True, exist_ok=True)
+            original = b"def value(): return 7\n"
+            (source_repo / "app.py").write_bytes(original)
+            (validation_repo / "app.py").write_text("def value(): return 999\n", encoding="utf-8")
+            (validation_repo / "generated_test.py").write_text(
+                "from pathlib import Path\n"
+                "Path('executed.marker').write_text('executed')\n",
+                encoding="utf-8",
+            )
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [
+                        {
+                            "path": "app.py",
+                            "sha256": hashlib.sha256(original).hexdigest(),
+                        }
+                    ],
+                },
+            )
+
+            preflight = intent_test_source_preflight_payload(run_dir)
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                result = run_intent_tests(run_dir)
+
+        self.assertEqual(preflight["tests"][0]["reason_code"], "validation_workspace_modified")
+        self.assertFalse(preflight["tests"][0]["agent_repairable"])
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertFalse((validation_repo / "executed.marker").exists())
 
     def test_runtime_diagnostics_repairs_harness_failure_but_not_product_assertion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -238,6 +300,22 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertEqual([item["test_id"] for item in payload["repair_candidates"]], ["ITV-harness"])
         self.assertEqual(payload["repair_candidates"][0]["reason_code"], "project_dependency_missing")
         self.assertEqual(payload["non_repairable"][0]["test_id"], "ITV-product")
+
+    def test_runtime_diagnostics_do_not_treat_product_not_found_assertions_as_missing_dependencies(self) -> None:
+        payload = intent_runtime_repair_diagnostics(
+            {
+                "test_runs": [
+                    {
+                        "test_id": "ITV-001",
+                        "status": "failed",
+                        "exit_code": 1,
+                        "stderr": "AssertionError: expected the API to report resource not found",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(payload["summary"], {"repairable": 0, "non_repairable": 1})
 
     def test_writer_prompt_exposes_capabilities_without_forcing_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

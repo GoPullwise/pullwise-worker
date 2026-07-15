@@ -2181,7 +2181,7 @@ def _generic_agent_test_command_allowed(
         if path_like:
             if not candidate.is_absolute():
                 candidate = cwd / candidate
-            if candidate.exists() and not path_is_under(candidate, validation_repo):
+            if not path_is_under(candidate, validation_repo):
                 return False, "agent-proposed command references a path outside the validation workspace"
             if candidate.exists() and path_is_under(candidate, validation_repo):
                 test_intent = test_intent or any(
@@ -2978,6 +2978,16 @@ class ReviewWorkerV1:
                         )
                     elif phase in MECHANICAL_PHASES:
                         self.run_mechanical_phase(repo_dir, run_dir, job, phase, active=active, progress=progress)
+                        if phase == "intent_test_running":
+                            validation_config = intent_validation_config(job)
+                            self.repair_intent_test_runtime(
+                                codex_client,
+                                repo_dir,
+                                run_dir,
+                                job,
+                                max_attempts=int(validation_config.get("max_runtime_repair_attempts") or 0),
+                                active=active,
+                            )
                     if phase in {"reviewer_fanout", "intent_test_validation"}:
                         self.progress_phase(
                             active,
@@ -3000,6 +3010,17 @@ class ReviewWorkerV1:
                             job,
                             phase,
                             validation_exc,
+                            active=active,
+                        )
+                        validate_phase_outputs(run_dir, phase, artifact_dir)
+                    if phase == "intent_test_writing":
+                        validation_config = intent_validation_config(job)
+                        self.repair_intent_test_preflight(
+                            codex_client,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            max_attempts=int(validation_config.get("max_preflight_repair_attempts") or 0),
                             active=active,
                         )
                         validate_phase_outputs(run_dir, phase, artifact_dir)
@@ -3989,6 +4010,231 @@ class ReviewWorkerV1:
             raise
         self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
 
+    def _run_intent_execution_repair_turn(
+        self,
+        codex_client: CodexSdkClient | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        *,
+        stage: str,
+        attempt: int,
+        diagnostics: dict[str, Any],
+        active: ActiveJob | None = None,
+    ) -> bool:
+        phase = "intent_test_writing" if stage == "preflight" else "intent_test_running"
+        if codex_client is None:
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "intent_test_execution_repair_unavailable",
+                    "stage": stage,
+                    "attempt": attempt,
+                    "reason": "Codex SDK client is missing",
+                    "time": iso_time(time.time()),
+                },
+            )
+            return False
+        state = read_json(run_dir / "run-state.json", {})
+        thread_id = str(state.get("thread_id") or "") if isinstance(state, dict) else ""
+        if not thread_id:
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "intent_test_execution_repair_unavailable",
+                    "stage": stage,
+                    "attempt": attempt,
+                    "reason": "Codex thread is missing",
+                    "time": iso_time(time.time()),
+                },
+            )
+            return False
+        append_jsonl(
+            run_dir / "worker.log.jsonl",
+            {
+                "event": "intent_test_execution_repair_started",
+                "stage": stage,
+                "attempt": attempt,
+                "time": iso_time(time.time()),
+            },
+        )
+        prompt = intent_execution_repair_prompt(run_dir, stage=stage, attempt=attempt, job=job)
+        prompt += "\nCurrent structured diagnostics:\n"
+        prompt += json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)[:20000]
+        repair_unit_id = self._start_phase_repair_estimate(active, phase)
+        turn_metrics: object = None
+        try:
+            turn_metrics = codex_client.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                prompt=prompt,
+                effort=effort_for_phase(job, phase),
+                read_only=False,
+                timeout_seconds=turn_timeout_for_job(job),
+                cancel_requested=self.poll_cancel_requested,
+            )
+        except JobCancelled:
+            self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
+            raise
+        except Exception as exc:
+            self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "intent_test_execution_repair_failed",
+                    "stage": stage,
+                    "attempt": attempt,
+                    "error": str(exc),
+                    "time": iso_time(time.time()),
+                },
+            )
+            return False
+        self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
+        append_jsonl(
+            run_dir / "worker.log.jsonl",
+            {
+                "event": "intent_test_execution_repair_completed",
+                "stage": stage,
+                "attempt": attempt,
+                "duration_ms": getattr(turn_metrics, "duration_ms", None),
+                "time": iso_time(time.time()),
+            },
+        )
+        return True
+
+    def repair_intent_test_preflight(
+        self,
+        codex_client: CodexSdkClient | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        *,
+        max_attempts: int = 1,
+        active: ActiveJob | None = None,
+    ) -> dict[str, Any]:
+        validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+        validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+        execution_repo = Path(validation_root) if validation_root else repo_dir
+        refresh_agentic_execution_capabilities(execution_repo, run_dir)
+        preflight = intent_test_source_preflight_payload(run_dir)
+        write_json(run_dir / "intent" / "intent-test-preflight.json", preflight)
+        for repair_attempt in range(1, max(0, int(max_attempts)) + 1):
+            summary = preflight.get("summary") if isinstance(preflight.get("summary"), dict) else {}
+            if int(summary.get("agent_repairable") or 0) <= 0:
+                break
+            if not self._run_intent_execution_repair_turn(
+                codex_client,
+                repo_dir,
+                run_dir,
+                job,
+                stage="preflight",
+                attempt=repair_attempt,
+                diagnostics=preflight,
+                active=active,
+            ):
+                break
+            repair_intent_test_source_artifact(run_dir / "intent" / "intent-test-source.json", run_dir)
+            refresh_agentic_execution_capabilities(execution_repo, run_dir)
+            preflight = intent_test_source_preflight_payload(run_dir)
+            write_json(run_dir / "intent" / "intent-test-preflight.json", preflight)
+        return preflight
+
+    def repair_intent_test_runtime(
+        self,
+        codex_client: CodexSdkClient | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        *,
+        max_attempts: int = 1,
+        active: ActiveJob | None = None,
+    ) -> dict[str, Any]:
+        raw_path = run_dir / "intent" / "intent-test-results.raw.json"
+        current = read_json(raw_path, {})
+        if not isinstance(current, dict):
+            current = {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": []}
+        history_path = run_dir / "intent" / "intent-test-execution-history.json"
+        history = read_json(history_path, {})
+        if not isinstance(history, dict) or history.get("schema_version") != "intent-test-execution-history/v1":
+            history = {
+                "schema_version": "intent-test-execution-history/v1",
+                "run_id": run_dir.name,
+                "attempts": [],
+            }
+        attempts = history.get("attempts") if isinstance(history.get("attempts"), list) else []
+        if not attempts:
+            attempts.append(current)
+        history["attempts"] = attempts
+        write_json(history_path, history)
+
+        diagnostics_path = run_dir / "intent" / "intent-test-runtime-diagnostics.json"
+        diagnostics = intent_runtime_repair_diagnostics(current)
+        write_json(diagnostics_path, diagnostics)
+        validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+        validation_root = str(validation.get("validation_repo_root") or "").strip() if isinstance(validation, dict) else ""
+        execution_repo = Path(validation_root) if validation_root else repo_dir
+        current_attempt = max(
+            [
+                max(1, int(item.get("attempt") or 1))
+                for item in current.get("test_runs", [])
+                if isinstance(item, dict)
+            ]
+            or [1]
+        )
+        for repair_attempt in range(1, max(0, int(max_attempts)) + 1):
+            candidates = diagnostics.get("repair_candidates") if isinstance(diagnostics.get("repair_candidates"), list) else []
+            candidate_ids = {
+                str(candidate.get("test_id") or "").strip()
+                for candidate in candidates
+                if isinstance(candidate, dict) and str(candidate.get("test_id") or "").strip()
+            }
+            if not candidate_ids:
+                break
+            if not self._run_intent_execution_repair_turn(
+                codex_client,
+                repo_dir,
+                run_dir,
+                job,
+                stage="runtime",
+                attempt=repair_attempt,
+                diagnostics=diagnostics,
+                active=active,
+            ):
+                break
+            repair_intent_test_source_artifact(run_dir / "intent" / "intent-test-source.json", run_dir)
+            refresh_agentic_execution_capabilities(execution_repo, run_dir)
+            preflight = intent_test_source_preflight_payload(run_dir)
+            write_json(run_dir / "intent" / "intent-test-preflight.json", preflight)
+            current_attempt += 1
+            retry = run_intent_tests(run_dir, only_test_ids=candidate_ids, attempt=current_attempt)
+            retry_runs = retry.get("test_runs") if isinstance(retry.get("test_runs"), list) else []
+            retry_by_id = {
+                str(item.get("test_id") or "").strip(): item
+                for item in retry_runs
+                if isinstance(item, dict) and str(item.get("test_id") or "").strip()
+            }
+            merged_runs: list[dict[str, Any]] = []
+            for item in current.get("test_runs", []):
+                if not isinstance(item, dict):
+                    continue
+                test_id = str(item.get("test_id") or "").strip()
+                merged_runs.append(retry_by_id.pop(test_id, item))
+            merged_runs.extend(retry_by_id.values())
+            current = {
+                **current,
+                "schema_version": "intent-test-run-results/v1",
+                "run_id": run_dir.name,
+                "test_runs": merged_runs,
+            }
+            write_json(raw_path, current)
+            attempts.append(retry)
+            history["attempts"] = attempts
+            history["final_result"] = current
+            write_json(history_path, history)
+            diagnostics = intent_runtime_repair_diagnostics(current)
+            write_json(diagnostics_path, diagnostics)
+        return current
+
     def run_reviewer_json_validation_phase(
         self,
         codex_client: CodexSdkClient | None,
@@ -4426,6 +4672,24 @@ def _validate_restrictive_review_policy(policy: dict[str, Any]) -> None:
 def intent_validation_policy_for_job(job: dict[str, Any]) -> dict[str, Any]:
     policy = _job_review_policy(job)
     canonical = policy.get("intent_test_validation") if isinstance(policy.get("intent_test_validation"), dict) else {}
+    max_preflight_repair_attempts = _policy_int(
+        canonical,
+        "max_preflight_repair_attempts",
+        "maxPreflightRepairAttempts",
+        default=1,
+    )
+    max_runtime_repair_attempts = _policy_int(
+        canonical,
+        "max_runtime_repair_attempts",
+        "maxRuntimeRepairAttempts",
+        default=1,
+    )
+    for field, value in (
+        ("max_preflight_repair_attempts", max_preflight_repair_attempts),
+        ("max_runtime_repair_attempts", max_runtime_repair_attempts),
+    ):
+        if value < 0 or value > 3:
+            raise ValueError(f"review_request.policy.intent_test_validation.{field} must be between 0 and 3")
     return {
         "enabled": canonical.get("enabled", True) is not False,
         "only_tiers": canonical.get("only_tiers") or canonical.get("onlyTiers") or ["P0", "P1"],
@@ -4443,6 +4707,8 @@ def intent_validation_policy_for_job(job: dict[str, Any]) -> dict[str, Any]:
             "maxTotalTestRunSeconds",
             default=900,
         ),
+        "max_preflight_repair_attempts": max_preflight_repair_attempts,
+        "max_runtime_repair_attempts": max_runtime_repair_attempts,
     }
 
 
@@ -5375,6 +5641,8 @@ def intent_validation_config(job: dict[str, Any]) -> dict[str, Any]:
         "max_tests_per_bundle": int(configured.get("max_tests_per_bundle") or 2),
         "max_test_run_seconds_per_test": int(configured.get("max_test_run_seconds_per_test") or 60),
         "max_total_test_run_seconds": int(configured.get("max_total_test_run_seconds") or 900),
+        "max_preflight_repair_attempts": int(configured.get("max_preflight_repair_attempts") or 0),
+        "max_runtime_repair_attempts": int(configured.get("max_runtime_repair_attempts") or 0),
         "run_tests_in_disposable_workspace": True,
         "require_intent_evidence": True,
     }
@@ -7233,7 +7501,6 @@ def intent_runtime_repair_diagnostics(raw_payload: Any) -> dict[str, Any]:
         "err_module_not_found",
         "package not found",
         "command not found",
-        "not found",
     )
     harness_markers = (
         "syntaxerror",
