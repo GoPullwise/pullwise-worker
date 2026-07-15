@@ -258,6 +258,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             runner.parent.mkdir(parents=True)
             test_file.parent.mkdir(parents=True)
             runner.write_text("runner", encoding="utf-8")
+            runner.chmod(0o755)
             test_file.write_text("case", encoding="utf-8")
 
             allowed, reason = intent_test_command_policy(
