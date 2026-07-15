@@ -34,6 +34,7 @@ def _write_intent_run(
     plan: dict,
     source: dict,
     defer_inventory_baseline: bool = False,
+    per_test_timeout_seconds: int = 20,
 ) -> tuple[Path, Path]:
     repo = root / "repo"
     run_dir = repo / ".codex-review" / "runs" / "run_1"
@@ -53,7 +54,7 @@ def _write_intent_run(
             "schema_version": "intent-test-validation/v1",
             "enabled": True,
             "max_tests_per_run": 20,
-            "max_test_run_seconds_per_test": 20,
+            "max_test_run_seconds_per_test": per_test_timeout_seconds,
             "max_total_test_run_seconds": 60,
         },
     )
@@ -1336,6 +1337,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     ],
                 },
                 defer_inventory_baseline=True,
+                per_test_timeout_seconds=60,
             )
             workspace = validation_repo / "services" / "math"
             workspace.mkdir(parents=True)

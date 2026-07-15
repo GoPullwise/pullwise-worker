@@ -13,6 +13,7 @@ from unittest.mock import patch
 from pullwise_worker.review_worker_v1 import (
     ActiveJob,
     ReviewWorkerV1,
+    _intent_test_env,
     immutable_inventory_baseline_path,
     intent_validation_workspace_integrity_payload,
     inventory,
@@ -121,6 +122,22 @@ class ValidationWorkspaceIntegrityBoundaryTests(unittest.TestCase):
                 for violation in integrity["violations"]
             )
         )
+
+    def test_worker_runtime_cache_is_contained_and_excluded_from_source_integrity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _repo, run_dir, validation_repo = self._prepared_workspace(Path(tmp_dir))
+            env = _intent_test_env(validation_repo, sandboxed=False)
+            runtime_appdata = Path(env["APPDATA"])
+            telemetry = runtime_appdata / "go" / "telemetry" / "local" / "report.json"
+            telemetry.parent.mkdir(parents=True, exist_ok=True)
+            telemetry.write_text("{}\n", encoding="utf-8")
+
+            integrity = intent_validation_workspace_integrity_payload(run_dir)
+
+        runtime_appdata.resolve(strict=False).relative_to(
+            (validation_repo / ".codex-review").resolve(strict=False)
+        )
+        self.assertEqual(integrity["status"], "ok", integrity)
 
     def test_declaring_validation_repo_source_does_not_allow_added_source_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

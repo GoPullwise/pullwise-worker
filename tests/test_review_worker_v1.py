@@ -4772,7 +4772,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertNotIn("PULLWISE_WORKER_TOKEN", env)
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("HTTPS_PROXY", env)
-        self.assertEqual(env["HOME"], str(validation_repo / ".intent-test-home"))
+        self.assertEqual(
+            env["HOME"],
+            str(validation_repo / ".codex-review" / "intent-test-home"),
+        )
         self.assertEqual(env["PYTHONPATH"], str(validation_repo))
         self.assertEqual(env["PULLWISE_INTENT_TEST_NETWORK_DISABLED"], "1")
 

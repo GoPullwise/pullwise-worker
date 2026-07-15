@@ -8084,7 +8084,7 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
         normalized = key.upper()
         if normalized in passthrough or normalized.startswith("LC_"):
             env[key] = value
-    sandbox_home = validation_repo / ".intent-test-home"
+    sandbox_home = validation_repo / ".codex-review" / "intent-test-home"
     sandbox_tmp = sandbox_home / "tmp"
     sandbox_tmp.mkdir(parents=True, exist_ok=True)
     if sandboxed:
