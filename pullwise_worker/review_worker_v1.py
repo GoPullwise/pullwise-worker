@@ -50,6 +50,7 @@ MAX_REVIEWER_ASSIGNMENTS = 128
 LOW_MEMORY_REVIEWER_TOTAL_BYTES = 6 * 1024**3
 LOW_MEMORY_REVIEWER_AVAILABLE_BYTES = 2 * 1024**3
 CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS = 15
+CODEX_ACCOUNT_READ_TIMEOUT_SECONDS = 15
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 WORKER_COMMAND_ACTIVE_STATUSES = {"pending", "running"}
@@ -1226,13 +1227,30 @@ class CodexSdkClient:
             raise RuntimeError("Codex SDK is not running")
         self._codex.login_api_key(api_key)
 
-    def account(self, *, refresh_token: bool = False) -> Any:
+    def account(
+        self,
+        *,
+        refresh_token: bool = False,
+        timeout_seconds: float = CODEX_ACCOUNT_READ_TIMEOUT_SECONDS,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         self._raise_if_unhealthy()
         if self._codex is None:
             self.start()
         if self._codex is None:
             raise RuntimeError("Codex SDK is not running")
-        return self._codex.account(refresh_token=refresh_token)
+        try:
+            result = run_bounded_call(
+                lambda: self._codex.account(refresh_token=refresh_token),
+                timeout_seconds=timeout_seconds,
+                timeout_message="Codex account read timed out",
+                cancel_requested=cancel_requested,
+                cancelled_error=lambda: JobCancelled("Codex account read cancelled"),
+            )
+        except (TimeoutError, JobCancelled) as exc:
+            self._mark_unhealthy(str(exc))
+            raise
+        return self._model_to_dict(result)
 
     def close(self) -> None:
         codex = self._codex
@@ -3951,19 +3969,21 @@ class ReviewWorkerV1:
     ) -> None:
         if codex_client is None:
             raise RuntimeError("Codex SDK client is missing")
-        state = read_json(run_dir / "run-state.json")
-        thread_id = str(state.get("thread_id") or "")
-        if not thread_id:
-            raise RuntimeError("Codex thread is missing")
-        codex_client.run_turn(
-            thread_id=thread_id,
-            repo_dir=repo_dir,
-            prompt='Codex auth check: return only JSON {"ok": true}.',
-            effort="medium",
-            read_only=True,
-            timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
+        del repo_dir, run_dir, job
+        timeout_seconds = float(CODEX_ACCOUNT_READ_TIMEOUT_SECONDS)
+        remaining = remaining_wall_time_seconds(deadline_monotonic)
+        if remaining is not None:
+            timeout_seconds = max(0.001, min(timeout_seconds, remaining))
+        payload = codex_client.account(
+            refresh_token=True,
+            timeout_seconds=timeout_seconds,
             cancel_requested=self.poll_cancel_requested,
         )
+        requires_auth = payload.get("requiresOpenaiAuth", payload.get("requires_openai_auth"))
+        if not isinstance(requires_auth, bool):
+            raise RuntimeError("Codex account response is missing requiresOpenaiAuth")
+        if requires_auth and payload.get("account") is None:
+            raise RuntimeError("Codex account authentication required")
 
     def run_semantic_phase(
         self,

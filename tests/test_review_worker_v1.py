@@ -9817,6 +9817,55 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Codex SDK client is missing"):
                 worker.run_semantic_phase(None, repo, run_dir, {"job_id": "job_1"}, "repo_map")
 
+    def test_codex_auth_check_reads_and_refreshes_account_without_starting_a_model_turn(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        class FakeCodexClient:
+            def account(self, **kwargs: object) -> object:
+                calls.append(dict(kwargs))
+                return {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True}
+
+            def run_turn(self, **_kwargs: object) -> object:
+                raise AssertionError("auth check must not start a model turn")
+
+        worker = SimpleNamespace(poll_cancel_requested=lambda: False)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            ReviewWorkerV1.run_codex_auth_check(
+                worker,
+                FakeCodexClient(),
+                repo_dir,
+                run_dir,
+                {},
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["refresh_token"])
+        self.assertGreater(float(calls[0]["timeout_seconds"]), 0)
+
+    def test_codex_auth_check_rejects_a_missing_account(self) -> None:
+        class FakeCodexClient:
+            def account(self, **_kwargs: object) -> object:
+                return {"account": None, "requiresOpenaiAuth": True}
+
+        worker = SimpleNamespace(poll_cancel_requested=lambda: False)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+
+            with self.assertRaisesRegex(RuntimeError, "authentication required"):
+                ReviewWorkerV1.run_codex_auth_check(
+                    worker,
+                    FakeCodexClient(),
+                    repo_dir,
+                    run_dir,
+                    {},
+                )
+
             self.assertFalse((run_dir / "repo-map.json").exists())
 
     def test_run_semantic_phase_does_not_synthesize_missing_codex_output(self) -> None:
