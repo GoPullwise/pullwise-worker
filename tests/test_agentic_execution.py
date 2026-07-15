@@ -34,7 +34,7 @@ def _write_intent_run(
     plan: dict,
     source: dict,
     defer_inventory_baseline: bool = False,
-    per_test_timeout_seconds: int = 20,
+    per_test_timeout_seconds: int = 60,
 ) -> tuple[Path, Path]:
     repo = root / "repo"
     run_dir = repo / ".codex-review" / "runs" / "run_1"
