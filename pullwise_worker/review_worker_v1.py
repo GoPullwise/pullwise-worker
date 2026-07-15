@@ -5175,7 +5175,8 @@ def reviewer_assignment_prompt(
         "Existing tests are contract evidence, not proof that the implementation is correct.",
         "Actively look for concrete failure scenarios before concluding that findings is empty.",
         "Before reporting an async UI race or duplicate mutation, inspect disabled state, synchronous ref/lock guards, event ordering, and server idempotency; prove that the second action reaches a harmful non-idempotent operation.",
-        "Every finding must include id, title, severity, confidence, path/line evidence, impact, recommendation, false_positive_risk, and next_agent_task.",
+        "Every finding must include id, title, severity, confidence, impact, recommendation, false_positive_risk, and next_agent_task.",
+        'Every finding must include a non-empty locations array. Each location must use the exact shape {"path": "relative/source/path", "start_line": 1, "end_line": 1} with positive repository line numbers.',
         "If findings is empty, review_summary must document concrete areas examined, checks performed, and rejected candidates with source-backed reasons.",
         "Write one JSON object only using schema_version codex-reviewer-output/v1.",
         "The object must include bundle_id, reviewer, reviewed_paths, findings, review_summary, and uncertainties.",
@@ -5222,6 +5223,8 @@ def reviewer_json_repair_prompt(
             f"Local validation failed: {validation_error}",
             "Repair only malformed files under .codex-review/runs/*/raw-reviewers/.",
             "Each repaired file must be JSON using schema_version codex-reviewer-output/v1 with a findings array.",
+            'Every finding must contain a non-empty locations array using the exact item shape {"path": "relative/source/path", "start_line": 1, "end_line": 1} with positive repository line numbers.',
+            "If a finding has no source-backed location, remove that unsupported finding instead of inventing a path or line.",
             "Preserve valid reviewer evidence, locations, severity, confidence, and false-positive context.",
             "Do not add unrelated findings.",
             "Do not modify application source files.",
@@ -6392,8 +6395,16 @@ def validate_reviewer_outputs(run_dir: Path) -> None:
             finding["locations"] = locations
             for alias in (
                 "location",
+                "code_location",
+                "codeLocation",
+                "source_location",
+                "sourceLocation",
                 "affected_locations",
                 "affectedLocations",
+                "code_locations",
+                "codeLocations",
+                "source_locations",
+                "sourceLocations",
                 "line_evidence",
                 "lineEvidence",
             ):
@@ -7084,19 +7095,22 @@ def _intent_private_runtime_bind_root(command: list[str]) -> tuple[Path | None, 
         is_active_python = executable.resolve(strict=True) == Path(sys.executable).resolve(strict=True)
     except OSError:
         is_active_python = False
-    if not is_active_python:
+    if is_active_python:
+        prefix = Path(sys.prefix)
+        bind_root = (
+            prefix
+            if prefix.is_dir() and _path_is_lexically_under(executable, prefix)
+            else executable.parent
+        )
+    elif executable.is_file() and executable.parent.name.lower() in {"bin", "sbin"}:
+        bind_root = executable.parent
+    else:
         return (
             None,
             "environment_error: absolute generated test executable is outside the sandbox-visible trusted runtime",
         )
-    prefix = Path(sys.prefix)
-    bind_root = (
-        prefix
-        if prefix.is_dir() and _path_is_lexically_under(executable, prefix)
-        else executable.parent
-    )
     if not bind_root.is_dir():
-        return None, "environment_error: active Python runtime directory is unavailable"
+        return None, "environment_error: trusted runtime directory is unavailable"
     return bind_root, ""
 
 
@@ -7155,9 +7169,39 @@ def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo:
         "--chdir",
         sandbox_cwd,
     ]
-    for host_path in ("/usr", "/bin", "/lib", "/lib64", "/opt"):
-        if Path(host_path).exists():
-            argv.extend(["--ro-bind", host_path, host_path])
+    system_bind_roots = tuple(
+        Path(host_path)
+        for host_path in ("/usr", "/bin", "/lib", "/lib64", "/opt")
+        if Path(host_path).exists()
+    )
+    for host_path in system_bind_roots:
+        argv.extend(["--ro-bind", str(host_path), str(host_path)])
+    raw_rustup_home = str(os.environ.get("RUSTUP_HOME") or "").strip()
+    if raw_rustup_home:
+        rustup_home = Path(raw_rustup_home)
+        if (
+            rustup_home.is_absolute()
+            and rustup_home.is_dir()
+            and not rustup_home.is_symlink()
+            and not path_is_under(rustup_home, validation_root)
+            and not any(path_is_under(rustup_home, system_root) for system_root in system_bind_roots)
+        ):
+            _append_sandbox_bind(argv, rustup_home)
+    if command and not Path(command[0]).is_absolute():
+        resolved_runtime = shutil.which(command[0])
+        resolved_runtime_path = Path(resolved_runtime) if resolved_runtime else None
+        if (
+            resolved_runtime_path is not None
+            and resolved_runtime_path.is_absolute()
+            and resolved_runtime_path.is_file()
+            and resolved_runtime_path.parent.name.lower() in {"bin", "sbin"}
+            and not path_is_under(resolved_runtime_path, validation_root)
+            and not any(
+                path_is_under(resolved_runtime_path, system_root)
+                for system_root in system_bind_roots
+            )
+        ):
+            _append_sandbox_bind(argv, resolved_runtime_path.parent)
     executable_path = Path(command[0]) if command else Path()
     contained_executable = executable_path.is_absolute() and path_is_under(executable_path, validation_root)
     runtime_bind_root, runtime_bind_error = (
@@ -10492,6 +10536,10 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
         value.get("path")
         or value.get("file")
         or value.get("filename")
+        or value.get("file_path")
+        or value.get("filePath")
+        or value.get("source_path")
+        or value.get("sourcePath")
         or value.get("primary_path")
         or value.get("primaryPath")
         or ""
@@ -10534,6 +10582,10 @@ def agent_report_location(value: object) -> dict[str, Any] | None:
     for key in (
         "file",
         "filename",
+        "file_path",
+        "filePath",
+        "source_path",
+        "sourcePath",
         "line",
         "line_start",
         "line_end",
@@ -10567,6 +10619,10 @@ def agent_report_finding_location(finding: dict[str, Any]) -> dict[str, Any] | N
                 finding.get("path")
                 or finding.get("file")
                 or finding.get("filename")
+                or finding.get("file_path")
+                or finding.get("filePath")
+                or finding.get("source_path")
+                or finding.get("sourcePath")
                 or finding.get("primary_path")
                 or finding.get("primaryPath")
             ),
@@ -10607,6 +10663,10 @@ def agent_report_location_candidates(value: object, *, default_path: object = ""
         "path",
         "file",
         "filename",
+        "file_path",
+        "filePath",
+        "source_path",
+        "sourcePath",
         "primary_path",
         "primaryPath",
         "line",
@@ -10625,7 +10685,7 @@ def agent_report_location_candidates(value: object, *, default_path: object = ""
     }
     if location_fields.intersection(value):
         candidate = dict(value)
-        if default_path and not any(candidate.get(key) for key in ("path", "file", "filename", "primary_path", "primaryPath")):
+        if default_path and not any(candidate.get(key) for key in ("path", "file", "filename", "file_path", "filePath", "source_path", "sourcePath", "primary_path", "primaryPath")):
             candidate["path"] = default_path
         return [candidate]
 
@@ -10633,7 +10693,7 @@ def agent_report_location_candidates(value: object, *, default_path: object = ""
     for path, location_value in value.items():
         if isinstance(location_value, dict):
             candidate = dict(location_value)
-            if not any(candidate.get(key) for key in ("path", "file", "filename", "primary_path", "primaryPath")):
+            if not any(candidate.get(key) for key in ("path", "file", "filename", "file_path", "filePath", "source_path", "sourcePath", "primary_path", "primaryPath")):
                 candidate["path"] = path
             candidates.append(candidate)
         elif isinstance(location_value, (int, float, str, list, tuple)):
@@ -10645,10 +10705,13 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
     raw_locations = finding.get("locations")
     if not isinstance(raw_locations, list):
         raw_locations = []
-    if not raw_locations and isinstance(finding.get("location"), dict):
-        raw_locations = [finding["location"]]
     if not raw_locations:
-        for key in ("affected_locations", "affectedLocations"):
+        for key in ("location", "code_location", "codeLocation", "source_location", "sourceLocation"):
+            if isinstance(finding.get(key), dict):
+                raw_locations = [finding[key]]
+                break
+    if not raw_locations:
+        for key in ("affected_locations", "affectedLocations", "code_locations", "codeLocations", "source_locations", "sourceLocations"):
             if isinstance(finding.get(key), list):
                 raw_locations = finding[key]
                 break
@@ -10656,6 +10719,10 @@ def agent_report_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
         finding.get("path")
         or finding.get("file")
         or finding.get("filename")
+        or finding.get("file_path")
+        or finding.get("filePath")
+        or finding.get("source_path")
+        or finding.get("sourcePath")
         or finding.get("primary_path")
         or finding.get("primaryPath")
     )

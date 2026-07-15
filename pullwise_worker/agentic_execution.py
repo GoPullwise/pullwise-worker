@@ -231,7 +231,9 @@ def _resolved_executable(
 ) -> str | None:
     path = Path(executable)
     if path.is_absolute():
-        return str(path.resolve(strict=False)) if path.is_file() else None
+        # Preserve multicall/shim basenames (for example cargo -> rustup).
+        # Capability metadata must not silently change invocation semantics.
+        return str(path.absolute()) if path.is_file() else None
     resolved = resolver(executable)
     return str(resolved) if resolved else None
 

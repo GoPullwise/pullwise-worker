@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import shutil
 import sys
 import tempfile
@@ -249,6 +250,100 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertEqual(skip_reason, "")
         self.assertEqual(sandbox_cwd, "/workspace")
         self.assertEqual(command[-2], "/workspace/tools/bespoke-test")
+
+    def test_linux_sandbox_read_only_binds_a_trusted_external_runtime_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation"
+            runtime_bin = root / "toolchain" / "bin"
+            validation_repo.mkdir()
+            runtime_bin.mkdir(parents=True)
+            runner = runtime_bin / "custom-intent-test"
+            runner.write_text("runtime", encoding="utf-8")
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                side_effect=lambda name: "/usr/bin/bwrap" if name in {"bwrap", "bubblewrap"} else None,
+            ):
+                command, _sandbox_cwd, skip_reason = _intent_test_sandbox_command(
+                    [str(runner), "verify"],
+                    validation_repo,
+                    validation_repo,
+                )
+
+        self.assertEqual(skip_reason, "")
+        self.assertTrue(
+            any(
+                command[index : index + 3] == ["--ro-bind", str(runtime_bin), str(runtime_bin)]
+                for index in range(len(command) - 2)
+            )
+        )
+        self.assertEqual(command[-2], str(runner))
+
+    def test_linux_sandbox_resolves_and_binds_a_bare_external_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation"
+            runtime_bin = root / "toolchain" / "bin"
+            validation_repo.mkdir()
+            runtime_bin.mkdir(parents=True)
+            runner = runtime_bin / "custom-intent-test"
+            runner.write_text("runtime", encoding="utf-8")
+
+            def resolve_runtime(name: str) -> str | None:
+                if name in {"bwrap", "bubblewrap"}:
+                    return "/usr/bin/bwrap"
+                if name == "custom-intent-test":
+                    return str(runner)
+                return None
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                side_effect=resolve_runtime,
+            ):
+                command, _sandbox_cwd, skip_reason = _intent_test_sandbox_command(
+                    ["custom-intent-test", "verify"],
+                    validation_repo,
+                    validation_repo,
+                )
+
+        self.assertEqual(skip_reason, "")
+        self.assertTrue(
+            any(
+                command[index : index + 3] == ["--ro-bind", str(runtime_bin), str(runtime_bin)]
+                for index in range(len(command) - 2)
+            )
+        )
+        self.assertEqual(command[-2], "custom-intent-test")
+
+    def test_linux_sandbox_exposes_rust_toolchains_without_package_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation"
+            rustup_home = root / "rustup-home"
+            runner = validation_repo / "tools" / "bespoke-test"
+            runner.parent.mkdir(parents=True)
+            rustup_home.mkdir()
+            runner.write_text("runner", encoding="utf-8")
+            with patch.dict(os.environ, {"RUSTUP_HOME": str(rustup_home)}), patch(
+                "pullwise_worker.review_worker_v1.sys.platform",
+                "linux",
+            ), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                side_effect=lambda name: "/usr/bin/bwrap" if name in {"bwrap", "bubblewrap"} else None,
+            ):
+                command, _sandbox_cwd, skip_reason = _intent_test_sandbox_command(
+                    [str(runner), "verify"],
+                    validation_repo,
+                    validation_repo,
+                )
+
+        self.assertEqual(skip_reason, "")
+        self.assertTrue(
+            any(
+                command[index : index + 3] == ["--ro-bind", str(rustup_home), str(rustup_home)]
+                for index in range(len(command) - 2)
+            )
+        )
 
     def test_generic_agent_runner_still_rejects_network_install_and_shell_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
