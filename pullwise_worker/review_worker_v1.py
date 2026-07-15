@@ -857,6 +857,9 @@ class CodexSdkClient:
         self._runtime_resources.register_thread(thread_id, thread)
         return thread_id
 
+    def release_thread(self, thread_id: str) -> None:
+        self._runtime_resources.release_thread(thread_id)
+
     def run_turn(
         self,
         *,
@@ -4174,6 +4177,11 @@ class ReviewWorkerV1:
                             attempt=int(attempt_record["attempt"]),
                             error=exc,
                         )
+                    finally:
+                        release_codex_thread_reference(
+                            codex_client,
+                            str(attempt_record["thread_id"]),
+                        )
 
                     if outcome.valid_output:
                         try:
@@ -5108,6 +5116,18 @@ def start_codex_thread_with_lifecycle(
         kwargs["cancel_requested"] = cancel_requested
     result = method(repo_dir, model, **kwargs)
     return str(result or "").strip()
+
+
+def release_codex_thread_reference(codex_client: Any, thread_id: str) -> None:
+    release_thread = getattr(codex_client, "release_thread", None)
+    if not callable(release_thread) or not thread_id:
+        return
+    try:
+        release_thread(thread_id)
+    except Exception:
+        # Thread references are local cleanup state. Cleanup failures must not
+        # replace the reviewer outcome that the worker still needs to record.
+        pass
 
 
 class RepositoryLimitExceeded(RuntimeError):
@@ -6785,10 +6805,6 @@ def split_oversized_bundle_item(
         end_line = min(line_count, (index + 1) * lines_per_segment)
         line_fraction = (end_line - start_line + 1) / line_count
         segment_tokens = max(1, math.ceil(estimated_tokens * line_fraction))
-        if segment_tokens > MAX_BUNDLE_ESTIMATED_TOKENS:
-            raise RuntimeError(
-                f"source segment exceeds hard bundle limit: {item.get('path')}:{start_line}-{end_line}"
-            )
         segment = dict(item)
         segment["estimated_tokens"] = segment_tokens
         segment["_segment_start_line"] = start_line
@@ -8242,6 +8258,85 @@ def _intent_sandbox_setup_failed(command: list[str], completed: subprocess.Compl
     )
 
 
+def _generated_intent_test_path(generated: dict[str, Any]) -> str:
+    return str(
+        generated.get("path")
+        or generated.get("artifact_path")
+        or generated.get("artifactPath")
+        or generated.get("test_file")
+        or generated.get("filename")
+        or ""
+    ).strip()
+
+
+def _authorized_generated_intent_test_source(
+    run_dir: Path,
+    validation_repo: Path,
+    raw_path: str,
+) -> tuple[Path, Path] | None:
+    if not raw_path or validation_repo.is_symlink():
+        return None
+    declared_path = Path(raw_path)
+    source_repo = _source_repository_for_run_dir(run_dir)
+    expected_validation_repo = source_repo.parent / "validation-repo"
+    if validation_repo.resolve(strict=False) != expected_validation_repo.resolve(strict=False):
+        return None
+    source_candidates = (
+        (
+            declared_path if declared_path.is_absolute() else source_repo / declared_path,
+            source_repo,
+            source_repo / ".codex-review" / "generated-tests",
+        ),
+        (
+            declared_path if declared_path.is_absolute() else run_dir / declared_path,
+            run_dir,
+            run_dir / "intent" / "generated-tests",
+        ),
+    )
+    for source_candidate, relative_root, permitted_root in source_candidates:
+        if (
+            permitted_root.is_symlink()
+            or not path_is_under(permitted_root, relative_root)
+            or source_candidate.is_symlink()
+            or not _is_regular_file_no_follow(source_candidate)
+            or not path_is_under(source_candidate, permitted_root)
+        ):
+            continue
+        try:
+            relative_path = source_candidate.resolve(strict=True).relative_to(
+                relative_root.resolve(strict=True)
+            )
+        except (OSError, ValueError):
+            continue
+        destination = validation_repo / relative_path
+        if path_is_under(destination, validation_repo):
+            return source_candidate, relative_path
+    return None
+
+
+def _regular_file_contents_match(left: Path, right: Path) -> bool:
+    if (
+        left.is_symlink()
+        or right.is_symlink()
+        or not _is_regular_file_no_follow(left)
+        or not _is_regular_file_no_follow(right)
+    ):
+        return False
+    try:
+        if left.stat(follow_symlinks=False).st_size != right.stat(follow_symlinks=False).st_size:
+            return False
+        with left.open("rb") as left_handle, right.open("rb") as right_handle:
+            while True:
+                left_chunk = left_handle.read(1024 * 1024)
+                right_chunk = right_handle.read(1024 * 1024)
+                if left_chunk != right_chunk:
+                    return False
+                if not left_chunk:
+                    return True
+    except OSError:
+        return False
+
+
 def materialize_generated_intent_test_sources(
     run_dir: Path,
     validation_repo: Path | None,
@@ -8253,22 +8348,36 @@ def materialize_generated_intent_test_sources(
     generated_tests = source.get("generated_tests") if isinstance(source.get("generated_tests"), list) else []
     if validation_repo is None:
         return {}
+    canonical_source_root = _source_repository_for_run_dir(run_dir)
+    canonical_validation_root = canonical_source_root.parent / "validation-repo"
+    validation_root_value = str(validation.get("validation_repo_root") or "").strip()
+    declared_validation_root = Path(validation_root_value) if validation_root_value else None
+    validation_root_matches = (
+        declared_validation_root is not None
+        and declared_validation_root.resolve(strict=False) == canonical_validation_root.resolve(strict=False)
+        and validation_repo.resolve(strict=False) == canonical_validation_root.resolve(strict=False)
+        and not validation_repo.is_symlink()
+    )
     source_root_value = str(validation.get("source_repo_root") or "").strip()
-    source_root = Path(source_root_value) if source_root_value else None
-    source_generation_root = source_root / ".codex-review" / "generated-tests" if source_root is not None else None
-    run_generation_root = run_dir / "intent" / "generated-tests"
+    declared_source_root = Path(source_root_value) if source_root_value else None
+    source_root_matches = (
+        declared_source_root is not None
+        and declared_source_root.resolve(strict=False) == canonical_source_root.resolve(strict=False)
+    )
+    source_generation_root = canonical_source_root / ".codex-review" / "generated-tests"
     errors: dict[str, str] = {}
     for index, generated in enumerate(generated_tests):
         if not isinstance(generated, dict):
             continue
         test_id = _intent_test_id(generated, f"ITV-{index + 1:03d}")
-        raw_path = str(
-            generated.get("path")
-            or generated.get("artifact_path")
-            or generated.get("artifactPath")
-            or ""
-        ).strip()
+        raw_path = _generated_intent_test_path(generated)
         if not raw_path:
+            continue
+        if not validation_root_matches:
+            errors[test_id] = "validation workspace destination differs from the worker-owned path"
+            continue
+        if not source_root_matches:
+            errors[test_id] = "validation workspace source repository differs from the worker-owned path"
             continue
         declared_path = Path(raw_path)
         validation_candidate = declared_path if declared_path.is_absolute() else validation_repo / declared_path
@@ -8278,76 +8387,54 @@ def materialize_generated_intent_test_sources(
             "existing_test",
             "repository_test",
         }
-        if source_root is not None and source_generation_root is not None:
-            try:
-                validation_relative = validation_candidate.resolve(strict=False).relative_to(
-                    validation_repo.resolve(strict=False)
-                )
-            except ValueError:
-                validation_relative = None
-            original_candidate = source_root / validation_relative if validation_relative is not None else None
-            existing_repo_file = (
-                original_candidate is not None
-                and original_candidate.is_file()
-                and not path_is_under(original_candidate, source_generation_root)
+        try:
+            validation_relative = validation_candidate.resolve(strict=False).relative_to(
+                validation_repo.resolve(strict=False)
             )
-            if existing_repo_file:
-                if not reuse_existing:
-                    errors[test_id] = "generated test path overlaps an existing repository file"
-                    continue
-                try:
-                    immutable_match = (
-                        validation_candidate.is_file()
-                        and not validation_candidate.is_symlink()
-                        and hashlib.sha256(validation_candidate.read_bytes()).digest()
-                        == hashlib.sha256(original_candidate.read_bytes()).digest()
-                    )
-                except OSError:
-                    immutable_match = False
-                if not immutable_match:
-                    errors[test_id] = "explicitly reused existing repository test differs from source"
-                    continue
-        if path_is_under(validation_candidate, validation_repo) and validation_candidate.is_file():
-            if materialized_paths is not None:
-                try:
-                    materialized_paths[test_id] = validation_candidate.resolve(strict=False).relative_to(
-                        validation_repo.resolve(strict=False)
-                    ).as_posix()
-                except ValueError:
-                    pass
-            continue
-        source_candidate = declared_path if declared_path.is_absolute() else (source_root / declared_path if source_root is not None else None)
-        source_is_canonical = (
-            source_candidate is not None
-            and source_generation_root is not None
-            and not source_candidate.is_symlink()
-            and source_candidate.is_file()
-            and path_is_under(source_candidate, source_generation_root)
+        except ValueError:
+            validation_relative = None
+        original_candidate = (
+            canonical_source_root / validation_relative
+            if validation_relative is not None
+            else None
         )
-        if source_is_canonical:
-            try:
-                relative_path = source_candidate.resolve(strict=True).relative_to(source_root.resolve(strict=True))
-            except (OSError, ValueError):
-                errors[test_id] = "generated test source escapes the source repository"
+        existing_repo_file = (
+            original_candidate is not None
+            and not original_candidate.is_symlink()
+            and _is_regular_file_no_follow(original_candidate)
+            and path_is_under(original_candidate, canonical_source_root)
+            and not path_is_under(original_candidate, source_generation_root)
+        )
+        if existing_repo_file:
+            if not reuse_existing:
+                errors[test_id] = "generated test path overlaps an existing repository file"
                 continue
-        else:
-            run_candidate = declared_path if declared_path.is_absolute() else run_dir / declared_path
-            if run_candidate.is_symlink() or not run_candidate.is_file() or not path_is_under(run_candidate, run_generation_root):
-                errors[test_id] = "generated test source is missing or outside .codex-review/generated-tests"
+            if not _regular_file_contents_match(validation_candidate, original_candidate):
+                errors[test_id] = "explicitly reused existing repository test differs from source"
                 continue
-            try:
-                relative_path = run_candidate.resolve(strict=True).relative_to(run_dir.resolve(strict=True))
-            except (OSError, ValueError):
-                errors[test_id] = "generated test source escapes the run intent directory"
-                continue
-            source_candidate = run_candidate
+            if materialized_paths is not None:
+                materialized_paths[test_id] = validation_relative.as_posix()
+            continue
+        authorized_source = _authorized_generated_intent_test_source(
+            run_dir,
+            validation_repo,
+            raw_path,
+        )
+        if authorized_source is None:
+            errors[test_id] = "generated test source is missing or outside the worker-owned generated-test roots"
+            continue
+        source_candidate, relative_path = authorized_source
         destination = validation_repo / relative_path
         if not path_is_under(destination, validation_repo):
             errors[test_id] = "generated test destination escapes the validation workspace"
             continue
+        if destination.exists() and not _regular_file_contents_match(source_candidate, destination):
+            errors[test_id] = "generated test destination differs from the worker-owned source"
+            continue
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_candidate, destination, follow_symlinks=False)
+            if not destination.exists():
+                shutil.copy2(source_candidate, destination, follow_symlinks=False)
             if materialized_paths is not None:
                 materialized_paths[test_id] = relative_path.as_posix()
         except OSError as exc:
@@ -8363,59 +8450,20 @@ def _declared_generated_test_paths(run_dir: Path, validation_repo: Path) -> set[
         else []
     )
     allowed: set[str] = set()
-    validation_root = validation_repo.resolve(strict=False)
-    source_repo = _source_repository_for_run_dir(run_dir)
-    source_generation_root = source_repo / ".codex-review" / "generated-tests"
-    run_generation_root = run_dir / "intent" / "generated-tests"
     for generated in generated_tests:
         if not isinstance(generated, dict):
             continue
-        raw_path = str(
-            generated.get("path")
-            or generated.get("test_file")
-            or generated.get("filename")
-            or ""
-        ).strip()
-        if not raw_path:
+        authorized_source = _authorized_generated_intent_test_source(
+            run_dir,
+            validation_repo,
+            _generated_intent_test_path(generated),
+        )
+        if authorized_source is None:
             continue
-        candidate = Path(raw_path)
-        if not candidate.is_absolute():
-            candidate = validation_repo / candidate
-        try:
-            relative = candidate.resolve(strict=False).relative_to(validation_root)
-        except ValueError:
-            declared_source = Path(raw_path)
-            source_candidates = (
-                (
-                    declared_source if declared_source.is_absolute() else source_repo / declared_source,
-                    source_repo,
-                    source_generation_root,
-                ),
-                (
-                    declared_source if declared_source.is_absolute() else run_dir / declared_source,
-                    run_dir,
-                    run_generation_root,
-                ),
-            )
-            relative = None
-            for source_candidate, relative_root, permitted_root in source_candidates:
-                if (
-                    source_candidate.is_symlink()
-                    or not _is_regular_file_no_follow(source_candidate)
-                    or not path_is_under(source_candidate, permitted_root)
-                ):
-                    continue
-                try:
-                    relative = source_candidate.resolve(strict=True).relative_to(
-                        relative_root.resolve(strict=True)
-                    )
-                except (OSError, ValueError):
-                    relative = None
-                if relative is not None:
-                    break
-            if relative is None:
-                continue
-        allowed.add(relative.as_posix())
+        source_candidate, relative_path = authorized_source
+        destination = validation_repo / relative_path
+        if _regular_file_contents_match(source_candidate, destination):
+            allowed.add(relative_path.as_posix())
     return allowed
 
 
@@ -8431,13 +8479,13 @@ def intent_validation_workspace_integrity_payload(run_dir: Path) -> dict[str, An
         declared_validation_repo = Path(validation_root)
         if declared_validation_repo.resolve(strict=False) != expected_validation_repo.resolve(strict=False):
             violations.append({"path": validation_root, "reason": "validation workspace root differs from the worker-owned path"})
+    source_root = str(validation.get("source_repo_root") or "").strip() if isinstance(validation, dict) else ""
+    if not source_root:
+        violations.append({"path": "", "reason": "validation workspace source repository metadata is missing"})
+    elif Path(source_root).resolve(strict=False) != source_repo.resolve(strict=False):
+        violations.append({"path": source_root, "reason": "validation workspace source repository differs from the worker-owned path"})
 
     baseline_path = immutable_inventory_baseline_path(run_dir)
-    if not baseline_path.exists() and not baseline_path.is_symlink():
-        try:
-            ensure_immutable_inventory_baseline(source_repo, run_dir)
-        except RuntimeError:
-            pass
     baseline_payload = read_json(baseline_path, {}) if not baseline_path.is_symlink() else {}
     inventory_files = baseline_payload.get("files") if _valid_inventory_payload(baseline_payload) else []
     if not inventory_files and not _valid_inventory_payload(baseline_payload):

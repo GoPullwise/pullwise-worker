@@ -185,6 +185,36 @@ class ValidationWorkspaceIntegrityBoundaryTests(unittest.TestCase):
             integrity,
         )
 
+    def test_tampered_validation_repo_root_cannot_materialize_to_external_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo, run_dir, _validation_repo = self._prepared_workspace(root)
+            generated_source = repo / ".codex-review" / "generated-tests" / "secret.py"
+            generated_source.parent.mkdir(parents=True)
+            generated_source.write_text("SECRET = 'canonical source'\n", encoding="utf-8")
+            external_validation = root / "external-validation"
+            external_validation.mkdir()
+            validation = read_json(run_dir / "intent" / "validation-workspace.json", {})
+            validation["validation_repo_root"] = str(external_validation)
+            write_json(run_dir / "intent" / "validation-workspace.json", validation)
+            source = {
+                "schema_version": "intent-test-source/v1",
+                "generated_tests": [
+                    {"test_id": "ITV-001", "path": str(generated_source)}
+                ],
+            }
+
+            errors = materialize_generated_intent_test_sources(
+                run_dir,
+                external_validation,
+                validation,
+                source,
+            )
+            copied = external_validation / ".codex-review" / "generated-tests" / "secret.py"
+
+        self.assertIn("ITV-001", errors)
+        self.assertFalse(copied.exists())
+
     def test_missing_worker_baseline_fails_closed_without_rebaselining_mutated_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo, run_dir, validation_repo = self._prepared_workspace(Path(tmp_dir))

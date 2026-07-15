@@ -15,6 +15,7 @@ from pullwise_worker.agentic_execution import build_execution_capabilities
 from pullwise_worker.review_worker_v1 import (
     ReviewWorkerV1,
     _intent_test_sandbox_command,
+    ensure_immutable_inventory_baseline,
     intent_execution_repair_prompt,
     intent_runtime_repair_diagnostics,
     intent_test_command_policy,
@@ -32,6 +33,7 @@ def _write_intent_run(
     *,
     plan: dict,
     source: dict,
+    defer_inventory_baseline: bool = False,
 ) -> tuple[Path, Path]:
     repo = root / "repo"
     run_dir = repo / ".codex-review" / "runs" / "run_1"
@@ -57,7 +59,23 @@ def _write_intent_run(
     )
     write_json(run_dir / "intent" / "intent-test-plan.json", plan)
     write_json(run_dir / "intent" / "intent-test-source.json", source)
+    if not defer_inventory_baseline:
+        ensure_immutable_inventory_baseline(repo, run_dir)
     return run_dir, validation_repo
+
+
+def _establish_immutable_validation_baseline(
+    run_dir: Path,
+    validation_repo: Path,
+    relative_paths: list[str],
+) -> None:
+    repo = run_dir.parent.parent.parent
+    for relative_path in relative_paths:
+        validation_path = validation_repo / relative_path
+        source_path = repo / relative_path
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(validation_path.read_bytes())
+    ensure_immutable_inventory_baseline(repo, run_dir)
 
 
 class AgenticExecutionContractsTest(unittest.TestCase):
@@ -163,12 +181,18 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             (validation_repo / "package.json").write_text(
                 json.dumps({"scripts": {"test": "vitest run"}}),
                 encoding="utf-8",
             )
             (validation_repo / "generated.test.js").write_text("export {};\n", encoding="utf-8")
+            _establish_immutable_validation_baseline(
+                run_dir,
+                validation_repo,
+                ["package.json"],
+            )
             with patch(
                 "pullwise_worker.review_worker_v1.shutil.which",
                 side_effect=lambda name: "/usr/bin/npm" if name == "npm" else None,
@@ -225,6 +249,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             runner.parent.mkdir(parents=True)
             test_file.parent.mkdir(parents=True)
             runner.write_text("contained runner", encoding="utf-8")
+            runner.chmod(0o755)
             test_file.write_text("case", encoding="utf-8")
 
             payload = intent_test_source_preflight_payload(run_dir)
@@ -426,11 +451,13 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             source_repo = root / "repo"
             source_repo.mkdir(parents=True, exist_ok=True)
             original = b"def value(): return 7\n"
             (source_repo / "app.py").write_bytes(original)
+            ensure_immutable_inventory_baseline(source_repo, run_dir)
             (validation_repo / "app.py").write_text("def value(): return 999\n", encoding="utf-8")
             (validation_repo / "generated_test.py").write_text(
                 "from pathlib import Path\n"
@@ -476,11 +503,13 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             source_repo = root / "repo"
             source_repo.mkdir(parents=True, exist_ok=True)
             original = b"def value(): return 7\n"
             (source_repo / "app.py").write_bytes(original)
+            ensure_immutable_inventory_baseline(source_repo, run_dir)
             (validation_repo / "app.py").write_bytes(original)
             (validation_repo / "generated_test.py").write_text(
                 "import unittest\n"
@@ -522,10 +551,12 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             source_repo = root / "repo"
             source_repo.mkdir(parents=True, exist_ok=True)
             (source_repo / "app.py").write_text("print('application')\n", encoding="utf-8")
+            ensure_immutable_inventory_baseline(source_repo, run_dir)
             (validation_repo / "app.py").write_text("print('application')\n", encoding="utf-8")
 
             payload = intent_test_source_preflight_payload(run_dir)
@@ -551,6 +582,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             source_repo = root / "repo"
             source_test = source_repo / "tests" / "test_existing.py"
@@ -563,6 +595,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 "    def test_behavior(self): self.assertTrue(True)\n"
             )
             source_test.write_text(content, encoding="utf-8")
+            ensure_immutable_inventory_baseline(source_repo, run_dir)
             validation_test.write_text(content, encoding="utf-8")
 
             payload = intent_test_source_preflight_payload(run_dir)
@@ -862,8 +895,14 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             (validation_repo / "app.py").write_text("def value(): return 7\n", encoding="utf-8")
+            _establish_immutable_validation_baseline(
+                run_dir,
+                validation_repo,
+                ["app.py"],
+            )
             generated_path = validation_repo / "generated_test.py"
             generated_path.write_text(
                 "import unittest\n"
@@ -1013,11 +1052,13 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             source_repo = root / "repo"
             source_repo.mkdir(parents=True, exist_ok=True)
             original = b"def value(): return 7\n"
             (source_repo / "app.py").write_bytes(original)
+            ensure_immutable_inventory_baseline(source_repo, run_dir)
             validation_app = validation_repo / "app.py"
             validation_app.write_bytes(original)
             generated_path = validation_repo / "generated_test.py"
@@ -1134,6 +1175,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             workspace = validation_repo / "packages" / "web"
             workspace.mkdir(parents=True)
@@ -1143,6 +1185,11 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 "import assert from 'node:assert/strict';\n"
                 "test('real node process', () => assert.equal(2 + 3, 5));\n",
                 encoding="utf-8",
+            )
+            _establish_immutable_validation_baseline(
+                run_dir,
+                validation_repo,
+                ["packages/web/package.json"],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1176,6 +1223,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             workspace = validation_repo / "services" / "math"
             workspace.mkdir(parents=True)
@@ -1191,6 +1239,11 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 "    if Value() != 7 { t.Fatalf(\"unexpected value: %d\", Value()) }\n"
                 "}\n",
                 encoding="utf-8",
+            )
+            _establish_immutable_validation_baseline(
+                run_dir,
+                validation_repo,
+                ["services/math/go.mod", "services/math/value.go"],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1230,6 +1283,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             workspace = validation_repo / "services" / "dotnet"
             workspace.mkdir(parents=True)
@@ -1247,6 +1301,11 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 "if (2 + 3 != 5) Environment.Exit(1);\n"
                 'Console.WriteLine("agentic intent check passed");\n',
                 encoding="utf-8",
+            )
+            _establish_immutable_validation_baseline(
+                run_dir,
+                validation_repo,
+                ["services/dotnet/IntentTest.csproj"],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
@@ -1292,6 +1351,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         }
                     ],
                 },
+                defer_inventory_baseline=True,
             )
             workspace = validation_repo / "crates" / "math"
             (workspace / "src").mkdir(parents=True)
@@ -1308,6 +1368,11 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 "    fn behavior() { assert_eq!(value(), 7); }\n"
                 "}\n",
                 encoding="utf-8",
+            )
+            _establish_immutable_validation_baseline(
+                run_dir,
+                validation_repo,
+                ["crates/math/Cargo.toml"],
             )
 
             with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):

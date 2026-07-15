@@ -234,6 +234,97 @@ class BundleResourceLimitRegressionTest(unittest.TestCase):
             ],
         )
 
+    def test_multiline_file_with_one_oversized_line_is_split_by_rendered_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            source_path = repo_dir / "src" / "mixed_lines.py"
+            source_path.parent.mkdir(parents=True)
+            oversized_line = "x" * (MAX_BUNDLE_ESTIMATED_TOKENS * 2)
+            source_path.write_text(
+                f"prefix = True\n{oversized_line}\nsuffix = True\n",
+                encoding="utf-8",
+            )
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [
+                        {
+                            "path": "src/mixed_lines.py",
+                            "is_source_like": True,
+                            "is_binary": False,
+                            "is_generated_candidate": False,
+                            "risk_hints": [],
+                            "estimated_tokens": (
+                                MAX_BUNDLE_ESTIMATED_TOKENS * 4 + 1
+                            ),
+                            "line_count": 3,
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": "src/mixed_lines.py", "tier": "P0"}],
+                },
+            )
+
+            plan = bundle_plan_payload(run_dir)
+            write_json(run_dir / "bundle-plan.json", plan)
+            pack_bundles(repo_dir, run_dir)
+            packed_payloads = [
+                (
+                    bundle,
+                    (
+                        run_dir
+                        / "bundles"
+                        / f"{bundle['bundle_id']}.md"
+                    ).read_text(encoding="utf-8"),
+                )
+                for bundle in plan["bundles"]
+            ]
+
+        self.assertTrue(
+            all(
+                max(len(payload), len(payload.encode("utf-8")))
+                <= MAX_BUNDLE_ESTIMATED_TOKENS
+                for _bundle, payload in packed_payloads
+            )
+        )
+        ranges = [
+            item
+            for bundle, _payload in packed_payloads
+            for item in bundle.get("file_ranges", [])
+        ]
+        self.assertTrue(
+            any(item["start_line"] == item["end_line"] == 1 for item in ranges)
+        )
+        self.assertTrue(
+            any(item["start_line"] == item["end_line"] == 3 for item in ranges)
+        )
+        line_two_ranges = sorted(
+            (
+                int(item["start_char"]),
+                int(item["end_char"]),
+            )
+            for item in ranges
+            if item["start_line"] == item["end_line"] == 2
+            and "start_char" in item
+            and "end_char" in item
+        )
+        self.assertGreater(len(line_two_ranges), 1)
+        self.assertEqual(line_two_ranges[0][0], 0)
+        self.assertEqual(line_two_ranges[-1][1], len(oversized_line))
+        self.assertTrue(
+            all(
+                left[1] == right[0]
+                for left, right in zip(line_two_ranges, line_two_ranges[1:])
+            )
+        )
+
 
 class IntentSubprocessResourceRegressionTest(unittest.TestCase):
     def test_large_intent_output_is_streamed_without_parent_memory_growth(self) -> None:
@@ -608,6 +699,44 @@ class IntentPreflightBindingRegressionTest(unittest.TestCase):
                     "preflight_candidate_mismatch",
                     drift_case,
                 )
+
+    def test_execution_rejects_symlinked_preflight_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            declared_path = ".codex-review/generated-tests/test_approved.py"
+            marker = root / "symlinked-preflight.executed"
+            validation_script = root / "validation-repo" / declared_path
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                source=_generated_python_source(
+                    path=declared_path,
+                    command=[sys.executable, str(validation_script)],
+                ),
+            )
+            _write_canonical_generated_test(
+                run_dir,
+                "test_approved.py",
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
+            )
+            approved = intent_test_source_preflight_payload(run_dir)
+            approved_target = root / "approved-preflight.json"
+            write_json(approved_target, approved)
+            approved_path = run_dir / "intent" / "intent-test-preflight.json"
+            try:
+                approved_path.symlink_to(approved_target)
+            except OSError as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                result = run_intent_tests(run_dir)
+
+        self.assertFalse(marker.exists())
+        self.assertEqual(result["test_runs"][0]["status"], "skipped")
+        self.assertEqual(
+            result["test_runs"][0]["preflight"]["reason_code"],
+            "preflight_candidate_mismatch",
+        )
 
 
 if __name__ == "__main__":

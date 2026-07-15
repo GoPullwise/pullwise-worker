@@ -67,6 +67,12 @@ class CodexRuntimeResources:
         with self.threads_lock:
             self.threads[thread_id] = thread
 
+    def release_thread(self, thread_id: str) -> None:
+        if not thread_id:
+            return
+        with self.threads_lock:
+            self.threads.pop(thread_id, None)
+
     def clear(self) -> None:
         with self.events_lock:
             self._generation += 1
