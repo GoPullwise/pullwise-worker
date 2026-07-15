@@ -6751,6 +6751,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse(
             quota_refresh_error_is_exhaustion("codex account authentication required to read rate limits")
         )
+        self.assertFalse(
+            quota_refresh_error_is_exhaustion(
+                "JSON-RPC error -32603: failed to fetch codex rate limits: error sending request for url"
+            )
+        )
         self.assertTrue(quota_refresh_error_is_exhaustion("rate_limit_reached"))
 
 
@@ -6981,7 +6986,6 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             repo_dir = Path(tmp_dir) / "repo"
             run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
             run_dir.mkdir(parents=True)
-            write_review_instruction_tree(repo_dir)
 
             ReviewWorkerV1.run_mechanical_phase(
                 SimpleNamespace(),
@@ -6992,6 +6996,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
             validate_phase_outputs(run_dir, "bootstrap_helper_scripts")
 
+            self.assertTrue((repo_dir / ".codex-review" / "AGENTS.review.md").is_file())
             summary = json.loads((run_dir / "bootstrap_helper_scripts.summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["materialized_tools"], len(REQUIRED_TOOL_FILES))
             self.assertEqual(summary["materialized_schemas"], len(REQUIRED_SCHEMA_FILES))
