@@ -35,6 +35,7 @@ from pullwise_worker._main_part_08_lifecycle_cleanup import worker_wrapper_scrip
 from pullwise_worker.review_worker_v1 import (
     DEBUG_BUNDLE_ARTIFACT_ID,
     INTENT_TEST_CLASSIFICATIONS,
+    MECHANICAL_PHASES,
     PIPELINE_PHASES,
     REQUIRED_COMPLETED_ARTIFACTS,
     REQUIRED_PROMPT_FILES,
@@ -105,6 +106,7 @@ from pullwise_worker.review_worker_v1 import (
     validate_reviewer_outputs,
     validate_result_manifest_matches_uploaded_snapshot,
     write_debug_bundle,
+    write_review_instruction_tree,
     write_json,
     _intent_generated_python_compile_error,
     _intent_sandbox_setup_failed,
@@ -6971,6 +6973,30 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(summary["status"], "completed")
             self.assertEqual(summary["required_tools"], len(REQUIRED_TOOL_FILES))
             self.assertEqual(summary["materialized_tools"], 1)
+
+    def test_bootstrap_helper_scripts_is_mechanical_and_materializes_its_summary_without_codex(self) -> None:
+        self.assertNotIn("bootstrap_helper_scripts", SEMANTIC_PHASES)
+        self.assertIn("bootstrap_helper_scripts", MECHANICAL_PHASES)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            run_dir = repo_dir / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_review_instruction_tree(repo_dir)
+
+            ReviewWorkerV1.run_mechanical_phase(
+                SimpleNamespace(),
+                repo_dir,
+                run_dir,
+                {},
+                "bootstrap_helper_scripts",
+            )
+            validate_phase_outputs(run_dir, "bootstrap_helper_scripts")
+
+            summary = json.loads((run_dir / "bootstrap_helper_scripts.summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["materialized_tools"], len(REQUIRED_TOOL_FILES))
+            self.assertEqual(summary["materialized_schemas"], len(REQUIRED_SCHEMA_FILES))
+            self.assertEqual(summary["materialized_prompts"], len(REQUIRED_PROMPT_FILES))
 
     def test_bootstrap_helper_scripts_fallback_repairs_wrong_schema_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
