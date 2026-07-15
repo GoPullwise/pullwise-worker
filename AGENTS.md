@@ -296,6 +296,7 @@ Review pipeline rules:
 - Optional v1 artifact catalog entries must be preserved when present,
   including `raw_reviewer_output`, `verified_reviewer_output`,
   `intent_test_output`, and the intent planning/source/result artifacts.
+- Materialize `location-verification.json` as an optional `validation_result` artifact with its own stable artifact id. Any artifact name declared by `report.agent.json.artifacts`, `raw_artifact_refs`, or finding `validation_sources` becomes conditionally required: it must be a regular top-level run output and an exact artifact-manifest name before completed-run QA can pass.
 - Artifact manifest/upload entries must include stable v1 metadata:
   `artifact_id`, supported `kind`, `name`, `media_type`, `schema_id`,
   `schema_version = v1`, `encoding = utf-8`, `compression = none`, `required`,

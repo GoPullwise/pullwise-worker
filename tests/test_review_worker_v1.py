@@ -92,6 +92,7 @@ from pullwise_worker.review_worker_v1 import (
     pipeline_diagnostics_payload,
     prepare_validation_workspace,
     qa_gate_payload,
+    read_json,
     repair_agent_report_artifact,
     repair_intent_test_results_artifact,
     repair_intent_test_source_artifact,
@@ -5377,6 +5378,75 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertTrue(any("classification is invalid" in error for error in qa["errors"]))
         self.assertTrue(any("report.md sha256 mismatch" in error for error in qa["errors"]))
 
+    def test_qa_gate_rejects_report_artifact_reference_missing_from_run_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            report = read_json(run_dir / "report.agent.json", {})
+            report["artifacts"] = {"location_verification": "location-verification.json"}
+            write_json(run_dir / "report.agent.json", report)
+
+            qa = qa_gate_payload(repo, run_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertIn(
+            "report.agent.json artifact reference is missing from run outputs: location-verification.json",
+            qa["errors"],
+        )
+
+    def test_qa_gate_rejects_finding_artifact_reference_missing_from_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_basic_qa_inputs(repo, run_dir)
+            finding = finding_payload()
+            finding["validator_status"] = "confirmed"
+            finding["validation_sources"] = [
+                "validated-findings.json",
+                "clusters.json",
+                "location-verification.json",
+            ]
+            report = read_json(run_dir / "report.agent.json", {})
+            report["findings"] = [finding]
+            write_json(run_dir / "report.agent.json", report)
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(validation_entry()),
+            )
+            write_json(
+                run_dir / "clusters.json",
+                {"schema_version": "cluster-output/v1", "clusters": []},
+            )
+            write_json(
+                run_dir / "location-verification.json",
+                {
+                    "schema_version": "location-verification/v1",
+                    "run_id": "run_1",
+                    "items": [],
+                    "summary": {"locations_total": 0, "valid_locations": 0, "invalid_locations": 0},
+                },
+            )
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest = read_json(artifact_dir / "artifact-manifest.json", {})
+            manifest["items"] = [
+                item
+                for item in manifest.get("items", [])
+                if item.get("name") != "location-verification.json"
+            ]
+            write_json(artifact_dir / "artifact-manifest.json", manifest)
+            write_json(run_dir / "artifact-manifest.json", manifest)
+
+            qa = qa_gate_payload(repo, run_dir, artifact_dir)
+
+        self.assertEqual(qa["status"], "fail")
+        self.assertIn(
+            "report.agent.json artifact reference is missing from artifact-manifest.json: location-verification.json",
+            qa["errors"],
+        )
+
     def test_qa_gate_rejects_duplicate_artifact_manifest_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir) / "repo"
@@ -7107,6 +7177,63 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 self.assertEqual(item["schema_version"], "v1")
                 self.assertEqual(item["encoding"], "utf-8")
                 self.assertEqual(item["compression"], "none")
+
+    def test_location_verification_is_registered_and_uploaded_as_optional_validation_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            write_completed_artifact_inputs(run_dir)
+            write_json(
+                run_dir / "location-verification.json",
+                {
+                    "schema_version": "location-verification/v1",
+                    "run_id": "run_1",
+                    "items": [],
+                    "summary": {"locations_total": 0, "valid_locations": 0, "invalid_locations": 0},
+                },
+            )
+            write_json(
+                run_dir / "validated-findings.json",
+                validation_payload(),
+            )
+            materialize_artifacts(run_dir, artifact_dir)
+            manifest = artifact_manifest_items(
+                read_json(artifact_dir / "artifact-manifest.json", {})
+            )
+            validation_items = [
+                entry for entry in manifest if entry.get("kind") == "validation_result"
+            ]
+            item = next(
+                entry
+                for entry in validation_items
+                if entry.get("name") == "location-verification.json"
+            )
+            upload_calls = []
+
+            class Client:
+                def artifact(self, job_id: str, artifact_id: str, payload: dict) -> dict:
+                    upload_calls.append((job_id, artifact_id, payload))
+                    return {"accepted": True}
+
+            upload_artifacts(Client(), "job_1", "wk_1-1", artifact_dir)
+
+        self.assertEqual(item["artifact_id"], "art_location_verification")
+        self.assertEqual(item["kind"], "validation_result")
+        self.assertEqual(item["schema_id"], "location-verification")
+        self.assertIs(item["required"], False)
+        self.assertEqual(
+            {entry["name"] for entry in validation_items},
+            {"location-verification.json", "validated-findings.json"},
+        )
+        self.assertEqual(len({entry["artifact_id"] for entry in validation_items}), 2)
+        self.assertTrue(all(entry["required"] is False for entry in validation_items))
+        location_upload = next(
+            payload
+            for _job_id, artifact_id, payload in upload_calls
+            if artifact_id == "art_location_verification"
+        )
+        self.assertEqual(location_upload["artifact"], item)
 
     def test_terminal_artifacts_do_not_require_completed_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

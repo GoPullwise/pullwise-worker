@@ -391,6 +391,7 @@ LOG_ARTIFACT_NAMES = {"codex-events.jsonl", "worker.log.jsonl", "progress.log.js
 FINAL_REFRESH_ARTIFACT_NAMES = LOG_ARTIFACT_NAMES | {"debug-bundle.zip"}
 DEBUG_BUNDLE_NAME = "debug-bundle.zip"
 DEBUG_BUNDLE_ARTIFACT_ID = "art_debug_bundle"
+LOCATION_VERIFICATION_ARTIFACT_ID = "art_location_verification"
 UPLOADED_ARTIFACT_MANIFEST_NAME = "uploaded-artifact-manifest.json"
 MAX_BUNDLE_ESTIMATED_TOKENS = 60000
 PROVIDER_ENV_PASSTHROUGH_KEYS = (
@@ -11709,6 +11710,123 @@ def validate_artifact_manifest_for_qa(run_dir: Path, artifact_dir: Path, errors:
             errors.append(f"artifact {path.name} storage must reference server_artifact")
 
 
+def _report_artifact_reference_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, list):
+        references: list[str] = []
+        for item in value:
+            references.extend(_report_artifact_reference_strings(item))
+        return references
+    if isinstance(value, dict):
+        references = []
+        for item in value.values():
+            references.extend(_report_artifact_reference_strings(item))
+        return references
+    return []
+
+
+def _looks_like_report_artifact_reference(value: str) -> bool:
+    lowered = value.strip().lower()
+    return lowered.endswith((".json", ".jsonl", ".log", ".md", ".zip"))
+
+
+def report_artifact_references(report: object) -> set[str]:
+    if not isinstance(report, dict):
+        return set()
+    references = set(_report_artifact_reference_strings(report.get("artifacts")))
+    references.update(_report_artifact_reference_strings(report.get("raw_artifact_refs")))
+    non_artifact_validation_keys = {
+        "related_code",
+        "relatedcode",
+        "source",
+        "sources",
+        "path",
+        "paths",
+        "location",
+        "locations",
+    }
+
+    def validation_source_references(value: object) -> set[str]:
+        if isinstance(value, list):
+            return {
+                reference
+                for reference in _report_artifact_reference_strings(value)
+                if _looks_like_report_artifact_reference(reference)
+            }
+        if not isinstance(value, dict):
+            return set()
+        found: set[str] = set()
+        for key, item in value.items():
+            normalized_key = str(key).strip().lower().replace("-", "_")
+            if normalized_key in non_artifact_validation_keys:
+                continue
+            if isinstance(item, dict):
+                found.update(validation_source_references(item))
+                continue
+            for reference in _report_artifact_reference_strings(item):
+                if _looks_like_report_artifact_reference(reference):
+                    found.add(reference)
+        return found
+
+    for collection_name in ("findings", "appendix_findings", "disproven_findings"):
+        collection = report.get(collection_name)
+        if not isinstance(collection, list):
+            continue
+        for finding in collection:
+            if isinstance(finding, dict):
+                references.update(validation_source_references(finding.get("validation_sources")))
+    return references
+
+
+def validate_report_artifact_references_for_qa(
+    report: object,
+    run_dir: Path,
+    artifact_dir: Path | None,
+    errors: list[str],
+) -> None:
+    references = report_artifact_references(report)
+    if not references:
+        return
+    manifest_names: set[str] | None = None
+    if artifact_dir is not None:
+        manifest_payload = read_json(artifact_dir / "artifact-manifest.json", {})
+        manifest = manifest_payload.get("items") if isinstance(manifest_payload, dict) else None
+        if isinstance(manifest, list):
+            manifest_names = {
+                str(item.get("name") or "").strip()
+                for item in manifest
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            }
+    for reference in sorted(references):
+        normalized = reference.replace("\\", "/")
+        reference_path = PurePosixPath(normalized)
+        if (
+            normalized != reference
+            or reference_path.is_absolute()
+            or len(reference_path.parts) != 1
+            or reference_path.name in {"", ".", ".."}
+        ):
+            errors.append(
+                "report.agent.json artifact reference must name a top-level output: "
+                + reference
+            )
+            continue
+        run_output = run_dir / reference
+        if run_output.is_symlink() or not run_output.is_file():
+            errors.append(
+                "report.agent.json artifact reference is missing from run outputs: "
+                + reference
+            )
+            continue
+        if manifest_names is not None and reference not in manifest_names:
+            errors.append(
+                "report.agent.json artifact reference is missing from artifact-manifest.json: "
+                + reference
+            )
+
+
 MAIN_FINDING_VALIDATION_STATUSES = {"confirmed", "plausible", "validated"}
 WEAK_FINDING_VALIDATION_STATUSES = {"weak", "suppressed", "unresolved", "appendix"}
 DISPROVEN_FINDING_VALIDATION_STATUSES = {"disproven", "rejected", "false_positive", "invalid"}
@@ -12028,6 +12146,7 @@ def qa_gate_payload(
     report = read_json(run_dir / "report.agent.json", {})
     if not isinstance(report, dict) or report.get("schema_id") != "codex-full-repo-review":
         errors.append("report.agent.json is not a codex-full-repo-review object")
+    validate_report_artifact_references_for_qa(report, run_dir, artifact_dir, errors)
     if expected_output_language:
         actual_output_language = str(report.get("output_language") or "").strip()
         if actual_output_language != expected_output_language:
@@ -14746,6 +14865,7 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         ("repo-map.json", "repo_map", "application/json", "repo-map"),
         ("risk-routing.json", "risk_routing", "application/json", "risk-routing"),
         ("bundle-plan.json", "bundle_plan", "application/json", "bundle-plan"),
+        ("location-verification.json", "validation_result", "application/json", "location-verification"),
         ("clusters.json", "cluster_result", "application/json", "cluster-output"),
         ("validated-findings.json", "validation_result", "application/json", "validation-output"),
         ("intent/intent-map.json", "intent_map", "application/json", "intent-map"),
@@ -14764,7 +14884,20 @@ def materialize_artifacts(run_dir: Path, artifact_dir: Path) -> None:
         if not src.exists() and not src.is_symlink():
             continue
         dest = _copy_run_artifact_source(run_dir, rel, artifact_dir, destination_name=src.name)
-        manifest.append(artifact_item(dest, kind, media_type, schema_id, False))
+        manifest.append(
+            artifact_item(
+                dest,
+                kind,
+                media_type,
+                schema_id,
+                False,
+                artifact_id=(
+                    LOCATION_VERIFICATION_ARTIFACT_ID
+                    if rel == "location-verification.json"
+                    else None
+                ),
+            )
+        )
     for source_dir, name_prefix, artifact_prefix, kind in (
         (run_dir / "raw-reviewers", "raw-reviewer", "art_raw_reviewer_output", "raw_reviewer_output"),
         (run_dir / "verified-reviewers", "verified-reviewer", "art_verified_reviewer_output", "verified_reviewer_output"),
