@@ -2581,6 +2581,7 @@ class ReviewWorkerV1:
         self._machine_metrics_collected_at = 0.0
         self._heartbeat_lock = threading.RLock()
         self._progress_lock = threading.RLock()
+        self._event_send_lock = threading.RLock()
         self._last_workspace_cleanup_monotonic = 0.0
         self._persisted_unfinished_workspace_names: set[str] = set()
 
@@ -3093,48 +3094,49 @@ class ReviewWorkerV1:
         message: str = "",
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        with self._progress_lock:
-            active.last_event_sequence += 1
-            if progress is not None:
-                active.overall_percent = round(float(progress), 2)
-            active.current_phase = phase
-            active.current_phase_status = status
-            active.current_phase_percent = round(float(current_phase_percent), 2)
-            active.message = message
-            active.apply_progress_data(data)
-            if active.current_run_estimator and (
-                event_type in {"run_completed", "run_failed", "run_cancelled", "run_partial_completed"}
-            ):
-                active.current_run_estimator.mark_terminal()
-            event = {
-                "protocol_version": PROTOCOL_VERSION,
-                "run_id": active.run_id,
-                "worker_id": str(self.config.worker_id),
-                "sequence": active.last_event_sequence,
-                "timestamp": iso_time(time.time()),
-                "event_type": event_type,
-                "phase": phase,
-                "severity": "info" if status not in {"failed", "cancelled"} else "error",
-                "message": message,
-                "progress": {
-                    "overall_percent": active.overall_percent,
-                    "current_phase_percent": active.current_phase_percent,
-                    "status": status,
-                    "steps": active.progress_steps(),
-                },
-                "data": data or {},
-            }
-            estimate = active.current_run_estimator.snapshot() if active.current_run_estimator else None
-            if isinstance(estimate, dict):
-                event["progress"]["estimate"] = estimate
-            append_jsonl(run_dir / "progress.log.jsonl", event)
-            snapshot = active.progress_snapshot()
-            write_json(run_dir / "progress.json", snapshot)
-            run_state = read_json(run_dir / "run-state.json", {})
-            if not isinstance(run_state, dict):
-                run_state = {}
-            run_state.update({"active_job": active.heartbeat_payload(), "progress": snapshot})
-            write_json(run_dir / "run-state.json", run_state)
+        with self._event_send_lock:
+            with self._progress_lock:
+                active.last_event_sequence += 1
+                if progress is not None:
+                    active.overall_percent = round(float(progress), 2)
+                active.current_phase = phase
+                active.current_phase_status = status
+                active.current_phase_percent = round(float(current_phase_percent), 2)
+                active.message = message
+                active.apply_progress_data(data)
+                if active.current_run_estimator and (
+                    event_type in {"run_completed", "run_failed", "run_cancelled", "run_partial_completed"}
+                ):
+                    active.current_run_estimator.mark_terminal()
+                event = {
+                    "protocol_version": PROTOCOL_VERSION,
+                    "run_id": active.run_id,
+                    "worker_id": str(self.config.worker_id),
+                    "sequence": active.last_event_sequence,
+                    "timestamp": iso_time(time.time()),
+                    "event_type": event_type,
+                    "phase": phase,
+                    "severity": "info" if status not in {"failed", "cancelled"} else "error",
+                    "message": message,
+                    "progress": {
+                        "overall_percent": active.overall_percent,
+                        "current_phase_percent": active.current_phase_percent,
+                        "status": status,
+                        "steps": active.progress_steps(),
+                    },
+                    "data": data or {},
+                }
+                estimate = active.current_run_estimator.snapshot() if active.current_run_estimator else None
+                if isinstance(estimate, dict):
+                    event["progress"]["estimate"] = estimate
+                append_jsonl(run_dir / "progress.log.jsonl", event)
+                snapshot = active.progress_snapshot()
+                write_json(run_dir / "progress.json", snapshot)
+                run_state = read_json(run_dir / "run-state.json", {})
+                if not isinstance(run_state, dict):
+                    run_state = {}
+                run_state.update({"active_job": active.heartbeat_payload(), "progress": snapshot})
+                write_json(run_dir / "run-state.json", run_state)
             if hasattr(self.client, "event"):
                 try:
                     self.client.event(active.run_id, event)
@@ -3155,22 +3157,24 @@ class ReviewWorkerV1:
             active.state = "cancelling"
             active.message = "Cancellation requested."
             self.persist_active_run_marker(active)
-            if active.run_dir is not None:
-                self.emit_cancel_requested(active, active.run_dir)
-            return True
+            run_dir = active.run_dir
+        if run_dir is not None:
+            self.emit_cancel_requested(active, run_dir)
+        return True
 
     def emit_cancel_requested(self, active: ActiveJob, run_dir: Path) -> None:
-        with self._progress_lock:
-            if active.cancel_requested_reported:
-                return
-            reason = active.cancel_reason or "server_cancelled"
-            active.cancel_requested = True
-            active.state = "cancelling"
-            active.cancel_requested_reported = True
-            append_jsonl(
-                run_dir / "worker.log.jsonl",
-                {"event": "run_cancel_requested", "reason": reason, "time": iso_time(time.time())},
-            )
+        with self._event_send_lock:
+            with self._progress_lock:
+                if active.cancel_requested_reported:
+                    return
+                reason = active.cancel_reason or "server_cancelled"
+                active.cancel_requested = True
+                active.state = "cancelling"
+                active.cancel_requested_reported = True
+                append_jsonl(
+                    run_dir / "worker.log.jsonl",
+                    {"event": "run_cancel_requested", "reason": reason, "time": iso_time(time.time())},
+                )
             self.emit_event(
                 active,
                 run_dir,
@@ -3182,25 +3186,27 @@ class ReviewWorkerV1:
                 message="Cancellation requested.",
                 data={"reason": reason, "cancel_requested": True},
             )
-            self.persist_active_run_marker(active)
+            with self._progress_lock:
+                self.persist_active_run_marker(active)
 
     def start_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int) -> None:
-        with self._progress_lock:
-            if active.cancel_requested:
-                return
-            estimator = active.current_run_estimator
-            estimate_unit_id = phase_estimate_unit_id(phase)
-            if (
-                estimator is not None
-                and estimator.has_work_unit(estimate_unit_id)
-                and estimator.work_unit_state(estimate_unit_id) in {"pending", "retrying"}
-            ):
-                estimator.start_work_unit(estimate_unit_id)
-            active.state = "finishing" if phase in {"upload_artifacts", "submit_result_envelope", "cleanup_active_job"} else "busy"
-            append_jsonl(
-                run_dir / "worker.log.jsonl",
-                {"event": "phase_started", "phase": phase, "progress": progress, "time": iso_time(time.time())},
-            )
+        with self._event_send_lock:
+            with self._progress_lock:
+                if active.cancel_requested:
+                    return
+                estimator = active.current_run_estimator
+                estimate_unit_id = phase_estimate_unit_id(phase)
+                if (
+                    estimator is not None
+                    and estimator.has_work_unit(estimate_unit_id)
+                    and estimator.work_unit_state(estimate_unit_id) in {"pending", "retrying"}
+                ):
+                    estimator.start_work_unit(estimate_unit_id)
+                active.state = "finishing" if phase in {"upload_artifacts", "submit_result_envelope", "cleanup_active_job"} else "busy"
+                append_jsonl(
+                    run_dir / "worker.log.jsonl",
+                    {"event": "phase_started", "phase": phase, "progress": progress, "time": iso_time(time.time())},
+                )
             self.emit_event(
                 active,
                 run_dir,
@@ -3211,7 +3217,8 @@ class ReviewWorkerV1:
                 current_phase_percent=0.0,
                 message=phase.replace("_", " "),
             )
-            self.persist_active_run_marker(active)
+            with self._progress_lock:
+                self.persist_active_run_marker(active)
 
     def complete_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int, *, data: dict[str, Any] | None = None) -> None:
         estimator = active.current_run_estimator
@@ -3287,32 +3294,33 @@ class ReviewWorkerV1:
         )
 
     def fail_phase(self, active: ActiveJob, run_dir: Path, phase: str, error: object) -> None:
-        with self._progress_lock:
-            estimator = active.current_run_estimator
-            estimate_unit_id = phase_estimate_unit_id(phase)
-            if estimator is not None and estimator.has_work_unit(estimate_unit_id):
-                estimator.finish_work_unit(estimate_unit_id, state="failed")
-            failure = failure_payload_for_error(error, status="failed", phase=phase)
-            failure_record = {
-                "event": "phase_failed",
-                "phase": phase,
-                "error": str(error),
-                "time": iso_time(time.time()),
-                "failure_category": failure.get("category"),
-                "failure_action": failure.get("failure_action"),
-            }
-            append_jsonl(run_dir / "worker.log.jsonl", failure_record)
-            run_state = read_json(run_dir / "run-state.json", {})
-            if not isinstance(run_state, dict):
-                run_state = {}
-            run_state["failure"] = {
-                "phase": phase,
-                "message": str(error),
-                "category": failure.get("category"),
-                "failure_action": failure.get("failure_action"),
-                "updated_at": iso_time(time.time()),
-            }
-            write_json(run_dir / "run-state.json", run_state)
+        with self._event_send_lock:
+            with self._progress_lock:
+                estimator = active.current_run_estimator
+                estimate_unit_id = phase_estimate_unit_id(phase)
+                if estimator is not None and estimator.has_work_unit(estimate_unit_id):
+                    estimator.finish_work_unit(estimate_unit_id, state="failed")
+                failure = failure_payload_for_error(error, status="failed", phase=phase)
+                failure_record = {
+                    "event": "phase_failed",
+                    "phase": phase,
+                    "error": str(error),
+                    "time": iso_time(time.time()),
+                    "failure_category": failure.get("category"),
+                    "failure_action": failure.get("failure_action"),
+                }
+                append_jsonl(run_dir / "worker.log.jsonl", failure_record)
+                run_state = read_json(run_dir / "run-state.json", {})
+                if not isinstance(run_state, dict):
+                    run_state = {}
+                run_state["failure"] = {
+                    "phase": phase,
+                    "message": str(error),
+                    "category": failure.get("category"),
+                    "failure_action": failure.get("failure_action"),
+                    "updated_at": iso_time(time.time()),
+                }
+                write_json(run_dir / "run-state.json", run_state)
             self.emit_event(
                 active,
                 run_dir,

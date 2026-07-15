@@ -359,6 +359,52 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
 
         self.assertEqual(metrics.duration_ms, 321)
 
+    def test_turn_completion_ignores_completed_notification_for_another_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            requested_turns: list[str] = []
+
+            class Client:
+                def turn_start(
+                    self,
+                    _thread_id: str,
+                    _items: list,
+                    params: dict | None = None,
+                ) -> SimpleNamespace:
+                    del params
+                    return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+                def next_turn_notification(self, turn_id: str) -> SimpleNamespace:
+                    requested_turns.append(turn_id)
+                    reported_turn_id = "turn-other" if len(requested_turns) == 1 else turn_id
+                    return SimpleNamespace(
+                        method="turn/completed",
+                        payload={
+                            "turn": {
+                                "id": reported_turn_id,
+                                "status": "completed",
+                                "error": None,
+                            },
+                        },
+                    )
+
+                def unregister_turn_notifications(self, _turn_id: str) -> None:
+                    return None
+
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+            server._client = Client()
+
+            server.run_turn(
+                thread_id="thread-1",
+                repo_dir=workspace,
+                prompt="review",
+                effort="medium",
+                read_only=True,
+                timeout_seconds=2,
+            )
+
+        self.assertEqual(requested_turns, ["turn-1", "turn-1"])
+
     def test_turn_notification_stream_preserves_empty_eof_error_with_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)

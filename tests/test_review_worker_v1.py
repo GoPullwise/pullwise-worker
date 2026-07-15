@@ -633,6 +633,160 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(snapshot["message"], "second")
         self.assertEqual([event["sequence"] for event in events], [1, 2])
 
+    def test_blocked_phase_event_post_does_not_block_busy_heartbeat_snapshot(self) -> None:
+        event_post_started = threading.Event()
+        release_event_post = threading.Event()
+        heartbeat_received = threading.Event()
+        heartbeat_payloads: list[dict] = []
+
+        class Client:
+            def event(self, _run_id: str, _event: dict) -> dict:
+                event_post_started.set()
+                release_event_post.wait(2)
+                return {}
+
+            def heartbeat(self, **payload: dict) -> dict:
+                heartbeat_payloads.append(payload)
+                heartbeat_received.set()
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            active = ActiveJob(
+                job_id="job_1",
+                run_id="run_1",
+                lease_id="lease_1",
+                attempt_id="wk_1-1",
+                run_dir=run_dir,
+            )
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=tmp_dir),
+                client=Client(),
+            )
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            worker.state.set_active(active)
+            phase_thread = threading.Thread(
+                target=worker.start_phase,
+                args=(active, run_dir, "repo_map", 33),
+                daemon=True,
+            )
+            heartbeat_thread = threading.Thread(target=worker.heartbeat, daemon=True)
+
+            phase_thread.start()
+            self.assertTrue(event_post_started.wait(1))
+            try:
+                heartbeat_thread.start()
+                heartbeat_was_timely = heartbeat_received.wait(0.25)
+            finally:
+                release_event_post.set()
+                phase_thread.join(2)
+                heartbeat_thread.join(2)
+
+        self.assertTrue(heartbeat_was_timely)
+        self.assertEqual(heartbeat_payloads[0]["status"], "busy")
+        self.assertEqual(heartbeat_payloads[0]["progress"]["current_phase"], "repo_map")
+        self.assertEqual(heartbeat_payloads[0]["progress"]["last_event_sequence"], 1)
+
+    def test_blocked_cancel_event_post_does_not_block_cancelling_heartbeat_snapshot(self) -> None:
+        event_post_started = threading.Event()
+        release_event_post = threading.Event()
+        heartbeat_received = threading.Event()
+        heartbeat_payloads: list[dict] = []
+
+        class Client:
+            def event(self, _run_id: str, _event: dict) -> dict:
+                event_post_started.set()
+                release_event_post.wait(2)
+                return {}
+
+            def heartbeat(self, **payload: dict) -> dict:
+                heartbeat_payloads.append(payload)
+                heartbeat_received.set()
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            active = ActiveJob(
+                job_id="job_1",
+                run_id="run_1",
+                lease_id="lease_1",
+                attempt_id="wk_1-1",
+                state="busy",
+                current_phase="reviewer_fanout",
+                run_dir=run_dir,
+            )
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=tmp_dir),
+                client=Client(),
+            )
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            worker.state.set_active(active)
+            cancel_thread = threading.Thread(
+                target=worker.request_cancel,
+                args=(active,),
+                kwargs={"reason": "user_requested"},
+                daemon=True,
+            )
+            heartbeat_thread = threading.Thread(target=worker.heartbeat, daemon=True)
+
+            cancel_thread.start()
+            self.assertTrue(event_post_started.wait(1))
+            try:
+                heartbeat_thread.start()
+                heartbeat_was_timely = heartbeat_received.wait(0.25)
+            finally:
+                release_event_post.set()
+                cancel_thread.join(2)
+                heartbeat_thread.join(2)
+
+        self.assertTrue(heartbeat_was_timely)
+        self.assertEqual(heartbeat_payloads[0]["status"], "cancelling")
+        self.assertEqual(heartbeat_payloads[0]["progress"]["current_phase"], "reviewer_fanout")
+        self.assertTrue(active.cancel_requested)
+
+    def test_concurrent_progress_event_posts_preserve_sequence_order(self) -> None:
+        first_post_started = threading.Event()
+        release_first_post = threading.Event()
+        posted_sequences: list[int] = []
+
+        class Client:
+            def event(self, _run_id: str, event: dict) -> dict:
+                posted_sequences.append(event["sequence"])
+                if event["sequence"] == 1:
+                    first_post_started.set()
+                    release_first_post.wait(2)
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            active = ActiveJob(job_id="job_1", run_id="run_1", lease_id="lease_1", attempt_id="wk_1-1")
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=tmp_dir),
+                client=Client(),
+            )
+            first = threading.Thread(
+                target=worker.emit_event,
+                args=(active, run_dir, "progress_updated", "repo_map"),
+                daemon=True,
+            )
+            second = threading.Thread(
+                target=worker.emit_event,
+                args=(active, run_dir, "progress_updated", "risk_routing"),
+                daemon=True,
+            )
+
+            first.start()
+            self.assertTrue(first_post_started.wait(1))
+            second.start()
+            try:
+                self.assertEqual(posted_sequences, [1])
+            finally:
+                release_first_post.set()
+                first.join(2)
+                second.join(2)
+
+        self.assertEqual(posted_sequences, [1, 2])
+
     def test_codex_sdk_turn_returns_completed_duration_metric(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
