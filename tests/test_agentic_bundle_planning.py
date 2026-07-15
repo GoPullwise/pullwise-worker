@@ -75,6 +75,12 @@ class AgenticBundlePlanningTest(unittest.TestCase):
         self.assertIn("bundle-grouping.json", prompt)
         self.assertIn("bundle-grouping/v1", prompt)
         self.assertIn("exactly once", prompt)
+        self.assertIn("max_bundles", prompt)
+        self.assertIn("max_reviewer_assignments", prompt)
+        self.assertIn("P0=3", prompt)
+        self.assertIn("P1=2", prompt)
+        self.assertIn("P2=1", prompt)
+        self.assertIn("Worker will not merge", prompt)
         self.assertIn("Do not assign reviewers", prompt)
 
     def test_production_module_has_no_mechanical_bundle_planner(self) -> None:
@@ -108,8 +114,18 @@ class AgenticBundlePlanningTest(unittest.TestCase):
             planning_input["constraints"]["max_reviewer_assignments"],
             13,
         )
+        self.assertEqual(
+            planning_input["constraints"][
+                "reviewer_assignments_per_bundle_by_tier"
+            ],
+            {"P0": 3, "P1": 2, "P2": 1},
+        )
+        self.assertNotIn(
+            "worker_may_coalesce_same_tier_groups",
+            planning_input["constraints"],
+        )
 
-    def test_same_tier_semantic_groups_coalesce_without_losing_affinity(self) -> None:
+    def test_worker_preserves_agent_owned_semantic_bundle_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir, run_dir = self._run_dir(Path(tmp_dir))
             paths = ["src/users.py", "src/orders.py"]
@@ -157,15 +173,16 @@ class AgenticBundlePlanningTest(unittest.TestCase):
 
             plan = materialize_agent_bundle_plan(run_dir, _job())
 
-        self.assertEqual(len(plan["bundles"]), 1)
-        bundle = plan["bundles"][0]
-        self.assertEqual(bundle["paths"], paths)
-        self.assertEqual(bundle["semantic_group_ids"], ["users", "orders"])
-        self.assertCountEqual(
-            bundle["grouping_reasons"],
-            ["user lifecycle", "order lifecycle"],
+        self.assertEqual(len(plan["bundles"]), 2)
+        self.assertEqual(
+            [bundle["paths"] for bundle in plan["bundles"]],
+            [[paths[0]], [paths[1]]],
         )
-        self.assertEqual(plan["reviewer_assignment_count"], 2)
+        self.assertEqual(
+            [bundle["semantic_group_id"] for bundle in plan["bundles"]],
+            ["users", "orders"],
+        )
+        self.assertEqual(plan["reviewer_assignment_count"], 4)
 
     def test_post_split_bundle_and_assignment_caps_fail_without_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

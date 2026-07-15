@@ -5778,9 +5778,12 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
             "Write bundle-grouping.json using schema_version bundle-grouping/v1.",
             "Place every item from bundle-planning-input.json in exactly one group; do not omit or duplicate paths.",
             "Keep every group within one tier and copy each path's P0/P1/P2 tier exactly.",
-            "Minimize the number of groups while preserving semantic cohesion by feature, entrypoint, trust boundary, state flow, and implementation/test affinity.",
+            "Treat every output group as an agent-owned semantic bundle boundary: the Worker will not merge separate groups.",
+            "Honor constraints.max_bundles and constraints.max_reviewer_assignments while preserving exact coverage. Reviewer assignment cost per bundle is P0=3, P1=2, P2=1, so minimize the weighted total as well as the bundle count.",
+            "Minimize the number of groups while preserving semantic cohesion by feature, entrypoint, trust boundary, state flow, and implementation/test affinity; prefer a smaller coherent group set over mechanically fragmented groups.",
             "Avoid singleton or tiny groups unless the path is genuinely isolated or combining it would materially reduce semantic coherence.",
             "Use estimated_tokens and the supplied constraints to make groups substantial; the Worker may split only when the rendered payload exceeds a hard safety boundary.",
+            "If the limits cannot be met safely, still return the most compact valid exact-cover grouping; never omit a path, change a tier, or reduce reviewer coverage to force the counts under a limit. The Worker will reject an impossible rendered plan before fanout.",
             "Use only repository evidence exposed by the inputs and paths; do not build dependency graphs or call graphs.",
             "Do not assign reviewers, file ranges, bundle ids, token estimates, or final size limits; the Worker derives and enforces those fields.",
         ],
@@ -7134,9 +7137,14 @@ def prepare_bundle_planning_input(
             "max_reviewer_assignments": int(
                 review_worker_policy["maxReviewerAssignments"]
             ),
+            "reviewer_assignments_per_bundle_by_tier": {
+                "P0": 3,
+                "P1": 2,
+                "P2": 1,
+            },
             "allowed_tiers": ["P0", "P1", "P2"],
             "worker_may_split_oversized_groups": True,
-            "worker_may_coalesce_same_tier_groups": True,
+            "worker_preserves_semantic_group_boundaries": True,
         },
         "routing_sources": routing.get("sources", {}),
         "items": items,
@@ -7265,13 +7273,9 @@ def materialize_agent_bundle_plan(
         for item in planning_input.get("items", [])
         if isinstance(item, dict) and str(item.get("path") or "").strip()
     }
-    items_by_tier: dict[str, list[dict[str, Any]]] = {
-        "P0": [],
-        "P1": [],
-        "P2": [],
-    }
     groups = grouping.get("groups")
     assert isinstance(groups, list)
+    bundles: list[dict[str, Any]] = []
     for group in groups:
         assert isinstance(group, dict)
         tier = str(group["tier"]).upper()
@@ -7282,6 +7286,7 @@ def materialize_agent_bundle_plan(
             for reason in group["grouping_reasons"]
             if str(reason).strip()
         ]
+        group_items: list[dict[str, Any]] = []
         for path in group["paths"]:
             item = dict(inventory_by_path[str(path)])
             item["_routing_source"] = str(
@@ -7290,16 +7295,13 @@ def materialize_agent_bundle_plan(
             item["_semantic_group_id"] = group_id
             item["_semantic_group_title"] = title
             item["_semantic_group_reasons"] = semantic_reasons
-            items_by_tier[tier].extend(
+            group_items.extend(
                 split_oversized_bundle_item(item, repo_dir)
             )
-
-    bundles: list[dict[str, Any]] = []
-    for tier in ("P0", "P1", "P2"):
         _append_render_fitted_bundle_chunks(
             repo_dir,
             tier,
-            items_by_tier[tier],
+            group_items,
             bundles,
         )
 
@@ -7309,7 +7311,7 @@ def materialize_agent_bundle_plan(
         "run_id": run_dir.name,
         "routing_sources": planning_input.get("routing_sources", {}),
         "planning_strategy": (
-            "codex_semantic_grouping_then_worker_same_tier_bounded_pack"
+            "codex_count_aware_semantic_grouping_then_worker_bounded_split"
         ),
         "semantic_group_count": len(groups),
         "resource_limits": {
@@ -12540,10 +12542,14 @@ def prompt_template_for_name(name: str) -> str:
         "02_bundle_planner.md": (
             "You are the Semantic Bundle Planner. Read bundle-planning-input.json and group every eligible path "
             "exactly once by feature, entrypoint, trust boundary, state flow, and implementation/test affinity. "
-            "Keep groups tier-homogeneous, minimize unnecessary groups, and avoid tiny or singleton groups unless "
-            "they are semantically isolated. Write only bundle-grouping.json using "
-            "bundle-grouping/v1. Do not assign reviewers, ranges, bundle ids, or final size limits; the Worker owns "
-            "validation and bounded splitting.\n"
+            "Keep groups tier-homogeneous. Treat each output group as a final semantic bundle boundary: the Worker "
+            "will not merge separate groups. Honor constraints.max_bundles and constraints.max_reviewer_assignments; "
+            "reviewer cost per bundle is P0=3, P1=2, and P2=1. Minimize both group count and weighted reviewer cost "
+            "without losing semantic cohesion, and avoid tiny or singleton groups unless they are truly isolated. "
+            "If a hard limit appears impossible, preserve exact coverage and tiers and return the most compact safe "
+            "grouping so the Worker can reject it before fanout; never omit paths or reduce reviewer coverage. Write "
+            "only bundle-grouping.json using bundle-grouping/v1. Do not assign reviewers, ranges, bundle ids, or final "
+            "size limits; the Worker owns validation and bounded splitting.\n"
         ),
         "reviewers/security.md": "You are the Security Reviewer. Report only concrete security issues with realistic abuse paths. Demonstrate an end-to-end attacker-controlled path, account for producer-side validation and containment, and classify unproven reachability as defense-in-depth rather than high/critical. Return JSON only using codex-reviewer-output/v1.\n",
         "reviewers/correctness.md": "You are the Correctness Reviewer. Focus on incorrect behavior, state, boundaries, idempotency, and concurrency. Return JSON only using codex-reviewer-output/v1.\n",

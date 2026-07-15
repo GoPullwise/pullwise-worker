@@ -382,6 +382,64 @@ class ReviewerFanoutConcurrencyTest(unittest.TestCase):
             )
             self.assertEqual(execution["assignments"][2]["attempts"], [])
 
+    def test_thread_archive_failure_closes_runtime_and_stops_pending_work(self) -> None:
+        with fanout_fixture(["security", "correctness", "test_gap"]) as (
+            worker,
+            repo,
+            run_dir,
+            job,
+            active,
+        ):
+            started_reviewers: list[str] = []
+            archived_threads: list[str] = []
+            runtime_closed = threading.Event()
+
+            class FakeCodexClient:
+                def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                    return f"reviewer-thread-{len(started_reviewers) + 1}"
+
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    _bundle, reviewer, _output = prompt_assignment(kwargs["prompt"])
+                    started_reviewers.append(reviewer)
+                    if reviewer == "security":
+                        write_reviewer_output(kwargs["prompt"])
+                        return SimpleNamespace(duration_ms=10)
+                    cancel_requested = kwargs["cancel_requested"]
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline and not cancel_requested():
+                        time.sleep(0.01)
+                    raise JobCancelled("cancel requested")
+
+                def release_thread(self, thread_id: str) -> None:
+                    archived_threads.append(thread_id)
+                    if thread_id == "reviewer-thread-1":
+                        raise RuntimeError("archive rpc failed")
+
+                def close(self) -> None:
+                    runtime_closed.set()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Codex reviewer thread archive failed.*archive rpc failed",
+            ):
+                worker.run_reviewer_fanout_phase(
+                    FakeCodexClient(),
+                    repo,
+                    run_dir,
+                    job,
+                    active=active,
+                    progress=70,
+                )
+
+            execution = json.loads(
+                (run_dir / "reviewer-execution.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(runtime_closed.is_set())
+            self.assertCountEqual(started_reviewers, ["security", "correctness"])
+            self.assertIn("reviewer-thread-1", archived_threads)
+            self.assertEqual(execution["assignments"][2]["attempts"], [])
+            self.assertEqual(execution["assignments"][2]["status"], "cancelled")
+
     def test_transient_capacity_error_retries_once_and_reduces_concurrency_to_one(self) -> None:
         with fanout_fixture(["security", "correctness", "test_gap"]) as (
             worker,
