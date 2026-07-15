@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 from . import __version__
 from ._main_part_01_bootstrap import REPOSITORY_MIRROR_CACHE_DIR_NAME, worker_machine_metrics_payload
+from .agentic_execution import build_execution_capabilities
 from .current_run_eta import CurrentRunEstimator
 
 try:
