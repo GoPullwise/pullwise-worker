@@ -8062,7 +8062,42 @@ def safe_artifact_suffix(name: str, *, fallback: str = "artifact") -> str:
     return "".join(char if char.isalnum() else "_" for char in name).strip("_") or fallback
 
 
-def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[str, str]:
+def _intent_is_rust_command(command: list[str] | None) -> bool:
+    if not command:
+        return False
+    executable = Path(str(command[0])).name.lower()
+    if executable.endswith(".exe"):
+        executable = executable[:-4]
+    return executable in {"cargo", "rustc", "rustup"}
+
+
+def _intent_host_rustup_home() -> Path | None:
+    configured_home = str(os.environ.get("RUSTUP_HOME") or "").strip()
+    if configured_home:
+        candidate = Path(configured_home)
+    else:
+        configured_host_home = str(os.environ.get("HOME") or "").strip()
+        if configured_host_home:
+            candidate = Path(configured_host_home) / ".rustup"
+        else:
+            try:
+                candidate = Path.home() / ".rustup"
+            except (OSError, RuntimeError):
+                return None
+    try:
+        if not candidate.is_absolute() or not candidate.is_dir() or candidate.is_symlink():
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+def _intent_test_env(
+    validation_repo: Path,
+    *,
+    sandboxed: bool = False,
+    command: list[str] | None = None,
+) -> dict[str, str]:
     env: dict[str, str] = {}
     passthrough = {
         "PATH",
@@ -8074,8 +8109,6 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
         "PROGRAMFILES",
         "PROGRAMFILES(X86)",
         "PROGRAMW6432",
-        "RUSTUP_HOME",
-        "RUSTUP_TOOLCHAIN",
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
@@ -8084,6 +8117,13 @@ def _intent_test_env(validation_repo: Path, *, sandboxed: bool = False) -> dict[
         normalized = key.upper()
         if normalized in passthrough or normalized.startswith("LC_"):
             env[key] = value
+    if _intent_is_rust_command(command):
+        rustup_home = _intent_host_rustup_home()
+        if rustup_home is not None:
+            env["RUSTUP_HOME"] = str(rustup_home)
+        rustup_toolchain = str(os.environ.get("RUSTUP_TOOLCHAIN") or "").strip()
+        if rustup_toolchain:
+            env["RUSTUP_TOOLCHAIN"] = rustup_toolchain
     sandbox_home = validation_repo / ".codex-review" / "intent-test-home"
     sandbox_tmp = sandbox_home / "tmp"
     sandbox_tmp.mkdir(parents=True, exist_ok=True)
@@ -8232,14 +8272,10 @@ def _intent_test_sandbox_command(command: list[str], cwd: Path, validation_repo:
     )
     for host_path in system_bind_roots:
         argv.extend(["--ro-bind", str(host_path), str(host_path)])
-    raw_rustup_home = str(os.environ.get("RUSTUP_HOME") or "").strip()
-    if raw_rustup_home:
-        rustup_home = Path(raw_rustup_home)
+    rustup_home = _intent_host_rustup_home() if _intent_is_rust_command(command) else None
+    if rustup_home is not None:
         if (
-            rustup_home.is_absolute()
-            and rustup_home.is_dir()
-            and not rustup_home.is_symlink()
-            and not path_is_under(rustup_home, validation_root)
+            not path_is_under(rustup_home, validation_root)
             and not any(path_is_under(rustup_home, system_root) for system_root in system_bind_roots)
         ):
             _append_sandbox_bind(argv, rustup_home)
@@ -9175,6 +9211,7 @@ def run_intent_tests(
                 env=_intent_test_env(
                     validation_repo,
                     sandboxed=sys.platform.startswith("linux"),
+                    command=command,
                 ),
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,

@@ -4788,6 +4788,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             validation_repo.mkdir(parents=True)
             python_executable.parent.mkdir()
             python_executable.write_text("", encoding="utf-8")
+            python_executable.chmod(0o755)
             write_json(
                 run_dir / "intent" / "validation-workspace.json",
                 {"validation_repo_root": str(validation_repo)},

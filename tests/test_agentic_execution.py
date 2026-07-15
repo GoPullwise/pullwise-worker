@@ -15,6 +15,7 @@ from pullwise_worker.agentic_execution import build_execution_capabilities
 from pullwise_worker.review_worker_v1 import (
     ReviewWorkerV1,
     _intent_test_sandbox_command,
+    _intent_test_env,
     ensure_immutable_inventory_baseline,
     intent_execution_repair_prompt,
     intent_runtime_repair_diagnostics,
@@ -387,15 +388,13 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         )
         self.assertEqual(command[-2], "custom-intent-test")
 
-    def test_linux_sandbox_exposes_rust_toolchains_without_package_credentials(self) -> None:
+    def test_linux_sandbox_exposes_explicit_rust_toolchains_without_package_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             validation_repo = root / "validation"
             rustup_home = root / "rustup-home"
-            runner = validation_repo / "tools" / "bespoke-test"
-            runner.parent.mkdir(parents=True)
+            validation_repo.mkdir()
             rustup_home.mkdir()
-            runner.write_text("runner", encoding="utf-8")
             with patch.dict(os.environ, {"RUSTUP_HOME": str(rustup_home)}), patch(
                 "pullwise_worker.review_worker_v1.sys.platform",
                 "linux",
@@ -404,7 +403,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 side_effect=lambda name: "/usr/bin/bwrap" if name in {"bwrap", "bubblewrap"} else None,
             ):
                 command, _sandbox_cwd, skip_reason = _intent_test_sandbox_command(
-                    [str(runner), "verify"],
+                    ["cargo", "test"],
                     validation_repo,
                     validation_repo,
                 )
@@ -414,6 +413,58 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             any(
                 command[index : index + 3] == ["--ro-bind", str(rustup_home), str(rustup_home)]
                 for index in range(len(command) - 2)
+            )
+        )
+
+    def test_rust_runtime_uses_default_host_rustup_home_when_env_is_unset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            validation_repo = root / "validation"
+            host_home = root / "host-home"
+            rustup_home = host_home / ".rustup"
+            validation_repo.mkdir()
+            rustup_home.mkdir(parents=True)
+            with patch.dict(os.environ, {"HOME": str(host_home)}, clear=True), patch(
+                "pullwise_worker.review_worker_v1.sys.platform",
+                "linux",
+            ), patch(
+                "pullwise_worker.review_worker_v1.shutil.which",
+                side_effect=lambda name: "/usr/bin/bwrap" if name in {"bwrap", "bubblewrap"} else None,
+            ):
+                env = _intent_test_env(
+                    validation_repo,
+                    command=["cargo", "test", "--offline"],
+                )
+                command, _sandbox_cwd, skip_reason = _intent_test_sandbox_command(
+                    ["cargo", "test", "--offline"],
+                    validation_repo,
+                    validation_repo,
+                )
+                non_rust_env = _intent_test_env(
+                    validation_repo,
+                    command=["python", "-m", "unittest"],
+                )
+                non_rust_command, _sandbox_cwd, non_rust_skip_reason = _intent_test_sandbox_command(
+                    ["python", "-m", "unittest"],
+                    validation_repo,
+                    validation_repo,
+                )
+
+        self.assertEqual(env["RUSTUP_HOME"], str(rustup_home))
+        self.assertNotIn("RUSTUP_HOME", non_rust_env)
+        self.assertEqual(skip_reason, "")
+        self.assertEqual(non_rust_skip_reason, "")
+        self.assertTrue(
+            any(
+                command[index : index + 3] == ["--ro-bind", str(rustup_home), str(rustup_home)]
+                for index in range(len(command) - 2)
+            )
+        )
+        self.assertFalse(
+            any(
+                non_rust_command[index : index + 3]
+                == ["--ro-bind", str(rustup_home), str(rustup_home)]
+                for index in range(len(non_rust_command) - 2)
             )
         )
 
