@@ -14,6 +14,7 @@ from pullwise_worker.review_worker_v1 import (
     pack_bundles,
     phase_prompt,
     prepare_bundle_planning_input,
+    read_json,
     write_json,
 )
 
@@ -27,6 +28,33 @@ def _inventory_item(path: str, *, estimated_tokens: int = 10) -> dict[str, objec
         "risk_hints": [],
         "estimated_tokens": estimated_tokens,
         "line_count": 1,
+    }
+
+
+def _job(*, max_bundles: int = 24, max_reviewer_assignments: int = 48) -> dict[str, object]:
+    return {
+        "model_profile": {
+            "default_model": "gpt-5.5",
+            "core_effort": "high",
+            "non_core_effort": "medium",
+        },
+        "review_request": {
+            "policy": {
+                "allow_source_modification": False,
+                "allow_dependency_install": False,
+                "allow_network": False,
+                "helper_scripts_standard_library_only": True,
+                "turn_timeout_seconds": 60,
+                "reviewer_concurrency": 2,
+                "max_bundles": max_bundles,
+                "max_reviewer_assignments": max_reviewer_assignments,
+            },
+            "budget": {"max_wall_time_seconds": 600},
+        },
+        "repositoryLimits": {
+            "maxFiles": 100,
+            "maxBytes": 1024 * 1024,
+        },
     }
 
 
@@ -51,6 +79,158 @@ class AgenticBundlePlanningTest(unittest.TestCase):
 
     def test_production_module_has_no_mechanical_bundle_planner(self) -> None:
         self.assertFalse(hasattr(review_worker_v1, "bundle_plan_payload"))
+
+    def test_bundle_planning_input_exposes_server_resource_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _repo_dir, run_dir = self._run_dir(Path(tmp_dir))
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [_inventory_item("src/app.py")],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": "src/app.py", "tier": "P1"}],
+                },
+            )
+
+            planning_input = prepare_bundle_planning_input(
+                run_dir,
+                _job(max_bundles=7, max_reviewer_assignments=13),
+            )
+
+        self.assertEqual(planning_input["constraints"]["max_bundles"], 7)
+        self.assertEqual(
+            planning_input["constraints"]["max_reviewer_assignments"],
+            13,
+        )
+
+    def test_same_tier_semantic_groups_coalesce_without_losing_affinity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir, run_dir = self._run_dir(Path(tmp_dir))
+            paths = ["src/users.py", "src/orders.py"]
+            for path in paths:
+                source = repo_dir / path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(f"# {path}\n", encoding="utf-8")
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [_inventory_item(path) for path in paths],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": path, "tier": "P1"} for path in paths],
+                },
+            )
+            write_json(
+                run_dir / "bundle-grouping.json",
+                {
+                    "schema_version": "bundle-grouping/v1",
+                    "run_id": "run_1",
+                    "groups": [
+                        {
+                            "group_id": "users",
+                            "tier": "P1",
+                            "title": "Users",
+                            "paths": [paths[0]],
+                            "grouping_reasons": ["user lifecycle"],
+                        },
+                        {
+                            "group_id": "orders",
+                            "tier": "P1",
+                            "title": "Orders",
+                            "paths": [paths[1]],
+                            "grouping_reasons": ["order lifecycle"],
+                        },
+                    ],
+                },
+            )
+
+            plan = materialize_agent_bundle_plan(run_dir, _job())
+
+        self.assertEqual(len(plan["bundles"]), 1)
+        bundle = plan["bundles"][0]
+        self.assertEqual(bundle["paths"], paths)
+        self.assertEqual(bundle["semantic_group_ids"], ["users", "orders"])
+        self.assertCountEqual(
+            bundle["grouping_reasons"],
+            ["user lifecycle", "order lifecycle"],
+        )
+        self.assertEqual(plan["reviewer_assignment_count"], 2)
+
+    def test_post_split_bundle_and_assignment_caps_fail_without_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir, run_dir = self._run_dir(Path(tmp_dir))
+            path = "src/large.py"
+            source = repo_dir / path
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "\n".join(f"line_{index} = '{'x' * 100}'" for index in range(1500)),
+                encoding="utf-8",
+            )
+            write_json(
+                run_dir / "inventory.json",
+                {
+                    "schema_version": "inventory/v1",
+                    "files": [
+                        {
+                            **_inventory_item(
+                                path,
+                                estimated_tokens=MAX_BUNDLE_ESTIMATED_TOKENS * 3,
+                            ),
+                            "line_count": 1500,
+                        }
+                    ],
+                },
+            )
+            write_json(
+                run_dir / "risk-routing.json",
+                {
+                    "schema_version": "risk-routing/v1",
+                    "routes": [{"path": path, "tier": "P0"}],
+                },
+            )
+            write_json(
+                run_dir / "bundle-grouping.json",
+                {
+                    "schema_version": "bundle-grouping/v1",
+                    "run_id": "run_1",
+                    "groups": [
+                        {
+                            "group_id": "large-critical-module",
+                            "tier": "P0",
+                            "title": "Large critical module",
+                            "paths": [path],
+                            "grouping_reasons": ["single cohesive module"],
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "REVIEW_PLAN_LIMIT_EXCEEDED.*bundles.*1",
+            ):
+                materialize_agent_bundle_plan(
+                    run_dir,
+                    _job(max_bundles=1, max_reviewer_assignments=3),
+                )
+
+            planning_input = read_json(run_dir / "bundle-planning-input.json")
+
+        self.assertEqual(
+            [item["path"] for item in planning_input["items"]],
+            [path],
+        )
 
     def test_semantic_turn_receives_worker_owned_planning_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

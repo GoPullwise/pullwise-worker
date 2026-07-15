@@ -1760,6 +1760,39 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     },
                 },
             })
+        canonical_policy = {
+            "allow_source_modification": False,
+            "allow_dependency_install": False,
+            "allow_network": False,
+            "helper_scripts_standard_library_only": True,
+            "turn_timeout_seconds": 1800,
+            "reviewer_concurrency": 2,
+            "max_bundles": 24,
+            "max_reviewer_assignments": 48,
+        }
+        for missing_field in ("max_bundles", "max_reviewer_assignments"):
+            incomplete_policy = dict(canonical_policy)
+            incomplete_policy.pop(missing_field)
+            with self.subTest(missing_field=missing_field), self.assertRaisesRegex(
+                ValueError,
+                missing_field,
+            ):
+                validate_job_policy(
+                    {
+                        "model_profile": {
+                            "default_model": "gpt-5.5",
+                            "core_effort": "high",
+                        },
+                        "review_request": {
+                            "budget": {"max_wall_time_seconds": 14400},
+                            "policy": incomplete_policy,
+                        },
+                        "repositoryLimits": {
+                            "maxFiles": 2000,
+                            "maxBytes": 50 * 1024 * 1024,
+                        },
+                    }
+                )
         unsafe_job = {
             "model_profile": {"default_model": "gpt-5.5", "core_effort": "high"},
             "review_request": {
@@ -1797,6 +1830,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                     "helper_scripts_standard_library_only": True,
                     "turn_timeout_seconds": 1800,
                     "reviewer_concurrency": 2,
+                    "max_bundles": 24,
+                    "max_reviewer_assignments": 48,
                     "intent_test_validation": {
                         "enabled": True,
                         "only_tiers": ["P0"],
@@ -1816,6 +1851,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(turn_timeout_for_job(job), 1800)
         self.assertEqual(review_worker_policy_for_job(job)["scanDeadlineSeconds"], 14400)
         self.assertEqual(review_worker_policy_for_job(job)["reviewerConcurrency"], 2)
+        self.assertEqual(review_worker_policy_for_job(job)["maxBundles"], 24)
+        self.assertEqual(
+            review_worker_policy_for_job(job)["maxReviewerAssignments"],
+            48,
+        )
         self.assertEqual(effort_for_phase(job, "reviewer_fanout"), "high")
         self.assertEqual(effort_for_phase(job, "inventory_repository"), "medium")
         parsed = validate_job_policy(job)["intent_test_validation"]
@@ -1832,6 +1872,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 "allow_network": False,
                 "helper_scripts_standard_library_only": True,
                 "turn_timeout_seconds": 1800,
+                "max_bundles": 24,
+                "max_reviewer_assignments": 48,
             },
         }
         fallback_job["agentConfig"] = {
@@ -1874,9 +1916,58 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                                 "helper_scripts_standard_library_only": True,
                                 "turn_timeout_seconds": 1800,
                                 "reviewer_concurrency": reviewer_concurrency,
+                                "max_bundles": 24,
+                                "max_reviewer_assignments": 48,
                             },
                         },
                         "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+                    }
+                )
+
+    def test_job_policy_rejects_review_plan_limits_outside_bounded_range(self) -> None:
+        for field, value, message in (
+            ("max_bundles", 0, "max_bundles must be between 1 and 64"),
+            ("max_bundles", 65, "max_bundles must be between 1 and 64"),
+            (
+                "max_reviewer_assignments",
+                0,
+                "max_reviewer_assignments must be between 1 and 128",
+            ),
+            (
+                "max_reviewer_assignments",
+                129,
+                "max_reviewer_assignments must be between 1 and 128",
+            ),
+        ):
+            policy = {
+                "allow_source_modification": False,
+                "allow_dependency_install": False,
+                "allow_network": False,
+                "helper_scripts_standard_library_only": True,
+                "turn_timeout_seconds": 1800,
+                "reviewer_concurrency": 2,
+                "max_bundles": 24,
+                "max_reviewer_assignments": 48,
+            }
+            policy[field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                ValueError,
+                message,
+            ):
+                validate_job_policy(
+                    {
+                        "model_profile": {
+                            "default_model": "gpt-5.5",
+                            "core_effort": "high",
+                        },
+                        "review_request": {
+                            "budget": {"max_wall_time_seconds": 14400},
+                            "policy": policy,
+                        },
+                        "repositoryLimits": {
+                            "maxFiles": 2000,
+                            "maxBytes": 50 * 1024 * 1024,
+                        },
                     }
                 )
 
