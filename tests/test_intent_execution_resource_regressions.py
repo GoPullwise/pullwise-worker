@@ -18,6 +18,7 @@ from pullwise_worker.review_worker_v1 import (
     MAX_BUNDLE_ESTIMATED_TOKENS,
     ReviewWorkerV1,
     bundle_plan_payload,
+    ensure_immutable_inventory_baseline,
     intent_command_is_runnable_for_repo,
     intent_execution_preflight,
     intent_runtime_repair_diagnostics,
@@ -66,7 +67,22 @@ def _write_intent_run(
         },
     )
     write_json(run_dir / "intent" / "intent-test-source.json", source)
+    ensure_immutable_inventory_baseline(repo, run_dir)
     return run_dir, validation_repo
+
+
+def _write_canonical_generated_test(
+    run_dir: Path,
+    relative_path: str,
+    content: str,
+) -> tuple[str, Path]:
+    repo = run_dir.parent.parent.parent
+    declared_path = (Path(".codex-review") / "generated-tests" / relative_path).as_posix()
+    source_path = repo / declared_path
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(content, encoding="utf-8")
+    validation_path = repo.parent / "validation-repo" / declared_path
+    return declared_path, validation_path
 
 
 def _generated_python_source(
@@ -176,17 +192,19 @@ class IntentSubprocessResourceRegressionTest(unittest.TestCase):
         output_bytes = 12 * 1024 * 1024
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
+            declared_path = ".codex-review/generated-tests/test_large_output.py"
             run_dir, validation_repo = _write_intent_run(
                 root,
                 source=_generated_python_source(
-                    path="test_large_output.py",
-                    command=[sys.executable, "test_large_output.py"],
+                    path=declared_path,
+                    command=[sys.executable, declared_path],
                 ),
             )
-            (validation_repo / "test_large_output.py").write_text(
+            _write_canonical_generated_test(
+                run_dir,
+                "test_large_output.py",
                 "import sys\n"
                 f"sys.stdout.write('x' * {output_bytes})\n",
-                encoding="utf-8",
             )
 
             tracemalloc.start()
@@ -425,16 +443,21 @@ class IntentPreflightBindingRegressionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             validation_repo = root / "validation-repo"
-            script = validation_repo / "test_approved.py"
+            declared_path = ".codex-review/generated-tests/test_approved.py"
+            script = validation_repo / declared_path
             run_dir, validation_repo = _write_intent_run(
                 root,
                 source=_generated_python_source(
-                    path="test_approved.py",
+                    path=declared_path,
                     command=[sys.executable, str(script)],
                     required_paths=["fixture.dat"],
                 ),
             )
-            script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                "test_approved.py",
+                "raise SystemExit(0)\n",
+            )
             fixture = validation_repo / "fixture.dat"
             fixture.write_text("fixture", encoding="utf-8")
 
@@ -454,16 +477,21 @@ class IntentPreflightBindingRegressionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             validation_repo = root / "validation-repo"
-            script = validation_repo / "test_approved.py"
+            declared_path = ".codex-review/generated-tests/test_approved.py"
+            script = validation_repo / declared_path
             run_dir, validation_repo = _write_intent_run(
                 root,
                 source=_generated_python_source(
-                    path="test_approved.py",
+                    path=declared_path,
                     command=[sys.executable, str(script)],
                     required_paths=["../outside.dat"],
                 ),
             )
-            script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            _write_canonical_generated_test(
+                run_dir,
+                "test_approved.py",
+                "raise SystemExit(0)\n",
+            )
             (root / "outside.dat").write_text("outside", encoding="utf-8")
 
             preflight = intent_test_source_preflight_payload(run_dir)
@@ -479,12 +507,13 @@ class IntentPreflightBindingRegressionTest(unittest.TestCase):
             with self.subTest(drift=drift_case), tempfile.TemporaryDirectory() as tmp_dir:
                 root = Path(tmp_dir)
                 validation_repo = root / "validation-repo"
-                script = validation_repo / "test_approved.py"
+                declared_path = ".codex-review/generated-tests/test_approved.py"
+                script = validation_repo / declared_path
                 marker = root / f"{drift_case}.executed"
                 approved_command = [sys.executable, str(script), "--approved"]
                 approved_required_paths = [str(validation_repo / "fixture-a.dat")]
                 source = _generated_python_source(
-                    path="test_approved.py",
+                    path=declared_path,
                     command=approved_command,
                     required_paths=approved_required_paths,
                 )
@@ -492,10 +521,11 @@ class IntentPreflightBindingRegressionTest(unittest.TestCase):
                 (validation_repo / "fixture-a.dat").write_text("a", encoding="utf-8")
                 (validation_repo / "fixture-b.dat").write_text("b", encoding="utf-8")
                 (validation_repo / "nested").mkdir()
-                script.write_text(
+                _write_canonical_generated_test(
+                    run_dir,
+                    "test_approved.py",
                     "from pathlib import Path\n"
                     f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
-                    encoding="utf-8",
                 )
 
                 preflight = intent_test_source_preflight_payload(run_dir)

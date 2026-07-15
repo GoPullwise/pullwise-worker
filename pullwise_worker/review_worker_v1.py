@@ -6,6 +6,7 @@ import copy
 import fnmatch
 import hashlib
 import importlib.metadata
+import inspect
 import json
 import math
 import os
@@ -22,7 +23,7 @@ import urllib.parse
 import zipfile
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -2475,6 +2476,49 @@ class ReviewWorkerV1:
     def default_codex_events_path(self) -> Path:
         return self.isolation.logs / "codex-sdk-events.jsonl"
 
+    def active_run_marker_path(self) -> Path:
+        return self.isolation.runtime / "active-run.json"
+
+    def read_active_run_marker(self) -> dict[str, Any]:
+        path = self.active_run_marker_path()
+        if path.is_symlink():
+            return {}
+        payload = read_json(path, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def persist_active_run_marker(self, active: ActiveJob) -> None:
+        self.isolation.runtime.mkdir(parents=True, exist_ok=True)
+        write_json(
+            self.active_run_marker_path(),
+            {
+                "job_id": active.job_id,
+                "run_id": active.run_id,
+                "lease_id": active.lease_id,
+                "attempt_id": active.attempt_id,
+                "state": active.state,
+                "current_phase": active.current_phase or "prepare_workspace",
+                "current_phase_status": active.current_phase_status or "running",
+                "updated_at": iso_time(time.time()),
+            },
+        )
+
+    def clear_active_run_marker(self, active: ActiveJob | None = None) -> None:
+        path = self.active_run_marker_path()
+        if not path.exists() and not path.is_symlink():
+            return
+        if active is not None:
+            payload = self.read_active_run_marker()
+            marker_run_id = str(payload.get("run_id") or "").strip()
+            marker_job_id = str(payload.get("job_id") or "").strip()
+            if marker_run_id and marker_run_id != active.run_id:
+                return
+            if marker_job_id and marker_job_id != active.job_id:
+                return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
     def ensure_codex_client(self, events_path: Path | None = None) -> CodexSdkClient:
         self.isolation.runtime.mkdir(parents=True, exist_ok=True)
         self.isolation.logs.mkdir(parents=True, exist_ok=True)
@@ -2616,6 +2660,46 @@ class ReviewWorkerV1:
                 "submit_marker": submit_marker,
                 "evidence_mtime": evidence_mtime,
             }
+
+        runtime_marker = self.read_active_run_marker()
+        marker_run_name = str(runtime_marker.get("run_id") or "").strip()
+        if marker_run_name:
+            marker_run_name = safe_id(marker_run_name, "recovered_run")
+            marker_run_dir = (
+                self.isolation.workspaces
+                / marker_run_name
+                / "repo"
+                / ".codex-review"
+                / "runs"
+                / marker_run_name
+            )
+            marker_run_state = read_json(marker_run_dir / "run-state.json", {})
+            if not isinstance(marker_run_state, dict):
+                marker_run_state = {}
+            if self._persisted_run_is_terminal(marker_run_name, marker_run_state):
+                self.clear_active_run_marker()
+            else:
+                existing = records.get(marker_run_name, {})
+                existing_active = (
+                    existing.get("active_job")
+                    if isinstance(existing.get("active_job"), dict)
+                    else {}
+                )
+                try:
+                    marker_mtime = self.active_run_marker_path().stat().st_mtime
+                except OSError:
+                    marker_mtime = 0.0
+                records[marker_run_name] = {
+                    "run_name": marker_run_name,
+                    "run_dir": existing.get("run_dir") or marker_run_dir,
+                    "run_state": existing.get("run_state") or marker_run_state,
+                    "active_job": {**runtime_marker, **existing_active},
+                    "submit_marker": existing.get("submit_marker") or {},
+                    "evidence_mtime": max(
+                        float(existing.get("evidence_mtime") or 0.0),
+                        marker_mtime,
+                    ),
+                }
         return sorted(records.values(), key=lambda item: (float(item["evidence_mtime"]), item["run_name"]), reverse=True)
 
     def recover_persisted_active_job(self) -> ActiveJob | None:
@@ -2647,7 +2731,7 @@ class ReviewWorkerV1:
                 f"recovered_lease_{run_id}",
             ),
             attempt_id=persisted_id(
-                submit_marker.get("attempt_id"),
+                submit_marker.get("attempt_id") or active_payload.get("attempt_id"),
                 f"{self.config.worker_id}-recovered",
             ),
             state="finishing",
@@ -2956,6 +3040,7 @@ class ReviewWorkerV1:
             active.cancel_reason = reason_text
             active.state = "cancelling"
             active.message = "Cancellation requested."
+            self.persist_active_run_marker(active)
             if active.run_dir is not None:
                 self.emit_cancel_requested(active, active.run_dir)
 
@@ -2982,6 +3067,7 @@ class ReviewWorkerV1:
                 message="Cancellation requested.",
                 data={"reason": reason, "cancel_requested": True},
             )
+            self.persist_active_run_marker(active)
 
     def start_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int) -> None:
         with self._progress_lock:
@@ -3010,6 +3096,7 @@ class ReviewWorkerV1:
                 current_phase_percent=0.0,
                 message=phase.replace("_", " "),
             )
+            self.persist_active_run_marker(active)
 
     def complete_phase(self, active: ActiveJob, run_dir: Path, phase: str, progress: int, *, data: dict[str, Any] | None = None) -> None:
         estimator = active.current_run_estimator
@@ -3124,20 +3211,22 @@ class ReviewWorkerV1:
 
 
     def run_job(self, job: dict[str, Any]) -> None:
+        started = time.time()
+        started_monotonic = time.monotonic()
         job_id = safe_id(job.get("job_id"), "job")
         run_id = safe_id(job.get("run_id") or f"run_{job_id}", "run")
         lease_id = safe_id(job.get("lease_id") or f"lease_{job_id}", "lease")
         attempt = int(job.get("attempt") or 1)
         active = ActiveJob(job_id=job_id, run_id=run_id, lease_id=lease_id, attempt_id=f"{self.config.worker_id}-{attempt}")
         self.state.set_active(active)
+        self.persist_active_run_marker(active)
         heartbeat_stop, heartbeat_thread = self.start_active_job_supervisor(active)
-        terminal_state = "failed"
+        terminal_state = "finishing"
+        terminal_result_confirmed = False
         codex_client: CodexSdkClient | None = None
         repo_dir: Path | None = None
         run_dir: Path | None = None
         artifact_dir: Path | None = None
-        started = time.time()
-        started_monotonic = time.monotonic()
         try:
             job_policy = validate_job_policy(job)
             scan_deadline_seconds = int(job_policy.get("review_worker", {}).get("scanDeadlineSeconds") or 0)
@@ -3150,14 +3239,19 @@ class ReviewWorkerV1:
                 job,
                 started_monotonic=started_monotonic,
             )
-            repo_dir, run_dir, artifact_dir = self.prepare_workspace(job, run_id)
+            repo_dir, run_dir, artifact_dir = invoke_with_lifecycle_controls(
+                self.prepare_workspace,
+                job,
+                run_id,
+                deadline_monotonic=deadline_monotonic,
+                cancel_requested=self.poll_cancel_requested,
+            )
             active.run_dir = run_dir
             events_path = run_dir / "codex-events.jsonl"
             append_jsonl(run_dir / "worker.log.jsonl", {"event": "job_started", "job_id": job_id, "run_id": run_id, "time": iso_time(started)})
             self.emit_event(active, run_dir, "run_started", "prepare_workspace", status="running", progress=0, message="Run started.")
             for phase, progress in PIPELINE_PHASES:
-                if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
-                    raise JobPartialCompleted("review wall-time deadline exceeded")
+                remaining_wall_time_seconds(deadline_monotonic)
                 if active.cancel_requested:
                     raise JobCancelled(active.cancel_reason or "cancel requested")
                 self.start_phase(active, run_dir, phase, progress)
@@ -3186,7 +3280,7 @@ class ReviewWorkerV1:
                             codex_client.start_thread(
                                 repo_dir,
                                 model_for_job(job),
-                                timeout_seconds=turn_timeout_for_job(job),
+                                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                                 cancel_requested=self.poll_cancel_requested,
                             )
                             if codex_client
@@ -3199,22 +3293,39 @@ class ReviewWorkerV1:
                         run_state.update({"thread_id": thread_id, "active_job": active.heartbeat_payload()})
                         write_json(run_dir / "run-state.json", run_state)
                     elif phase == "check_codex_auth":
-                        self.run_codex_auth_check(codex_client, repo_dir, run_dir, job)
+                        invoke_with_lifecycle_controls(
+                            self.run_codex_auth_check,
+                            codex_client,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            deadline_monotonic=deadline_monotonic,
+                        )
                     elif phase == "submit_result_envelope":
                         pass
                     elif phase == "cleanup_active_job":
                         pass
                     elif phase == "reviewer_fanout":
-                        self.run_reviewer_fanout_phase(
+                        invoke_with_lifecycle_controls(
+                            self.run_reviewer_fanout_phase,
                             codex_client,
                             repo_dir,
                             run_dir,
                             job,
+                            deadline_monotonic=deadline_monotonic,
                             active=active,
                             progress=progress,
                         )
                     elif phase in SEMANTIC_PHASES:
-                        self.run_semantic_phase(codex_client, repo_dir, run_dir, job, phase)
+                        invoke_with_lifecycle_controls(
+                            self.run_semantic_phase,
+                            codex_client,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            phase,
+                            deadline_monotonic=deadline_monotonic,
+                        )
                         if phase == "intent_test_writing":
                             repair_intent_test_source_artifact(
                                 run_dir / "intent" / "intent-test-source.json",
@@ -3225,22 +3336,36 @@ class ReviewWorkerV1:
                         if phase == "final_report_json":
                             repair_agent_report_artifact(run_dir, job)
                     elif phase == "reviewer_json_validation":
-                        self.run_reviewer_json_validation_phase(
+                        invoke_with_lifecycle_controls(
+                            self.run_reviewer_json_validation_phase,
                             codex_client,
                             repo_dir,
                             run_dir,
                             job,
+                            deadline_monotonic=deadline_monotonic,
                             active=active,
                         )
                     elif phase in MECHANICAL_PHASES:
-                        self.run_mechanical_phase(repo_dir, run_dir, job, phase, active=active, progress=progress)
+                        invoke_with_lifecycle_controls(
+                            self.run_mechanical_phase,
+                            repo_dir,
+                            run_dir,
+                            job,
+                            phase,
+                            deadline_monotonic=deadline_monotonic,
+                            cancel_requested=self.poll_cancel_requested,
+                            active=active,
+                            progress=progress,
+                        )
                         if phase == "intent_test_running":
                             validation_config = intent_validation_config(job)
-                            self.repair_intent_test_runtime(
+                            invoke_with_lifecycle_controls(
+                                self.repair_intent_test_runtime,
                                 codex_client,
                                 repo_dir,
                                 run_dir,
                                 job,
+                                deadline_monotonic=deadline_monotonic,
                                 max_attempts=int(validation_config.get("max_runtime_repair_attempts") or 0),
                                 active=active,
                             )
@@ -3259,23 +3384,27 @@ class ReviewWorkerV1:
                     except Exception as validation_exc:
                         if phase not in SEMANTIC_PHASES:
                             raise
-                        self.repair_semantic_phase_outputs(
+                        invoke_with_lifecycle_controls(
+                            self.repair_semantic_phase_outputs,
                             codex_client,
                             repo_dir,
                             run_dir,
                             job,
                             phase,
                             validation_exc,
+                            deadline_monotonic=deadline_monotonic,
                             active=active,
                         )
                         validate_phase_outputs(run_dir, phase, artifact_dir)
                     if phase == "intent_test_writing":
                         validation_config = intent_validation_config(job)
-                        self.repair_intent_test_preflight(
+                        invoke_with_lifecycle_controls(
+                            self.repair_intent_test_preflight,
                             codex_client,
                             repo_dir,
                             run_dir,
                             job,
+                            deadline_monotonic=deadline_monotonic,
                             max_attempts=int(validation_config.get("max_preflight_repair_attempts") or 0),
                             active=active,
                         )
@@ -3317,6 +3446,7 @@ class ReviewWorkerV1:
                         if not self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "done", run_dir), artifact_dir, envelope):
                             terminal_state = "result_submit_failed"
                             return
+                        terminal_result_confirmed = True
                         terminal_state = "completed"
                         self.emit_event(
                             active,
@@ -3370,6 +3500,7 @@ class ReviewWorkerV1:
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "cancelled", run_dir), artifact_dir, envelope):
+                terminal_result_confirmed = True
                 terminal_state = "cancelled"
             else:
                 terminal_state = "result_submit_failed"
@@ -3407,6 +3538,7 @@ class ReviewWorkerV1:
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "partial_completed", run_dir), artifact_dir, envelope):
+                terminal_result_confirmed = True
                 terminal_state = "partial_completed"
             else:
                 terminal_state = "result_submit_failed"
@@ -3435,6 +3567,7 @@ class ReviewWorkerV1:
             if upload_error:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "failed", run_dir), artifact_dir, envelope):
+                terminal_result_confirmed = True
                 terminal_state = "failed"
             else:
                 terminal_state = "result_submit_failed"
@@ -3444,11 +3577,24 @@ class ReviewWorkerV1:
             heartbeat_thread.join()
             if codex_client is not None:
                 codex_client.set_events_path(self.default_codex_events_path())
-            if terminal_state in TERMINAL_STATES:
+            if terminal_state in TERMINAL_STATES and terminal_result_confirmed:
+                self.clear_active_run_marker(active)
                 self.state.clear_active(terminal_state)
+            else:
+                active.state = "finishing"
+                self.persist_active_run_marker(active)
             self.heartbeat()
 
-    def prepare_workspace(self, job: dict[str, Any], run_id: str) -> tuple[Path, Path, Path]:
+    def prepare_workspace(
+        self,
+        job: dict[str, Any],
+        run_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> tuple[Path, Path, Path]:
+        check_lifecycle_cancelled(cancel_requested)
+        remaining_wall_time_seconds(deadline_monotonic)
         workspace = self.isolation.workspaces / run_id
         repo_dir = workspace / "repo"
         artifact_dir = self.isolation.artifacts / run_id
@@ -3459,19 +3605,14 @@ class ReviewWorkerV1:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         source = str(job.get("checkout_dir") or job.get("checkoutDir") or "").strip()
         limits = repository_limits_for_job(job)
-        scan_deadline_seconds = None
-        try:
-            scan_deadline_seconds = int(review_worker_policy_for_job(job).get("scanDeadlineSeconds") or 0)
-        except (TypeError, ValueError):
-            scan_deadline_seconds = None
-        copy_deadline = time.monotonic() + scan_deadline_seconds if scan_deadline_seconds and scan_deadline_seconds > 0 else None
         if source:
             copy_tree(
                 Path(source),
                 repo_dir,
                 max_files=limits.get("maxFiles") if limits else None,
                 max_bytes=limits.get("maxBytes") if limits else None,
-                deadline_monotonic=copy_deadline,
+                deadline_monotonic=deadline_monotonic,
+                cancel_requested=cancel_requested,
             )
         else:
             work_dir = Path(str(getattr(self.config, "work_dir", "") or self.isolation.worker_root))
@@ -3479,7 +3620,8 @@ class ReviewWorkerV1:
                 job,
                 repo_dir,
                 mirror_cache_root=work_dir / REPOSITORY_MIRROR_CACHE_DIR_NAME,
-                deadline_monotonic=copy_deadline,
+                deadline_monotonic=deadline_monotonic,
+                cancel_requested=cancel_requested,
             )
         repo_supplied_review_root = repo_dir / ".codex-review"
         if repo_supplied_review_root.exists():
@@ -3492,9 +3634,14 @@ class ReviewWorkerV1:
             max_files=limits.get("maxFiles") if limits else None,
             max_bytes=limits.get("maxBytes") if limits else None,
             context="preparing checkout",
-            deadline_monotonic=copy_deadline,
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
         )
-        if repository_file_count(repo_dir) <= 0:
+        if repository_file_count(
+            repo_dir,
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
+        ) <= 0:
             raise RuntimeError("repository checkout produced no repository files")
         for path in (
             repo_dir / ".codex-review",
@@ -3540,9 +3687,13 @@ class ReviewWorkerV1:
                     "error": str(exc),
                 },
             )
+            self.persist_active_run_marker(active)
             return False
         try:
+            result_status = result_status_from_envelope(envelope)
             with self._progress_lock:
+                if result_status == "done" and active.cancel_requested:
+                    raise JobCancelled(active.cancel_reason or "cancel requested")
                 active.terminal_result_in_flight = True
             self.client.result(job_id, payload)
             with self._progress_lock:
@@ -3567,6 +3718,10 @@ class ReviewWorkerV1:
                 # submission; recovery remains conservatively blocked instead.
                 pass
             return True
+        except JobCancelled:
+            with self._progress_lock:
+                active.terminal_result_in_flight = False
+            raise
         except Exception as exc:
             with self._progress_lock:
                 active.terminal_result_in_flight = False
@@ -3588,10 +3743,19 @@ class ReviewWorkerV1:
                     "error": str(exc),
                 },
             )
+            self.persist_active_run_marker(active)
             return False
 
 
-    def run_codex_auth_check(self, codex_client: CodexSdkClient | None, repo_dir: Path, run_dir: Path, job: dict[str, Any]) -> None:
+    def run_codex_auth_check(
+        self,
+        codex_client: CodexSdkClient | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
         if codex_client is None:
             raise RuntimeError("Codex SDK client is missing")
         state = read_json(run_dir / "run-state.json")
@@ -3604,11 +3768,20 @@ class ReviewWorkerV1:
             prompt='Codex auth check: return only JSON {"ok": true}.',
             effort="medium",
             read_only=True,
-            timeout_seconds=turn_timeout_for_job(job),
+            timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
             cancel_requested=self.poll_cancel_requested,
         )
 
-    def run_semantic_phase(self, codex_client: CodexSdkClient | None, repo_dir: Path, run_dir: Path, job: dict[str, Any], phase: str) -> None:
+    def run_semantic_phase(
+        self,
+        codex_client: CodexSdkClient | None,
+        repo_dir: Path,
+        run_dir: Path,
+        job: dict[str, Any],
+        phase: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> None:
         if codex_client is None:
             raise RuntimeError("Codex SDK client is missing")
         state = read_json(run_dir / "run-state.json")
@@ -3623,7 +3796,7 @@ class ReviewWorkerV1:
             prompt=prompt,
             effort=effort,
             read_only=False,
-            timeout_seconds=turn_timeout_for_job(job),
+            timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
             cancel_requested=self.poll_cancel_requested,
         )
 
@@ -3639,6 +3812,7 @@ class ReviewWorkerV1:
         attempt: int,
         expected_assignments: set[tuple[str, str]],
         cancel_event: threading.Event,
+        deadline_monotonic: float | None,
     ) -> ReviewerAssignmentOutcome:
         def cancel_requested() -> bool:
             return cancel_event.is_set() or self.poll_cancel_requested()
@@ -3657,7 +3831,7 @@ class ReviewWorkerV1:
                 ),
                 effort=effort_for_phase(job, "reviewer_fanout"),
                 read_only=False,
-                timeout_seconds=turn_timeout_for_job(job),
+                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=cancel_requested,
                 writable_roots=[work.staging_dir],
             )
@@ -3701,6 +3875,7 @@ class ReviewWorkerV1:
         *,
         active: ActiveJob,
         progress: int,
+        deadline_monotonic: float | None = None,
     ) -> None:
         if codex_client is None:
             raise RuntimeError("Codex SDK client is missing")
@@ -3822,9 +3997,18 @@ class ReviewWorkerV1:
         pending = deque(works)
         active_futures: dict[
             Future[ReviewerAssignmentOutcome],
-            tuple[ReviewerAssignmentWork, dict[str, Any], dict[str, Any]],
+            tuple[
+                ReviewerAssignmentWork,
+                ReviewerAssignmentWork,
+                dict[str, Any],
+                dict[str, Any],
+            ],
         ] = {}
         cancel_event = threading.Event()
+
+        def assignment_cancel_requested() -> bool:
+            return cancel_event.is_set() or self.poll_cancel_requested()
+
         completed = 0
         finished = 0
         effective_concurrency = max_concurrency
@@ -3848,15 +4032,23 @@ class ReviewWorkerV1:
                     work = pending.popleft()
                     record = records[work.index - 1]
                     attempt = len(record["attempts"]) + 1
-                    if work.staging_dir.exists():
-                        shutil.rmtree(work.staging_dir)
-                    work.staging_dir.mkdir(parents=True, exist_ok=True)
+                    attempt_staging_dir = work.staging_dir / f"attempt-{attempt:02d}"
+                    if attempt_staging_dir.exists():
+                        shutil.rmtree(attempt_staging_dir)
+                    attempt_staging_dir.mkdir(parents=True, exist_ok=True)
+                    attempt_work = replace(
+                        work,
+                        staging_dir=attempt_staging_dir,
+                        staging_output_path=attempt_staging_dir / work.output_name,
+                    )
                     if estimator is not None:
                         estimator.start_work_unit(estimate_unit_id(work, attempt))
                     try:
                         reviewer_thread_id = codex_client.start_thread(
                             repo_dir,
                             model_for_job(job),
+                            timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
+                            cancel_requested=assignment_cancel_requested,
                         )
                         if not reviewer_thread_id:
                             raise RuntimeError("Codex reviewer thread is missing")
@@ -3916,13 +4108,14 @@ class ReviewWorkerV1:
                         repo_dir,
                         run_dir,
                         job,
-                        work,
+                        attempt_work,
                         thread_id=reviewer_thread_id,
                         attempt=attempt,
                         expected_assignments=expected_assignments,
                         cancel_event=cancel_event,
+                        deadline_monotonic=deadline_monotonic,
                     )
-                    active_futures[future] = (work, record, attempt_record)
+                    active_futures[future] = (work, attempt_work, record, attempt_record)
                     self.progress_phase(
                         active,
                         run_dir,
@@ -3950,12 +4143,12 @@ class ReviewWorkerV1:
                     return_when=FIRST_COMPLETED,
                 )
                 for future in sorted(done, key=lambda item: active_futures[item][0].index):
-                    work, record, attempt_record = active_futures.pop(future)
+                    work, attempt_work, record, attempt_record = active_futures.pop(future)
                     try:
                         outcome = future.result()
                     except BaseException as exc:
                         outcome = ReviewerAssignmentOutcome(
-                            work=work,
+                            work=attempt_work,
                             thread_id=str(attempt_record["thread_id"]),
                             attempt=int(attempt_record["attempt"]),
                             error=exc,
@@ -3963,7 +4156,10 @@ class ReviewWorkerV1:
 
                     if outcome.valid_output:
                         try:
-                            os.replace(work.staging_output_path, work.output_path)
+                            os.replace(
+                                outcome.work.staging_output_path,
+                                work.output_path,
+                            )
                         except OSError as exc:
                             outcome.error = exc
                             outcome.valid_output = False
@@ -4029,7 +4225,7 @@ class ReviewWorkerV1:
                                         ),
                                     )
                             pending.appendleft(work)
-                            shutil.rmtree(work.staging_dir, ignore_errors=True)
+                            shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
                             append_jsonl(
                                 run_dir / "worker.log.jsonl",
                                 {
@@ -4106,7 +4302,7 @@ class ReviewWorkerV1:
                     )
                     if outcome.valid_output:
                         completed += 1
-                        shutil.rmtree(work.staging_dir, ignore_errors=True)
+                        shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
                     else:
                         record["error"] = (
                             "exact assignment output is missing, malformed, or covers a different assignment"
@@ -4798,6 +4994,48 @@ class JobCancelled(RuntimeError):
 
 class JobPartialCompleted(RuntimeError):
     pass
+
+
+def check_lifecycle_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise JobCancelled("cancel requested")
+
+
+def remaining_wall_time_seconds(deadline_monotonic: float | None) -> float | None:
+    if deadline_monotonic is None:
+        return None
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0:
+        raise JobPartialCompleted("review wall-time deadline exceeded")
+    return remaining
+
+
+def turn_timeout_with_deadline(job: dict[str, Any], deadline_monotonic: float | None) -> int:
+    configured = max(1, int(turn_timeout_for_job(job)))
+    remaining = remaining_wall_time_seconds(deadline_monotonic)
+    if remaining is None:
+        return configured
+    if remaining < 1:
+        raise JobPartialCompleted("review wall-time deadline exceeded")
+    return max(1, min(configured, int(remaining)))
+
+
+def invoke_with_lifecycle_controls(
+    method: Callable[..., Any],
+    *args: Any,
+    deadline_monotonic: float | None,
+    cancel_requested: Callable[[], bool] | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Pass lifecycle controls while preserving legacy subclass overrides."""
+    parameters = inspect.signature(method).parameters.values()
+    names = {parameter.name for parameter in parameters}
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+    if accepts_kwargs or "deadline_monotonic" in names:
+        kwargs["deadline_monotonic"] = deadline_monotonic
+    if cancel_requested is not None and (accepts_kwargs or "cancel_requested" in names):
+        kwargs["cancel_requested"] = cancel_requested
+    return method(*args, **kwargs)
 
 
 class RepositoryLimitExceeded(RuntimeError):
@@ -5559,14 +5797,15 @@ def repository_scan_stats(
     *,
     context: str,
     deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
     files_seen = 0
     bytes_seen = 0
     for path in sorted(repo_dir.rglob("*")):
+        check_lifecycle_cancelled(cancel_requested)
         if ".git" in path.parts or ".codex-review" in path.parts:
             continue
-        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
-            raise RuntimeError(f"repository scan deadline exceeded while {context}")
+        remaining_wall_time_seconds(deadline_monotonic)
         if not _is_regular_file_no_follow(path):
             continue
         stat_result = path.stat(follow_symlinks=False)
@@ -5609,9 +5848,15 @@ def enforce_repository_limits(
     max_bytes: int | None = None,
     context: str = "preparing checkout",
     deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
     raise_repository_limit_if_exceeded(
-        repository_scan_stats(repo_dir, context=context, deadline_monotonic=deadline_monotonic),
+        repository_scan_stats(
+            repo_dir,
+            context=context,
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
+        ),
         max_files=max_files,
         max_bytes=max_bytes,
         context=context,
@@ -5624,19 +5869,25 @@ def inventory(
     max_files: int | None = None,
     max_bytes: int | None = None,
     deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     raise_repository_limit_if_exceeded(
-        repository_scan_stats(repo_dir, context="inventorying checkout", deadline_monotonic=deadline_monotonic),
+        repository_scan_stats(
+            repo_dir,
+            context="inventorying checkout",
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
+        ),
         max_files=max_files,
         max_bytes=max_bytes,
         context="inventorying checkout",
     )
     files = []
     for path in sorted(repo_dir.rglob("*")):
+        check_lifecycle_cancelled(cancel_requested)
         if ".git" in path.parts or ".codex-review" in path.parts:
             continue
-        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
-            raise RuntimeError("repository scan deadline exceeded while inventorying checkout")
+        remaining_wall_time_seconds(deadline_monotonic)
         if not _is_regular_file_no_follow(path):
             continue
         rel = path.relative_to(repo_dir).as_posix()
@@ -13146,7 +13397,10 @@ def copy_tree(
     max_files: int | None = None,
     max_bytes: int | None = None,
     deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
+    check_lifecycle_cancelled(cancel_requested)
+    remaining_wall_time_seconds(deadline_monotonic)
     try:
         source_mode = source.stat(follow_symlinks=False).st_mode
     except OSError as exc:
@@ -13155,13 +13409,20 @@ def copy_tree(
         raise RuntimeError(f"repository source must be a real directory: {source}")
 
     raise_repository_limit_if_exceeded(
-        repository_scan_stats(source, context="copying checkout", deadline_monotonic=deadline_monotonic),
+        repository_scan_stats(
+            source,
+            context="copying checkout",
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
+        ),
         max_files=max_files,
         max_bytes=max_bytes,
         context="copying checkout",
     )
 
     for root, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
+        check_lifecycle_cancelled(cancel_requested)
+        remaining_wall_time_seconds(deadline_monotonic)
         root_path = Path(root)
         if ".git" in root_path.parts or ".codex-review" in root_path.parts:
             dirnames[:] = []
@@ -13175,8 +13436,8 @@ def copy_tree(
         if rel_root != Path("."):
             (dest / rel_root).mkdir(parents=True, exist_ok=True)
         for filename in filenames:
-            if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
-                raise RuntimeError("repository scan deadline exceeded while copying checkout")
+            check_lifecycle_cancelled(cancel_requested)
+            remaining_wall_time_seconds(deadline_monotonic)
             path = root_path / filename
             if not _is_regular_file_no_follow(path):
                 continue
@@ -13186,9 +13447,16 @@ def copy_tree(
             shutil.copy2(path, target, follow_symlinks=False)
 
 
-def repository_file_count(repo_dir: Path) -> int:
+def repository_file_count(
+    repo_dir: Path,
+    *,
+    deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> int:
     files_seen = 0
     for root, dirnames, filenames in os.walk(repo_dir, topdown=True, followlinks=False):
+        check_lifecycle_cancelled(cancel_requested)
+        remaining_wall_time_seconds(deadline_monotonic)
         root_path = Path(root)
         if ".git" in root_path.parts or ".codex-review" in root_path.parts:
             dirnames[:] = []
@@ -13199,6 +13467,8 @@ def repository_file_count(repo_dir: Path) -> int:
             if name not in {".git", ".codex-review"} and not (root_path / name).is_symlink()
         ]
         for filename in filenames:
+            check_lifecycle_cancelled(cancel_requested)
+            remaining_wall_time_seconds(deadline_monotonic)
             if _is_regular_file_no_follow(root_path / filename):
                 files_seen += 1
     return files_seen
@@ -13232,22 +13502,83 @@ def git_command_timeout(deadline_monotonic: float | None) -> int | None:
     return max(1, remaining)
 
 
-def run_git(args: list[str], *, env: dict[str, str], deadline_monotonic: float | None = None) -> None:
+def terminate_polled_process(process: Any) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
     try:
-        subprocess.run(
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=1)
+
+
+def poll_process_communicate(
+    process: Any,
+    args: list[str],
+    *,
+    deadline_monotonic: float | None,
+    cancel_requested: Callable[[], bool] | None,
+    timeout_deadline_monotonic: float | None = None,
+) -> tuple[Any, Any]:
+    while True:
+        try:
+            check_lifecycle_cancelled(cancel_requested)
+            remaining = remaining_wall_time_seconds(deadline_monotonic)
+        except (JobCancelled, JobPartialCompleted):
+            terminate_polled_process(process)
+            raise
+        if timeout_deadline_monotonic is not None:
+            timeout_remaining = timeout_deadline_monotonic - time.monotonic()
+            if timeout_remaining <= 0:
+                terminate_polled_process(process)
+                raise subprocess.TimeoutExpired(args, 0)
+        else:
+            timeout_remaining = None
+        waits = [0.1]
+        if remaining is not None:
+            waits.append(remaining)
+        if timeout_remaining is not None:
+            waits.append(timeout_remaining)
+        try:
+            return process.communicate(timeout=max(0.001, min(waits)))
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run_git(
+    args: list[str],
+    *,
+    env: dict[str, str],
+    deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> None:
+    check_lifecycle_cancelled(cancel_requested)
+    remaining_wall_time_seconds(deadline_monotonic)
+    try:
+        process = subprocess.Popen(
             args,
-            check=True,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            timeout=git_command_timeout(deadline_monotonic),
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("repository scan deadline exceeded while cloning checkout") from exc
+        stdout, stderr = poll_process_communicate(
+            process,
+            args,
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
+        )
+        if int(process.returncode or 0) != 0:
+            raise subprocess.CalledProcessError(
+                int(process.returncode),
+                args,
+                output=stdout,
+                stderr=stderr,
+            )
     except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
+        stderr = str(exc.stderr or "").strip()
         detail = f": {stderr[-500:]}" if stderr else ""
         raise RuntimeError(f"repository checkout git command failed{detail}") from exc
 
@@ -13303,7 +13634,9 @@ def ensure_repository_mirror(
     *,
     env: dict[str, str],
     deadline_monotonic: float | None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
+    check_lifecycle_cancelled(cancel_requested)
     clone_url = repository_mirror_identity_url(clone_url)
     cache_root = mirror_dir.parent
     if cache_root.is_symlink():
@@ -13316,17 +13649,24 @@ def ensure_repository_mirror(
     if mirror_dir.exists() and not mirror_dir.is_dir():
         raise RuntimeError("repository mirror directory must be a directory")
     if not (mirror_dir / "HEAD").is_file():
-        run_git(["git", "init", "--bare", str(mirror_dir)], env=env, deadline_monotonic=deadline_monotonic)
+        run_git(
+            ["git", "init", "--bare", str(mirror_dir)],
+            env=env,
+            deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
+        )
         run_git(
             ["git", "-C", str(mirror_dir), "remote", "add", "origin", clone_url],
             env=env,
             deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
         )
     else:
         run_git(
             ["git", "-C", str(mirror_dir), "remote", "set-url", "origin", clone_url],
             env=env,
             deadline_monotonic=deadline_monotonic,
+            cancel_requested=cancel_requested,
         )
 
 
@@ -13358,6 +13698,7 @@ def fetch_repository_mirror(
     *,
     env: dict[str, str],
     deadline_monotonic: float | None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> str:
     source_ref, target_ref = repository_fetch_ref(job, mirror_dir)
     force_prefix = "+" if source_ref.startswith("refs/heads/") else ""
@@ -13375,6 +13716,7 @@ def fetch_repository_mirror(
         ],
         env=env,
         deadline_monotonic=deadline_monotonic,
+        cancel_requested=cancel_requested,
     )
     return target_ref
 
@@ -13386,27 +13728,32 @@ def clone_checkout_from_mirror(
     *,
     env: dict[str, str],
     deadline_monotonic: float | None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
     run_git(
         ["git", "clone", "--shared", "--no-checkout", str(mirror_dir), str(repo_dir)],
         env=env,
         deadline_monotonic=deadline_monotonic,
+        cancel_requested=cancel_requested,
     )
     checkout_ref = "refs/pullwise/checkout"
     run_git(
         ["git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin", f"{mirror_ref}:{checkout_ref}"],
         env=env,
         deadline_monotonic=deadline_monotonic,
+        cancel_requested=cancel_requested,
     )
     run_git(
         ["git", "-C", str(repo_dir), "checkout", "--detach", checkout_ref],
         env=env,
         deadline_monotonic=deadline_monotonic,
+        cancel_requested=cancel_requested,
     )
     run_git(
         ["git", "-C", str(repo_dir), "remote", "remove", "origin"],
         env=env,
         deadline_monotonic=deadline_monotonic,
+        cancel_requested=cancel_requested,
     )
 
 
@@ -13423,7 +13770,10 @@ def clone_repository_checkout(
     *,
     mirror_cache_root: Path,
     deadline_monotonic: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
+    check_lifecycle_cancelled(cancel_requested)
+    remaining_wall_time_seconds(deadline_monotonic)
     clone_url = job_clone_url(job)
     token = job_clone_token(job)
     mirror_dir = repository_mirror_dir(mirror_cache_root, job, clone_url)
@@ -13442,12 +13792,14 @@ def clone_repository_checkout(
                     clone_url,
                     env=env,
                     deadline_monotonic=deadline_monotonic,
+                    cancel_requested=cancel_requested,
                 )
                 mirror_ref = fetch_repository_mirror(
                     job,
                     mirror_dir,
                     env=env,
                     deadline_monotonic=deadline_monotonic,
+                    cancel_requested=cancel_requested,
                 )
                 clone_checkout_from_mirror(
                     mirror_dir,
@@ -13455,12 +13807,17 @@ def clone_repository_checkout(
                     mirror_ref,
                     env=env,
                     deadline_monotonic=deadline_monotonic,
+                    cancel_requested=cancel_requested,
                 )
                 try:
                     os.utime(mirror_dir, None, follow_symlinks=False)
                 except (NotImplementedError, OSError):
                     pass
                 break
+            except JobCancelled:
+                raise
+            except JobPartialCompleted:
+                raise
             except RuntimeError:
                 if repo_dir.exists():
                     shutil.rmtree(repo_dir)
