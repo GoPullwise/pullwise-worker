@@ -3018,6 +3018,27 @@ class ReviewWorkerV1:
         self._persisted_unfinished_workspace_names = {str(record["run_name"]) for record in records}
         if not records:
             return None
+        for persisted_record in records:
+            persisted_run_dir = Path(persisted_record["run_dir"])
+            if not persisted_run_dir.is_dir():
+                continue
+            try:
+                _recover_model_output_publication(persisted_run_dir)
+            except OSError as exc:
+                persisted_record["publication_recovery_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                try:
+                    append_jsonl(
+                        persisted_run_dir / "worker.log.jsonl",
+                        {
+                            "event": "model_output_publication_recovery_failed",
+                            "error": persisted_record["publication_recovery_error"],
+                            "time": iso_time(time.time()),
+                        },
+                    )
+                except OSError:
+                    pass
         record = records[0]
         active_payload = record["active_job"]
         submit_marker = record["submit_marker"]
@@ -3055,8 +3076,14 @@ class ReviewWorkerV1:
             or "submit_result_envelope"
         )
         active.current_phase_status = str(progress.get("current_phase_status") or "blocked")
+        publication_recovery_error = str(
+            record.get("publication_recovery_error") or ""
+        )
         active.message = str(
-            progress.get("message")
+            publication_recovery_error
+            and "Recovered unfinished run with an unresolved model-output publication: "
+            + publication_recovery_error
+            or progress.get("message")
             or "Recovered unfinished run; operator intervention is required before this slot can be reused."
         )
         try:
@@ -6305,13 +6332,86 @@ def prepare_model_turn_workspace(
 
 
 MODEL_OUTPUT_PUBLICATION_JOURNAL = ".model-output-publication.json"
+MODEL_OUTPUT_PUBLICATION_SCHEMA = "model-output-publication/v2"
+LEGACY_MODEL_OUTPUT_PUBLICATION_SCHEMA = "model-output-publication/v1"
+
+
+def _validated_model_output_declarations(
+    declared_outputs: tuple[str, ...],
+) -> tuple[str, ...]:
+    paths: list[PurePosixPath] = []
+    normalized: list[str] = []
+    for raw_declared in declared_outputs:
+        if not isinstance(raw_declared, str):
+            raise OSError("model output declaration must be a string")
+        declared = raw_declared.strip()
+        relative = PurePosixPath(declared)
+        if (
+            not declared
+            or declared != raw_declared
+            or not relative.parts
+            or relative.is_absolute()
+            or relative.as_posix() != declared
+            or "\\" in declared
+            or any(char in declared for char in "\r\n\x00")
+            or any(part in {"", ".", ".."} or ":" in part for part in relative.parts)
+        ):
+            raise OSError(f"model output declaration is unsafe: {raw_declared}")
+        if any(
+            relative == existing
+            or relative in existing.parents
+            or existing in relative.parents
+            for existing in paths
+        ):
+            raise OSError("model output declarations overlap")
+        paths.append(relative)
+        normalized.append(relative.as_posix())
+    return tuple(normalized)
+
+
+def _model_output_snapshot_digest(
+    relative: str,
+    replacement_kind: str,
+    snapshot: dict[str, ModelOutputFile],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"model-output-snapshot/v1\x00")
+    digest.update(replacement_kind.encode("ascii"))
+    digest.update(b"\x00")
+    if replacement_kind == "file":
+        entries = [("", snapshot.get(relative))]
+    elif replacement_kind == "directory":
+        prefix = relative.rstrip("/") + "/"
+        entries = [
+            (path[len(prefix) :], output)
+            for path, output in sorted(snapshot.items())
+            if path.startswith(prefix)
+        ]
+    else:
+        return digest.hexdigest()
+    for nested_path, output in entries:
+        if output is None:
+            raise OSError(f"declared model output snapshot is missing: {relative}")
+        path_bytes = nested_path.encode("utf-8")
+        digest.update(len(path_bytes).to_bytes(8, "big"))
+        digest.update(path_bytes)
+        digest.update(b"\x01" if output.executable else b"\x00")
+        digest.update(len(output.payload).to_bytes(8, "big"))
+        digest.update(output.payload)
+    return digest.hexdigest()
 
 
 def _model_output_publication_path(run_dir: Path, raw_path: object) -> Path:
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise OSError("model output publication journal contains an invalid path")
     relative = PurePosixPath(raw_path)
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+    if (
+        not relative.parts
+        or relative.is_absolute()
+        or relative.as_posix() != raw_path
+        or "\\" in raw_path
+        or any(part in {"", ".", ".."} or ":" in part for part in relative.parts)
+    ):
         raise OSError("model output publication journal contains an unsafe path")
     candidate = run_dir.joinpath(*relative.parts)
     if not _path_is_within(candidate.resolve(strict=False), run_dir.resolve(strict=False)):
@@ -6329,26 +6429,41 @@ def _write_model_output_publication_journal(
     )
 
 
-def _recover_model_output_publication(run_dir: Path) -> None:
-    journal_path = run_dir / MODEL_OUTPUT_PUBLICATION_JOURNAL
-    if not journal_path.exists() and not journal_path.is_symlink():
-        return
-    if journal_path.is_symlink():
-        raise OSError("model output publication journal is a symlink")
-    try:
-        journal = json.loads(_bounded_regular_model_file(journal_path).payload.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise OSError(f"model output publication journal is invalid: {exc}") from exc
-    if not isinstance(journal, dict) or journal.get("schema_version") != "model-output-publication/v1":
+def _durable_model_output_replace(source: Path, destination: Path) -> None:
+    if source.parent != destination.parent:
+        raise OSError("model output transaction rename crosses directories")
+    os.replace(source, destination)
+    _fsync_directory(destination.parent)
+
+
+def _parse_model_output_publication_journal(
+    run_dir: Path,
+    journal: object,
+) -> tuple[str, str, list[dict[str, Any]]]:
+    if not isinstance(journal, dict):
+        raise OSError("model output publication journal is not an object")
+    schema = journal.get("schema_version")
+    if schema not in {
+        MODEL_OUTPUT_PUBLICATION_SCHEMA,
+        LEGACY_MODEL_OUTPUT_PUBLICATION_SCHEMA,
+    }:
         raise OSError("model output publication journal has an unsupported schema")
     state = journal.get("state")
-    if state not in {"committing", "committed"}:
+    if state not in {"preparing", "committing", "committed"} or (
+        schema == LEGACY_MODEL_OUTPUT_PUBLICATION_SCHEMA and state == "preparing"
+    ):
         raise OSError("model output publication journal has an invalid state")
     raw_items = journal.get("items")
     if not isinstance(raw_items, list):
         raise OSError("model output publication journal has invalid items")
+    raw_destinations = tuple(
+        str(item.get("destination") or "") if isinstance(item, dict) else ""
+        for item in raw_items
+    )
+    _validated_model_output_declarations(raw_destinations)
 
-    items: list[tuple[Path, Path, Path, bool, bool]] = []
+    items: list[dict[str, Any]] = []
+    transaction_paths: set[Path] = set()
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             raise OSError("model output publication journal contains an invalid item")
@@ -6365,59 +6480,195 @@ def _recover_model_output_publication(run_dir: Path) -> None:
             raise OSError("model output publication journal contains an invalid prepared path")
         if not backup.name.startswith(f".{destination.name}.") or not backup.name.endswith(".backup"):
             raise OSError("model output publication journal contains an invalid backup path")
-        items.append((destination, prepared, backup, had_destination, has_replacement))
+        if prepared in transaction_paths or backup in transaction_paths:
+            raise OSError("model output publication journal reuses a transaction path")
+        transaction_paths.update((prepared, backup))
+        replacement_kind = raw_item.get("replacement_kind")
+        expected_digest = raw_item.get("expected_digest")
+        if schema == MODEL_OUTPUT_PUBLICATION_SCHEMA:
+            if replacement_kind not in {"absent", "file", "directory"}:
+                raise OSError("model output publication journal contains an invalid replacement kind")
+            if has_replacement != (replacement_kind != "absent"):
+                raise OSError("model output publication journal replacement flags conflict")
+            if replacement_kind == "absent":
+                if expected_digest not in {None, ""}:
+                    raise OSError("absent model output publication item has a digest")
+            elif not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+                raise OSError("model output publication journal contains an invalid digest")
+        items.append(
+            {
+                **raw_item,
+                "destination_path": destination,
+                "prepared_path": prepared,
+                "backup_path": backup,
+            }
+        )
+    return str(schema), str(state), items
+
+
+def _rollback_model_output_publication(
+    run_dir: Path,
+    items: list[dict[str, Any]],
+) -> None:
+    for item in reversed(items):
+        destination = item["destination_path"]
+        backup = item["backup_path"]
+        backup_exists = backup.exists() or backup.is_symlink()
+        destination_exists = destination.exists() or destination.is_symlink()
+        if backup_exists:
+            if backup.is_symlink():
+                raise OSError(f"model output publication backup is a symlink: {backup}")
+            _validate_worker_owned_output(backup, run_dir)
+            if destination_exists:
+                _remove_model_output_transaction_path(destination, run_dir)
+            try:
+                _durable_model_output_replace(backup, destination)
+            except OSError as exc:
+                raise OSError(
+                    f"could not restore model output publication backup {backup} "
+                    f"to {destination}: {exc}"
+                ) from exc
+        elif item["had_destination"]:
+            if not destination_exists:
+                raise OSError("model output publication lost its previous destination")
+            _validate_worker_owned_output(destination, run_dir)
+        elif destination_exists:
+            _remove_model_output_transaction_path(destination, run_dir)
+    for item in items:
+        prepared = item["prepared_path"]
+        backup = item["backup_path"]
+        if prepared.exists() or prepared.is_symlink():
+            _remove_model_output_transaction_path(prepared, run_dir)
+        if backup.exists() or backup.is_symlink():
+            raise OSError(f"model output publication backup was not restored: {backup}")
+    _remove_worker_owned_output(run_dir / MODEL_OUTPUT_PUBLICATION_JOURNAL, run_dir)
+
+
+def _model_output_destination_error(
+    run_dir: Path,
+    item: dict[str, Any],
+) -> str:
+    destination = item["destination_path"]
+    replacement_kind = str(item.get("replacement_kind") or "")
+    destination_exists = destination.exists() or destination.is_symlink()
+    if replacement_kind == "absent":
+        return "destination still exists" if destination_exists else ""
+    if not destination_exists:
+        return "destination is missing"
+    if destination.is_symlink():
+        return "destination is a symlink"
+    try:
+        _validate_worker_owned_output(destination, run_dir)
+    except OSError as exc:
+        return str(exc)
+    if replacement_kind == "file" and not _is_regular_file_no_follow(destination):
+        return "destination is not a regular file"
+    if replacement_kind == "directory" and not destination.is_dir():
+        return "destination is not a directory"
+    try:
+        snapshot = _declared_model_output_snapshot(
+            run_dir,
+            (str(item["destination"]),),
+        )
+        actual_digest = _model_output_snapshot_digest(
+            str(item["destination"]),
+            replacement_kind,
+            snapshot,
+        )
+    except OSError as exc:
+        return str(exc)
+    if actual_digest != item.get("expected_digest"):
+        return "destination digest differs from the committed snapshot"
+    return ""
+
+
+def _committed_publication_can_rollback(
+    run_dir: Path,
+    items: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    for item in items:
+        if not item["had_destination"]:
+            continue
+        backup = item["backup_path"]
+        if not (backup.exists() or backup.is_symlink()):
+            return False, f"previous destination backup is missing: {backup}"
+        if backup.is_symlink():
+            return False, f"previous destination backup is a symlink: {backup}"
+        try:
+            _validate_worker_owned_output(backup, run_dir)
+        except OSError as exc:
+            return False, str(exc)
+    return True, ""
+
+
+def _recover_model_output_publication(run_dir: Path) -> None:
+    journal_path = run_dir / MODEL_OUTPUT_PUBLICATION_JOURNAL
+    if not journal_path.exists() and not journal_path.is_symlink():
+        return
+    if journal_path.is_symlink():
+        raise OSError("model output publication journal is a symlink")
+    try:
+        journal = json.loads(_bounded_regular_model_file(journal_path).payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError(f"model output publication journal is invalid: {exc}") from exc
+    schema, state, items = _parse_model_output_publication_journal(run_dir, journal)
+
+    if state == "preparing":
+        for item in items:
+            backup = item["backup_path"]
+            if backup.exists() or backup.is_symlink():
+                raise OSError("preparing model output publication unexpectedly has a backup")
+        for item in items:
+            prepared = item["prepared_path"]
+            if prepared.exists() or prepared.is_symlink():
+                _remove_model_output_transaction_path(prepared, run_dir)
+        _remove_worker_owned_output(journal_path, run_dir)
+        return
 
     if state == "committing":
-        for destination, _prepared, backup, had_destination, _has_replacement in reversed(items):
-            backup_exists = backup.exists() or backup.is_symlink()
-            destination_exists = destination.exists() or destination.is_symlink()
-            if backup_exists:
-                if backup.is_symlink():
-                    raise OSError("model output publication backup is a symlink")
-                _validate_worker_owned_output(backup, run_dir)
-                if destination_exists:
-                    _remove_worker_owned_output(destination, run_dir)
-                try:
-                    os.replace(backup, destination)
-                except OSError as exc:
-                    raise OSError(
-                        f"could not restore model output publication backup {backup} "
-                        f"to {destination}: {exc}"
-                    ) from exc
-            elif had_destination and not destination_exists:
-                raise OSError("model output publication lost its previous destination")
-            elif not had_destination and destination_exists:
-                _remove_worker_owned_output(destination, run_dir)
-    else:
-        for destination, _prepared, backup, had_destination, has_replacement in items:
-            if has_replacement and not (destination.exists() or destination.is_symlink()):
-                if had_destination and (backup.exists() or backup.is_symlink()) and not backup.is_symlink():
-                    _validate_worker_owned_output(backup, run_dir)
-                    os.replace(backup, destination)
-                raise OSError("committed model output publication is missing its destination")
+        _rollback_model_output_publication(run_dir, items)
+        return
 
-    for _destination, prepared, backup, _had_destination, _has_replacement in items:
+    if schema != MODEL_OUTPUT_PUBLICATION_SCHEMA:
+        raise OSError("legacy committed model output publication requires operator recovery")
+    validation_errors = [
+        f"{item['destination']}: {error}"
+        for item in items
+        if (error := _model_output_destination_error(run_dir, item))
+    ]
+    if validation_errors:
+        can_rollback, rollback_reason = _committed_publication_can_rollback(run_dir, items)
+        if not can_rollback:
+            raise OSError(
+                "committed model output publication is invalid and cannot be rolled back: "
+                + "; ".join(validation_errors + [rollback_reason])
+            )
+        rollback_journal = {**journal, "state": "committing"}
+        _write_model_output_publication_journal(run_dir, rollback_journal)
+        _rollback_model_output_publication(run_dir, items)
+        return
+
+    for item in items:
+        prepared = item["prepared_path"]
+        backup = item["backup_path"]
         if prepared.exists() or prepared.is_symlink():
-            _remove_worker_owned_output(prepared, run_dir)
+            _remove_model_output_transaction_path(prepared, run_dir)
         if backup.exists() or backup.is_symlink():
-            _remove_worker_owned_output(backup, run_dir)
+            _remove_model_output_transaction_path(backup, run_dir)
     _remove_worker_owned_output(journal_path, run_dir)
 
 
-def _prepare_model_output_publication_item(
+def _plan_model_output_publication_item(
     staging: Path,
     run_dir: Path,
-    resolved_run_dir: Path,
     declared: str,
     snapshot: dict[str, ModelOutputFile],
     transaction_id: str,
-) -> tuple[dict[str, Any], Path | None]:
+) -> dict[str, Any]:
     relative = PurePosixPath(declared)
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-        raise OSError(f"model output declaration is unsafe: {declared}")
     source = staging.joinpath(*relative.parts)
     destination = run_dir.joinpath(*relative.parts)
-    if not _path_is_within(destination.resolve(strict=False), resolved_run_dir):
+    if not _path_is_within(destination.resolve(strict=False), run_dir.resolve(strict=False)):
         raise OSError(f"model output destination escapes the run directory: {destination}")
     if path_has_symlink_component(destination.parent):
         raise OSError(f"model output destination parent contains a symlink: {destination.parent}")
@@ -6425,58 +6676,75 @@ def _prepare_model_output_publication_item(
     destination_exists = destination.exists() or destination.is_symlink()
     if destination.is_symlink():
         raise OSError(f"model output destination is a symlink: {destination}")
-    if destination_exists and not (
-        _is_regular_file_no_follow(destination) or destination.is_dir()
-    ):
-        raise OSError(f"model output destination is not regular: {destination}")
     if destination_exists:
         _validate_worker_owned_output(destination, run_dir)
+    if not source.exists() and not source.is_symlink():
+        replacement_kind = "absent"
+    elif path_has_symlink_component(source):
+        raise OSError(f"declared model output contains a symlink: {source}")
+    elif source.is_file():
+        replacement_kind = "file"
+    elif source.is_dir():
+        replacement_kind = "directory"
+    else:
+        raise OSError(f"declared model output is not regular: {source}")
     prepared = destination.with_name(f".{destination.name}.{transaction_id}.publish")
     backup = destination.with_name(f".{destination.name}.{transaction_id}.backup")
     if prepared.exists() or prepared.is_symlink() or backup.exists() or backup.is_symlink():
         raise OSError(f"model output publication transaction path already exists: {destination}")
-    has_replacement = source.exists() or source.is_symlink()
+    expected_digest = (
+        _model_output_snapshot_digest(declared, replacement_kind, snapshot)
+        if replacement_kind != "absent"
+        else None
+    )
+    return {
+        "destination": declared,
+        "prepared": prepared.relative_to(run_dir).as_posix(),
+        "backup": backup.relative_to(run_dir).as_posix(),
+        "had_destination": destination_exists,
+        "has_replacement": replacement_kind != "absent",
+        "replacement_kind": replacement_kind,
+        "expected_digest": expected_digest,
+    }
+
+
+def _materialize_prepared_model_output(
+    run_dir: Path,
+    item: dict[str, Any],
+    snapshot: dict[str, ModelOutputFile],
+) -> None:
+    replacement_kind = str(item["replacement_kind"])
+    if replacement_kind == "absent":
+        return
+    relative = str(item["destination"])
+    prepared = _model_output_publication_path(run_dir, item["prepared"])
     try:
-        if has_replacement:
-            if path_has_symlink_component(source):
-                raise OSError(f"declared model output contains a symlink: {source}")
-            if source.is_file():
-                output = snapshot.get(relative.as_posix())
-                if output is None:
-                    raise OSError(f"declared model output snapshot is missing: {source}")
+        if replacement_kind == "file":
+            output = snapshot.get(relative)
+            if output is None:
+                raise OSError(f"declared model output snapshot is missing: {relative}")
+            _write_worker_owned_bytes(
+                prepared,
+                output.payload,
+                executable=output.executable,
+            )
+        else:
+            prepared.mkdir(parents=False, exist_ok=False)
+            prefix = relative.rstrip("/") + "/"
+            for snapshot_path, output in snapshot.items():
+                if not snapshot_path.startswith(prefix):
+                    continue
+                nested = PurePosixPath(snapshot_path[len(prefix) :])
                 _write_worker_owned_bytes(
-                    prepared,
+                    prepared.joinpath(*nested.parts),
                     output.payload,
                     executable=output.executable,
                 )
-            elif source.is_dir():
-                prepared.mkdir(parents=False, exist_ok=False)
-                prefix = relative.as_posix().rstrip("/") + "/"
-                for snapshot_path, output in snapshot.items():
-                    if not snapshot_path.startswith(prefix):
-                        continue
-                    nested = PurePosixPath(snapshot_path[len(prefix) :])
-                    _write_worker_owned_bytes(
-                        prepared.joinpath(*nested.parts),
-                        output.payload,
-                        executable=output.executable,
-                    )
-            else:
-                raise OSError(f"declared model output is not regular: {source}")
+            _fsync_directory_tree(prepared)
     except BaseException:
         if prepared.exists() or prepared.is_symlink():
-            _remove_worker_owned_output(prepared, run_dir)
+            _remove_model_output_transaction_path(prepared, run_dir)
         raise
-    return (
-        {
-            "destination": destination.relative_to(run_dir).as_posix(),
-            "prepared": prepared.relative_to(run_dir).as_posix(),
-            "backup": backup.relative_to(run_dir).as_posix(),
-            "had_destination": destination_exists,
-            "has_replacement": has_replacement,
-        },
-        prepared if has_replacement else None,
-    )
 
 
 def publish_model_turn_outputs(
@@ -6485,52 +6753,63 @@ def publish_model_turn_outputs(
     declared_outputs: tuple[str, ...],
 ) -> list[str]:
     _recover_model_output_publication(run_dir)
-    snapshot = _declared_model_output_snapshot(staging, declared_outputs)
-    resolved_run_dir = run_dir.resolve(strict=False)
+    declarations = _validated_model_output_declarations(declared_outputs)
+    if not declarations:
+        return []
+    snapshot = _declared_model_output_snapshot(staging, declarations)
     transaction_id = f"{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
-    transaction_items: list[dict[str, Any]] = []
-    prepared_paths: list[Path] = []
-    try:
-        for declared in declared_outputs:
-            item, prepared = _prepare_model_output_publication_item(
-                staging,
-                run_dir,
-                resolved_run_dir,
-                declared,
-                snapshot,
-                transaction_id,
-            )
-            transaction_items.append(item)
-            if prepared is not None:
-                prepared_paths.append(prepared)
-    except BaseException:
-        for prepared in reversed(prepared_paths):
-            if prepared.exists() or prepared.is_symlink():
-                _remove_worker_owned_output(prepared, run_dir)
-        raise
-
-    journal = {
-        "schema_version": "model-output-publication/v1",
-        "state": "committing",
+    transaction_items = [
+        _plan_model_output_publication_item(
+            staging,
+            run_dir,
+            declared,
+            snapshot,
+            transaction_id,
+        )
+        for declared in declarations
+    ]
+    journal: dict[str, Any] = {
+        "schema_version": MODEL_OUTPUT_PUBLICATION_SCHEMA,
+        "state": "preparing",
         "items": transaction_items,
     }
     try:
         _write_model_output_publication_journal(run_dir, journal)
         for item in transaction_items:
-            if not item["had_destination"]:
-                continue
-            destination = _model_output_publication_path(run_dir, item["destination"])
-            backup = _model_output_publication_path(run_dir, item["backup"])
-            os.replace(destination, backup)
-        for item in transaction_items:
-            if not item["has_replacement"]:
-                continue
-            prepared = _model_output_publication_path(run_dir, item["prepared"])
-            destination = _model_output_publication_path(run_dir, item["destination"])
-            os.replace(prepared, destination)
+            _materialize_prepared_model_output(run_dir, item, snapshot)
+        journal["state"] = "committing"
+        _write_model_output_publication_journal(run_dir, journal)
+        _schema, _state, parsed_items = _parse_model_output_publication_journal(
+            run_dir,
+            journal,
+        )
+        for item in parsed_items:
+            if item["had_destination"]:
+                _durable_model_output_replace(
+                    item["destination_path"],
+                    item["backup_path"],
+                )
+        for item in parsed_items:
+            if item["has_replacement"]:
+                _durable_model_output_replace(
+                    item["prepared_path"],
+                    item["destination_path"],
+                )
+        validation_errors = [
+            f"{item['destination']}: {error}"
+            for item in parsed_items
+            if (error := _model_output_destination_error(run_dir, item))
+        ]
+        if validation_errors:
+            raise OSError(
+                "model output publication validation failed: "
+                + "; ".join(validation_errors)
+            )
         journal["state"] = "committed"
         _write_model_output_publication_journal(run_dir, journal)
     except BaseException as publication_error:
+        if journal.get("state") == "committed":
+            raise
         try:
             _recover_model_output_publication(run_dir)
         except BaseException as rollback_error:
@@ -6539,9 +6818,6 @@ def publish_model_turn_outputs(
             ) from publication_error
         raise
     _recover_model_output_publication(run_dir)
-    for prepared in prepared_paths:
-        if prepared.exists() or prepared.is_symlink():
-            _remove_worker_owned_output(prepared, run_dir)
     return sorted(snapshot)
 
 

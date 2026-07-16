@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 from tests.bundle_planning_fixtures import materialize_test_bundle_plan
 from pullwise_worker import __version__
+import pullwise_worker.review_worker_v1 as review_worker_v1_module
 from pullwise_worker.current_run_eta import CurrentRunEstimator
 from pullwise_worker._main_part_01_bootstrap import (
     PULLWISE_WORKER_USER_AGENT,
@@ -10596,6 +10597,167 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(len(backups), 1)
             self.assertEqual((backups[0] / "old_test.py").read_text(encoding="utf-8"), "old\n")
             self.assertTrue((run_dir / ".model-output-publication.json").is_file())
+
+    def test_committed_publication_recovery_rolls_back_the_whole_batch_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "semantic"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staging.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (staging / "a.json").write_text("new-a\n", encoding="utf-8")
+            (staging / "b.json").write_text("new-b\n", encoding="utf-8")
+            (run_dir / "a.json").write_text("old-a\n", encoding="utf-8")
+            (run_dir / "b.json").write_text("old-b\n", encoding="utf-8")
+            real_recover = review_worker_v1_module._recover_model_output_publication
+
+            def defer_committed_cleanup(path: Path) -> None:
+                journal_path = path / ".model-output-publication.json"
+                if journal_path.is_file() and read_json(journal_path).get("state") == "committed":
+                    raise RuntimeError("simulate process exit before committed cleanup")
+                real_recover(path)
+
+            with patch(
+                "pullwise_worker.review_worker_v1._recover_model_output_publication",
+                side_effect=defer_committed_cleanup,
+            ), self.assertRaisesRegex(RuntimeError, "simulate process exit"):
+                publish_model_turn_outputs(staging, run_dir, ("a.json", "b.json"))
+
+            (run_dir / "b.json").unlink()
+            real_recover(run_dir)
+            real_recover(run_dir)
+
+            self.assertEqual((run_dir / "a.json").read_text(encoding="utf-8"), "old-a\n")
+            self.assertEqual((run_dir / "b.json").read_text(encoding="utf-8"), "old-b\n")
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
+            self.assertEqual(list(run_dir.glob(".*.backup")), [])
+
+    def test_publication_cleans_prepared_outputs_when_commit_journal_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "semantic"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staging.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (staging / "result.json").write_text("new\n", encoding="utf-8")
+            (run_dir / "result.json").write_text("old\n", encoding="utf-8")
+            real_write = review_worker_v1_module._write_model_output_publication_journal
+            writes = 0
+
+            def fail_second_write(path: Path, payload: dict[str, object]) -> None:
+                nonlocal writes
+                writes += 1
+                if writes == 2:
+                    raise OSError("injected committing journal failure")
+                real_write(path, payload)
+
+            with patch(
+                "pullwise_worker.review_worker_v1._write_model_output_publication_journal",
+                side_effect=fail_second_write,
+            ), self.assertRaisesRegex(OSError, "injected committing journal failure"):
+                publish_model_turn_outputs(staging, run_dir, ("result.json",))
+
+            self.assertEqual((run_dir / "result.json").read_text(encoding="utf-8"), "old\n")
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
+            self.assertEqual(list(run_dir.glob(".*.publish")), [])
+            self.assertEqual(list(run_dir.glob(".*.backup")), [])
+
+    def test_publication_rejects_root_and_overlapping_declarations_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "semantic"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            (staging / "intent" / "generated-tests").mkdir(parents=True)
+            (staging / "intent" / "generated-tests" / "new.py").write_text(
+                "new\n",
+                encoding="utf-8",
+            )
+            (run_dir / "intent").mkdir(parents=True)
+            (run_dir / "intent" / "old.py").write_text("old\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(OSError, "declaration is unsafe"):
+                publish_model_turn_outputs(staging, run_dir, (".",))
+            with self.assertRaisesRegex(OSError, "declarations overlap"):
+                publish_model_turn_outputs(
+                    staging,
+                    run_dir,
+                    ("intent", "intent/generated-tests"),
+                )
+
+            self.assertEqual((run_dir / "intent" / "old.py").read_text(encoding="utf-8"), "old\n")
+            self.assertEqual(list(run_dir.parent.glob(".run_1.*.publish")), [])
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
+
+    def test_publication_syncs_files_and_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "semantic"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staging.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (staging / "result.json").write_text("new\n", encoding="utf-8")
+
+            with patch(
+                "pullwise_worker.review_worker_v1.os.fsync",
+                wraps=os.fsync,
+            ) as file_sync, patch(
+                "pullwise_worker.review_worker_v1._fsync_directory",
+                wraps=review_worker_v1_module._fsync_directory,
+            ) as directory_sync:
+                publish_model_turn_outputs(staging, run_dir, ("result.json",))
+
+            self.assertGreater(file_sync.call_count, 0)
+            self.assertGreater(directory_sync.call_count, 0)
+
+    def test_persisted_active_run_recovery_repairs_publication_before_finishing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            run_dir = (
+                worker.isolation.workspaces
+                / "run_1"
+                / "repo"
+                / ".codex-review"
+                / "runs"
+                / "run_1"
+            )
+            destination = run_dir / "result.json"
+            prepared = run_dir / ".result.json.crash.publish"
+            backup = run_dir / ".result.json.crash.backup"
+            run_dir.mkdir(parents=True)
+            destination.write_text("old\n", encoding="utf-8")
+            os.replace(destination, backup)
+            destination.write_text("partial-new\n", encoding="utf-8")
+            prepared.write_text("uncommitted-new\n", encoding="utf-8")
+            write_json(
+                run_dir / ".model-output-publication.json",
+                {
+                    "schema_version": "model-output-publication/v1",
+                    "state": "committing",
+                    "items": [
+                        {
+                            "destination": "result.json",
+                            "prepared": ".result.json.crash.publish",
+                            "backup": ".result.json.crash.backup",
+                            "had_destination": True,
+                            "has_replacement": True,
+                        }
+                    ],
+                },
+            )
+            active = ActiveJob("job_1", "run_1", "lease_1", "wk_1-1")
+            worker.persist_active_run_marker(active)
+
+            recovered = worker.recover_persisted_active_job()
+
+            self.assertIsNotNone(recovered)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "old\n")
+            self.assertFalse(prepared.exists())
+            self.assertFalse(backup.exists())
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
 
     def test_model_turn_publication_rejects_aggregate_output_over_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
