@@ -1193,7 +1193,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(requests[1]["sandboxPolicy"]["networkAccess"], False)
         self.assertEqual(
             requests[1]["sandboxPolicy"]["writableRoots"],
-            [str(workspace / ".codex-review"), str(workspace.parent / "validation-repo")],
+            [str(workspace / ".codex-review")],
         )
         self.assertNotIn("danger", json.dumps(requests).lower())
 

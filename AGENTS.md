@@ -129,13 +129,13 @@ Codex execution rules:
   and preserve current camelCase `codexErrorInfo` values such as
   `usageLimitExceeded` when mapping the worker's stable public error code.
 - Implement a fixed approval handler even when approval policy is `never`:
-  allow writes only under `.codex-review/**` in the main repo or the disposable
-  validation workspace, allow Python standard-library helper scripts under
-  `.codex-review/tools/*.py`, allow read-only repository inspection commands,
-  allow bounded project test commands only inside the disposable validation
-  workspace, and deny source modifications in the main repo, installs,
-  downloads, network access, branch changes, commit, push, and access to other
-  worker directories.
+  semantic Codex turns may write only under the main repo''s `.codex-review/**`
+  and may run only contained read-only repository inspection commands. Never
+  approve Python/helper execution or project test commands from a Codex turn.
+  The Worker alone materializes generated test source into the disposable
+  validation workspace and executes it through its bounded sandbox path. Deny
+  source modifications, installs, downloads, network access, branch changes,
+  commit, push, and access to other worker directories.
 
 ## Whole-Scan ETA Contract
 
@@ -223,9 +223,12 @@ Review pipeline rules:
   be parseable JSON objects with the expected `schema_version`; hash-artifact
   completion requires an `artifact-manifest/v1` object with an `items` list.
 - Intent-driven tests are allowed only for selected P0/P1 high-value candidate
-  findings. Generated tests must live in the disposable validation workspace or
-  `.codex-review/generated-tests/**`, must not install dependencies or use
-  network, and must execute with `cwd` inside the disposable validation repo.
+  findings. Codex-authored generated test source must live under
+  `.codex-review/generated-tests/**` or the run-local
+  `intent/generated-tests/**` alias. The Worker must copy it into the disposable
+  validation workspace before execution; Codex may not write or execute there
+  directly. Tests must not install dependencies or use network, and must execute
+  with `cwd` inside the disposable validation repo.
   Local phase validation must enforce the v1.2 intent artifact contract:
   `intent-map.json` has `bundle_id` and `behavioral_contracts`, every planned,
   generated, raw, and analyzed test has a unique `test_id`, plan/source/result

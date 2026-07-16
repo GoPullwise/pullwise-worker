@@ -336,7 +336,7 @@ Rules:
 - Do not call external review or scanning tools.
 - Do not modify application source files.
 - Write only under .codex-review/** when file writes are needed.
-- For dynamic tests, write only to the disposable validation workspace or .codex-review/generated-tests/**.
+- For dynamic tests, write source only under .codex-review/generated-tests/**; the Worker materializes and executes it in the disposable validation workspace.
 - Helper scripts must use Python 3 standard library only.
 - Helper scripts perform mechanical tasks only.
 - Codex performs semantic code review judgment.
@@ -1184,8 +1184,7 @@ class CodexSdkClient:
     ) -> dict[str, Any]:
         if read_only:
             return {"type": "readOnly", "networkAccess": False}
-        validation_repo = repo_dir.parent / "validation-repo"
-        default_roots = [repo_dir / ".codex-review", validation_repo]
+        default_roots = [repo_dir / ".codex-review"]
         selected_roots = writable_roots if writable_roots is not None else default_roots
         allowed_roots = [root.resolve(strict=False) for root in default_roots]
         resolved_roots: list[str] = []
@@ -1772,7 +1771,6 @@ class CodexQuotaMonitor:
 
 READ_ONLY_COMMANDS = {"find", "wc", "cat", "grep", "rg"}
 GIT_READ_ONLY_SUBCOMMANDS = {"status", "diff", "log", "show", "ls-files", "rev-parse", "grep"}
-PROJECT_TEST_COMMANDS = {"npm", "pnpm", "yarn", "pytest", "python", "python3", "py", "go", "cargo", "mvn", "gradle", "make"}
 DENIED_COMMAND_TOKENS = {
     "brew",
     "checkout",
@@ -1833,8 +1831,8 @@ def decide_approval(message: dict[str, Any], workspace: Path) -> tuple[str, str]
         if isinstance(file_changes, dict):
             paths.extend(file_changes.keys())
         if paths and all(path_is_under_allowed_write_root(workspace, path) for path in paths):
-            return "acceptForSession", "write is limited to .codex-review or disposable validation workspace"
-        return "decline", "file changes outside approved review workspaces are not allowed"
+            return "acceptForSession", "write is limited to the worker-owned .codex-review workspace"
+        return "decline", "file changes outside the worker-owned .codex-review workspace are not allowed"
     if "command" in request_type or request.get("command") or request.get("argv"):
         command = request.get("argv") if isinstance(request.get("argv"), list) else request.get("command")
         if command_is_allowed(command, workspace, request.get("cwd")):
@@ -1871,7 +1869,7 @@ def path_is_under_validation_workspace(workspace: Path, raw_path: object) -> boo
 
 
 def path_is_under_allowed_write_root(workspace: Path, raw_path: object) -> bool:
-    return path_is_under_codex_review(workspace, raw_path) or path_is_under_validation_workspace(workspace, raw_path)
+    return path_is_under_codex_review(workspace, raw_path)
 
 
 def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None) -> bool:
@@ -1894,19 +1892,8 @@ def command_is_allowed(command: object, workspace: Path, raw_cwd: object = None)
         cwd_in_workspace = True
     except ValueError:
         cwd_in_workspace = False
-    cwd_in_validation = path_is_under_validation_workspace(workspace, cwd)
-    if not cwd_in_workspace and not cwd_in_validation:
+    if not cwd_in_workspace:
         return False
-    if executable in {"python", "python3"} and len(argv) >= 2:
-        if (
-            path_is_under_codex_review(workspace, argv[1])
-            and "/tools/" in Path(argv[1]).as_posix()
-            and helper_command_arguments_are_contained(argv[2:], workspace, cwd)
-        ):
-            return True
-    if executable in PROJECT_TEST_COMMANDS and cwd_in_validation:
-        allowed, _reason = intent_test_command_policy(argv, cwd, workspace.parent / "validation-repo")
-        return allowed
     if executable == "git":
         return git_command_is_read_only(argv, workspace, cwd)
     if executable in READ_ONLY_COMMANDS:
@@ -1929,20 +1916,6 @@ def read_operand_is_contained(raw_path: object, workspace: Path, cwd: Path) -> b
     if not candidate.is_absolute():
         candidate = cwd / candidate
     return path_is_under(candidate, workspace) or path_is_under_validation_workspace(workspace, candidate)
-
-
-def helper_command_arguments_are_contained(argv: list[str], workspace: Path, cwd: Path) -> bool:
-    for part in argv:
-        value = str(part)
-        candidate_value = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
-        candidate = Path(candidate_value)
-        looks_like_path = candidate.is_absolute() or candidate_value.startswith(".") or "/" in candidate_value or "\\" in candidate_value
-        if not looks_like_path:
-            local_candidate = cwd / candidate
-            looks_like_path = local_candidate.exists() or local_candidate.is_symlink()
-        if looks_like_path and not read_operand_is_contained(candidate_value, workspace, cwd):
-            return False
-    return True
 
 
 def simple_read_file_operands(
@@ -2147,7 +2120,11 @@ def read_command_operands_are_contained(executable: str, argv: list[str], worksp
 def git_command_is_read_only(argv: list[str], workspace: Path, cwd: Path) -> bool:
     unsafe_options = {"--no-index", "--ext-diff", "--textconv", "--open-files-in-pager"}
     lowered = {str(part).lower() for part in argv[1:]}
-    if lowered.intersection(unsafe_options) or any(str(part).lower().startswith("--output=") for part in argv[1:]):
+    if lowered.intersection(unsafe_options) or any(
+        str(part).lower().startswith(f"{option}=")
+        for part in argv[1:]
+        for option in (*unsafe_options, "--output")
+    ):
         return False
     if "--" in argv:
         separator = argv.index("--")
@@ -6146,7 +6123,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "inputs": ["intent/intent-test-plan.json", "intent/execution-capabilities.json", "target snippets", "existing tests", "disposable validation workspace"],
         "outputs": ["intent/intent-test-source.json", "intent/generated-tests/** or disposable validation workspace tests"],
         "instructions": [
-            "Write temporary tests only in the disposable validation workspace or .codex-review/generated-tests/**.",
+            "Write generated test source only under .codex-review/generated-tests/**; the Worker owns validation-workspace materialization and execution.",
             "Return JSON only using intent-test-source/v1. Put every executable test record in the top-level generated_tests array, not only in aliases such as generated_test_files, created_test_files, or test_sources.",
             "Every generated test record must include path, command, and target_test_ids linking it to the intent-test-plan target(s) it implements.",
             "Use the observed capability and candidate preflight data, but remain free to propose a different safe command or test approach when it preserves the behavioral oracle and executes real repository code.",
@@ -10355,7 +10332,7 @@ def intent_execution_repair_prompt(
         f"Run artifact directory: {run_dir}",
         "Read intent/execution-capabilities.json and intent/intent-test-preflight.json.",
         "For runtime repair also read intent/intent-test-runtime-diagnostics.json and the referenced stdout/stderr logs.",
-        "Modify only generated tests in the disposable validation workspace or .codex-review/generated-tests/** and intent/intent-test-source.json.",
+        "Modify only generated test source under .codex-review/generated-tests/** or the run-local intent/generated-tests/** alias, plus intent/intent-test-source.json.",
         "You may choose a different agent-proposed command, runtime, cwd, import strategy, or faithful test harness when Worker policy can verify it.",
         "You must preserve the behavioral oracle, test_id/target_test_ids linkage, and execution of real repository behavior.",
         "Do not copy or reimplement application logic to manufacture a dependency-free passing test.",
@@ -13020,8 +12997,8 @@ def prompt_template_for_name(name: str) -> str:
             "preflight must verify. Prefer candidates that execute real repository behavior and preserve the oracle.\n"
         ),
         "intent/06_intent_test_writer.md": (
-            "You are the Intent Test Writer. Write temporary tests only in the disposable validation workspace or "
-            ".codex-review/generated-tests/**. Return JSON only using intent-test-source/v1, with every executable "
+            "You are the Intent Test Writer. Write generated test source only under .codex-review/generated-tests/**; "
+            "the Worker owns validation-workspace materialization and execution. Return JSON only using intent-test-source/v1, with every executable "
             'test record in the top-level "generated_tests" array rather than only in aliases such as '
             "generated_test_files, created_test_files, or test_sources. Every record must include path, command, "
             "and target_test_ids. Verify expected outcomes against AGENTS instructions, documentation, types, API "
