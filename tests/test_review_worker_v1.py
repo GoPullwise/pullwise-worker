@@ -179,6 +179,31 @@ def finding_payload(finding_id: str = "CL-001", *, title: str = "Backed finding"
     }
 
 
+def model_turn_test_job(*, reviewer_concurrency: int = 2) -> dict:
+    return {
+        "job_id": "job_1",
+        "model_profile": {
+            "default_model": "gpt-5.5",
+            "core_effort": "high",
+            "non_core_effort": "medium",
+        },
+        "review_request": {
+            "policy": {
+                "allow_source_modification": False,
+                "allow_dependency_install": False,
+                "allow_network": False,
+                "helper_scripts_standard_library_only": True,
+                "turn_timeout_seconds": 1800,
+                "max_bundles": 24,
+                "max_reviewer_assignments": 48,
+                "reviewer_concurrency": reviewer_concurrency,
+            },
+            "budget": {"max_wall_time_seconds": 14400},
+        },
+        "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+    }
+
+
 def validation_payload(*entries: dict) -> dict:
     return {
         "schema_version": "validation-output/v1",
@@ -10284,6 +10309,141 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertIn(str(repo), str(calls[0]["prompt"]))
             self.assertFalse(Path(str(calls[0]["turn_cwd"])).exists())
 
+    def test_semantic_cleanup_failure_preserves_job_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+
+            class CancellingCodexClient:
+                def run_turn(self, **_kwargs: object) -> None:
+                    raise JobCancelled("cancel requested during model turn")
+
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            with patch(
+                "pullwise_worker.review_worker_v1.cleanup_model_turn_workspace",
+                side_effect=OSError("staging cleanup failed"),
+            ), self.assertRaisesRegex(
+                JobCancelled,
+                "cancel requested during model turn",
+            ) as caught:
+                worker.run_semantic_phase(
+                    CancellingCodexClient(),
+                    repo,
+                    run_dir,
+                    model_turn_test_job(),
+                    "repo_map",
+                )
+
+            cleanup_events = [
+                json.loads(line)
+                for line in (run_dir / "worker.log.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(cleanup_events[-1]["event"], "model_turn_cleanup_failed")
+            self.assertIn("staging cleanup failed", cleanup_events[-1]["error"])
+            self.assertTrue(
+                any(
+                    "staging cleanup failed" in note
+                    for note in getattr(caught.exception, "__notes__", [])
+                )
+            )
+
+    def test_semantic_cleanup_failure_after_success_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+
+            class SuccessfulCodexClient:
+                def run_turn(self, **kwargs: object) -> None:
+                    write_json(
+                        Path(str(kwargs["turn_cwd"])) / "repo-map.json",
+                        {"schema_version": "repo-map/v1", "modules": []},
+                    )
+
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            with patch(
+                "pullwise_worker.review_worker_v1.cleanup_model_turn_workspace",
+                side_effect=OSError("staging cleanup failed"),
+            ), self.assertRaisesRegex(OSError, "staging cleanup failed"):
+                worker.run_semantic_phase(
+                    SuccessfulCodexClient(),
+                    repo,
+                    run_dir,
+                    model_turn_test_job(),
+                    "repo_map",
+                )
+
+    def test_semantic_repair_cleanup_failure_preserves_turn_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+
+            class TimingOutCodexClient:
+                def run_turn(self, **_kwargs: object) -> None:
+                    raise TimeoutError("model turn timed out")
+
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            with patch(
+                "pullwise_worker.review_worker_v1.cleanup_model_turn_workspace",
+                side_effect=OSError("repair cleanup failed"),
+            ), self.assertRaisesRegex(TimeoutError, "model turn timed out"):
+                worker.repair_semantic_phase_outputs(
+                    TimingOutCodexClient(),
+                    repo,
+                    run_dir,
+                    model_turn_test_job(),
+                    "repo_map",
+                    RuntimeError("invalid repo map"),
+                )
+
+    def test_intent_repair_cleanup_failure_after_success_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+
+            class SuccessfulCodexClient:
+                def run_turn(self, **_kwargs: object) -> None:
+                    return None
+
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            with patch(
+                "pullwise_worker.review_worker_v1.cleanup_model_turn_workspace",
+                side_effect=OSError("intent repair cleanup failed"),
+            ), self.assertRaisesRegex(OSError, "intent repair cleanup failed"):
+                worker._run_intent_execution_repair_turn(
+                    SuccessfulCodexClient(),
+                    repo,
+                    run_dir,
+                    model_turn_test_job(),
+                    stage="preflight",
+                    attempt=1,
+                    diagnostics={},
+                )
+
     def test_model_turn_directory_publication_exactly_replaces_stale_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -10354,6 +10514,88 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 + list((run_dir / "intent").glob(".*.backup")),
                 [],
             )
+
+    def test_model_turn_publication_recovers_interrupted_transaction_before_next_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "noop"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            destination = run_dir / "intent" / "generated-tests"
+            prepared = run_dir / "intent" / ".generated-tests.crash.publish"
+            backup = run_dir / "intent" / ".generated-tests.crash.backup"
+            destination.mkdir(parents=True)
+            staging.mkdir(parents=True)
+            (destination / "old_test.py").write_text("old\n", encoding="utf-8")
+            os.replace(destination, backup)
+            destination.mkdir()
+            (destination / "partial_test.py").write_text("partial\n", encoding="utf-8")
+            prepared.mkdir()
+            (prepared / "next_test.py").write_text("next\n", encoding="utf-8")
+            write_json(
+                run_dir / ".model-output-publication.json",
+                {
+                    "schema_version": "model-output-publication/v1",
+                    "state": "committing",
+                    "items": [
+                        {
+                            "destination": "intent/generated-tests",
+                            "prepared": "intent/.generated-tests.crash.publish",
+                            "backup": "intent/.generated-tests.crash.backup",
+                            "had_destination": True,
+                            "has_replacement": True,
+                        }
+                    ],
+                },
+            )
+
+            published = publish_model_turn_outputs(staging, run_dir, ())
+
+            self.assertEqual(published, [])
+            self.assertEqual((destination / "old_test.py").read_text(encoding="utf-8"), "old\n")
+            self.assertFalse((destination / "partial_test.py").exists())
+            self.assertFalse(prepared.exists())
+            self.assertFalse(backup.exists())
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
+
+    def test_model_turn_publication_preserves_backup_when_rollback_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "intent-writing"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staged_generated = staging / "intent" / "generated-tests"
+            run_generated = run_dir / "intent" / "generated-tests"
+            staged_generated.mkdir(parents=True)
+            run_generated.mkdir(parents=True)
+            (staged_generated / "new_test.py").write_text("new\n", encoding="utf-8")
+            (run_generated / "old_test.py").write_text("old\n", encoding="utf-8")
+            real_replace = os.replace
+
+            def fail_commit_and_rollback(source: object, destination: object) -> None:
+                source_path = Path(source)
+                destination_path = Path(destination)
+                if source_path.name.endswith(".publish") and destination_path == run_generated:
+                    raise PermissionError("injected commit failure")
+                if source_path.name.endswith(".backup") and destination_path == run_generated:
+                    raise PermissionError("injected rollback failure")
+                real_replace(source, destination)
+
+            with patch(
+                "pullwise_worker.review_worker_v1.os.replace",
+                side_effect=fail_commit_and_rollback,
+            ), self.assertRaisesRegex(
+                OSError,
+                "could not restore model output publication backup.*injected rollback failure",
+            ):
+                publish_model_turn_outputs(
+                    staging,
+                    run_dir,
+                    ("intent/generated-tests",),
+                )
+
+            backups = list((run_dir / "intent").glob(".generated-tests.*.backup"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0] / "old_test.py").read_text(encoding="utf-8"), "old\n")
+            self.assertTrue((run_dir / ".model-output-publication.json").is_file())
 
     def test_model_turn_publication_rejects_aggregate_output_over_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -10686,6 +10928,269 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             [1, 2, 3, 4],
         )
         self.assertTrue(all(published_outputs))
+
+    def test_reviewer_fanout_cleanup_failure_after_success_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            bundles_dir = run_dir / "bundles"
+            prompts_dir = repo / ".codex-review" / "prompts" / "reviewers"
+            bundles_dir.mkdir(parents=True)
+            prompts_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {
+                            "bundle_id": "p0-bundle-001",
+                            "tier": "P0",
+                            "reviewers": ["correctness"],
+                        }
+                    ],
+                },
+            )
+            (bundles_dir / "p0-bundle-001.md").write_text(
+                "# p0-bundle-001\n",
+                encoding="utf-8",
+            )
+            (prompts_dir / "correctness.md").write_text(
+                "Review correctness.\n",
+                encoding="utf-8",
+            )
+
+            class SuccessfulCodexClient:
+                def start_thread(self, repo_dir: Path, model: str) -> str:
+                    return "reviewer-thread-1"
+
+                def run_turn(self, **kwargs: object) -> None:
+                    output_path = Path(
+                        next(
+                            line.removeprefix("Exact output path: ")
+                            for line in str(kwargs["prompt"]).splitlines()
+                            if line.startswith("Exact output path: ")
+                        )
+                    )
+                    write_json(
+                        output_path,
+                        {
+                            "schema_version": "codex-reviewer-output/v1",
+                            "bundle_id": "p0-bundle-001",
+                            "reviewer": "correctness",
+                            "reviewed_paths": ["src/app.py"],
+                            "findings": [],
+                            "uncertainties": [],
+                        },
+                    )
+
+            class Worker(ReviewWorkerV1):
+                def progress_phase(self, *args: object, **kwargs: object) -> None:
+                    return None
+
+            worker = Worker(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            active = ActiveJob(
+                "job_1",
+                "run_1",
+                "lease_1",
+                "attempt_1",
+                thread_id="thread_1",
+            )
+            staging_root = repo.parent / "model-turns" / "run_1" / "reviewer-fanout"
+            cleanup_calls: list[Path] = []
+
+            def fail_root_cleanup(_repo_dir: Path, staging: Path) -> None:
+                cleanup_calls.append(staging)
+                if staging == staging_root:
+                    raise OSError("reviewer staging cleanup failed")
+
+            with patch(
+                "pullwise_worker.review_worker_v1.cleanup_model_turn_workspace",
+                side_effect=fail_root_cleanup,
+            ), self.assertRaisesRegex(OSError, "reviewer staging cleanup failed"):
+                worker.run_reviewer_fanout_phase(
+                    SuccessfulCodexClient(),
+                    repo,
+                    run_dir,
+                    model_turn_test_job(reviewer_concurrency=1),
+                    active=active,
+                    progress=70,
+                )
+
+            self.assertIn(staging_root, cleanup_calls)
+
+    def test_reviewer_fanout_enforces_run_level_aggregate_output_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            bundles_dir = run_dir / "bundles"
+            prompts_dir = repo / ".codex-review" / "prompts" / "reviewers"
+            bundles_dir.mkdir(parents=True)
+            prompts_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+            write_json(
+                run_dir / "bundle-plan.json",
+                {
+                    "schema_version": "bundle-plan/v1",
+                    "bundles": [
+                        {
+                            "bundle_id": "p0-bundle-001",
+                            "tier": "P0",
+                            "reviewers": ["security", "correctness"],
+                        }
+                    ],
+                },
+            )
+            (bundles_dir / "p0-bundle-001.md").write_text(
+                "# p0-bundle-001\n",
+                encoding="utf-8",
+            )
+            for reviewer in ("security", "correctness"):
+                (prompts_dir / f"{reviewer}.md").write_text(
+                    f"{reviewer} reviewer\n",
+                    encoding="utf-8",
+                )
+
+            payloads = {
+                reviewer: (
+                    json.dumps(
+                        {
+                            "schema_version": "codex-reviewer-output/v1",
+                            "bundle_id": "p0-bundle-001",
+                            "reviewer": reviewer,
+                            "reviewed_paths": ["src/app.py"],
+                            "findings": [],
+                            "uncertainties": [],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                for reviewer in ("security", "correctness")
+            }
+            output_budget = max(len(payload) for payload in payloads.values())
+            both_turns_ready = threading.Barrier(2)
+
+            class FakeCodexClient:
+                def __init__(self) -> None:
+                    self.thread_count = 0
+
+                def start_thread(self, _repo_dir: Path, _model: str) -> str:
+                    self.thread_count += 1
+                    return f"reviewer-thread-{self.thread_count}"
+
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    prompt = str(kwargs["prompt"])
+                    reviewer = next(
+                        line.removeprefix("Reviewer assignment: ")
+                        for line in prompt.splitlines()
+                        if line.startswith("Reviewer assignment: ")
+                    )
+                    output_path = Path(
+                        next(
+                            line.removeprefix("Exact output path: ")
+                            for line in prompt.splitlines()
+                            if line.startswith("Exact output path: ")
+                        )
+                    )
+                    both_turns_ready.wait(timeout=2)
+                    output_path.write_bytes(payloads[reviewer])
+                    return SimpleNamespace(duration_ms=1)
+
+            class Worker(ReviewWorkerV1):
+                def progress_phase(self, *_args: object, **_kwargs: object) -> None:
+                    return None
+
+            job = {
+                "job_id": "job_1",
+                "model_profile": {
+                    "default_model": "gpt-5.5",
+                    "core_effort": "high",
+                    "non_core_effort": "medium",
+                },
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                        "max_bundles": 24,
+                        "max_reviewer_assignments": 48,
+                        "reviewer_concurrency": 2,
+                    },
+                    "budget": {"max_wall_time_seconds": 14400},
+                },
+                "repositoryLimits": {
+                    "maxFiles": 2000,
+                    "maxBytes": 50 * 1024 * 1024,
+                },
+            }
+            worker = Worker(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            active = ActiveJob(
+                "job_1",
+                "run_1",
+                "lease_1",
+                "attempt_1",
+                thread_id="thread_1",
+            )
+
+            with patch(
+                "pullwise_worker.review_worker_v1.MAX_MODEL_OUTPUT_TOTAL_BYTES",
+                output_budget,
+            ), patch(
+                "pullwise_worker.review_worker_v1.reviewer_concurrency_decision_for_job",
+                return_value=(2, 2, "", {}),
+            ), self.assertRaisesRegex(
+                OSError,
+                "reviewer fanout output exceeds aggregate byte limit",
+            ):
+                worker.run_reviewer_fanout_phase(
+                    FakeCodexClient(),
+                    repo,
+                    run_dir,
+                    job,
+                    active=active,
+                    progress=70,
+                )
+
+            execution = read_json(run_dir / "reviewer-execution.json")
+            published = list((run_dir / "raw-reviewers").glob("*.json"))
+            published_size = published[0].stat().st_size if published else 0
+
+        self.assertEqual(len(published), 1)
+        self.assertLessEqual(published_size, output_budget)
+        self.assertEqual(execution["output_bytes_limit"], output_budget)
+        self.assertEqual(execution["output_bytes_published"], published_size)
+        self.assertEqual(execution["output_bytes_reserved"], published_size)
+        self.assertIn(
+            execution["output_bytes_rejected"],
+            {len(payload) for payload in payloads.values()},
+        )
+        self.assertGreater(
+            execution["output_bytes_reserved"]
+            + execution["output_bytes_rejected"],
+            output_budget,
+        )
+        self.assertEqual(execution["output_budget_status"], "exceeded")
+        failed = [
+            record
+            for record in execution["assignments"]
+            if record.get("status") == "failed"
+        ]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("reserved_bytes=", failed[0]["error"])
+        self.assertIn("requested_bytes=", failed[0]["error"])
 
     def test_debug_summary_explains_candidate_disposition_and_degraded_intent_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

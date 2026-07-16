@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import tempfile
 import threading
 import time
@@ -52,6 +53,129 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
                 self.assertFalse(server.is_running())
             finally:
                 release.set()
+
+    def test_close_waits_for_inflight_start_and_closes_the_started_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            start_entered = threading.Event()
+            release_start = threading.Event()
+            close_finished = threading.Event()
+            close_calls = 0
+            outcomes: list[BaseException] = []
+
+            class Config:
+                def __init__(self, **_kwargs: object) -> None:
+                    return None
+
+            class Codex:
+                def __init__(self, _config: Config) -> None:
+                    self._client = SimpleNamespace(_approval_handler=None)
+                    start_entered.set()
+                    release_start.wait(3)
+
+                def close(self) -> None:
+                    nonlocal close_calls
+                    close_calls += 1
+
+            runtime = SimpleNamespace(Codex=Codex, CodexConfig=Config)
+            server = CodexSdkClient("", {}, workspace, workspace / "events.jsonl")
+
+            def start() -> None:
+                try:
+                    server.start()
+                except BaseException as exc:  # noqa: BLE001 - asserted below.
+                    outcomes.append(exc)
+
+            def close() -> None:
+                try:
+                    server.close()
+                except BaseException as exc:  # noqa: BLE001 - asserted below.
+                    outcomes.append(exc)
+                finally:
+                    close_finished.set()
+
+            with patch("pullwise_worker.review_worker_v1.load_codex_sdk_runtime", return_value=runtime):
+                start_runner = threading.Thread(target=start, daemon=True)
+                close_runner = threading.Thread(target=close, daemon=True)
+                start_runner.start()
+                self.assertTrue(start_entered.wait(1), "Codex construction never started")
+                close_runner.start()
+                close_returned_while_starting = close_finished.wait(0.1)
+                release_start.set()
+                start_runner.join(1)
+                close_runner.join(1)
+
+            self.assertFalse(close_returned_while_starting)
+            self.assertFalse(start_runner.is_alive())
+            self.assertFalse(close_runner.is_alive())
+            self.assertEqual(outcomes, [])
+            self.assertEqual(close_calls, 1)
+            self.assertFalse(server.is_running())
+            self.assertIsNone(server._runtime)
+
+    def test_late_archive_failure_and_job_cleanup_close_runtime_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            close_calls = 0
+            close_calls_lock = threading.Lock()
+            callers_ready = threading.Barrier(3)
+
+            class RacingServer(CodexSdkClient):
+                def __init__(self) -> None:
+                    super().__init__("", {}, workspace, workspace / "events.jsonl")
+                    self._race_codex_reads = False
+                    self._codex_read_barrier = threading.Barrier(2)
+
+                def __getattribute__(self, name: str) -> object:
+                    value = super().__getattribute__(name)
+                    if name == "_codex" and object.__getattribute__(self, "_race_codex_reads"):
+                        barrier = object.__getattribute__(self, "_codex_read_barrier")
+                        try:
+                            barrier.wait(0.2)
+                        except threading.BrokenBarrierError:
+                            pass
+                    return value
+
+            class Codex:
+                def close(self) -> None:
+                    nonlocal close_calls
+                    with close_calls_lock:
+                        close_calls += 1
+
+            server = RacingServer()
+            server._codex = Codex()
+            server._client = SimpleNamespace()
+            server._runtime = SimpleNamespace()
+            server._mark_unhealthy("thread start timed out")
+            server._race_codex_reads = True
+            outcomes: list[BaseException] = []
+
+            def invoke(call: Callable[[], None]) -> None:
+                callers_ready.wait()
+                try:
+                    call()
+                except BaseException as exc:  # noqa: BLE001 - asserted below.
+                    outcomes.append(exc)
+
+            late_archive = threading.Thread(
+                target=invoke,
+                args=(lambda: server._archive_late_thread(SimpleNamespace(id="thread-late")),),
+                daemon=True,
+            )
+            job_cleanup = threading.Thread(target=invoke, args=(server.close,), daemon=True)
+            late_archive.start()
+            job_cleanup.start()
+            callers_ready.wait()
+            late_archive.join(1)
+            job_cleanup.join(1)
+
+            self.assertFalse(late_archive.is_alive())
+            self.assertFalse(job_cleanup.is_alive())
+            self.assertEqual(outcomes, [])
+            self.assertEqual(close_calls, 1)
+            self.assertIsNone(server._codex)
+            self.assertIsNone(server._client)
+            self.assertIsNone(server._runtime)
 
     def test_thread_start_is_bounded_by_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

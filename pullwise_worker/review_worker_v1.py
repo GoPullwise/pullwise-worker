@@ -817,37 +817,40 @@ class CodexSdkClient:
         self._events_lock = self._runtime_resources.events_lock
         self._rate_limit_callback_lock = threading.Lock()
         self._threads_lock = self._runtime_resources.threads_lock
+        self._lifecycle_lock = threading.Lock()
         self._health_lock = threading.Lock()
         self._unhealthy_reason: str | None = None
 
     def start(self) -> None:
-        self._raise_if_unhealthy()
-        if self.is_running():
-            return
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        runtime = load_codex_sdk_runtime()
-        config_kwargs = {
-            "cwd": str(self.cwd),
-            "env": self.env,
-            "client_name": "codex_repo_review_worker",
-            "client_title": "Codex Repo Review Worker",
-            "client_version": WORKER_VERSION,
-            "experimental_api": False,
-        }
-        if self.command:
-            config_kwargs["codex_bin"] = self.command
-        config = runtime.CodexConfig(**config_kwargs)
-        codex = runtime.Codex(config)
-        client = getattr(codex, "_client", None)
-        if client is not None and hasattr(client, "_approval_handler"):
-            client._approval_handler = self._approval_handler
-        self._runtime = runtime
-        self._codex = codex
-        self._client = client
+        with self._lifecycle_lock:
+            self._raise_if_unhealthy()
+            if self._codex is not None:
+                return
+            self.events_path.parent.mkdir(parents=True, exist_ok=True)
+            runtime = load_codex_sdk_runtime()
+            config_kwargs = {
+                "cwd": str(self.cwd),
+                "env": self.env,
+                "client_name": "codex_repo_review_worker",
+                "client_title": "Codex Repo Review Worker",
+                "client_version": WORKER_VERSION,
+                "experimental_api": False,
+            }
+            if self.command:
+                config_kwargs["codex_bin"] = self.command
+            config = runtime.CodexConfig(**config_kwargs)
+            codex = runtime.Codex(config)
+            client = getattr(codex, "_client", None)
+            if client is not None and hasattr(client, "_approval_handler"):
+                client._approval_handler = self._approval_handler
+            self._runtime = runtime
+            self._codex = codex
+            self._client = client
 
     def is_running(self) -> bool:
-        with self._health_lock:
-            return self._codex is not None and self._unhealthy_reason is None
+        with self._lifecycle_lock:
+            with self._health_lock:
+                return self._codex is not None and self._unhealthy_reason is None
 
     def runtime_metadata(self) -> dict[str, Any]:
         def distribution_version(name: str) -> str:
@@ -1334,10 +1337,12 @@ class CodexSdkClient:
         return self._model_to_dict(result)
 
     def close(self) -> None:
-        codex = self._codex
-        self._codex = None
-        self._client = None
-        self._runtime_resources.clear()
+        with self._lifecycle_lock:
+            codex = self._codex
+            self._runtime = None
+            self._codex = None
+            self._client = None
+            self._runtime_resources.clear()
         if codex is not None:
             run_bounded_call(
                 codex.close,
@@ -2670,8 +2675,62 @@ class ReviewerAssignmentOutcome:
     valid_output: bool = False
     finding_count: int = 0
     duration_ms: int = 0
+    output_bytes: int = 0
     output_payload: bytes | None = None
     error: BaseException | None = None
+
+
+class ReviewerFanoutOutputBudgetExceeded(OSError):
+    def __init__(
+        self,
+        *,
+        limit_bytes: int,
+        reserved_bytes: int,
+        requested_bytes: int,
+        work: ReviewerAssignmentWork,
+    ) -> None:
+        self.limit_bytes = limit_bytes
+        self.reserved_bytes = reserved_bytes
+        self.requested_bytes = requested_bytes
+        self.bundle_id = work.bundle_id
+        self.reviewer_id = work.reviewer_id
+        super().__init__(
+            "reviewer fanout output exceeds aggregate byte limit: "
+            f"limit_bytes={limit_bytes}, "
+            f"reserved_bytes={reserved_bytes}, "
+            f"requested_bytes={requested_bytes}, "
+            f"assignment={work.bundle_id}/{work.reviewer_id}"
+        )
+
+
+class ReviewerFanoutOutputBudget:
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = max(0, int(limit_bytes))
+        self._reserved_bytes = 0
+        self._lock = threading.Lock()
+
+    @property
+    def reserved_bytes(self) -> int:
+        with self._lock:
+            return self._reserved_bytes
+
+    def reserve(
+        self,
+        requested_bytes: int,
+        work: ReviewerAssignmentWork,
+    ) -> int:
+        requested = max(0, int(requested_bytes))
+        with self._lock:
+            projected = self._reserved_bytes + requested
+            if projected > self.limit_bytes:
+                raise ReviewerFanoutOutputBudgetExceeded(
+                    limit_bytes=self.limit_bytes,
+                    reserved_bytes=self._reserved_bytes,
+                    requested_bytes=requested,
+                    work=work,
+                )
+            self._reserved_bytes = projected
+            return self._reserved_bytes
 
 
 def reviewer_error_is_transient_capacity(error: BaseException) -> bool:
@@ -4242,7 +4301,12 @@ class ReviewWorkerV1:
             )
             publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
         finally:
-            cleanup_model_turn_workspace(repo_dir, turn_cwd)
+            cleanup_model_turn_workspace_after_turn(
+                repo_dir,
+                turn_cwd,
+                run_dir=run_dir,
+                primary_error=sys.exc_info()[1],
+            )
 
     def _execute_reviewer_assignment(
         self,
@@ -4257,6 +4321,7 @@ class ReviewWorkerV1:
         expected_assignments: set[tuple[str, str]],
         cancel_event: threading.Event,
         deadline_monotonic: float | None,
+        output_budget: ReviewerFanoutOutputBudget | None = None,
     ) -> ReviewerAssignmentOutcome:
         def cancel_requested() -> bool:
             return cancel_event.is_set() or self.poll_cancel_requested()
@@ -4317,6 +4382,20 @@ class ReviewWorkerV1:
             and covered == {(work.bundle_id, work.reviewer_id)}
         )
         finding_count = len(payload.get("findings") or []) if isinstance(payload, dict) else 0
+        output_bytes = len(output_payload) if output_payload is not None else 0
+        if valid_output and output_budget is not None:
+            try:
+                output_budget.reserve(output_bytes, work)
+            except ReviewerFanoutOutputBudgetExceeded as exc:
+                return ReviewerAssignmentOutcome(
+                    work=work,
+                    thread_id=thread_id,
+                    attempt=attempt,
+                    finding_count=finding_count,
+                    duration_ms=duration_ms,
+                    output_bytes=output_bytes,
+                    error=exc,
+                )
         return ReviewerAssignmentOutcome(
             work=work,
             thread_id=thread_id,
@@ -4324,6 +4403,7 @@ class ReviewWorkerV1:
             valid_output=valid_output,
             finding_count=finding_count,
             duration_ms=duration_ms,
+            output_bytes=output_bytes,
             output_payload=output_payload if valid_output else None,
         )
 
@@ -4411,6 +4491,7 @@ class ReviewWorkerV1:
                     "attempts": [],
                 }
             )
+        output_budget = ReviewerFanoutOutputBudget(MAX_MODEL_OUTPUT_TOTAL_BYTES)
 
         estimator = active.current_run_estimator
 
@@ -4461,6 +4542,10 @@ class ReviewWorkerV1:
             "max_observed_concurrency": 0,
             "assignments_total": len(assignments),
             "assignments_completed": 0,
+            "output_bytes_limit": output_budget.limit_bytes,
+            "output_bytes_reserved": 0,
+            "output_bytes_published": 0,
+            "output_budget_status": "within_limit",
             "assignments": records,
         }
         write_json(execution_path, execution)
@@ -4494,6 +4579,7 @@ class ReviewWorkerV1:
 
         completed = 0
         finished = 0
+        published_output_bytes = 0
         effective_concurrency = initial_effective_concurrency
         fatal_error: BaseException | None = None
         max_rate_limit_retries = 1
@@ -4621,6 +4707,7 @@ class ReviewWorkerV1:
                             expected_assignments=expected_assignments,
                             cancel_event=cancel_event,
                             deadline_monotonic=deadline_monotonic,
+                            output_budget=output_budget,
                         )
                     except BaseException as exc:
                         try:
@@ -4696,6 +4783,21 @@ class ReviewWorkerV1:
                             error=exc,
                         )
 
+                    execution["output_bytes_reserved"] = output_budget.reserved_bytes
+                    if outcome.output_bytes > 0:
+                        attempt_record["output_bytes"] = outcome.output_bytes
+                    if isinstance(
+                        outcome.error,
+                        ReviewerFanoutOutputBudgetExceeded,
+                    ):
+                        execution.update(
+                            {
+                                "output_budget_status": "exceeded",
+                                "output_bytes_rejected": outcome.error.requested_bytes,
+                                "output_budget_error": str(outcome.error),
+                            }
+                        )
+
                     if outcome.valid_output:
                         try:
                             if outcome.output_payload is None:
@@ -4703,6 +4805,10 @@ class ReviewWorkerV1:
                             _write_worker_owned_bytes(
                                 work.output_path,
                                 outcome.output_payload,
+                            )
+                            published_output_bytes += len(outcome.output_payload)
+                            execution["output_bytes_published"] = (
+                                published_output_bytes
                             )
                         except OSError as exc:
                             outcome.error = exc
@@ -4792,7 +4898,12 @@ class ReviewWorkerV1:
                                         ),
                                     )
                             pending.appendleft(work)
-                            shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
+                            cleanup_model_turn_workspace_after_turn(
+                                repo_dir,
+                                attempt_work.staging_dir,
+                                run_dir=run_dir,
+                                primary_error=outcome.error,
+                            )
                             append_jsonl(
                                 run_dir / "worker.log.jsonl",
                                 {
@@ -4851,7 +4962,12 @@ class ReviewWorkerV1:
                             fatal_error = outcome.error
                             cancel_event.set()
                         write_json(execution_path, execution)
-                        shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
+                        cleanup_model_turn_workspace_after_turn(
+                            repo_dir,
+                            attempt_work.staging_dir,
+                            run_dir=run_dir,
+                            primary_error=outcome.error,
+                        )
                         continue
 
                     attempt_record.update(
@@ -4874,7 +4990,12 @@ class ReviewWorkerV1:
                         record["error"] = (
                             "exact assignment output is missing, malformed, or covers a different assignment"
                         )
-                    shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
+                    cleanup_model_turn_workspace_after_turn(
+                        repo_dir,
+                        attempt_work.staging_dir,
+                        run_dir=run_dir,
+                        primary_error=None,
+                    )
                     finished += 1
                     execution["assignments_completed"] = completed
                     write_json(execution_path, execution)
@@ -4928,10 +5049,20 @@ class ReviewWorkerV1:
                         }
                     )
             write_json(execution_path, execution)
-            shutil.rmtree(staging_root, ignore_errors=True)
+            cleanup_model_turn_workspace_after_turn(
+                repo_dir,
+                staging_root,
+                run_dir=run_dir,
+                primary_error=fatal_error,
+            )
             raise fatal_error
 
-        shutil.rmtree(staging_root, ignore_errors=True)
+        cleanup_model_turn_workspace_after_turn(
+            repo_dir,
+            staging_root,
+            run_dir=run_dir,
+            primary_error=None,
+        )
 
     def _start_phase_repair_estimate(
         self,
@@ -5063,7 +5194,12 @@ class ReviewWorkerV1:
                 publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
                 fallback_semantic_artifact(run_dir, job, phase)
             finally:
-                cleanup_model_turn_workspace(repo_dir, turn_cwd)
+                cleanup_model_turn_workspace_after_turn(
+                    repo_dir,
+                    turn_cwd,
+                    run_dir=run_dir,
+                    primary_error=sys.exc_info()[1],
+                )
         except BaseException:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
@@ -5152,7 +5288,12 @@ class ReviewWorkerV1:
                 )
                 publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
             finally:
-                cleanup_model_turn_workspace(repo_dir, turn_cwd)
+                cleanup_model_turn_workspace_after_turn(
+                    repo_dir,
+                    turn_cwd,
+                    run_dir=run_dir,
+                    primary_error=sys.exc_info()[1],
+                )
         except JobCancelled:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
@@ -5458,7 +5599,12 @@ class ReviewWorkerV1:
                 )
                 publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
             finally:
-                cleanup_model_turn_workspace(repo_dir, turn_cwd)
+                cleanup_model_turn_workspace_after_turn(
+                    repo_dir,
+                    turn_cwd,
+                    run_dir=run_dir,
+                    primary_error=sys.exc_info()[1],
+                )
         except BaseException:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
@@ -6013,6 +6159,62 @@ def cleanup_model_turn_workspace(repo_dir: Path, staging: Path) -> None:
         parent = parent.parent
 
 
+def cleanup_model_turn_workspace_after_turn(
+    repo_dir: Path,
+    staging: Path,
+    *,
+    run_dir: Path,
+    primary_error: BaseException | None,
+) -> None:
+    try:
+        cleanup_model_turn_workspace(repo_dir, staging)
+    except OSError as cleanup_error:
+        if primary_error is None:
+            raise
+        note = (
+            f"Model turn workspace cleanup failed for {staging}: "
+            f"{type(cleanup_error).__name__}: {cleanup_error}"
+        )
+        add_note = getattr(primary_error, "add_note", None)
+        try:
+            if callable(add_note):
+                add_note(note)
+            else:
+                notes = getattr(primary_error, "__notes__", None)
+                if not isinstance(notes, list):
+                    notes = []
+                    setattr(primary_error, "__notes__", notes)
+                notes.append(note)
+        except Exception:
+            pass
+        try:
+            append_jsonl(
+                run_dir / "worker.log.jsonl",
+                {
+                    "event": "model_turn_cleanup_failed",
+                    "staging_path": str(staging),
+                    "error": f"{type(cleanup_error).__name__}: {cleanup_error}",
+                    "primary_error": type(primary_error).__name__,
+                    "time": iso_time(time.time()),
+                },
+            )
+        except Exception as log_error:
+            logging_note = (
+                f"Worker log recording for the cleanup failure also failed: "
+                f"{type(log_error).__name__}: {log_error}"
+            )
+            add_note = getattr(primary_error, "add_note", None)
+            try:
+                if callable(add_note):
+                    add_note(logging_note)
+                else:
+                    notes = getattr(primary_error, "__notes__", None)
+                    if isinstance(notes, list):
+                        notes.append(logging_note)
+            except Exception:
+                pass
+
+
 def prepare_model_turn_workspace(
     repo_dir: Path,
     run_dir: Path,
@@ -6111,9 +6313,16 @@ def _recover_model_output_publication(run_dir: Path) -> None:
             if backup_exists:
                 if backup.is_symlink():
                     raise OSError("model output publication backup is a symlink")
+                _validate_worker_owned_output(backup, run_dir)
                 if destination_exists:
                     _remove_worker_owned_output(destination, run_dir)
-                os.replace(backup, destination)
+                try:
+                    os.replace(backup, destination)
+                except OSError as exc:
+                    raise OSError(
+                        f"could not restore model output publication backup {backup} "
+                        f"to {destination}: {exc}"
+                    ) from exc
             elif had_destination and not destination_exists:
                 raise OSError("model output publication lost its previous destination")
             elif not had_destination and destination_exists:
@@ -6122,6 +6331,7 @@ def _recover_model_output_publication(run_dir: Path) -> None:
         for destination, _prepared, backup, had_destination, has_replacement in items:
             if has_replacement and not (destination.exists() or destination.is_symlink()):
                 if had_destination and (backup.exists() or backup.is_symlink()) and not backup.is_symlink():
+                    _validate_worker_owned_output(backup, run_dir)
                     os.replace(backup, destination)
                 raise OSError("committed model output publication is missing its destination")
 
@@ -6133,46 +6343,39 @@ def _recover_model_output_publication(run_dir: Path) -> None:
     _remove_worker_owned_output(journal_path, run_dir)
 
 
-def publish_model_turn_outputs(
+def _prepare_model_output_publication_item(
     staging: Path,
     run_dir: Path,
-    declared_outputs: tuple[str, ...],
-) -> list[str]:
-    _recover_model_output_publication(run_dir)
-    snapshot = _declared_model_output_snapshot(staging, declared_outputs)
-    resolved_run_dir = run_dir.resolve(strict=False)
-    transaction_id = f"{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
-    transaction_items: list[dict[str, Any]] = []
-    prepared_paths: list[Path] = []
-    for declared in declared_outputs:
-        relative = PurePosixPath(declared)
-        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-            raise OSError(f"model output declaration is unsafe: {declared}")
-        source = staging.joinpath(*relative.parts)
-        destination = run_dir.joinpath(*relative.parts)
-        if not _path_is_within(destination.resolve(strict=False), resolved_run_dir):
-            raise OSError(f"model output destination escapes the run directory: {destination}")
-        if path_has_symlink_component(destination.parent):
-            raise OSError(f"model output destination parent contains a symlink: {destination.parent}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination_exists = destination.exists() or destination.is_symlink()
-        if destination.is_symlink():
-            raise OSError(f"model output destination is a symlink: {destination}")
-        if destination_exists and not (
-            _is_regular_file_no_follow(destination) or destination.is_dir()
-        ):
-            raise OSError(f"model output destination is not regular: {destination}")
-        if destination_exists:
-            _validate_worker_owned_output(destination, run_dir)
-        prepared = destination.with_name(
-            f".{destination.name}.{transaction_id}.publish"
-        )
-        backup = destination.with_name(
-            f".{destination.name}.{transaction_id}.backup"
-        )
-        if prepared.exists() or prepared.is_symlink() or backup.exists() or backup.is_symlink():
-            raise OSError(f"model output publication transaction path already exists: {destination}")
-        has_replacement = source.exists() or source.is_symlink()
+    resolved_run_dir: Path,
+    declared: str,
+    snapshot: dict[str, ModelOutputFile],
+    transaction_id: str,
+) -> tuple[dict[str, Any], Path | None]:
+    relative = PurePosixPath(declared)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise OSError(f"model output declaration is unsafe: {declared}")
+    source = staging.joinpath(*relative.parts)
+    destination = run_dir.joinpath(*relative.parts)
+    if not _path_is_within(destination.resolve(strict=False), resolved_run_dir):
+        raise OSError(f"model output destination escapes the run directory: {destination}")
+    if path_has_symlink_component(destination.parent):
+        raise OSError(f"model output destination parent contains a symlink: {destination.parent}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination_exists = destination.exists() or destination.is_symlink()
+    if destination.is_symlink():
+        raise OSError(f"model output destination is a symlink: {destination}")
+    if destination_exists and not (
+        _is_regular_file_no_follow(destination) or destination.is_dir()
+    ):
+        raise OSError(f"model output destination is not regular: {destination}")
+    if destination_exists:
+        _validate_worker_owned_output(destination, run_dir)
+    prepared = destination.with_name(f".{destination.name}.{transaction_id}.publish")
+    backup = destination.with_name(f".{destination.name}.{transaction_id}.backup")
+    if prepared.exists() or prepared.is_symlink() or backup.exists() or backup.is_symlink():
+        raise OSError(f"model output publication transaction path already exists: {destination}")
+    has_replacement = source.exists() or source.is_symlink()
+    try:
         if has_replacement:
             if path_has_symlink_component(source):
                 raise OSError(f"declared model output contains a symlink: {source}")
@@ -6199,16 +6402,51 @@ def publish_model_turn_outputs(
                     )
             else:
                 raise OSError(f"declared model output is not regular: {source}")
-            prepared_paths.append(prepared)
-        transaction_items.append(
-            {
-                "destination": destination.relative_to(run_dir).as_posix(),
-                "prepared": prepared.relative_to(run_dir).as_posix(),
-                "backup": backup.relative_to(run_dir).as_posix(),
-                "had_destination": destination_exists,
-                "has_replacement": has_replacement,
-            }
-        )
+    except BaseException:
+        if prepared.exists() or prepared.is_symlink():
+            _remove_worker_owned_output(prepared, run_dir)
+        raise
+    return (
+        {
+            "destination": destination.relative_to(run_dir).as_posix(),
+            "prepared": prepared.relative_to(run_dir).as_posix(),
+            "backup": backup.relative_to(run_dir).as_posix(),
+            "had_destination": destination_exists,
+            "has_replacement": has_replacement,
+        },
+        prepared if has_replacement else None,
+    )
+
+
+def publish_model_turn_outputs(
+    staging: Path,
+    run_dir: Path,
+    declared_outputs: tuple[str, ...],
+) -> list[str]:
+    _recover_model_output_publication(run_dir)
+    snapshot = _declared_model_output_snapshot(staging, declared_outputs)
+    resolved_run_dir = run_dir.resolve(strict=False)
+    transaction_id = f"{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+    transaction_items: list[dict[str, Any]] = []
+    prepared_paths: list[Path] = []
+    try:
+        for declared in declared_outputs:
+            item, prepared = _prepare_model_output_publication_item(
+                staging,
+                run_dir,
+                resolved_run_dir,
+                declared,
+                snapshot,
+                transaction_id,
+            )
+            transaction_items.append(item)
+            if prepared is not None:
+                prepared_paths.append(prepared)
+    except BaseException:
+        for prepared in reversed(prepared_paths):
+            if prepared.exists() or prepared.is_symlink():
+                _remove_worker_owned_output(prepared, run_dir)
+        raise
 
     journal = {
         "schema_version": "model-output-publication/v1",
