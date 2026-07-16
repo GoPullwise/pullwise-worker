@@ -863,10 +863,11 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
                 def run_turn(self, **kwargs):
                     self.prompts.append(kwargs["prompt"])
-                    declared_path = _canonical_generated_test_path(
-                        "generated_test.py"
-                    )
-                    source_path = root / "repo" / declared_path
+                    declared_path = (
+                        Path("intent") / "generated-tests" / "generated_test.py"
+                    ).as_posix()
+                    turn_cwd = Path(kwargs["turn_cwd"])
+                    source_path = turn_cwd / declared_path
                     source_path.parent.mkdir(parents=True, exist_ok=True)
                     source_path.write_text(
                         "import unittest\n"
@@ -875,7 +876,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         encoding="utf-8",
                     )
                     write_json(
-                        run_dir / "intent" / "intent-test-source.json",
+                        turn_cwd / "intent" / "intent-test-source.json",
                         {
                             "schema_version": "intent-test-source/v1",
                             "generated_tests": [

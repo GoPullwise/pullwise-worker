@@ -6347,7 +6347,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "role": "Intent Test Writer",
         "prompt_files": ["intent/06_intent_test_writer.md"],
         "inputs": ["intent/intent-test-plan.json", "intent/execution-capabilities.json", "target snippets", "existing tests", "disposable validation workspace"],
-        "outputs": ["intent/intent-test-source.json", "intent/generated-tests/** or disposable validation workspace tests"],
+        "outputs": ["intent/intent-test-source.json", "intent/generated-tests/**"],
         "instructions": [
             "Write generated test source only under intent/generated-tests/** in the writable phase output directory; the Worker owns validation-workspace materialization and execution.",
             "Return JSON only using intent-test-source/v1. Put every executable test record in the top-level generated_tests array, not only in aliases such as generated_test_files, created_test_files, or test_sources.",

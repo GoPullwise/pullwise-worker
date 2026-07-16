@@ -8962,7 +8962,9 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             class FakeCodexClient:
                 def run_turn(self, **kwargs: object) -> SimpleNamespace:
                     calls.append(kwargs)
-                    (raw_dir / "security.json").write_text(
+                    repair_raw_dir = Path(str(kwargs["turn_cwd"])) / "raw-reviewers"
+                    repair_raw_dir.mkdir(parents=True, exist_ok=True)
+                    (repair_raw_dir / "security.json").write_text(
                         json.dumps(
                             {
                                 "schema_version": "codex-reviewer-output/v1",
@@ -9019,6 +9021,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(verified["schema_version"], "codex-reviewer-output/v1")
         self.assertEqual(calls[0]["thread_id"], "thread_1")
         self.assertEqual(calls[0]["effort"], "medium")
+        self.assertFalse(Path(calls[0]["turn_cwd"]).is_relative_to(repo))
         self.assertFalse(calls[0]["read_only"])
         self.assertIn("Reviewer JSON output repair", calls[0]["prompt"])
         estimator = active.current_run_estimator
@@ -10524,7 +10527,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             class FakeCodexClient:
                 def run_turn(self, **kwargs: object) -> SimpleNamespace:
                     calls.append(kwargs)
-                    (run_dir / "repo-map.json").write_text(
+                    (Path(str(kwargs["turn_cwd"])) / "repo-map.json").write_text(
                         json.dumps({"schema_version": "repo-map/v1", "areas": []}),
                         encoding="utf-8",
                     )
@@ -10576,6 +10579,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(calls[0]["thread_id"], "thread_1")
         self.assertEqual(calls[0]["effort"], "high")
         self.assertFalse(calls[0]["read_only"])
+        self.assertFalse(Path(calls[0]["turn_cwd"]).is_relative_to(repo))
         self.assertIn("Phase output repair: repo_map", calls[0]["prompt"])
         self.assertIn("Repair only the required output file", calls[0]["prompt"])
         estimator = active.current_run_estimator
