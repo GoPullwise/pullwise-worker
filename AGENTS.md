@@ -441,12 +441,12 @@ local job queue and must claim a new server-side job only after the current job
 has finished. The only job slot must not be occupied by avoidable job-level
 retry sleep or cleanup IO.
 
-- Final result upload should attempt the immediate request once. If submission
-  fails or local manifest/upload-snapshot validation blocks submission, write
-  `result-envelope.json` plus `result-submit-failed.json` or
-  `result-submit-blocked.json`, keep `active_job` in `finishing`, continue
-  heartbeat with the active job id, and do not create, scan, migrate, or
-  resubmit saved result-submission queue files.
+- After local manifest/upload-snapshot validation, durably write the exact
+  terminal payload to the run's `terminal-result-outbox.json` before the first
+  HTTP request. Attempt once inside `run_job()`; retry only transport failures,
+  HTTP 408/429, and server 5xx from the outer control-plane loop. Permanent HTTP
+  failures and local validation/integrity failures stay blocked for operator
+  diagnosis. This one-record terminal WAL is not a local job queue.
 - Result upload payloads should use gzip compression for large JSON. Keep server
   gzip JSON support and worker compression thresholds aligned.
 - Do not add unbounded job-level `time.sleep()` retry loops to `run_job()` or other code
@@ -456,15 +456,15 @@ retry sleep or cleanup IO.
   hot loop.
 - Persist the active slot under the instance runtime directory before checkout
   starts. On restart, restore unfinished active/result-submission state before
-  the first heartbeat or lease attempt; never claim around a recovered run and
-  never invent a result resubmission path. Clear runtime/active-run.json only
-  after the control plane has accepted a terminal result (or equivalent
-  confirmed terminal evidence); blocked/failed submission evidence must keep
-  the slot occupied.
+  the first heartbeat or lease attempt, then replay a valid retryable terminal
+  outbox after heartbeat and before claim. Never claim around a recovered run.
+  Clear `runtime/active-run.json` and the outbox only after the control plane
+  acknowledgement is durably recorded; blocked/failed submission evidence must
+  keep the slot occupied.
 - A completed-result commit must check recorded cancellation under the same
-  lock that sets terminal_result_in_flight. Cancellation that wins before that
-  boundary produces a cancelled result; cancellation observed after the
-  terminal commit begins must not replace the accepted terminal outcome.
+  lock that durably prepares the terminal outbox. Cancellation that wins before
+  that boundary produces a cancelled result; cancellation observed after the
+  terminal WAL commit begins must not replace or mutate the prepared outcome.
 - Require a positive server-supplied scan wall-time budget. Start one absolute
   monotonic deadline before checkout and pass it
   unchanged through checkout/copy/clone, Codex thread starts and turns,

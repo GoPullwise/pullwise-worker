@@ -6037,7 +6037,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertFalse(run_thread.is_alive())
         self.assertGreaterEqual(len(busy_heartbeats), 2)
-        self.assertTrue(all(payload["status"] in {"leased", "busy", "cancelling"} for payload in busy_heartbeats))
+        self.assertTrue(
+            all(
+                payload["status"] in {"leased", "busy", "cancelling", "finishing"}
+                for payload in busy_heartbeats
+            )
+        )
         self.assertTrue(all(payload["concurrency"]["available_job_slots"] == 0 for payload in busy_heartbeats))
         self.assertEqual(results[0]["status"], "cancelled")
 
@@ -11836,7 +11841,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 raise PullwiseRequestError("terminal response lost")
 
             def heartbeat(self, **payload: dict) -> dict:
-                return {}
+                del payload
+                return {"cancelled_job_ids": ["job_1"]}
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -11852,6 +11858,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 artifact_dir,
                 {"protocol_version": "review-worker-protocol/v1"},
             )
+            worker.codex_client = SimpleNamespace(is_running=lambda: True)  # type: ignore[assignment]
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+            worker.machine_metrics_payload = lambda: None  # type: ignore[method-assign]
+            worker.heartbeat()
 
             if active.state in {"completed", "failed", "cancelled", "partial_completed"}:
                 worker.state.clear_active(active.state)
@@ -11866,6 +11876,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(worker.state.active_job.job_id, "job_1")
         self.assertEqual(active.state, "finishing")
         self.assertTrue(active.terminal_result_prepared)
+        self.assertFalse(active.cancel_requested)
         self.assertEqual(active.current_phase_status, "failed")
         self.assertEqual(failed["status"], "result_submit_failed")
         self.assertEqual(outbox["schema_version"], "terminal-result-outbox/v1")

@@ -64,7 +64,7 @@ Intent-test execution is capability-driven rather than selected from a framework
 
 Core semantic phases use the server subscription plan reasoning effort; mechanical and non-core phases use the same model with medium reasoning effort. Do not add alternate review pipelines, per-task CLI review flows, local job queues, or worker-side prefetch.
 
-If terminal result submission fails, the worker writes `result-envelope.json` plus `result-submit-failed.json` or `result-submit-blocked.json`, keeps the active job in `finishing`, continues heartbeat with the active job id, and does not create a saved submission queue. Retrying the scan requires the user to start a new scan.
+Before sending a validated terminal result, the worker durably writes the exact payload to `terminal-result-outbox.json`. A retryable transport, HTTP 408/429, or server 5xx failure keeps the active job in `finishing`; the control-plane loop and restart recovery replay that same payload before any new lease. The outbox is removed only after the server acknowledgement is durably recorded. Local validation failures and permanent HTTP failures remain blocked with `result-submit-blocked.json` or `result-submit-failed.json` for operator diagnosis; the outbox is a one-slot terminal WAL, not a worker job queue.
 
 Production local capability example:
 
