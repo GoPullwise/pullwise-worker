@@ -10662,6 +10662,73 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual(list(run_dir.glob(".*.publish")), [])
             self.assertEqual(list(run_dir.glob(".*.backup")), [])
 
+    def test_publication_rolls_back_when_committed_journal_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "semantic"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staging.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (staging / "result.json").write_text("new\n", encoding="utf-8")
+            (run_dir / "result.json").write_text("old\n", encoding="utf-8")
+            real_write = review_worker_v1_module._write_model_output_publication_journal
+            writes = 0
+
+            def fail_third_write(path: Path, payload: dict[str, object]) -> None:
+                nonlocal writes
+                writes += 1
+                if writes == 3:
+                    raise OSError("injected committed journal failure")
+                real_write(path, payload)
+
+            with patch(
+                "pullwise_worker.review_worker_v1._write_model_output_publication_journal",
+                side_effect=fail_third_write,
+            ), self.assertRaisesRegex(OSError, "injected committed journal failure"):
+                publish_model_turn_outputs(staging, run_dir, ("result.json",))
+
+            self.assertEqual(writes, 3)
+            self.assertEqual((run_dir / "result.json").read_text(encoding="utf-8"), "old\n")
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
+            self.assertEqual(list(run_dir.glob(".*.publish")), [])
+            self.assertEqual(list(run_dir.glob(".*.backup")), [])
+
+    def test_publication_cleans_journaled_prepared_file_after_partial_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "semantic"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staging.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (staging / "result.json").write_text("new\n", encoding="utf-8")
+            (run_dir / "result.json").write_text("old\n", encoding="utf-8")
+            prepared_paths: list[Path] = []
+
+            def fail_partial_write(
+                path: Path,
+                payload: bytes,
+                *,
+                executable: bool = False,
+            ) -> None:
+                del executable
+                prepared_paths.append(path)
+                path.write_bytes(payload[:1])
+                raise OSError("injected prepared write failure")
+
+            with patch(
+                "pullwise_worker.review_worker_v1._write_new_worker_owned_bytes",
+                side_effect=fail_partial_write,
+            ), self.assertRaisesRegex(OSError, "injected prepared write failure"):
+                publish_model_turn_outputs(staging, run_dir, ("result.json",))
+
+            self.assertEqual(len(prepared_paths), 1)
+            self.assertTrue(prepared_paths[0].name.endswith(".publish"))
+            self.assertEqual((run_dir / "result.json").read_text(encoding="utf-8"), "old\n")
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
+            self.assertEqual(list(run_dir.glob(".*.publish")), [])
+            self.assertEqual(list(run_dir.glob(".*.backup")), [])
+            self.assertEqual(list(run_dir.rglob("*.tmp")), [])
+
     def test_publication_rejects_root_and_overlapping_declarations_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

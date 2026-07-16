@@ -6192,6 +6192,33 @@ def _write_worker_owned_bytes(
         temporary.unlink(missing_ok=True)
 
 
+def _write_new_worker_owned_bytes(
+    path: Path,
+    payload: bytes,
+    *,
+    executable: bool = False,
+) -> None:
+    """Durably create a unique transaction file at its journaled path."""
+    if path_has_symlink_component(path.parent):
+        raise OSError(f"worker output parent contains a symlink: {path.parent}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    mode = 0o700 if executable else 0o600
+    descriptor = os.open(path, flags, mode)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _validate_worker_owned_output(path: Path, root: Path) -> None:
     resolved_root = root.resolve(strict=False)
     if not _path_is_within(path.resolve(strict=False), resolved_root):
@@ -6744,7 +6771,7 @@ def _materialize_prepared_model_output(
             output = snapshot.get(relative)
             if output is None:
                 raise OSError(f"declared model output snapshot is missing: {relative}")
-            _write_worker_owned_bytes(
+            _write_new_worker_owned_bytes(
                 prepared,
                 output.payload,
                 executable=output.executable,
@@ -6832,8 +6859,6 @@ def publish_model_turn_outputs(
         journal["state"] = "committed"
         _write_model_output_publication_journal(run_dir, journal)
     except BaseException as publication_error:
-        if journal.get("state") == "committed":
-            raise
         try:
             _recover_model_output_publication(run_dir)
         except BaseException as rollback_error:

@@ -154,7 +154,9 @@ Codex execution rules:
   owner execute permission, and declared outputs publish as one journaled
   transaction: prebuild every replacement, back up every prior destination,
   roll the whole set back on failure, and recover an interrupted transaction
-  before the next publish. Every stage is removed after its turn; cleanup
+  during persisted-run startup and before the next publish. Durably sync
+  prepared files, the journal, and affected parent directories on POSIX before
+  advancing transaction state. Every stage is removed after its turn; cleanup
   failure must not replace an active turn/cancellation error, but must be
   recorded and must remain fatal after an otherwise successful turn. Reviewer
   assignment output uses the same bounded snapshot boundary plus one
