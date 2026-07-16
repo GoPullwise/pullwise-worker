@@ -3940,7 +3940,20 @@ class ReviewWorkerV1:
             else:
                 active.state = "finishing"
                 self.persist_active_run_marker(active)
-            self.heartbeat()
+            try:
+                self.heartbeat()
+            except PullwiseRequestError as exc:
+                if not control_plane_error_is_retryable(exc):
+                    raise
+                if run_dir is not None:
+                    append_jsonl(
+                        run_dir / "worker.log.jsonl",
+                        {
+                            "event": "final_idle_heartbeat_deferred",
+                            "error": quota_text(exc, 500),
+                            "time": iso_time(time.time()),
+                        },
+                    )
 
     def prepare_workspace(
         self,

@@ -142,6 +142,10 @@ Codex execution rules:
   reads must reject symlinks (including symlinked path components) and operate
   on regular files so model-authored paths cannot become confused-deputy access
   to provider credentials or other worker state.
+- Once a terminal result is accepted and the active marker/slot is cleared, a
+  retryable final idle-heartbeat failure must be logged and deferred to the
+  continuous control-plane loop. It must not escape `run_job()` and terminate
+  the daemon; permanent HTTP errors and programming errors still fail closed.
 
 ## Whole-Scan ETA Contract
 
