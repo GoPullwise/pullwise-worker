@@ -3079,13 +3079,16 @@ class ReviewWorkerV1:
         publication_recovery_error = str(
             record.get("publication_recovery_error") or ""
         )
-        active.message = str(
-            publication_recovery_error
-            and "Recovered unfinished run with an unresolved model-output publication: "
-            + publication_recovery_error
-            or progress.get("message")
-            or "Recovered unfinished run; operator intervention is required before this slot can be reused."
-        )
+        if publication_recovery_error:
+            active.message = (
+                "Recovered unfinished run with an unresolved model-output publication: "
+                + publication_recovery_error
+            )
+        else:
+            active.message = str(
+                progress.get("message")
+                or "Recovered unfinished run; operator intervention is required before this slot can be reused."
+            )
         try:
             active.overall_percent = max(0.0, min(100.0, float(progress.get("overall_percent") or 0.0)))
             active.current_phase_percent = max(
@@ -6146,6 +6149,20 @@ def _fsync_directory_tree(path: Path) -> None:
     _fsync_directory(path.parent)
 
 
+def _fsync_directory_chain(path: Path, root: Path) -> None:
+    if os.name == "nt":
+        return
+    resolved_root = root.resolve(strict=False)
+    current = path.resolve(strict=False)
+    if not _path_is_within(current, resolved_root):
+        raise OSError(f"directory sync path escapes its root: {path}")
+    while True:
+        _fsync_directory(current)
+        if current == resolved_root:
+            return
+        current = current.parent
+
+
 def _write_worker_owned_bytes(
     path: Path,
     payload: bytes,
@@ -6349,6 +6366,7 @@ def _validated_model_output_declarations(
         if (
             not declared
             or declared != raw_declared
+            or declared == MODEL_OUTPUT_PUBLICATION_JOURNAL
             or not relative.parts
             or relative.is_absolute()
             or relative.as_posix() != declared
@@ -6503,6 +6521,9 @@ def _parse_model_output_publication_journal(
                 "backup_path": backup,
             }
         )
+    destination_paths = {item["destination_path"] for item in items}
+    if destination_paths.intersection(transaction_paths):
+        raise OSError("model output publication journal aliases a destination path")
     return str(schema), str(state), items
 
 
@@ -6768,6 +6789,9 @@ def publish_model_turn_outputs(
         )
         for declared in declarations
     ]
+    for item in transaction_items:
+        destination = _model_output_publication_path(run_dir, item["destination"])
+        _fsync_directory_chain(destination.parent, run_dir)
     journal: dict[str, Any] = {
         "schema_version": MODEL_OUTPUT_PUBLICATION_SCHEMA,
         "state": "preparing",
