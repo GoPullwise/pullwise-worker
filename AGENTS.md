@@ -100,6 +100,9 @@ Codex execution rules:
 - Use the OpenAI Codex Python SDK (`openai-codex`) for worker automation; do not add new hand-written app-server JSON-RPC clients. Managed workers must refresh OpenAI's official standalone CLI under the current `worker_root` (default release `latest`) and pass its absolute `PULLWISE_CODEX_COMMAND` as `CodexConfig.codex_bin`, while keeping `cwd` and `env` instance-scoped. The SDK-bundled CLI is only a compatibility fallback when no managed command is configured.
 - For the `openai-codex` SDK approval mode, use `ApprovalMode.deny_all` when Pullwise wants no escalations; current SDKs expose `deny_all`/`auto_review`, not `ApprovalMode.never`.
 - Worker Python package dependencies such as `pullwise-worker`, `openai-codex`, `openai-codex-cli-bin`, and transitive runtime packages must run from the worker instance venv under `$worker_root/.venv`; do not rely on global/system Python packages or console scripts for worker execution.
+- Keep `openai-codex` pinned to the SDK version validated by the runtime
+  contract tests. SDK upgrades are explicit compatibility changes and must
+  include the optional real Codex integration check before release.
 - Installer/update code must accept only an HTTPS Codex installer URL without credentials or fragments, a `latest` or validated semantic release, and an absolute `.../codex` command contained by `worker_root`. Download through a secure temporary file, install as the worker service user, probe `codex --version`, then migrate env state; failed updates must leave the prior command usable.
 - Persist `codex-runtime.json` and include it in debug bundles so the worker version, Python SDK version, SDK-bundled CLI version, configured CLI path/version, and runtime mode are available when model compatibility fails.
 - The Python SDK owns Codex runtime/app-server lifecycle for worker automation. Do not reintroduce worker-managed app-server process lifetime knobs such as `PULLWISE_CODEX_APP_SERVER_MAX_AGE_SECONDS` or `PULLWISE_CODEX_APP_SERVER_MAX_TURNS`.
@@ -140,10 +143,15 @@ Codex execution rules:
   instructions during isolation preparation so upgrades cannot retain stale
   `.codex-review` write guidance.
 - Treat every model-turn workspace as hostile. Snapshot/publish only bounded
-  regular declared files, reject symlinks and non-regular files, and ignore
-  undeclared files. Worker/SDK JSONL appends and JSON reads must also reject
-  symlinks so model-authored paths cannot become confused-deputy access to
-  provider credentials or other worker state.
+  regular declared files with both per-file and aggregate byte limits, reject
+  symlinks and non-regular files, and ignore undeclared files. Directory
+  outputs are exact mirrors, safe executable intent harnesses retain only
+  owner execute permission, and every stage is removed after its turn.
+  Reviewer assignment output uses the same bounded snapshot boundary before
+  worker-owned publication. Worker/SDK JSONL appends and JSON reads must also
+  reject symlinks and non-regular files and use non-blocking opens so
+  model-authored FIFOs cannot hang the worker or become confused-deputy access
+  to provider credentials or other worker state.
 - Once a terminal result is accepted and the active marker/slot is cleared, a
   retryable final idle-heartbeat failure must be logged and deferred to the
   continuous control-plane loop. It must not escape `run_job()` and terminate

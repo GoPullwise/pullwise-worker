@@ -117,6 +117,37 @@ def _write_canonical_generated_test(
     return source_path, validation_repo / declared_path
 
 
+def _write_staged_generated_test(
+    turn_kwargs: dict[str, object],
+    relative_path: str,
+    content: str,
+) -> Path:
+    turn_cwd = Path(str(turn_kwargs["turn_cwd"]))
+    declared_path = (
+        Path("intent") / "generated-tests" / relative_path
+    ).as_posix()
+    staged_source = turn_cwd / declared_path
+    staged_source.parent.mkdir(parents=True, exist_ok=True)
+    staged_source.write_text(content, encoding="utf-8")
+    source_path = turn_cwd / "intent" / "intent-test-source.json"
+    source_payload = json.loads(source_path.read_text(encoding="utf-8"))
+    for generated in source_payload.get("generated_tests", []):
+        if not isinstance(generated, dict):
+            continue
+        old_path = str(generated.get("path") or "")
+        if Path(old_path).name != Path(relative_path).name:
+            continue
+        generated["path"] = declared_path
+        command = generated.get("command")
+        if isinstance(command, list):
+            generated["command"] = [
+                declared_path if str(part) == old_path else part
+                for part in command
+            ]
+    write_json(source_path, source_payload)
+    return turn_cwd
+
+
 class AgenticExecutionContractsTest(unittest.TestCase):
     def test_capability_snapshot_is_driven_by_agent_candidates_and_nested_workspaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1056,7 +1087,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                 def __init__(self) -> None:
                     self.calls = 0
 
-                def run_turn(self, **_kwargs):
+                def run_turn(self, **kwargs):
                     self.calls += 1
                     repaired_source = (
                         "import unittest\n"
@@ -1064,13 +1095,10 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         "class GeneratedTest(unittest.TestCase):\n"
                         "    def test_behavior(self): self.assertEqual(value(), 7)\n"
                     )
-                    generated_source.write_text(
+                    _write_staged_generated_test(
+                        kwargs,
+                        "generated_test.py",
                         repaired_source,
-                        encoding="utf-8",
-                    )
-                    generated_path.write_text(
-                        repaired_source,
-                        encoding="utf-8",
                     )
                     return SimpleNamespace(duration_ms=5)
 
@@ -1147,19 +1175,16 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             write_json(run_dir / "intent" / "intent-test-results.raw.json", initial)
 
             class SelectiveRepairCodex:
-                def run_turn(self, **_kwargs):
+                def run_turn(self, **kwargs):
                     repaired_source = (
                         "import unittest\n"
                         "class RepairTest(unittest.TestCase):\n"
                         "    def test_behavior(self): self.assertTrue(True)\n"
                     )
-                    repair_source.write_text(
+                    _write_staged_generated_test(
+                        kwargs,
+                        "test_repair.py",
                         repaired_source,
-                        encoding="utf-8",
-                    )
-                    repair_path.write_text(
-                        repaired_source,
-                        encoding="utf-8",
                     )
                     return SimpleNamespace(duration_ms=5)
 
@@ -1235,7 +1260,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
             write_json(run_dir / "intent" / "intent-test-results.raw.json", initial)
 
             class SourceMutatingCodex:
-                def run_turn(self, **_kwargs):
+                def run_turn(self, **kwargs):
                     validation_app.write_text("def value(): return 7  # agent changed source\n", encoding="utf-8")
                     repaired_source = (
                         "import unittest\n"
@@ -1243,13 +1268,10 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                         "class GeneratedTest(unittest.TestCase):\n"
                         "    def test_behavior(self): self.assertEqual(value(), 7)\n"
                     )
-                    generated_source.write_text(
+                    _write_staged_generated_test(
+                        kwargs,
+                        "generated_test.py",
                         repaired_source,
-                        encoding="utf-8",
-                    )
-                    generated_path.write_text(
-                        repaired_source,
-                        encoding="utf-8",
                     )
                     return SimpleNamespace(duration_ms=5)
 

@@ -53,6 +53,7 @@ from pullwise_worker.review_worker_v1 import (
     Isolation,
     ReviewWorkerV1,
     RepositoryLimitExceeded,
+    ReviewerAssignmentWork,
     WorkerState,
     artifact_manifest_items,
     codex_error_code,
@@ -81,6 +82,7 @@ from pullwise_worker.review_worker_v1 import (
     reviewer_assignment_prompt,
     reviewer_json_repair_prompt,
     progress_final_payload,
+    publish_model_turn_outputs,
     inventory,
     intent_test_command_policy,
     location_verification_payload,
@@ -1778,6 +1780,28 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 },
                 workspace,
             )
+            denied_git_output_command, _reason = decide_approval(
+                {
+                    "method": "approval/request",
+                    "params": {
+                        "type": "commandExecution",
+                        "command": "git diff --output ../escaped.diff",
+                        "cwd": str(workspace),
+                    },
+                },
+                workspace,
+            )
+            denied_git_short_pager_command, _reason = decide_approval(
+                {
+                    "method": "approval/request",
+                    "params": {
+                        "type": "commandExecution",
+                        "command": "git grep -Opython3 needle",
+                        "cwd": str(workspace),
+                    },
+                },
+                workspace,
+            )
             denied_sed_in_place, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "sed -i s/a/b/ src/app.py", "cwd": str(workspace)}},
                 workspace,
@@ -1797,6 +1821,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(denied_cwd, "decline")
         self.assertEqual(denied_git_clean, "decline")
         self.assertEqual(denied_git_pager_command, "decline")
+        self.assertEqual(denied_git_output_command, "decline")
+        self.assertEqual(denied_git_short_pager_command, "decline")
         self.assertEqual(denied_sed_in_place, "decline")
 
     def test_approval_policy_contains_all_read_command_operands(self) -> None:
@@ -10172,6 +10198,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertTrue(Path(calls[0]["turn_cwd"]).is_relative_to(repo.parent / "model-turns"))
             self.assertFalse(Path(calls[0]["turn_cwd"]).is_relative_to(repo))
             self.assertFalse((run_dir / "repo-map.json").exists())
+            self.assertFalse(Path(str(calls[0]["turn_cwd"])).exists())
             with self.assertRaisesRegex(RuntimeError, "repo-map"):
                 validate_phase_outputs(run_dir, "repo_map")
 
@@ -10223,6 +10250,135 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertEqual((repo / "app.py").read_text(encoding="utf-8"), "ORIGINAL\n")
             self.assertFalse((run_dir / "app.py").exists())
             self.assertIn(str(repo), str(calls[0]["prompt"]))
+            self.assertFalse(Path(str(calls[0]["turn_cwd"])).exists())
+
+    def test_model_turn_directory_publication_exactly_replaces_stale_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "intent-writing"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staged_generated = staging / "intent" / "generated-tests"
+            run_generated = run_dir / "intent" / "generated-tests"
+            staged_generated.mkdir(parents=True)
+            run_generated.mkdir(parents=True)
+            (staged_generated / "new_test.py").write_text("new\n", encoding="utf-8")
+            (run_generated / "stale_test.py").write_text("stale\n", encoding="utf-8")
+            (run_dir / "worker-owned.json").write_text("{}\n", encoding="utf-8")
+
+            published = publish_model_turn_outputs(
+                staging,
+                run_dir,
+                ("intent/generated-tests",),
+            )
+
+            self.assertEqual(published, ["intent/generated-tests/new_test.py"])
+            self.assertEqual(
+                (run_generated / "new_test.py").read_text(encoding="utf-8"),
+                "new\n",
+            )
+            self.assertFalse((run_generated / "stale_test.py").exists())
+            self.assertTrue((run_dir / "worker-owned.json").is_file())
+
+    def test_model_turn_publication_rejects_aggregate_output_over_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "intent-writing"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            generated = staging / "intent" / "generated-tests"
+            generated.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            (generated / "one.py").write_bytes(b"123")
+            (generated / "two.py").write_bytes(b"456")
+
+            with patch(
+                "pullwise_worker.review_worker_v1.MAX_MODEL_OUTPUT_TOTAL_BYTES",
+                5,
+            ), self.assertRaisesRegex(OSError, "aggregate byte limit"):
+                publish_model_turn_outputs(
+                    staging,
+                    run_dir,
+                    ("intent/generated-tests",),
+                )
+
+            self.assertFalse((run_dir / "intent" / "generated-tests").exists())
+
+    def test_reviewer_assignment_rejects_oversized_output_before_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            staging = root / "model-turns" / "run_1" / "reviewer" / "attempt-01"
+            staging.mkdir(parents=True)
+            output_name = "p1-bundle-001.correctness.json"
+            work = ReviewerAssignmentWork(
+                index=1,
+                bundle_id="p1-bundle-001",
+                reviewer_id="correctness",
+                output_name=output_name,
+                output_path=run_dir / "raw-reviewers" / output_name,
+                staging_dir=staging,
+                staging_output_path=staging / output_name,
+            )
+
+            class OversizedCodex:
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
+                    Path(str(kwargs["turn_cwd"]), output_name).write_bytes(b"123456")
+                    return SimpleNamespace(duration_ms=1)
+
+            worker = ReviewWorkerV1(
+                SimpleNamespace(worker_id="wk_1", service_home=str(root)),
+                client=object(),
+            )
+            with patch(
+                "pullwise_worker.review_worker_v1.MAX_MODEL_OUTPUT_FILE_BYTES",
+                5,
+            ), patch.object(worker, "poll_cancel_requested", return_value=False), patch(
+                "pullwise_worker.review_worker_v1.effort_for_phase",
+                return_value="medium",
+            ), patch(
+                "pullwise_worker.review_worker_v1.turn_timeout_with_deadline",
+                return_value=30,
+            ):
+                outcome = worker._execute_reviewer_assignment(
+                    OversizedCodex(),
+                    repo,
+                    run_dir,
+                    {},
+                    work,
+                    thread_id="thread-1",
+                    attempt=1,
+                    expected_assignments={("p1-bundle-001", "correctness")},
+                    cancel_event=threading.Event(),
+                    deadline_monotonic=None,
+                )
+
+            self.assertIsInstance(outcome.error, OSError)
+            self.assertFalse(outcome.valid_output)
+            self.assertIsNone(outcome.output_payload)
+            self.assertFalse(work.output_path.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX execute bits are not meaningful on Windows")
+    def test_model_turn_publication_preserves_only_safe_execute_bits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "intent-writing"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staged_harness = staging / "intent" / "generated-tests" / "harness"
+            staged_harness.parent.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            staged_harness.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            staged_harness.chmod(0o4777)
+
+            publish_model_turn_outputs(
+                staging,
+                run_dir,
+                ("intent/generated-tests",),
+            )
+
+            published_mode = (
+                run_dir / "intent" / "generated-tests" / "harness"
+            ).stat().st_mode & 0o7777
+            self.assertEqual(published_mode, 0o700)
 
     def test_reviewer_fanout_runs_scoped_assignments_on_bounded_independent_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -3983,14 +3983,17 @@ class ReviewWorkerV1:
                 if not control_plane_error_is_retryable(exc):
                     raise
                 if run_dir is not None:
-                    append_jsonl(
-                        run_dir / "worker.log.jsonl",
-                        {
-                            "event": "final_idle_heartbeat_deferred",
-                            "error": quota_text(exc, 500),
-                            "time": iso_time(time.time()),
-                        },
-                    )
+                    try:
+                        append_jsonl(
+                            run_dir / "worker.log.jsonl",
+                            {
+                                "event": "final_idle_heartbeat_deferred",
+                                "error": quota_text(exc, 500),
+                                "time": iso_time(time.time()),
+                            },
+                        )
+                    except Exception:
+                        pass
 
     def prepare_workspace(
         self,
@@ -4211,18 +4214,21 @@ class ReviewWorkerV1:
             include_existing=False,
         )
         prompt = phase_prompt(phase, run_dir, job, output_dir=turn_cwd)
-        codex_client.run_turn(
-            thread_id=thread_id,
-            repo_dir=repo_dir,
-            turn_cwd=turn_cwd,
-            prompt=prompt,
-            effort=effort,
-            read_only=False,
-            timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
-            cancel_requested=self.poll_cancel_requested,
-            metrics_phase=phase,
-        )
-        publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
+        try:
+            codex_client.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                turn_cwd=turn_cwd,
+                prompt=prompt,
+                effort=effort,
+                read_only=False,
+                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
+                cancel_requested=self.poll_cancel_requested,
+                metrics_phase=phase,
+            )
+            publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
+        finally:
+            cleanup_model_turn_workspace(repo_dir, turn_cwd)
 
     def _execute_reviewer_assignment(
         self,
@@ -4829,6 +4835,7 @@ class ReviewWorkerV1:
                             fatal_error = outcome.error
                             cancel_event.set()
                         write_json(execution_path, execution)
+                        shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
                         continue
 
                     attempt_record.update(
@@ -4847,11 +4854,11 @@ class ReviewWorkerV1:
                     )
                     if outcome.valid_output:
                         completed += 1
-                        shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
                     else:
                         record["error"] = (
                             "exact assignment output is missing, malformed, or covers a different assignment"
                         )
+                    shutil.rmtree(attempt_work.staging_dir, ignore_errors=True)
                     finished += 1
                     execution["assignments_completed"] = completed
                     write_json(execution_path, execution)
@@ -4905,12 +4912,10 @@ class ReviewWorkerV1:
                         }
                     )
             write_json(execution_path, execution)
+            shutil.rmtree(staging_root, ignore_errors=True)
             raise fatal_error
 
-        try:
-            staging_root.rmdir()
-        except OSError:
-            pass
+        shutil.rmtree(staging_root, ignore_errors=True)
 
     def _start_phase_repair_estimate(
         self,
@@ -5021,25 +5026,28 @@ class ReviewWorkerV1:
             include_existing=True,
         )
         try:
-            turn_metrics = codex_client.run_turn(
-                thread_id=thread_id,
-                repo_dir=repo_dir,
-                turn_cwd=turn_cwd,
-                prompt=phase_repair_prompt(
-                    phase,
-                    run_dir,
-                    validation_error,
-                    job,
-                    output_dir=turn_cwd,
-                ),
-                effort=effort_for_phase(job, phase),
-                read_only=False,
-                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
-                cancel_requested=self.poll_cancel_requested,
-                metrics_phase=f"{phase}_repair",
-            )
-            publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
-            fallback_semantic_artifact(run_dir, job, phase)
+            try:
+                turn_metrics = codex_client.run_turn(
+                    thread_id=thread_id,
+                    repo_dir=repo_dir,
+                    turn_cwd=turn_cwd,
+                    prompt=phase_repair_prompt(
+                        phase,
+                        run_dir,
+                        validation_error,
+                        job,
+                        output_dir=turn_cwd,
+                    ),
+                    effort=effort_for_phase(job, phase),
+                    read_only=False,
+                    timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
+                    cancel_requested=self.poll_cancel_requested,
+                    metrics_phase=f"{phase}_repair",
+                )
+                publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
+                fallback_semantic_artifact(run_dir, job, phase)
+            finally:
+                cleanup_model_turn_workspace(repo_dir, turn_cwd)
         except BaseException:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
@@ -5114,17 +5122,21 @@ class ReviewWorkerV1:
         repair_unit_id = self._start_phase_repair_estimate(active, phase)
         turn_metrics: object = None
         try:
-            turn_metrics = codex_client.run_turn(
-                thread_id=thread_id,
-                repo_dir=repo_dir,
-                turn_cwd=turn_cwd,
-                prompt=prompt,
-                effort=effort_for_phase(job, phase),
-                read_only=False,
-                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
-                cancel_requested=self.poll_cancel_requested,
-                metrics_phase=f"{phase}_repair",
-            )
+            try:
+                turn_metrics = codex_client.run_turn(
+                    thread_id=thread_id,
+                    repo_dir=repo_dir,
+                    turn_cwd=turn_cwd,
+                    prompt=prompt,
+                    effort=effort_for_phase(job, phase),
+                    read_only=False,
+                    timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
+                    cancel_requested=self.poll_cancel_requested,
+                    metrics_phase=f"{phase}_repair",
+                )
+                publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
+            finally:
+                cleanup_model_turn_workspace(repo_dir, turn_cwd)
         except JobCancelled:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
@@ -5141,7 +5153,6 @@ class ReviewWorkerV1:
                 },
             )
             return False
-        publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
         self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
         append_jsonl(
             run_dir / "worker.log.jsonl",
@@ -5412,26 +5423,29 @@ class ReviewWorkerV1:
             include_existing=True,
         )
         try:
-            turn_metrics = codex_client.run_turn(
-                thread_id=thread_id,
-                repo_dir=repo_dir,
-                turn_cwd=turn_cwd,
-                prompt=reviewer_json_repair_prompt(
-                    run_dir,
-                    validation_error,
-                    job,
-                    output_dir=turn_cwd,
-                ),
-                effort=effort_for_phase(job, "reviewer_json_validation"),
-                read_only=False,
-                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
-                cancel_requested=self.poll_cancel_requested,
-                metrics_phase="reviewer_json_validation_repair",
-            )
+            try:
+                turn_metrics = codex_client.run_turn(
+                    thread_id=thread_id,
+                    repo_dir=repo_dir,
+                    turn_cwd=turn_cwd,
+                    prompt=reviewer_json_repair_prompt(
+                        run_dir,
+                        validation_error,
+                        job,
+                        output_dir=turn_cwd,
+                    ),
+                    effort=effort_for_phase(job, "reviewer_json_validation"),
+                    read_only=False,
+                    timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
+                    cancel_requested=self.poll_cancel_requested,
+                    metrics_phase="reviewer_json_validation_repair",
+                )
+                publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
+            finally:
+                cleanup_model_turn_workspace(repo_dir, turn_cwd)
         except BaseException:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
-        publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
         self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
 
     def run_mechanical_phase(
@@ -6423,7 +6437,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "role": "Risk Router",
         "prompt_files": ["01_risk_router.md"],
         "inputs": ["repo-map.json", "inventory.json"],
-        "outputs": ["risk-routing.json", "coverage.json when coverage is refined"],
+        "outputs": ["risk-routing.json"],
         "instructions": [
             "Classify files and directories into P0/P1/P2/P3/SKIP using role, entrypoint, trust boundary, auth/payment/data/upload/config/concurrency signals.",
             "Cover every non-hard-skipped inventory path with an explicit route or provide an intentional default_depth in P0/P1/P2/P3/SKIP for all unmatched paths.",
@@ -6772,7 +6786,7 @@ def reviewer_assignment_prompt(
         "Write one JSON object only using schema_version codex-reviewer-output/v1.",
         "The object must include bundle_id, reviewer, reviewed_paths, findings, review_summary, and uncertainties.",
         "Do not modify application source files, install dependencies, use network, or call external scanning services.",
-        "Write only the exact output file under the active .codex-review tree; do not rely on prose in the turn response.",
+        "Write only the exact output file in the writable reviewer workspace; do not rely on prose in the turn response.",
         f"--- {template_name} ---",
         prompt_template_text(run_dir, template_name),
     ]

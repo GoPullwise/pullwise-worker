@@ -1,1 +1,1 @@
-# pullwise-worker has no third-party runtime dependencies.
+# Runtime dependencies are declared and pinned in pyproject.toml.

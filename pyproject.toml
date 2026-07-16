@@ -7,10 +7,10 @@ name = "pullwise-worker"
 version = "0.10.20"
 description = "Pullwise pull-based scan worker"
 requires-python = ">=3.10"
-# The worker uses OpenAI's Codex Python SDK for automation while still
-# pinning Codex runtime state to the worker-scoped service home.
+# The worker pins the validated Codex SDK; upgrade it deliberately with the
+# runtime-contract and real-integration tests.
 dependencies = [
-    "openai-codex",
+    "openai-codex==0.1.0b3",
 ]
 
 [project.scripts]
