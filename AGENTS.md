@@ -133,7 +133,9 @@ Codex execution rules:
   `usageLimitExceeded` when mapping the worker's stable public error code.
 - A timed-out or cancelled SDK call may still own a background reader or late
   thread/turn. Mark that App Server runtime unhealthy and close it during job
-  cleanup; never reuse it for another turn or run.
+  cleanup; never reuse it for another turn or run. Serialize SDK lifecycle
+  transitions and atomically detach the runtime before bounded close so late
+  archive cleanup and job cleanup cannot close the same App Server twice.
 - Implement a fixed approval handler even when approval policy is `never`:
   deny every file-change approval plus Python/helper and project-test command
   execution. A Codex thread starts read-only. Every writable semantic/reviewer
@@ -149,9 +151,15 @@ Codex execution rules:
   regular declared files with both per-file and aggregate byte limits, reject
   symlinks and non-regular files, and ignore undeclared files. Directory
   outputs are exact mirrors, safe executable intent harnesses retain only
-  owner execute permission, and every stage is removed after its turn.
-  Reviewer assignment output uses the same bounded snapshot boundary before
-  worker-owned publication. Worker/SDK JSONL appends and JSON reads must also
+  owner execute permission, and declared outputs publish as one journaled
+  transaction: prebuild every replacement, back up every prior destination,
+  roll the whole set back on failure, and recover an interrupted transaction
+  before the next publish. Every stage is removed after its turn; cleanup
+  failure must not replace an active turn/cancellation error, but must be
+  recorded and must remain fatal after an otherwise successful turn. Reviewer
+  assignment output uses the same bounded snapshot boundary plus one
+  thread-safe run-level aggregate byte budget before worker-owned publication.
+  Worker/SDK JSONL appends and JSON reads must also
   reject symlinks and non-regular files and use non-blocking opens so
   model-authored FIFOs cannot hang the worker or become confused-deputy access
   to provider credentials or other worker state.

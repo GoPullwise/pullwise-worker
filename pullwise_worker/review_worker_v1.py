@@ -5273,31 +5273,26 @@ class ReviewWorkerV1:
         prompt += json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)[:20000]
         repair_unit_id = self._start_phase_repair_estimate(active, phase)
         turn_metrics: object = None
+        primary_error: BaseException | None = None
         try:
-            try:
-                turn_metrics = codex_client.run_turn(
-                    thread_id=thread_id,
-                    repo_dir=repo_dir,
-                    turn_cwd=turn_cwd,
-                    prompt=prompt,
-                    effort=effort_for_phase(job, phase),
-                    read_only=False,
-                    timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
-                    cancel_requested=self.poll_cancel_requested,
-                    metrics_phase=f"{phase}_repair",
-                )
-                publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
-            finally:
-                cleanup_model_turn_workspace_after_turn(
-                    repo_dir,
-                    turn_cwd,
-                    run_dir=run_dir,
-                    primary_error=sys.exc_info()[1],
-                )
-        except JobCancelled:
+            turn_metrics = codex_client.run_turn(
+                thread_id=thread_id,
+                repo_dir=repo_dir,
+                turn_cwd=turn_cwd,
+                prompt=prompt,
+                effort=effort_for_phase(job, phase),
+                read_only=False,
+                timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
+                cancel_requested=self.poll_cancel_requested,
+                metrics_phase=f"{phase}_repair",
+            )
+            publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
+        except JobCancelled as exc:
+            primary_error = exc
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
         except Exception as exc:
+            primary_error = exc
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             append_jsonl(
                 run_dir / "worker.log.jsonl",
@@ -5310,6 +5305,26 @@ class ReviewWorkerV1:
                 },
             )
             return False
+        except BaseException as exc:
+            primary_error = exc
+            self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
+            raise
+        finally:
+            try:
+                cleanup_model_turn_workspace_after_turn(
+                    repo_dir,
+                    turn_cwd,
+                    run_dir=run_dir,
+                    primary_error=primary_error,
+                )
+            except OSError:
+                self._finish_phase_repair_estimate(
+                    active,
+                    repair_unit_id,
+                    turn_metrics,
+                    state="failed",
+                )
+                raise
         self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
         append_jsonl(
             run_dir / "worker.log.jsonl",
@@ -6007,11 +6022,16 @@ def _bounded_regular_model_file(path: Path) -> ModelOutputFile:
             raise OSError(f"model output is not a regular file: {path}")
         if stat_result.st_size > MAX_MODEL_OUTPUT_FILE_BYTES:
             raise OSError(f"model output exceeds the per-file limit: {path}")
+        expected_size = int(stat_result.st_size)
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            payload = handle.read(MAX_MODEL_OUTPUT_FILE_BYTES + 1)
-        if len(payload) > MAX_MODEL_OUTPUT_FILE_BYTES:
-            raise OSError(f"model output exceeds the per-file limit: {path}")
+            payload = handle.read(expected_size + 1)
+            final_stat = os.fstat(handle.fileno())
+        if len(payload) != expected_size or any(
+            getattr(final_stat, field, None) != getattr(stat_result, field, None)
+            for field in ("st_size", "st_mtime_ns", "st_ctime_ns", "st_dev", "st_ino")
+        ):
+            raise OSError(f"model output changed while it was being read: {path}")
         return ModelOutputFile(
             payload=payload,
             executable=bool(stat.S_IMODE(stat_result.st_mode) & 0o111),
