@@ -40,6 +40,7 @@ from .codex_sdk_runtime import (
     append_text_no_follow,
     CodexRuntimeResources,
     CodexTokenUsage,
+    path_has_symlink_component,
     read_text_no_follow,
     TurnEventScope,
     require_identifier,
@@ -57,6 +58,9 @@ WORKER_VERSION = __version__
 MAX_REVIEWER_CONCURRENCY = 2
 MAX_REVIEW_BUNDLES = 64
 MAX_REVIEWER_ASSIGNMENTS = 128
+MODEL_TURN_WORKSPACES_DIR_NAME = "model-turns"
+MAX_MODEL_OUTPUT_FILES = 2048
+MAX_MODEL_OUTPUT_FILE_BYTES = 16 * 1024 * 1024
 LOW_MEMORY_REVIEWER_TOTAL_BYTES = 6 * 1024**3
 LOW_MEMORY_REVIEWER_AVAILABLE_BYTES = 2 * 1024**3
 CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS = 15
@@ -110,6 +114,21 @@ SEMANTIC_PHASES = {
     "intent_test_failure_analysis",
     "validator_disproof",
     "final_report_json",
+}
+SEMANTIC_PHASE_MODEL_OUTPUTS: dict[str, tuple[str, ...]] = {
+    "repo_map": ("repo-map.json",),
+    "risk_routing": ("risk-routing.json",),
+    "bundle_planning": ("bundle-grouping.json",),
+    "clustering_and_voting": ("clusters.json", "validation-input.json"),
+    "intent_mining": ("intent/intent-map.json",),
+    "intent_test_planning": ("intent/intent-test-plan.json",),
+    "intent_test_writing": (
+        "intent/intent-test-source.json",
+        "intent/generated-tests",
+    ),
+    "intent_test_failure_analysis": ("intent/intent-test-results.json",),
+    "validator_disproof": ("validated-findings.json",),
+    "final_report_json": ("report.agent.json",),
 }
 INTENT_VALIDATION_CHILD_PHASES = {
     "intent_mining",
@@ -338,7 +357,7 @@ Rules:
 - Do not call external review or scanning tools.
 - Do not modify application source files.
 - Write only under .codex-review/** when file writes are needed.
-- For dynamic tests, write source only under .codex-review/generated-tests/**; the Worker materializes and executes it in the disposable validation workspace.
+- For dynamic tests, write source only under intent/generated-tests/** in the writable phase output directory; the Worker materializes and executes it in the disposable validation workspace.
 - Helper scripts must use Python 3 standard library only.
 - Helper scripts perform mechanical tasks only.
 - Codex performs semantic code review judgment.
@@ -883,7 +902,7 @@ class CodexSdkClient:
             lambda: self._codex.thread_start(
                 approval_mode=self._runtime.ApprovalMode.deny_all,
                 cwd=str(repo_dir),
-                sandbox=self._runtime.Sandbox.workspace_write,
+                sandbox=self._runtime.Sandbox.read_only,
                 service_name="codex_repo_review_worker",
                 model=model or None,
             ),
@@ -940,6 +959,7 @@ class CodexSdkClient:
         *,
         thread_id: str,
         repo_dir: Path,
+        turn_cwd: Path | None = None,
         prompt: str,
         effort: str,
         read_only: bool,
@@ -955,8 +975,20 @@ class CodexSdkClient:
             thread_id=thread_id,
         )
         self._approval_workspace = repo_dir
+        target_cwd = repo_dir
+        if not read_only:
+            if turn_cwd is None:
+                raise ValueError("writable Codex turns require a worker-owned external turn_cwd")
+            if writable_roots:
+                raise ValueError("additional writable roots are forbidden for semantic Codex turns")
+            allowed_turn_root = (repo_dir.parent / MODEL_TURN_WORKSPACES_DIR_NAME).resolve(strict=False)
+            target_cwd = Path(turn_cwd).resolve(strict=False)
+            if not _path_is_within(target_cwd, allowed_turn_root):
+                raise ValueError("Codex turn_cwd is outside the worker-owned model-turn workspace")
+            if path_has_symlink_component(Path(turn_cwd)) or not Path(turn_cwd).is_dir():
+                raise ValueError("Codex turn_cwd must be an existing non-symlink directory")
         params = {
-            "cwd": str(repo_dir),
+            "cwd": str(target_cwd),
             "approvalPolicy": "never",
             "sandboxPolicy": self._sandbox_policy(
                 repo_dir,
@@ -1186,20 +1218,12 @@ class CodexSdkClient:
     ) -> dict[str, Any]:
         if read_only:
             return {"type": "readOnly", "networkAccess": False}
-        review_root = repo_dir / ".codex-review"
-        default_roots = [review_root / "runs", review_root / "generated-tests"]
-        selected_roots = writable_roots if writable_roots is not None else default_roots
-        allowed_roots = [root.resolve(strict=False) for root in default_roots]
-        resolved_roots: list[str] = []
-        for root in selected_roots:
-            resolved = Path(root).resolve(strict=False)
-            if not any(_path_is_within(resolved, allowed) for allowed in allowed_roots):
-                raise ValueError(f"Codex writable root is outside the review workspace: {resolved}")
-            resolved_roots.append(str(resolved))
+        if writable_roots:
+            raise ValueError("additional writable roots are forbidden for semantic Codex turns")
         return {
             "type": "workspaceWrite",
             "networkAccess": False,
-            "writableRoots": resolved_roots,
+            "writableRoots": [],
         }
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
@@ -1823,19 +1847,7 @@ def decide_approval(message: dict[str, Any], workspace: Path) -> tuple[str, str]
     request = params.get("request") if isinstance(params.get("request"), dict) else params
     request_type = str(request.get("type") or request.get("kind") or message.get("method") or "").lower()
     if "file" in request_type or request.get("paths") or request.get("path") or request.get("grantRoot") or request.get("fileChanges"):
-        paths: list[object] = []
-        if isinstance(request.get("paths"), list):
-            paths.extend(request.get("paths") or [])
-        elif request.get("path"):
-            paths.append(request.get("path"))
-        if request.get("grantRoot"):
-            paths.append(request.get("grantRoot"))
-        file_changes = request.get("fileChanges")
-        if isinstance(file_changes, dict):
-            paths.extend(file_changes.keys())
-        if paths and all(path_is_under_allowed_write_root(workspace, path) for path in paths):
-            return "acceptForSession", "write is limited to the worker-owned .codex-review workspace"
-        return "decline", "file changes outside the worker-owned .codex-review workspace are not allowed"
+        return "decline", "file-change approvals are disabled; writable turns use an isolated sandbox cwd"
     if "command" in request_type or request.get("command") or request.get("argv"):
         command = request.get("argv") if isinstance(request.get("argv"), list) else request.get("command")
         if command_is_allowed(command, workspace, request.get("cwd")):
@@ -4015,7 +4027,6 @@ class ReviewWorkerV1:
             raise RuntimeError("repository checkout produced no repository files")
         for path in (
             repo_dir / ".codex-review",
-            repo_dir / ".codex-review" / "generated-tests",
             run_dir,
             run_dir / "bundles",
             run_dir / "raw-reviewers",
@@ -4164,10 +4175,21 @@ class ReviewWorkerV1:
         if phase == "bundle_planning":
             prepare_bundle_planning_input(run_dir, job)
         effort = effort_for_phase(job, phase)
-        prompt = phase_prompt(phase, run_dir, job)
+        declared_outputs = SEMANTIC_PHASE_MODEL_OUTPUTS.get(phase)
+        if declared_outputs is None:
+            raise RuntimeError(f"semantic phase has no declared model outputs: {phase}")
+        turn_cwd = prepare_model_turn_workspace(
+            repo_dir,
+            run_dir,
+            phase,
+            declared_outputs,
+            include_existing=False,
+        )
+        prompt = phase_prompt(phase, run_dir, job, output_dir=turn_cwd)
         codex_client.run_turn(
             thread_id=thread_id,
             repo_dir=repo_dir,
+            turn_cwd=turn_cwd,
             prompt=prompt,
             effort=effort,
             read_only=False,
@@ -4175,6 +4197,7 @@ class ReviewWorkerV1:
             cancel_requested=self.poll_cancel_requested,
             metrics_phase=phase,
         )
+        publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
 
     def _execute_reviewer_assignment(
         self,
@@ -4198,6 +4221,7 @@ class ReviewWorkerV1:
             turn_metrics = codex_client.run_turn(
                 thread_id=thread_id,
                 repo_dir=repo_dir,
+                turn_cwd=work.staging_dir,
                 prompt=reviewer_assignment_prompt(
                     run_dir,
                     work.bundle_id,
@@ -4209,7 +4233,6 @@ class ReviewWorkerV1:
                 read_only=False,
                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=cancel_requested,
-                writable_roots=[work.staging_dir],
                 metrics_phase="reviewer_fanout",
             )
         except Exception as exc:
@@ -4274,8 +4297,10 @@ class ReviewWorkerV1:
         ) = reviewer_concurrency_decision_for_job(job)
         raw_dir = run_dir / "raw-reviewers"
         raw_dir.mkdir(parents=True, exist_ok=True)
-        staging_root = run_dir / "reviewer-staging"
-        if staging_root.exists():
+        staging_root = model_turn_workspace_path(repo_dir, run_dir, "reviewer-fanout")
+        if staging_root.is_symlink():
+            staging_root.unlink()
+        elif staging_root.exists():
             shutil.rmtree(staging_root)
         staging_root.mkdir(parents=True, exist_ok=True)
         execution_path = run_dir / "reviewer-execution.json"
@@ -4944,17 +4969,35 @@ class ReviewWorkerV1:
             raise RuntimeError("Codex thread is missing")
         repair_unit_id = self._start_phase_repair_estimate(active, phase)
         turn_metrics: object = None
+        declared_outputs = SEMANTIC_PHASE_MODEL_OUTPUTS.get(phase)
+        if declared_outputs is None:
+            raise RuntimeError(f"semantic phase has no declared model outputs: {phase}")
+        turn_cwd = prepare_model_turn_workspace(
+            repo_dir,
+            run_dir,
+            f"{phase}-repair",
+            declared_outputs,
+            include_existing=True,
+        )
         try:
             turn_metrics = codex_client.run_turn(
                 thread_id=thread_id,
                 repo_dir=repo_dir,
-                prompt=phase_repair_prompt(phase, run_dir, validation_error, job),
+                turn_cwd=turn_cwd,
+                prompt=phase_repair_prompt(
+                    phase,
+                    run_dir,
+                    validation_error,
+                    job,
+                    output_dir=turn_cwd,
+                ),
                 effort=effort_for_phase(job, phase),
                 read_only=False,
                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
                 cancel_requested=self.poll_cancel_requested,
                 metrics_phase=f"{phase}_repair",
             )
+            publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
             fallback_semantic_artifact(run_dir, job, phase)
         except BaseException:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
@@ -5010,7 +5053,21 @@ class ReviewWorkerV1:
                 "time": iso_time(time.time()),
             },
         )
-        prompt = intent_execution_repair_prompt(run_dir, stage=stage, attempt=attempt, job=job)
+        declared_outputs = SEMANTIC_PHASE_MODEL_OUTPUTS["intent_test_writing"]
+        turn_cwd = prepare_model_turn_workspace(
+            repo_dir,
+            run_dir,
+            f"intent-{stage}-repair-{attempt}",
+            declared_outputs,
+            include_existing=True,
+        )
+        prompt = intent_execution_repair_prompt(
+            run_dir,
+            stage=stage,
+            attempt=attempt,
+            job=job,
+            output_dir=turn_cwd,
+        )
         prompt += "\nCurrent structured diagnostics:\n"
         prompt += json.dumps(diagnostics, ensure_ascii=False, sort_keys=True)[:20000]
         repair_unit_id = self._start_phase_repair_estimate(active, phase)
@@ -5019,6 +5076,7 @@ class ReviewWorkerV1:
             turn_metrics = codex_client.run_turn(
                 thread_id=thread_id,
                 repo_dir=repo_dir,
+                turn_cwd=turn_cwd,
                 prompt=prompt,
                 effort=effort_for_phase(job, phase),
                 read_only=False,
@@ -5042,6 +5100,7 @@ class ReviewWorkerV1:
                 },
             )
             return False
+        publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
         self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
         append_jsonl(
             run_dir / "worker.log.jsonl",
@@ -5303,11 +5362,25 @@ class ReviewWorkerV1:
             raise RuntimeError("Codex thread is missing")
         repair_unit_id = self._start_phase_repair_estimate(active, "reviewer_json_validation")
         turn_metrics: object = None
+        declared_outputs = ("raw-reviewers",)
+        turn_cwd = prepare_model_turn_workspace(
+            repo_dir,
+            run_dir,
+            "reviewer-json-repair",
+            declared_outputs,
+            include_existing=True,
+        )
         try:
             turn_metrics = codex_client.run_turn(
                 thread_id=thread_id,
                 repo_dir=repo_dir,
-                prompt=reviewer_json_repair_prompt(run_dir, validation_error, job),
+                turn_cwd=turn_cwd,
+                prompt=reviewer_json_repair_prompt(
+                    run_dir,
+                    validation_error,
+                    job,
+                    output_dir=turn_cwd,
+                ),
                 effort=effort_for_phase(job, "reviewer_json_validation"),
                 read_only=False,
                 timeout_seconds=turn_timeout_with_deadline(job, deadline_monotonic),
@@ -5317,6 +5390,7 @@ class ReviewWorkerV1:
         except BaseException:
             self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics, state="failed")
             raise
+        publish_model_turn_outputs(turn_cwd, run_dir, declared_outputs)
         self._finish_phase_repair_estimate(active, repair_unit_id, turn_metrics)
 
     def run_mechanical_phase(
@@ -5680,6 +5754,141 @@ def safe_id(value: Any, prefix: str) -> str:
     if not text or text in {".", ".."}:
         return fallback
     return text
+
+
+def model_turn_workspace_path(
+    repo_dir: Path,
+    run_dir: Path,
+    purpose: str,
+) -> Path:
+    workspace_root = repo_dir.parent / MODEL_TURN_WORKSPACES_DIR_NAME
+    candidate = workspace_root / safe_id(run_dir.name, "run") / safe_id(purpose, "turn")
+    if not _path_is_within(candidate.resolve(strict=False), workspace_root.resolve(strict=False)):
+        raise ValueError("model turn workspace escapes the worker-owned staging root")
+    return candidate
+
+
+def _bounded_regular_file_bytes(path: Path) -> bytes:
+    if path_has_symlink_component(path):
+        raise OSError(f"model output path contains a symlink: {path}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        stat_result = os.fstat(descriptor)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise OSError(f"model output is not a regular file: {path}")
+        if stat_result.st_size > MAX_MODEL_OUTPUT_FILE_BYTES:
+            raise OSError(f"model output exceeds the per-file limit: {path}")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read(MAX_MODEL_OUTPUT_FILE_BYTES + 1)
+        if len(payload) > MAX_MODEL_OUTPUT_FILE_BYTES:
+            raise OSError(f"model output exceeds the per-file limit: {path}")
+        return payload
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _declared_model_output_snapshot(
+    source_root: Path,
+    declared_outputs: tuple[str, ...],
+) -> dict[str, bytes]:
+    snapshot: dict[str, bytes] = {}
+    resolved_root = source_root.resolve(strict=False)
+    for declared in declared_outputs:
+        relative = PurePosixPath(declared)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"invalid declared model output path: {declared}")
+        source = source_root.joinpath(*relative.parts)
+        if not source.exists() and not source.is_symlink():
+            continue
+        if path_has_symlink_component(source):
+            raise OSError(f"declared model output contains a symlink: {source}")
+        if not _path_is_within(source.resolve(strict=False), resolved_root):
+            raise OSError(f"declared model output escapes staging: {source}")
+        if source.is_file():
+            snapshot[relative.as_posix()] = _bounded_regular_file_bytes(source)
+            continue
+        if not source.is_dir():
+            raise OSError(f"declared model output is not a file or directory: {source}")
+        for current_root, directories, filenames in os.walk(source, followlinks=False):
+            current = Path(current_root)
+            for name in directories:
+                directory = current / name
+                if directory.is_symlink():
+                    raise OSError(f"declared model output directory contains a symlink: {directory}")
+            for name in filenames:
+                file_path = current / name
+                if len(snapshot) >= MAX_MODEL_OUTPUT_FILES:
+                    raise OSError("model output exceeds the file-count limit")
+                relative_file = file_path.relative_to(source_root).as_posix()
+                snapshot[relative_file] = _bounded_regular_file_bytes(file_path)
+        if len(snapshot) > MAX_MODEL_OUTPUT_FILES:
+            raise OSError("model output exceeds the file-count limit")
+    return snapshot
+
+
+def _write_worker_owned_bytes(path: Path, payload: bytes) -> None:
+    if path_has_symlink_component(path.parent):
+        raise OSError(f"worker output parent contains a symlink: {path.parent}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def prepare_model_turn_workspace(
+    repo_dir: Path,
+    run_dir: Path,
+    purpose: str,
+    declared_outputs: tuple[str, ...],
+    *,
+    include_existing: bool,
+) -> Path:
+    staging = model_turn_workspace_path(repo_dir, run_dir, purpose)
+    existing = (
+        _declared_model_output_snapshot(run_dir, declared_outputs)
+        if include_existing
+        else {}
+    )
+    if staging.is_symlink():
+        staging.unlink()
+    elif staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=False)
+    for relative, payload in existing.items():
+        _write_worker_owned_bytes(staging.joinpath(*PurePosixPath(relative).parts), payload)
+    return staging
+
+
+def publish_model_turn_outputs(
+    staging: Path,
+    run_dir: Path,
+    declared_outputs: tuple[str, ...],
+) -> list[str]:
+    snapshot = _declared_model_output_snapshot(staging, declared_outputs)
+    for relative, payload in snapshot.items():
+        destination = run_dir.joinpath(*PurePosixPath(relative).parts)
+        if not _path_is_within(destination.resolve(strict=False), run_dir.resolve(strict=False)):
+            raise OSError(f"model output destination escapes the run directory: {destination}")
+        _write_worker_owned_bytes(destination, payload)
+    return sorted(snapshot)
 
 
 def iso_time(value: float) -> str:
@@ -6140,7 +6349,7 @@ SEMANTIC_PHASE_PROMPT_SPECS: dict[str, dict[str, Any]] = {
         "inputs": ["intent/intent-test-plan.json", "intent/execution-capabilities.json", "target snippets", "existing tests", "disposable validation workspace"],
         "outputs": ["intent/intent-test-source.json", "intent/generated-tests/** or disposable validation workspace tests"],
         "instructions": [
-            "Write generated test source only under .codex-review/generated-tests/**; the Worker owns validation-workspace materialization and execution.",
+            "Write generated test source only under intent/generated-tests/** in the writable phase output directory; the Worker owns validation-workspace materialization and execution.",
             "Return JSON only using intent-test-source/v1. Put every executable test record in the top-level generated_tests array, not only in aliases such as generated_test_files, created_test_files, or test_sources.",
             "Every generated test record must include path, command, and target_test_ids linking it to the intent-test-plan target(s) it implements.",
             "Use the observed capability and candidate preflight data, but remain free to propose a different safe command or test approach when it preserves the behavioral oracle and executes real repository code.",
@@ -6266,13 +6475,21 @@ def _adaptive_prompt_context(run_dir: Path) -> list[str]:
         lines.extend(f"  - {item}" for item in dict.fromkeys(emphasis))
     return lines
 
-def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -> str:
+def phase_prompt(
+    phase: str,
+    run_dir: Path,
+    job: dict[str, Any] | None = None,
+    *,
+    output_dir: Path | None = None,
+) -> str:
     spec = SEMANTIC_PHASE_PROMPT_SPECS.get(phase, {})
     role = str(spec.get("role") or phase.replace("_", " ").title())
     inputs = [str(item) for item in spec.get("inputs", []) if str(item).strip()]
     outputs = [str(item) for item in spec.get("outputs", []) if str(item).strip()]
     instructions = [str(item) for item in spec.get("instructions", []) if str(item).strip()]
     prompt_files = [str(item) for item in spec.get("prompt_files", []) if str(item).strip()]
+    output_root = output_dir or run_dir
+    repo_root = review_root_for_run_dir(run_dir).parent
     lines = [
         f"Phase: {phase}",
         f"Role: {role}",
@@ -6280,8 +6497,10 @@ def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -
         "Do not modify application source files.",
         "Do not install dependencies.",
         "Do not call external review/scanning services.",
-        "Write phase outputs only under the active .codex-review tree.",
-        f"Run artifact directory: {run_dir}",
+        f"Source repository (read-only): {repo_root}",
+        f"Input run artifact directory (read-only): {run_dir}",
+        f"Writable phase output directory: {output_root}",
+        "Write only the declared phase outputs inside the writable phase output directory.",
     ]
     lines.extend(output_language_prompt_lines(job))
     if phase == "intent_test_writing":
@@ -6295,7 +6514,7 @@ def phase_prompt(phase: str, run_dir: Path, job: dict[str, Any] | None = None) -
         lines.extend(f"- {item}" for item in inputs)
     if outputs:
         lines.append("Required outputs:")
-        lines.append(f"- Paths are relative to the run artifact directory: {run_dir}")
+        lines.append(f"- Paths are relative to the writable phase output directory: {output_root}")
         lines.extend(f"- {item}" for item in outputs)
     if instructions:
         lines.append("Phase instructions:")
@@ -6357,7 +6576,10 @@ def reviewer_assignment_prompt(
         raise RuntimeError(f"unsupported reviewer assignment: {reviewer_id}")
     output_name = reviewer_assignment_output_name(bundle_id, reviewer_id)
     exact_output_path = output_path or run_dir / "raw-reviewers" / output_name
-    relative_output_path = exact_output_path.relative_to(run_dir).as_posix()
+    try:
+        relative_output_path = exact_output_path.relative_to(run_dir).as_posix()
+    except ValueError:
+        relative_output_path = exact_output_path.name
     lines = [
         "Phase: reviewer_fanout",
         "Role: Independent Bundle Reviewer",
@@ -6366,7 +6588,7 @@ def reviewer_assignment_prompt(
         f"Reviewer assignment: {reviewer_id}",
         f"Read the packed bundle at: {run_dir / 'bundles' / f'{bundle_id}.md'}",
         f"Exact output path: {exact_output_path}",
-        f"Output path relative to the run artifact directory: {relative_output_path}",
+        f"Output filename relative to the writable reviewer workspace: {relative_output_path}",
         "Do not review or emit output for any other bundle or reviewer assignment in this turn.",
         "Treat this assignment as an independent review; do not inherit an earlier reviewer's empty conclusion.",
         "Inspect the concrete source in the packed bundle and follow referenced repository call sites when needed.",
@@ -6396,6 +6618,8 @@ def phase_repair_prompt(
     run_dir: Path,
     validation_error: object,
     job: dict[str, Any] | None = None,
+    *,
+    output_dir: Path | None = None,
 ) -> str:
     return "\n".join(
         [
@@ -6407,7 +6631,7 @@ def phase_repair_prompt(
             "Do not call external review/scanning services.",
             "Preserve valid existing evidence and fields; fix malformed or missing JSON/output files.",
             "",
-            phase_prompt(phase, run_dir, job).rstrip(),
+            phase_prompt(phase, run_dir, job, output_dir=output_dir).rstrip(),
         ]
     ) + "\n"
 
@@ -6416,11 +6640,14 @@ def reviewer_json_repair_prompt(
     run_dir: Path,
     validation_error: object,
     job: dict[str, Any] | None = None,
+    *,
+    output_dir: Path | None = None,
 ) -> str:
+    output_root = output_dir or run_dir
     lines = [
             "Reviewer JSON output repair",
             f"Local validation failed: {validation_error}",
-            "Repair only malformed files under .codex-review/runs/*/raw-reviewers/.",
+            f"Repair only malformed files under {output_root / 'raw-reviewers'}.",
             "Each repaired file must be JSON using schema_version codex-reviewer-output/v1 with a findings array.",
             REVIEWER_CONFIDENCE_PROMPT_CONTRACT,
             'Every finding must contain a non-empty locations array using the exact item shape {"path": "relative/source/path", "start_line": 1, "end_line": 1} with positive repository line numbers.',
@@ -6431,6 +6658,7 @@ def reviewer_json_repair_prompt(
             "Do not install dependencies or call external review/scanning services.",
             "",
             f"Run artifact directory: {run_dir}",
+            f"Writable repair output directory: {output_root}",
         ]
     lines.extend(output_language_prompt_lines(job))
     return "\n".join(lines) + "\n"
@@ -10342,14 +10570,17 @@ def intent_execution_repair_prompt(
     stage: str,
     attempt: int,
     job: dict[str, Any] | None = None,
+    output_dir: Path | None = None,
 ) -> str:
+    output_root = output_dir or run_dir
     lines = [
         "You are the Intent Test Execution Repair Agent.",
         f"Repair stage: {stage}; bounded attempt: {attempt}.",
         f"Run artifact directory: {run_dir}",
+        f"Writable repair output directory: {output_root}",
         "Read intent/execution-capabilities.json and intent/intent-test-preflight.json.",
         "For runtime repair also read intent/intent-test-runtime-diagnostics.json and the referenced stdout/stderr logs.",
-        "Modify only generated test source under .codex-review/generated-tests/** or the run-local intent/generated-tests/** alias, plus intent/intent-test-source.json.",
+        "Modify only intent/intent-test-source.json and intent/generated-tests/** inside the writable repair output directory.",
         "You may choose a different agent-proposed command, runtime, cwd, import strategy, or faithful test harness when Worker policy can verify it.",
         "You must preserve the behavioral oracle, test_id/target_test_ids linkage, and execution of real repository behavior.",
         "Do not copy or reimplement application logic to manufacture a dependency-free passing test.",
@@ -13014,7 +13245,7 @@ def prompt_template_for_name(name: str) -> str:
             "preflight must verify. Prefer candidates that execute real repository behavior and preserve the oracle.\n"
         ),
         "intent/06_intent_test_writer.md": (
-            "You are the Intent Test Writer. Write generated test source only under .codex-review/generated-tests/**; "
+            "You are the Intent Test Writer. Write generated test source only under intent/generated-tests/** in the writable phase output directory; "
             "the Worker owns validation-workspace materialization and execution. Return JSON only using intent-test-source/v1, with every executable "
             'test record in the top-level "generated_tests" array rather than only in aliases such as '
             "generated_test_files, created_test_files, or test_sources. Every record must include path, command, "

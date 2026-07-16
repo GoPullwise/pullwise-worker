@@ -1163,7 +1163,11 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
     def test_codex_sdk_turn_uses_restricted_workspace_write_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
+            root = Path(tmp_dir)
+            workspace = root / "repo"
+            workspace.mkdir()
+            turn_workspace = root / "model-turns" / "run_1" / "repo-map"
+            turn_workspace.mkdir(parents=True)
             requests: list[dict] = []
 
             class Client:
@@ -1186,19 +1190,25 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             server._client = Client()
             server._threads["thread_1"] = SimpleNamespace(id="thread_1")
             server.run_turn(thread_id="thread_1", repo_dir=workspace, prompt="review", effort="medium", read_only=True, timeout_seconds=2)
-            server.run_turn(thread_id="thread_1", repo_dir=workspace, prompt="review", effort="medium", read_only=False, timeout_seconds=2)
+            server.run_turn(
+                thread_id="thread_1",
+                repo_dir=workspace,
+                turn_cwd=turn_workspace,
+                prompt="review",
+                effort="medium",
+                read_only=False,
+                timeout_seconds=2,
+            )
 
         self.assertEqual(requests[0]["sandboxPolicy"], {"type": "readOnly", "networkAccess": False})
         self.assertEqual(requests[1]["sandboxPolicy"]["type"], "workspaceWrite")
         self.assertEqual(requests[1]["sandboxPolicy"]["networkAccess"], False)
         self.assertEqual(
             requests[1]["sandboxPolicy"]["writableRoots"],
-            [
-                str(workspace / ".codex-review" / "runs"),
-                str(workspace / ".codex-review" / "generated-tests"),
-            ],
+            [],
         )
-        self.assertNotIn(str(workspace / ".codex-review" / "prompts"), requests[1]["sandboxPolicy"]["writableRoots"])
+        self.assertEqual(requests[1]["cwd"], str(turn_workspace))
+        self.assertFalse(turn_workspace.is_relative_to(workspace))
         self.assertNotIn("danger", json.dumps(requests).lower())
 
     def test_worker_json_io_refuses_symlink_confused_deputy_paths(self) -> None:
@@ -1356,7 +1366,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             runtime = SimpleNamespace(
                 ApprovalMode=SimpleNamespace(deny_all="deny_all"),
-                Sandbox=SimpleNamespace(workspace_write="workspace_write"),
+                Sandbox=SimpleNamespace(read_only="read_only"),
             )
             server = CodexSdkClient("codex", {}, workspace, workspace / "events.jsonl")
             server._codex = Codex()
@@ -1366,7 +1376,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
         self.assertEqual(thread_id, "thread_1")
         self.assertEqual(captured[0]["approval_mode"], "deny_all")
-        self.assertEqual(captured[0]["sandbox"], "workspace_write")
+        self.assertEqual(captured[0]["sandbox"], "read_only")
         self.assertEqual(captured[0]["cwd"], str(workspace))
         self.assertEqual(captured[0]["model"], "gpt-5.5")
 
@@ -1698,7 +1708,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             (workspace / ".codex-review" / "tools").mkdir(parents=True)
             (workspace.parent / "validation-repo").mkdir(parents=True, exist_ok=True)
 
-            allowed_file, _reason = decide_approval(
+            denied_review_file, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "fileChange", "paths": [".codex-review/runs/run_1/out.json"]}},
                 workspace,
             )
@@ -1772,7 +1782,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 workspace,
             )
 
-        self.assertEqual(allowed_file, "acceptForSession")
+        self.assertEqual(denied_review_file, "decline")
         self.assertEqual(denied_validation_file, "decline")
         self.assertEqual(denied_file, "decline")
         self.assertEqual(denied_helper_command, "decline")
@@ -1865,7 +1875,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
 
         self.assertEqual(command_response, {"decision": "decline"})
-        self.assertEqual(file_response, {"decision": "acceptForSession"})
+        self.assertEqual(file_response, {"decision": "decline"})
         self.assertEqual(denied_response, {"decision": "decline"})
 
     def test_legacy_codex_approval_responses_use_legacy_review_decisions(self) -> None:
@@ -1887,7 +1897,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             )
 
         self.assertEqual(exec_response, {"decision": "denied"})
-        self.assertEqual(patch_response, {"decision": "approved_for_session"})
+        self.assertEqual(patch_response, {"decision": "denied"})
         self.assertEqual(denied_response, {"decision": "denied"})
 
     def test_pipeline_has_explicit_codex_auth_check_before_bootstrap(self) -> None:
@@ -10152,9 +10162,60 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.run_semantic_phase(FakeCodexClient(), repo, run_dir, job, "repo_map")
 
             self.assertFalse(calls[0]["read_only"])
+            self.assertTrue(Path(calls[0]["turn_cwd"]).is_relative_to(repo.parent / "model-turns"))
+            self.assertFalse(Path(calls[0]["turn_cwd"]).is_relative_to(repo))
             self.assertFalse((run_dir / "repo-map.json").exists())
             with self.assertRaisesRegex(RuntimeError, "repo-map"):
                 validate_phase_outputs(run_dir, "repo_map")
+
+    def test_run_semantic_phase_publishes_only_declared_output_from_external_turn_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            write_json(run_dir / "run-state.json", {"thread_id": "thread_1"})
+            (repo / "app.py").write_text("ORIGINAL\n", encoding="utf-8")
+            calls: list[dict[str, object]] = []
+
+            class FakeCodexClient:
+                def run_turn(self, **kwargs: object) -> None:
+                    calls.append(dict(kwargs))
+                    turn_cwd = Path(str(kwargs["turn_cwd"]))
+                    write_json(
+                        turn_cwd / "repo-map.json",
+                        {"schema_version": "repo-map/v1", "modules": []},
+                    )
+                    (turn_cwd / "app.py").write_text("MALICIOUS\n", encoding="utf-8")
+
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)), client=object())
+            job = {
+                "job_id": "job_1",
+                "model_profile": {
+                    "default_model": "gpt-5",
+                    "core_effort": "high",
+                    "non_core_effort": "medium",
+                },
+                "review_request": {
+                    "policy": {
+                        "allow_source_modification": False,
+                        "allow_dependency_install": False,
+                        "allow_network": False,
+                        "helper_scripts_standard_library_only": True,
+                        "turn_timeout_seconds": 1800,
+                        "max_bundles": 24,
+                        "max_reviewer_assignments": 48,
+                    },
+                    "budget": {"max_wall_time_seconds": 14400},
+                },
+                "repositoryLimits": {"maxFiles": 2000, "maxBytes": 50 * 1024 * 1024},
+            }
+            worker.run_semantic_phase(FakeCodexClient(), repo, run_dir, job, "repo_map")
+
+            self.assertEqual(read_json(run_dir / "repo-map.json")["schema_version"], "repo-map/v1")
+            self.assertEqual((repo / "app.py").read_text(encoding="utf-8"), "ORIGINAL\n")
+            self.assertFalse((run_dir / "app.py").exists())
+            self.assertIn(str(repo), str(calls[0]["prompt"]))
 
     def test_reviewer_fanout_runs_scoped_assignments_on_bounded_independent_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -10326,7 +10387,16 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             other_bundles = {value for value, _reviewer in assignments if value != bundle_id}
             self.assertTrue(all(other not in prompt for other in other_bundles))
             self.assertFalse(call["read_only"])
-            self.assertEqual(len(call["writable_roots"]), 1)
+            output_path = Path(
+                next(
+                    line.removeprefix("Exact output path: ")
+                    for line in prompt.splitlines()
+                    if line.startswith("Exact output path: ")
+                )
+            )
+            self.assertEqual(Path(call["turn_cwd"]), output_path.parent)
+            self.assertFalse(Path(call["turn_cwd"]).is_relative_to(repo))
+            self.assertEqual(call.get("writable_roots", []), [])
         self.assertEqual(execution["strategy"], "one_turn_per_assignment")
         self.assertEqual(execution["thread_strategy"], "one_thread_per_assignment")
         self.assertEqual(execution["max_concurrency"], 2)

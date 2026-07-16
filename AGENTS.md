@@ -129,19 +129,17 @@ Codex execution rules:
   and preserve current camelCase `codexErrorInfo` values such as
   `usageLimitExceeded` when mapping the worker's stable public error code.
 - Implement a fixed approval handler even when approval policy is `never`:
-  semantic Codex turns may write only under the main repo''s `.codex-review/**`
-  and may run only contained read-only repository inspection commands. Never
-  approve Python/helper execution or project test commands from a Codex turn.
-  The Worker alone materializes generated test source into the disposable
-  validation workspace and executes it through its bounded sandbox path. Deny
-  source modifications, installs, downloads, network access, branch changes,
-  commit, push, and access to other worker directories.
-- Keep worker-owned prompts, schemas, tools, and configuration outside every
-  semantic turn's writable roots. Model-writable roots are limited to the run
-  output tree and generated-test source tree. Worker/SDK JSONL appends and JSON
-  reads must reject symlinks (including symlinked path components) and operate
-  on regular files so model-authored paths cannot become confused-deputy access
-  to provider credentials or other worker state.
+  deny every file-change approval plus Python/helper and project-test command
+  execution. A Codex thread starts read-only. Every writable semantic/reviewer
+  turn must use a fresh worker-owned `model-turns/<run>/<turn>` cwd outside the
+  source repository, with no additional writable roots; source, prior evidence,
+  prompts, schemas, tools, configuration, run-state, and logs remain read-only.
+  After the turn, publish only that phase's explicit allowlisted outputs.
+- Treat every model-turn workspace as hostile. Snapshot/publish only bounded
+  regular declared files, reject symlinks and non-regular files, and ignore
+  undeclared files. Worker/SDK JSONL appends and JSON reads must also reject
+  symlinks so model-authored paths cannot become confused-deputy access to
+  provider credentials or other worker state.
 - Once a terminal result is accepted and the active marker/slot is cleared, a
   retryable final idle-heartbeat failure must be logged and deferred to the
   continuous control-plane loop. It must not escape `run_job()` and terminate
@@ -233,9 +231,8 @@ Review pipeline rules:
   be parseable JSON objects with the expected `schema_version`; hash-artifact
   completion requires an `artifact-manifest/v1` object with an `items` list.
 - Intent-driven tests are allowed only for selected P0/P1 high-value candidate
-  findings. Codex-authored generated test source must live under
-  `.codex-review/generated-tests/**` or the run-local
-  `intent/generated-tests/**` alias. The Worker must copy it into the disposable
+  findings. Codex-authored generated test source must be staged and published
+  only to the run-local `intent/generated-tests/**` tree. The Worker must copy it into the disposable
   validation workspace before execution; Codex may not write or execute there
   directly. Tests must not install dependencies or use network, and must execute
   with `cwd` inside the disposable validation repo.
@@ -674,7 +671,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Review phase prompts must be self-contained inside the cloned repository's `.codex-review` tree. Do not assume the worker package's parent-level v1.2 specification file is present in the repository being scanned.
 - Debug-bundle audit must fail noncanonical validator collections, progress counters that disagree with validator records, and intent summary counts that disagree with per-test classifications.
 - Intent regression commands generated as filesystem paths must run through a compatible discovery command, and duplicate records for the same generated test file must execute once while retaining all related finding ids.
-- Before sandbox execution, materialize declared generated-test files from the source checkout's `.codex-review/generated-tests/**` into the disposable validation repository at the same relative path. Reject symlinks, traversal, and paths outside that tree; command-only execution records do not require a source path.
+- Before sandbox execution, materialize declared generated-test files from the run-local `intent/generated-tests/**` tree (or a trusted worker-owned canonical compatibility source) into the disposable validation repository at the same relative path. Reject symlinks, traversal, and paths outside those trees; command-only execution records do not require a source path.
 - Keep progress-event mutation/persistence serialized and snapshots atomically replaced. Approval-policy read commands must validate every filesystem operand and resolve containment through symlinks, not just inspect the first path.
 - Worker and Codex self-updates must stage and probe a new version before activation, retain the last working version through the post-restart doctor check, and restore it on install, wrapper, watcher, restart, or doctor failure.
 - Report/validator binding must recognize canonical and model-emitted identity aliases on both sides, including `finding_ids`, `source_finding_ids`, `cluster_id`, and `source_cluster_id`. QA and debug-bundle audit must also verify the reverse direction: every confirmed/plausible validator entry appears in the main report.
@@ -699,7 +696,7 @@ A debug bundle is not the audit bundle and must never silently fall back to the 
 - Stream intent subprocess stdout/stderr to run-local files and keep only bounded diagnostic snippets in worker memory. Cancellation, execution, repair turns, and retries must share one monotonic deadline rather than resetting their wall-time budget.
 - Explicit-path intent executables must be regular executable files; bare commands may use `PATH`. Probe `python -m pytest` with the selected interpreter, and classify a missing Python dependency only from an anchored runtime diagnostic, never from assertion text that happens to mention `ModuleNotFoundError`.
 - Bind execution to the approved preflight's exact normalized command, canonical contained cwd, and canonical existing required paths. A symlinked, non-regular, missing, or drifted preflight snapshot must fail closed before process launch.
-- Generated-test sources and their disposable destinations must use the canonical source `.codex-review/generated-tests/**` or run-local `intent/generated-tests/**` roots, remain regular and content-matched, and preserve the same relative path. Integrity checks validate only: they must never lazily create, rebuild, or repair the immutable baseline.
+- Generated-test sources and their disposable destinations must use the staged run-local `intent/generated-tests/**` root or the trusted canonical compatibility root, remain regular and content-matched, and preserve the same relative path. Integrity checks validate only: they must never lazily create, rebuild, or repair the immutable baseline.
 - Keep the intent-validation inventory baseline in a worker-controlled workspace path outside both the source repository `.codex-review/**` write root and the disposable validation repository. Ignore the mutable run-local `inventory.json`, compare all baseline hashes, and reject undeclared source files while allowing only verified generated-test destinations.
 - Toolchain outputs must remain inside the disposable validation boundary. Put integrity-ignored build output under a worker-controlled path such as `validation_repo/.codex-review/build/**`; never redirect writes outside the validation workspace to evade integrity checks.
 - Unsandboxed intent runtime homes and caches must stay under `validation_repo/.codex-review/intent-test-home/**`. Keep toolchain telemetry/cache contained but outside the repository-source integrity inventory; never reintroduce a repository-visible `.intent-test-home` tree.
