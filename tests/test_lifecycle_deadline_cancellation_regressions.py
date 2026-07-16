@@ -238,7 +238,19 @@ class LifecycleDeadlineCancellationRegressionsTest(unittest.TestCase):
                     return True
 
             worker = Worker(worker_config(root), client=object())
-            worker.run_job(review_job())
+            real_append_jsonl = worker_module.append_jsonl
+
+            def append_with_final_log_failure(path: Path, value: object) -> None:
+                if isinstance(value, dict) and value.get("event") == "final_idle_heartbeat_deferred":
+                    raise OSError("log disk unavailable")
+                real_append_jsonl(path, value)
+
+            with patch.object(
+                worker_module,
+                "append_jsonl",
+                side_effect=append_with_final_log_failure,
+            ):
+                worker.run_job(review_job())
 
             self.assertEqual(heartbeat_calls, ["idle"])
             self.assertIsNone(worker.state.active_job)

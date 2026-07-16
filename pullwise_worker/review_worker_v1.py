@@ -346,7 +346,10 @@ CODEX_QUOTA_ERROR_MARKERS = (
     "no credits",
     "credits exhausted",
     "out of credits",
-    "429",
+)
+CODEX_QUOTA_HTTP_429_RE = re.compile(
+    r"\b(?:http(?:\s+status)?|status(?:\s+code)?|response(?:\s+code)?)\s*[:=]?\s*429\b",
+    re.IGNORECASE,
 )
 GLOBAL_AGENTS_TEXT = """# Codex Repo Review Worker Global Instructions
 
@@ -905,20 +908,24 @@ class CodexSdkClient:
         if self._codex is None or self._runtime is None:
             raise RuntimeError("Codex SDK is not running")
         self._approval_workspace = repo_dir
-        thread = run_bounded_call(
-            lambda: self._codex.thread_start(
-                approval_mode=self._runtime.ApprovalMode.deny_all,
-                cwd=str(repo_dir),
-                sandbox=self._runtime.Sandbox.read_only,
-                service_name="codex_repo_review_worker",
-                model=model or None,
-            ),
-            timeout_seconds=max(1, int(timeout_seconds)),
-            timeout_message="codex thread start timed out",
-            cancel_requested=cancel_requested,
-            cancelled_error=lambda: JobCancelled("cancel requested"),
-            late_result=self._archive_late_thread,
-        )
+        try:
+            thread = run_bounded_call(
+                lambda: self._codex.thread_start(
+                    approval_mode=self._runtime.ApprovalMode.deny_all,
+                    cwd=str(repo_dir),
+                    sandbox=self._runtime.Sandbox.read_only,
+                    service_name="codex_repo_review_worker",
+                    model=model or None,
+                ),
+                timeout_seconds=max(1, int(timeout_seconds)),
+                timeout_message="codex thread start timed out",
+                cancel_requested=cancel_requested,
+                cancelled_error=lambda: JobCancelled("cancel requested"),
+                late_result=self._archive_late_thread,
+            )
+        except (TimeoutError, JobCancelled) as exc:
+            self._mark_unhealthy(str(exc))
+            raise
         thread_id = require_identifier(getattr(thread, "id", ""), label="thread id")
         self._runtime_resources.register_thread(thread_id, thread)
         return thread_id
@@ -976,11 +983,6 @@ class CodexSdkClient:
         metrics_phase: str = "",
     ) -> CodexTurnMetrics:
         turn_started_monotonic = time.monotonic()
-        client = self._sdk_client()
-        event_scope = self._runtime_resources.begin_turn(
-            phase=metrics_phase,
-            thread_id=thread_id,
-        )
         self._approval_workspace = repo_dir
         target_cwd = repo_dir
         if not read_only:
@@ -1005,6 +1007,11 @@ class CodexSdkClient:
             "effort": effort,
             "summary": "concise",
         }
+        client = self._sdk_client()
+        event_scope = self._runtime_resources.begin_turn(
+            phase=metrics_phase,
+            thread_id=thread_id,
+        )
         deadline = time.monotonic() + max(1, int(timeout_seconds))
         start_completed = threading.Event()
         start_lock = threading.Lock()
@@ -1046,12 +1053,14 @@ class CodexSdkClient:
             if remaining <= 0:
                 abandon_start()
                 self._runtime_resources.abandon_turn(event_scope)
+                self._mark_unhealthy("codex turn start timed out")
                 raise TimeoutError("codex turn start timed out")
             if start_completed.wait(min(0.5, remaining)):
                 break
             if cancel_requested is not None and cancel_requested():
                 abandon_start()
                 self._runtime_resources.abandon_turn(event_scope)
+                self._mark_unhealthy("codex turn start was cancelled while the SDK call was active")
                 raise JobCancelled("cancel requested")
         start_error = start_state.get("error")
         if isinstance(start_error, BaseException):
@@ -1195,6 +1204,7 @@ class CodexSdkClient:
                 abandoned.set()
                 self._runtime_resources.abandon_turn(event_scope)
                 self.interrupt(thread_id, turn_id)
+                self._mark_unhealthy(f"codex turn timed out: {turn_id}")
                 raise TimeoutError(f"codex turn timed out: {turn_id}")
             if completed.wait(min(0.5, remaining)):
                 break
@@ -1202,6 +1212,7 @@ class CodexSdkClient:
                 abandoned.set()
                 self._runtime_resources.abandon_turn(event_scope)
                 self.interrupt(thread_id, turn_id)
+                self._mark_unhealthy(f"codex turn was cancelled while active: {turn_id}")
                 raise JobCancelled("cancel requested")
         turn_failure = failure.get("exception")
         if turn_failure is not None:
@@ -2146,6 +2157,7 @@ def git_command_is_read_only(argv: list[str], workspace: Path, cwd: Path) -> boo
         "--textconv",
         "--open-files-in-pager",
         "--output",
+        "--paginate",
     }
     lowered = {str(part).lower() for part in argv[1:]}
     if lowered.intersection(unsafe_options) or any(
@@ -2182,9 +2194,11 @@ def git_command_is_read_only(argv: list[str], workspace: Path, cwd: Path) -> boo
                 return False
             index += 2
             continue
-        if part == "--no-pager" or part.startswith("--no-") or part in {"--paginate", "-p"}:
+        if part == "--no-pager" or part.startswith("--no-"):
             index += 1
             continue
+        if part == "-p":
+            return False
         if part.startswith("-"):
             return False
         return part.lower() in GIT_READ_ONLY_SUBCOMMANDS
@@ -4282,6 +4296,8 @@ class ReviewWorkerV1:
 
         try:
             output_payload = _bounded_regular_file_bytes(work.staging_output_path)
+        except FileNotFoundError:
+            output_payload = None
         except OSError as exc:
             return ReviewerAssignmentOutcome(
                 work=work,
@@ -4291,7 +4307,7 @@ class ReviewWorkerV1:
                 error=exc,
             )
         try:
-            payload = json.loads(output_payload)
+            payload = json.loads(output_payload) if output_payload is not None else None
         except (UnicodeDecodeError, json.JSONDecodeError):
             payload = None
         covered = _reviewer_output_assignments(payload, work.staging_output_path, expected_assignments)
@@ -6378,8 +6394,8 @@ def validate_job_policy(job: dict[str, Any]) -> dict[str, Any]:
         scan_deadline_seconds = _policy_int(review_budget, "max_wall_time_seconds", "maxWallTimeSeconds", default=None)
     except (TypeError, ValueError):
         raise ValueError("claimed job must include review_request.budget.max_wall_time_seconds") from None
-    if turn_timeout_seconds <= 0 or scan_deadline_seconds < 0:
-        raise ValueError("review worker turn timeout must be positive and scan deadline must be non-negative")
+    if turn_timeout_seconds <= 0 or scan_deadline_seconds <= 0:
+        raise ValueError("review worker turn timeout and scan deadline must be positive")
     if reviewer_concurrency < 1 or reviewer_concurrency > MAX_REVIEWER_CONCURRENCY:
         raise ValueError(
             f"review_request.policy.reviewer_concurrency must be between 1 and {MAX_REVIEWER_CONCURRENCY}"
@@ -9821,13 +9837,28 @@ def materialize_generated_intent_test_sources(
         if not path_is_under(destination, validation_repo):
             errors[test_id] = "generated test destination escapes the validation workspace"
             continue
-        if destination.exists() and not _regular_file_contents_match(source_candidate, destination):
-            errors[test_id] = "generated test destination differs from the worker-owned source"
+        destination_exists = destination.exists() or destination.is_symlink()
+        if destination.is_symlink() or (
+            destination_exists and not _is_regular_file_no_follow(destination)
+        ):
+            errors[test_id] = "generated test destination is not a worker-owned regular file"
             continue
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if not destination.exists():
-                shutil.copy2(source_candidate, destination, follow_symlinks=False)
+            source_output = _bounded_regular_model_file(source_candidate)
+            destination_executable = bool(
+                destination_exists
+                and stat.S_IMODE(destination.lstat().st_mode) & 0o111
+            )
+            if (
+                not destination_exists
+                or not _regular_file_contents_match(source_candidate, destination)
+                or destination_executable != source_output.executable
+            ):
+                _write_worker_owned_bytes(
+                    destination,
+                    source_output.payload,
+                    executable=source_output.executable,
+                )
             if materialized_paths is not None:
                 materialized_paths[test_id] = relative_path.as_posix()
         except OSError as exc:
@@ -10045,9 +10076,6 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
     source = read_json(run_dir / "intent" / "intent-test-source.json", {})
     generated_tests = source.get("generated_tests") if isinstance(source, dict) and isinstance(source.get("generated_tests"), list) else []
     profile = read_json(run_dir / "repo-profile.json", {})
-    integrity = intent_validation_workspace_integrity_payload(run_dir)
-    write_json(run_dir / "intent" / "validation-workspace-integrity.json", integrity)
-    integrity_violations = integrity.get("violations") if isinstance(integrity.get("violations"), list) else []
     target_by_id = {
         _intent_test_id(target, f"ITP-{index + 1:03d}"): target
         for index, target in enumerate(targets)
@@ -10061,6 +10089,9 @@ def intent_test_source_preflight_payload(run_dir: Path) -> dict[str, Any]:
         source if isinstance(source, dict) else {},
         materialized_paths=materialized_paths,
     )
+    integrity = intent_validation_workspace_integrity_payload(run_dir)
+    write_json(run_dir / "intent" / "validation-workspace-integrity.json", integrity)
+    integrity_violations = integrity.get("violations") if isinstance(integrity.get("violations"), list) else []
     records = _intent_generated_execution_records(generated_tests)
     tests: list[dict[str, Any]] = []
     for index, generated in enumerate(records):
@@ -10268,9 +10299,6 @@ def run_intent_tests(
     config = read_json(run_dir / "intent" / "intent-test-validation.json", {})
     profile = read_json(run_dir / "repo-profile.json", {})
     profile = profile if isinstance(profile, dict) and profile.get("schema_version") == "repo-profile/v1" else {}
-    integrity = intent_validation_workspace_integrity_payload(run_dir)
-    write_json(run_dir / "intent" / "validation-workspace-integrity.json", integrity)
-    integrity_violations = integrity.get("violations") if isinstance(integrity.get("violations"), list) else []
     if isinstance(config, dict) and config.get("enabled") is False:
         return {"schema_version": "intent-test-run-results/v1", "run_id": run_dir.name, "test_runs": []}
     plan = read_json(run_dir / "intent" / "intent-test-plan.json", {})
@@ -10295,6 +10323,9 @@ def run_intent_tests(
         source if isinstance(source, dict) else {},
         materialized_paths=materialized_paths,
     )
+    integrity = intent_validation_workspace_integrity_payload(run_dir)
+    write_json(run_dir / "intent" / "validation-workspace-integrity.json", integrity)
+    integrity_violations = integrity.get("violations") if isinstance(integrity.get("violations"), list) else []
     target_by_id = {
         _intent_test_id(target, f"ITV-{index + 1:03d}"): target
         for index, target in enumerate(targets)
@@ -15629,7 +15660,11 @@ def codex_error_code(error: object) -> str:
         if public_code == "CODEX_QUOTA_EXHAUSTED":
             return "CODEX_QUOTA_EXHAUSTED"
         lowered = normalized.lower()
-        if any(marker in lowered for marker in CODEX_QUOTA_ERROR_MARKERS):
+        if (
+            any(marker in lowered for marker in CODEX_QUOTA_ERROR_MARKERS)
+            or lowered.strip() == "429"
+            or CODEX_QUOTA_HTTP_429_RE.search(normalized) is not None
+        ):
             return "CODEX_QUOTA_EXHAUSTED"
     return "CODEX_UNKNOWN_ERROR"
 

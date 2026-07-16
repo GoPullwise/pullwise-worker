@@ -131,6 +131,9 @@ Codex execution rules:
   `willRetry = true`; when `willRetry = false`, terminate that turn immediately
   and preserve current camelCase `codexErrorInfo` values such as
   `usageLimitExceeded` when mapping the worker's stable public error code.
+- A timed-out or cancelled SDK call may still own a background reader or late
+  thread/turn. Mark that App Server runtime unhealthy and close it during job
+  cleanup; never reuse it for another turn or run.
 - Implement a fixed approval handler even when approval policy is `never`:
   deny every file-change approval plus Python/helper and project-test command
   execution. A Codex thread starts read-only. Every writable semantic/reviewer
@@ -452,7 +455,8 @@ retry sleep or cleanup IO.
   lock that sets terminal_result_in_flight. Cancellation that wins before that
   boundary produces a cancelled result; cancellation observed after the
   terminal commit begins must not replace the accepted terminal outcome.
-- Start one absolute monotonic wall-time deadline before checkout and pass it
+- Require a positive server-supplied scan wall-time budget. Start one absolute
+  monotonic deadline before checkout and pass it
   unchanged through checkout/copy/clone, Codex thread starts and turns,
   inventory, intent execution, and repair retries. Clamp local turn/test caps
   to the remaining global budget and never create a fresh global budget for a

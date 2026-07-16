@@ -81,6 +81,7 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
                 runner.join(1.5)
                 self.assertFalse(runner.is_alive(), "thread_start exceeded its caller-visible timeout")
                 self.assertIsInstance(outcome[0], TimeoutError)
+                self.assertFalse(server.is_running())
                 self.assertLess(time.monotonic() - started_at, 2.0)
             finally:
                 release.set()
@@ -120,6 +121,7 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
                 runner.join(1.5)
                 self.assertFalse(runner.is_alive(), "thread_start ignored cancellation")
                 self.assertIsInstance(outcome[0], JobCancelled)
+                self.assertFalse(server.is_running())
             finally:
                 release.set()
                 runner.join(2)

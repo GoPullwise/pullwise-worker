@@ -286,7 +286,7 @@ class AgenticBundlePlanningTest(unittest.TestCase):
                     ).read_text(encoding="utf-8")
                     self_test.assertIn(path, planning_input)
                     write_json(
-                        run_dir / "bundle-grouping.json",
+                        Path(str(kwargs["turn_cwd"])) / "bundle-grouping.json",
                         {
                             "schema_version": "bundle-grouping/v1",
                             "run_id": "run_1",

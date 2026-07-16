@@ -1802,6 +1802,17 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 },
                 workspace,
             )
+            denied_git_forced_pager_command, _reason = decide_approval(
+                {
+                    "method": "approval/request",
+                    "params": {
+                        "type": "commandExecution",
+                        "command": "git --paginate log",
+                        "cwd": str(workspace),
+                    },
+                },
+                workspace,
+            )
             denied_sed_in_place, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "sed -i s/a/b/ src/app.py", "cwd": str(workspace)}},
                 workspace,
@@ -1823,6 +1834,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(denied_git_pager_command, "decline")
         self.assertEqual(denied_git_output_command, "decline")
         self.assertEqual(denied_git_short_pager_command, "decline")
+        self.assertEqual(denied_git_forced_pager_command, "decline")
         self.assertEqual(denied_sed_in_place, "decline")
 
     def test_approval_policy_contains_all_read_command_operands(self) -> None:
@@ -2031,6 +2043,23 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             "max_bundles": 24,
             "max_reviewer_assignments": 48,
         }
+        with self.assertRaisesRegex(ValueError, "scan deadline must be positive"):
+            validate_job_policy(
+                {
+                    "model_profile": {
+                        "default_model": "gpt-5.5",
+                        "core_effort": "high",
+                    },
+                    "review_request": {
+                        "budget": {"max_wall_time_seconds": 0},
+                        "policy": canonical_policy,
+                    },
+                    "repositoryLimits": {
+                        "maxFiles": 2000,
+                        "maxBytes": 50 * 1024 * 1024,
+                    },
+                }
+            )
         for missing_field in ("max_bundles", "max_reviewer_assignments"):
             incomplete_policy = dict(canonical_policy)
             incomplete_policy.pop(missing_field)
@@ -3012,7 +3041,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                         "max_bundles": 24,
                         "max_reviewer_assignments": 48,
                     },
-                    "budget": {"max_wall_time_seconds": 0},
+                    "budget": {"max_wall_time_seconds": 60},
                 },
                 "repositoryLimits": {"maxFiles": 100, "maxBytes": 1000000},
             }
@@ -6828,6 +6857,8 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(codex_error_code({"codexErrorInfo": "UsageLimitExceeded"}), "CODEX_QUOTA_EXHAUSTED")
         self.assertEqual(codex_error_code({"codexErrorInfo": "usageLimitExceeded"}), "CODEX_QUOTA_EXHAUSTED")
         self.assertEqual(codex_error_code('{"codexErrorInfo":"ContextWindowExceeded"}'), "CODEX_CONTEXT_WINDOW_EXCEEDED")
+        self.assertEqual(codex_error_code("HTTP status 429"), "CODEX_QUOTA_EXHAUSTED")
+        self.assertEqual(codex_error_code("review failed near line 429"), "CODEX_UNKNOWN_ERROR")
         self.assertEqual(codex_error_code("unexpected"), "CODEX_UNKNOWN_ERROR")
 
     def test_quota_exhausted_job_submits_terminal_failure_and_releases_active_slot(self) -> None:
