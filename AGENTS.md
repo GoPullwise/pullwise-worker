@@ -136,6 +136,12 @@ Codex execution rules:
   validation workspace and executes it through its bounded sandbox path. Deny
   source modifications, installs, downloads, network access, branch changes,
   commit, push, and access to other worker directories.
+- Keep worker-owned prompts, schemas, tools, and configuration outside every
+  semantic turn's writable roots. Model-writable roots are limited to the run
+  output tree and generated-test source tree. Worker/SDK JSONL appends and JSON
+  reads must reject symlinks (including symlinked path components) and operate
+  on regular files so model-authored paths cannot become confused-deputy access
+  to provider credentials or other worker state.
 
 ## Whole-Scan ETA Contract
 

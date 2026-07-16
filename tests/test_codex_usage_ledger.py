@@ -56,6 +56,25 @@ def token_event(
 
 
 class CodexUsageLedgerTests(unittest.TestCase):
+    def test_event_log_append_refuses_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            outside = root / "outside.log"
+            outside.write_text("sentinel\n", encoding="utf-8")
+            events_path = root / "codex-events.jsonl"
+            events_path.symlink_to(outside)
+            resources = CodexRuntimeResources(events_path)
+            scope = resources.begin_turn(
+                phase="repo_map",
+                turn_id="turn-1",
+                thread_id="thread-1",
+            )
+
+            with self.assertRaises(OSError):
+                resources.record_event(scope, "turn/completed", {"turnId": "turn-1"})
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "sentinel\n")
+
     def test_real_cumulative_snapshots_aggregate_each_turn_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             resources = CodexRuntimeResources(Path(tmp_dir) / "codex-events.jsonl")

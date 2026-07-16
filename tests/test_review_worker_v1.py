@@ -1193,9 +1193,33 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertEqual(requests[1]["sandboxPolicy"]["networkAccess"], False)
         self.assertEqual(
             requests[1]["sandboxPolicy"]["writableRoots"],
-            [str(workspace / ".codex-review")],
+            [
+                str(workspace / ".codex-review" / "runs"),
+                str(workspace / ".codex-review" / "generated-tests"),
+            ],
         )
+        self.assertNotIn(str(workspace / ".codex-review" / "prompts"), requests[1]["sandboxPolicy"]["writableRoots"])
         self.assertNotIn("danger", json.dumps(requests).lower())
+
+    def test_worker_json_io_refuses_symlink_confused_deputy_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            run_dir.mkdir(parents=True)
+            outside_log = root / "outside.log"
+            outside_log.write_text("sentinel\n", encoding="utf-8")
+            log_link = run_dir / "worker.log.jsonl"
+            log_link.symlink_to(outside_log)
+            outside_json = root / "secret.json"
+            outside_json.write_text("{\"secret\": \"provider-credential\"}\n", encoding="utf-8")
+            json_link = run_dir / "report.agent.json"
+            json_link.symlink_to(outside_json)
+
+            with self.assertRaises(OSError):
+                append_jsonl(log_link, {"event": "worker_append"})
+
+            self.assertEqual(outside_log.read_text(encoding="utf-8"), "sentinel\n")
+            self.assertEqual(read_json(json_link, {"safe": True}), {"safe": True})
 
     def test_codex_sdk_start_uses_sdk_pinned_runtime_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

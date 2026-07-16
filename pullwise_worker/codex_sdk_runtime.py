@@ -1,12 +1,67 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+
+def path_has_symlink_component(path: Path) -> bool:
+    candidate = path
+    while True:
+        try:
+            if candidate.is_symlink():
+                return True
+        except OSError:
+            return True
+        parent = candidate.parent
+        if parent == candidate:
+            return False
+        candidate = parent
+
+
+def read_text_no_follow(path: Path, *, encoding: str = "utf-8") -> str:
+    if path_has_symlink_component(path):
+        raise OSError(f"refusing to read through a symlink: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"refusing to read a non-regular file: {path}")
+        with os.fdopen(descriptor, "r", encoding=encoding) as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def append_text_no_follow(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path_has_symlink_component(path):
+        raise OSError(f"refusing to append through a symlink: {path}")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_APPEND
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"refusing to append to a non-regular file: {path}")
+        with os.fdopen(descriptor, "a", encoding=encoding) as handle:
+            descriptor = -1
+            handle.write(text)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -169,14 +224,12 @@ class CodexRuntimeResources:
         with self.events_lock:
             if not scope.active or scope.generation != self._generation:
                 return False
-            scope.path.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(
                 {"method": str(method or ""), "params": params},
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            with scope.path.open("a", encoding="utf-8") as handle:
-                handle.write(payload + "\n")
+            append_text_no_follow(scope.path, payload + "\n")
             self._record_usage_locked(scope, method, params)
             return True
 

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from pullwise_worker import review_worker_v1 as worker_module
+from pullwise_worker._main_part_01_bootstrap import PullwiseHTTPError
 from pullwise_worker.review_worker_v1 import (
     ActiveJob,
     JobCancelled,
@@ -207,6 +208,41 @@ class LifecycleDeadlineCancellationRegressionsTest(unittest.TestCase):
 
             self.assertEqual(marker_was_present, [True])
             self.assertFalse(marker_path.exists())
+
+    def test_transient_final_idle_heartbeat_after_accepted_result_does_not_escape_run_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            heartbeat_calls: list[str] = []
+
+            class Worker(ReviewWorkerV1):
+                def start_active_job_supervisor(self, _active: ActiveJob) -> tuple[threading.Event, _JoinedThread]:
+                    return threading.Event(), _JoinedThread()
+
+                def prepare_workspace(self, _job: dict, _run_id: str, **_kwargs: object) -> tuple[Path, Path, Path]:
+                    raise RuntimeError("checkout failed")
+
+                def emit_event(self, *_args: object, **_kwargs: object) -> None:
+                    return None
+
+                def heartbeat(self) -> None:
+                    heartbeat_calls.append("idle")
+                    raise PullwiseHTTPError("heartbeat unavailable", 503)
+
+                def build_envelope(self, *_args: object, **_kwargs: object) -> dict:
+                    return {
+                        "protocol_version": "review-worker-protocol/v1",
+                        "execution": {"status": "failed"},
+                    }
+
+                def submit_result_or_record_failure(self, *_args: object, **_kwargs: object) -> bool:
+                    return True
+
+            worker = Worker(worker_config(root), client=object())
+            worker.run_job(review_job())
+
+            self.assertEqual(heartbeat_calls, ["idle"])
+            self.assertIsNone(worker.state.active_job)
+            self.assertFalse((root / "runtime" / "active-run.json").exists())
 
     def test_completed_result_honors_cancellation_that_won_before_commit(self) -> None:
         class Client:

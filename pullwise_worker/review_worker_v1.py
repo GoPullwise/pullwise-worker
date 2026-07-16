@@ -37,8 +37,10 @@ from ._main_part_01_bootstrap import (
 )
 from .agentic_execution import build_execution_capabilities
 from .codex_sdk_runtime import (
+    append_text_no_follow,
     CodexRuntimeResources,
     CodexTokenUsage,
+    read_text_no_follow,
     TurnEventScope,
     require_identifier,
     run_bounded_call,
@@ -1184,7 +1186,8 @@ class CodexSdkClient:
     ) -> dict[str, Any]:
         if read_only:
             return {"type": "readOnly", "networkAccess": False}
-        default_roots = [repo_dir / ".codex-review"]
+        review_root = repo_dir / ".codex-review"
+        default_roots = [review_root / "runs", review_root / "generated-tests"]
         selected_roots = writable_roots if writable_roots is not None else default_roots
         allowed_roots = [root.resolve(strict=False) for root in default_roots]
         resolved_roots: list[str] = []
@@ -3999,6 +4002,7 @@ class ReviewWorkerV1:
             raise RuntimeError("repository checkout produced no repository files")
         for path in (
             repo_dir / ".codex-review",
+            repo_dir / ".codex-review" / "generated-tests",
             run_dir,
             run_dir / "bundles",
             run_dir / "raw-reviewers",
@@ -15721,7 +15725,7 @@ def ensure_json(directory: Path) -> None:
 
 def read_json(path: Path, default: Any = None) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(read_text_no_follow(path, encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {} if default is None else default
 
@@ -15751,9 +15755,11 @@ def write_json_atomic(path: Path, value: Any) -> None:
 
 
 def append_jsonl(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+    append_text_no_follow(
+        path,
+        json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def write_worker_config(path: Path, job: dict[str, Any], config: Any) -> None:
