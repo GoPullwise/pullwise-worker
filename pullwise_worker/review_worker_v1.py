@@ -68,6 +68,8 @@ CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS = 15
 CODEX_ACCOUNT_READ_TIMEOUT_SECONDS = 15
 CODEX_CLOSE_TIMEOUT_SECONDS = 15
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
+TERMINAL_RESULT_OUTBOX_SCHEMA = "terminal-result-outbox/v1"
+TERMINAL_RESULT_OUTBOX_FILENAME = "terminal-result-outbox.json"
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 WORKER_COMMAND_ACTIVE_STATUSES = {"pending", "running"}
 REFRESH_CODEX_QUOTA_COMMAND = "refresh_codex_quota"
@@ -479,6 +481,7 @@ class ActiveJob:
     cancel_requested: bool = False
     cancel_reason: str = ""
     cancel_requested_reported: bool = False
+    terminal_result_prepared: bool = False
     terminal_result_in_flight: bool = False
     terminal_result_submitted: bool = False
     run_dir: Path | None = None
@@ -2809,6 +2812,7 @@ class ReviewWorkerV1:
                 "state": active.state,
                 "current_phase": active.current_phase or "prepare_workspace",
                 "current_phase_status": active.current_phase_status or "running",
+                "terminal_result_prepared": active.terminal_result_prepared,
                 "updated_at": iso_time(time.time()),
             },
         )

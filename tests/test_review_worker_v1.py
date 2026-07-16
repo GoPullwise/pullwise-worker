@@ -25,6 +25,7 @@ from pullwise_worker.current_run_eta import CurrentRunEstimator
 from pullwise_worker._main_part_01_bootstrap import (
     PULLWISE_WORKER_USER_AGENT,
     PullwiseClient,
+    PullwiseRequestError,
     PullwiseResponse,
     WorkerConfig,
     provider_tool_path,
@@ -11822,10 +11823,17 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
         self.assertFalse((artifact_dir / "pending-submit.json").exists())
         self.assertIn("art_qa", blocked["error"])
         self.assertEqual(active.current_phase_status, "blocked")
-    def test_result_submit_failure_records_failure_without_saved_queue(self) -> None:
+    def test_result_submit_transport_failure_persists_terminal_outbox_before_request(self) -> None:
+        outbox_seen_during_request = False
+
         class Client:
             def result(self, job_id: str, payload: dict) -> None:
-                raise RuntimeError("server unavailable")
+                del job_id, payload
+                nonlocal outbox_seen_during_request
+                outbox_seen_during_request = (
+                    artifact_dir / "terminal-result-outbox.json"
+                ).is_file()
+                raise PullwiseRequestError("terminal response lost")
 
             def heartbeat(self, **payload: dict) -> dict:
                 return {}
@@ -11849,13 +11857,22 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 worker.state.clear_active(active.state)
 
             failed = __import__("json").loads((artifact_dir / "result-submit-failed.json").read_text(encoding="utf-8"))
+            outbox = json.loads(
+                (artifact_dir / "terminal-result-outbox.json").read_text(encoding="utf-8")
+            )
 
         self.assertFalse(submitted)
+        self.assertTrue(outbox_seen_during_request)
         self.assertEqual(worker.state.active_job.job_id, "job_1")
         self.assertEqual(active.state, "finishing")
+        self.assertTrue(active.terminal_result_prepared)
         self.assertEqual(active.current_phase_status, "failed")
         self.assertEqual(failed["status"], "result_submit_failed")
-        self.assertFalse((artifact_dir / "pending-submit.json").exists())
+        self.assertEqual(outbox["schema_version"], "terminal-result-outbox/v1")
+        self.assertEqual(outbox["run_id"], "run_1")
+        self.assertEqual(outbox["payload"], {"status": "done"})
+        self.assertEqual(outbox["attempt_count"], 1)
+        self.assertTrue(outbox["retryable"])
 
     def test_accepted_result_ignores_terminal_heartbeat_cancellation_race(self) -> None:
         events = []

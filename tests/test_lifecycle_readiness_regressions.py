@@ -41,6 +41,7 @@ class RecordingControlPlane:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.heartbeats: list[dict] = []
+        self.results: list[tuple[str, dict]] = []
 
     def register(self) -> dict:
         self.calls.append("register")
@@ -54,6 +55,10 @@ class RecordingControlPlane:
     def claim(self) -> None:
         self.calls.append("claim")
         return None
+
+    def result(self, job_id: str, payload: dict) -> None:
+        self.calls.append("result")
+        self.results.append((job_id, payload))
 
 
 def worker_config(root: Path) -> SimpleNamespace:
@@ -72,6 +77,71 @@ def disable_posix_lock(worker: ReviewWorkerV1) -> None:
 
 
 class LifecycleReadinessRegressionTests(unittest.TestCase):
+    def test_restart_replays_terminal_outbox_before_claiming_another_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_dir = root / "workspaces" / "run_1" / "repo" / ".codex-review" / "runs" / "run_1"
+            artifact_dir = root / "artifacts" / "run_1"
+            runtime_dir = root / "runtime"
+            run_dir.mkdir(parents=True)
+            artifact_dir.mkdir(parents=True)
+            runtime_dir.mkdir(parents=True)
+            active_marker = {
+                "job_id": "job_1",
+                "run_id": "run_1",
+                "lease_id": "lease_1",
+                "attempt_id": "wk_1-1",
+                "state": "finishing",
+                "current_phase": "submit_result_envelope",
+            }
+            (runtime_dir / "active-run.json").write_text(
+                json.dumps(active_marker), encoding="utf-8"
+            )
+            terminal_payload = {
+                "status": "done",
+                "attempt_id": "wk_1-1",
+                "result_checksum": "a" * 64,
+                "reviewWorkerProtocol": {
+                    "protocol_version": "review-worker-protocol/v1",
+                    "job": {
+                        "job_id": "job_1",
+                        "run_id": "run_1",
+                        "lease_id": "lease_1",
+                    },
+                    "execution": {"status": "completed"},
+                    "artifact_manifest": [],
+                },
+            }
+            (artifact_dir / "terminal-result-outbox.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "terminal-result-outbox/v1",
+                        **active_marker,
+                        "result_status": "done",
+                        "payload": terminal_payload,
+                        "attempt_count": 1,
+                        "retryable": True,
+                        "created_at": "2026-07-16T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            control_plane = RecordingControlPlane()
+            worker = ReviewWorkerV1(worker_config(root), client=control_plane)
+            disable_posix_lock(worker)
+            worker.codex_client = FakeCodexClient()  # type: ignore[assignment]
+            worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
+                worker.run(once=True)
+
+            self.assertEqual(control_plane.calls, ["register", "heartbeat", "result"])
+            self.assertEqual(control_plane.results, [("job_1", terminal_payload)])
+            self.assertIsNone(worker.state.active_job)
+            self.assertFalse((artifact_dir / "terminal-result-outbox.json").exists())
+            self.assertTrue((artifact_dir / "result-submit-succeeded.json").is_file())
+            self.assertFalse((runtime_dir / "active-run.json").exists())
+
     def test_restart_recovers_finishing_run_before_first_heartbeat_and_does_not_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
