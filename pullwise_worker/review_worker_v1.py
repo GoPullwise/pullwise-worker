@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import binascii
 import copy
 import fnmatch
 import hashlib
@@ -70,6 +71,9 @@ CODEX_CLOSE_TIMEOUT_SECONDS = 15
 TERMINAL_STATES = {"completed", "failed", "cancelled", "partial_completed"}
 TERMINAL_RESULT_OUTBOX_SCHEMA = "terminal-result-outbox/v1"
 TERMINAL_RESULT_OUTBOX_FILENAME = "terminal-result-outbox.json"
+TERMINAL_RESULT_SUPERSESSION_SCHEMA = "terminal-result-supersession/v1"
+TERMINAL_RESULT_SUPERSESSION_FILENAME = "terminal-result-supersession.json"
+CANCELLATION_AUTHORITY_ERROR_CODE = "JOB_CANCELLATION_AUTHORITATIVE"
 ACTIVE_HEARTBEAT_STATUSES = {"busy", "leased", "cancelling", "finishing", "failure_handling"}
 WORKER_COMMAND_ACTIVE_STATUSES = {"pending", "running"}
 REFRESH_CODEX_QUOTA_COMMAND = "refresh_codex_quota"
@@ -484,6 +488,7 @@ class ActiveJob:
     terminal_result_prepared: bool = False
     terminal_result_in_flight: bool = False
     terminal_result_submitted: bool = False
+    accepted_terminal_result_status: str = ""
     run_dir: Path | None = None
     last_event_sequence: int = 0
     overall_percent: float = 0.0
@@ -2768,6 +2773,37 @@ def control_plane_error_is_retryable(error: BaseException) -> bool:
     return normalized_status in {408, 429} or 500 <= normalized_status < 600
 
 
+def control_plane_error_is_cancellation_authoritative(
+    error: BaseException,
+    active: ActiveJob,
+) -> bool:
+    if not isinstance(error, PullwiseRequestError):
+        return False
+    try:
+        status_code = int(getattr(error, "status_code", 0))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if status_code != 409:
+        return False
+    if str(getattr(error, "error_code", "") or "").strip() != CANCELLATION_AUTHORITY_ERROR_CODE:
+        return False
+    response = getattr(error, "response_payload", None)
+    if not isinstance(response, dict):
+        return False
+    bindings = {
+        "jobId": active.job_id,
+        "runId": active.run_id,
+        "attemptId": active.attempt_id,
+    }
+    if any(str(response.get(key) or "").strip() != expected for key, expected in bindings.items()):
+        return False
+    return str(response.get("jobStatus") or "").strip().lower() in {
+        "cancel_requested",
+        "cancelling",
+        "cancelled",
+    }
+
+
 class ReviewWorkerV1:
     def __init__(self, config: Any, client: Any | None = None) -> None:
         self.config = config
@@ -2802,7 +2838,7 @@ class ReviewWorkerV1:
 
     def persist_active_run_marker(self, active: ActiveJob) -> None:
         self.isolation.runtime.mkdir(parents=True, exist_ok=True)
-        write_json(
+        write_json_durable(
             self.active_run_marker_path(),
             {
                 "job_id": active.job_id,
@@ -2830,7 +2866,7 @@ class ReviewWorkerV1:
             if marker_job_id and marker_job_id != active.job_id:
                 return
         try:
-            path.unlink()
+            remove_file_durable(path)
         except FileNotFoundError:
             pass
 
@@ -2886,6 +2922,13 @@ class ReviewWorkerV1:
     def terminal_result_outbox_path(self, run_id: str) -> Path:
         return self.isolation.artifacts / safe_id(run_id, "run") / TERMINAL_RESULT_OUTBOX_FILENAME
 
+    def terminal_result_supersession_path(self, run_id: str) -> Path:
+        return (
+            self.isolation.artifacts
+            / safe_id(run_id, "run")
+            / TERMINAL_RESULT_SUPERSESSION_FILENAME
+        )
+
     @staticmethod
     def terminal_result_payload_sha256(payload: dict[str, Any]) -> str:
         encoded = json.dumps(
@@ -2896,28 +2939,110 @@ class ReviewWorkerV1:
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def _persisted_terminal_outbox(self, run_name: str) -> dict[str, Any]:
-        payload = read_json(self.terminal_result_outbox_path(run_name), {})
+    @staticmethod
+    def _worker_evidence_path_present(path: Path) -> bool:
+        try:
+            return path.is_symlink() or path.exists()
+        except OSError:
+            return True
+
+    def _terminal_result_outbox_validation_error(
+        self,
+        payload: object,
+        run_name: str,
+    ) -> str:
         if not isinstance(payload, dict):
-            return {}
+            return "terminal result outbox must be a JSON object"
         if payload.get("schema_version") != TERMINAL_RESULT_OUTBOX_SCHEMA:
-            return {}
+            return "terminal result outbox schema_version is invalid"
         if str(payload.get("run_id") or "").strip() != run_name:
-            return {}
+            return "terminal result outbox run_id does not match its artifact directory"
         terminal_payload = payload.get("payload")
         if not isinstance(terminal_payload, dict):
-            return {}
+            return "terminal result outbox payload must be an object"
         expected_sha256 = str(payload.get("payload_sha256") or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
-            return {}
+            return "terminal result outbox payload_sha256 is invalid"
         if self.terminal_result_payload_sha256(terminal_payload) != expected_sha256:
-            return {}
+            return "terminal result outbox payload checksum does not match"
         result_status = str(payload.get("result_status") or "").strip().lower()
         if result_status not in {"done", "failed", "cancelled", "partial_completed"}:
-            return {}
+            return "terminal result outbox result_status is invalid"
         for key in ("job_id", "lease_id", "attempt_id"):
             if not str(payload.get(key) or "").strip():
-                return {}
+                return f"terminal result outbox {key} is required"
+        return ""
+
+    def _load_persisted_terminal_outbox(
+        self,
+        run_name: str,
+    ) -> tuple[dict[str, Any], str]:
+        path = self.terminal_result_outbox_path(run_name)
+        if not self._worker_evidence_path_present(path):
+            return {}, ""
+        if path.is_symlink():
+            return {}, "terminal result outbox must not be a symlink"
+        try:
+            payload = json.loads(read_text_no_follow(path, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {}, f"terminal result outbox could not be read: {exc}"
+        error = self._terminal_result_outbox_validation_error(payload, run_name)
+        if error:
+            return {}, error
+        return payload, ""
+
+    def _persisted_terminal_outbox(self, run_name: str) -> dict[str, Any]:
+        payload, _error = self._load_persisted_terminal_outbox(run_name)
+        return payload
+
+    def _load_persisted_terminal_supersession(
+        self,
+        run_name: str,
+    ) -> tuple[dict[str, Any], str]:
+        path = self.terminal_result_supersession_path(run_name)
+        if not self._worker_evidence_path_present(path):
+            return {}, ""
+        if path.is_symlink():
+            return {}, "terminal result supersession journal must not be a symlink"
+        try:
+            payload = json.loads(read_text_no_follow(path, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {}, f"terminal result supersession journal could not be read: {exc}"
+        if not isinstance(payload, dict):
+            return {}, "terminal result supersession journal must be a JSON object"
+        if payload.get("schema_version") != TERMINAL_RESULT_SUPERSESSION_SCHEMA:
+            return {}, "terminal result supersession journal schema_version is invalid"
+        expected_journal_sha = str(
+            payload.get("journal_sha256") or ""
+        ).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_journal_sha):
+            return {}, "terminal result supersession journal checksum is invalid"
+        journal_content = dict(payload)
+        journal_content.pop("journal_sha256", None)
+        if self.terminal_result_payload_sha256(journal_content) != expected_journal_sha:
+            return {}, "terminal result supersession journal checksum does not match"
+        if str(payload.get("run_id") or "").strip() != run_name:
+            return {}, "terminal result supersession run_id does not match its artifact directory"
+        if str(payload.get("authority_code") or "").strip() != CANCELLATION_AUTHORITY_ERROR_CODE:
+            return {}, "terminal result supersession authority_code is invalid"
+        original_outbox = payload.get("original_outbox")
+        original_error = self._terminal_result_outbox_validation_error(
+            original_outbox,
+            run_name,
+        )
+        if original_error:
+            return {}, f"terminal result supersession original outbox is invalid: {original_error}"
+        original_sha = str(payload.get("original_payload_sha256") or "").strip().lower()
+        if original_sha != str(original_outbox.get("payload_sha256") or "").strip().lower():
+            return {}, "terminal result supersession original payload checksum does not match"
+        for key in ("job_id", "lease_id", "attempt_id"):
+            expected = str(original_outbox.get(key) or "").strip()
+            if str(payload.get(key) or "").strip() != expected:
+                return {}, f"terminal result supersession {key} does not match original outbox"
+        return payload, ""
+
+    def _persisted_terminal_supersession(self, run_name: str) -> dict[str, Any]:
+        payload, _error = self._load_persisted_terminal_supersession(run_name)
         return payload
 
     def _persisted_run_is_terminal(self, run_name: str, run_state: dict[str, Any]) -> bool:
@@ -2947,19 +3072,45 @@ class ReviewWorkerV1:
             if not isinstance(run_state, dict):
                 run_state = {}
             if self._persisted_run_is_terminal(run_name, run_state):
-                from ._main_part_08_lifecycle_cleanup import cleanup_v1_workspace_path
-
-                cleanup_v1_workspace_path(self.isolation.workspaces, workspace)
                 continue
             active_job = run_state.get("active_job") if isinstance(run_state.get("active_job"), dict) else {}
-            terminal_outbox = self._persisted_terminal_outbox(run_name)
+            terminal_outbox, outbox_integrity_error = self._load_persisted_terminal_outbox(run_name)
+            terminal_supersession, supersession_integrity_error = (
+                self._load_persisted_terminal_supersession(run_name)
+            )
+            integrity_error = outbox_integrity_error or supersession_integrity_error
             failed_marker = self._persisted_submit_marker(run_name, "result-submit-failed.json")
             blocked_marker = self._persisted_submit_marker(run_name, "result-submit-blocked.json")
             submit_marker = failed_marker or blocked_marker
+            if integrity_error and not submit_marker:
+                identity = (
+                    terminal_supersession.get("original_outbox")
+                    if isinstance(terminal_supersession.get("original_outbox"), dict)
+                    else active_job
+                )
+                submit_marker = {
+                    "run_id": run_name,
+                    "job_id": identity.get("job_id"),
+                    "lease_id": identity.get("lease_id"),
+                    "attempt_id": identity.get("attempt_id"),
+                    "status": "result_submit_blocked",
+                    "error": integrity_error,
+                }
             persisted_state = str(active_job.get("state") or "").strip().lower()
-            if not terminal_outbox and not submit_marker and persisted_state not in ACTIVE_HEARTBEAT_STATUSES:
+            if (
+                not terminal_outbox
+                and not terminal_supersession
+                and not submit_marker
+                and persisted_state not in ACTIVE_HEARTBEAT_STATUSES
+            ):
                 continue
-            if terminal_outbox:
+            if integrity_error and self._worker_evidence_path_present(
+                self.terminal_result_outbox_path(run_name)
+            ):
+                evidence_path = self.terminal_result_outbox_path(run_name)
+            elif terminal_supersession:
+                evidence_path = self.terminal_result_supersession_path(run_name)
+            elif terminal_outbox:
                 evidence_path = self.terminal_result_outbox_path(run_name)
             elif submit_marker:
                 evidence_path = self.isolation.artifacts / run_name / (
@@ -2977,6 +3128,8 @@ class ReviewWorkerV1:
                 "run_state": run_state,
                 "active_job": active_job,
                 "terminal_outbox": terminal_outbox,
+                "terminal_supersession": terminal_supersession,
+                "integrity_error": integrity_error,
                 "submit_marker": submit_marker,
                 "evidence_mtime": evidence_mtime,
             }
@@ -2994,19 +3147,42 @@ class ReviewWorkerV1:
             run_name = artifact_run.name
             if run_name in records or self._persisted_submit_marker(run_name, "result-submit-succeeded.json"):
                 continue
-            terminal_outbox = self._persisted_terminal_outbox(run_name)
+            terminal_outbox, outbox_integrity_error = self._load_persisted_terminal_outbox(run_name)
+            terminal_supersession, supersession_integrity_error = (
+                self._load_persisted_terminal_supersession(run_name)
+            )
+            integrity_error = outbox_integrity_error or supersession_integrity_error
             failed_marker = self._persisted_submit_marker(run_name, "result-submit-failed.json")
             blocked_marker = self._persisted_submit_marker(run_name, "result-submit-blocked.json")
             submit_marker = failed_marker or blocked_marker
-            if not terminal_outbox and not submit_marker:
+            if integrity_error and not submit_marker:
+                identity = (
+                    terminal_supersession.get("original_outbox")
+                    if isinstance(terminal_supersession.get("original_outbox"), dict)
+                    else {}
+                )
+                submit_marker = {
+                    "run_id": run_name,
+                    "job_id": identity.get("job_id"),
+                    "lease_id": identity.get("lease_id"),
+                    "attempt_id": identity.get("attempt_id"),
+                    "status": "result_submit_blocked",
+                    "error": integrity_error,
+                }
+            if not terminal_outbox and not terminal_supersession and not submit_marker:
                 continue
-            evidence_path = (
+            if integrity_error and self._worker_evidence_path_present(
                 self.terminal_result_outbox_path(run_name)
-                if terminal_outbox
-                else artifact_run / (
+            ):
+                evidence_path = self.terminal_result_outbox_path(run_name)
+            elif terminal_supersession:
+                evidence_path = self.terminal_result_supersession_path(run_name)
+            elif terminal_outbox:
+                evidence_path = self.terminal_result_outbox_path(run_name)
+            else:
+                evidence_path = artifact_run / (
                     "result-submit-failed.json" if failed_marker else "result-submit-blocked.json"
                 )
-            )
             try:
                 evidence_mtime = evidence_path.stat().st_mtime
             except OSError:
@@ -3018,6 +3194,8 @@ class ReviewWorkerV1:
                 "run_state": {},
                 "active_job": {},
                 "terminal_outbox": terminal_outbox,
+                "terminal_supersession": terminal_supersession,
+                "integrity_error": integrity_error,
                 "submit_marker": submit_marker,
                 "evidence_mtime": evidence_mtime,
             }
@@ -3057,6 +3235,9 @@ class ReviewWorkerV1:
                     "active_job": {**runtime_marker, **existing_active},
                     "terminal_outbox": existing.get("terminal_outbox")
                     or self._persisted_terminal_outbox(marker_run_name),
+                    "terminal_supersession": existing.get("terminal_supersession")
+                    or self._persisted_terminal_supersession(marker_run_name),
+                    "integrity_error": existing.get("integrity_error") or "",
                     "submit_marker": existing.get("submit_marker") or {},
                     "evidence_mtime": max(
                         float(existing.get("evidence_mtime") or 0.0),
@@ -3098,6 +3279,17 @@ class ReviewWorkerV1:
             if isinstance(record.get("terminal_outbox"), dict)
             else {}
         )
+        terminal_supersession = (
+            record.get("terminal_supersession")
+            if isinstance(record.get("terminal_supersession"), dict)
+            else {}
+        )
+        superseded_outbox = (
+            terminal_supersession.get("original_outbox")
+            if isinstance(terminal_supersession.get("original_outbox"), dict)
+            else {}
+        )
+        integrity_error = str(record.get("integrity_error") or "").strip()
         submit_marker = record["submit_marker"]
         run_name = str(record["run_name"])
 
@@ -3107,6 +3299,7 @@ class ReviewWorkerV1:
 
         run_id = persisted_id(
             terminal_outbox.get("run_id")
+            or superseded_outbox.get("run_id")
             or submit_marker.get("run_id")
             or active_payload.get("run_id")
             or run_name,
@@ -3115,6 +3308,7 @@ class ReviewWorkerV1:
         active = ActiveJob(
             job_id=persisted_id(
                 terminal_outbox.get("job_id")
+                or superseded_outbox.get("job_id")
                 or submit_marker.get("job_id")
                 or active_payload.get("job_id"),
                 f"recovered_job_{run_id}",
@@ -3122,19 +3316,23 @@ class ReviewWorkerV1:
             run_id=run_id,
             lease_id=persisted_id(
                 terminal_outbox.get("lease_id")
+                or superseded_outbox.get("lease_id")
                 or submit_marker.get("lease_id")
                 or active_payload.get("lease_id"),
                 f"recovered_lease_{run_id}",
             ),
             attempt_id=persisted_id(
                 terminal_outbox.get("attempt_id")
+                or superseded_outbox.get("attempt_id")
                 or submit_marker.get("attempt_id")
                 or active_payload.get("attempt_id"),
                 f"{self.config.worker_id}-recovered",
             ),
             state="finishing",
         )
-        active.terminal_result_prepared = bool(terminal_outbox)
+        active.terminal_result_prepared = bool(
+            terminal_outbox or terminal_supersession or integrity_error
+        )
         active.run_dir = record["run_dir"] if Path(record["run_dir"]).is_dir() else None
         progress = record["run_state"].get("progress") if isinstance(record["run_state"].get("progress"), dict) else {}
         active.current_phase = str(
@@ -3146,7 +3344,13 @@ class ReviewWorkerV1:
         publication_recovery_error = str(
             record.get("publication_recovery_error") or ""
         )
-        if publication_recovery_error:
+        if integrity_error:
+            active.message = (
+                "Recovered terminal result integrity failure; the Worker slot is blocked: "
+                + integrity_error
+            )
+            active.current_phase_status = "blocked"
+        elif publication_recovery_error:
             active.message = (
                 "Recovered unfinished run with an unresolved model-output publication: "
                 + publication_recovery_error
@@ -3156,7 +3360,7 @@ class ReviewWorkerV1:
                 progress.get("message")
                 or (
                     "Recovered terminal result; durable submission replay is pending."
-                    if terminal_outbox
+                    if terminal_outbox or terminal_supersession
                     else "Recovered unfinished run; operator intervention is required before this slot can be reused."
                 )
             )
@@ -3179,17 +3383,86 @@ class ReviewWorkerV1:
         active = self.state.active_job
         if active is None:
             return False
-        record = self._persisted_terminal_outbox(active.run_id)
-        if not record:
+        record, outbox_integrity_error = self._load_persisted_terminal_outbox(
+            active.run_id
+        )
+        supersession, supersession_integrity_error = (
+            self._load_persisted_terminal_supersession(active.run_id)
+        )
+        integrity_error = outbox_integrity_error or supersession_integrity_error
+        if integrity_error:
+            active.terminal_result_prepared = True
+            active.state = "finishing"
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "blocked"
+            active.message = f"Terminal result replay blocked: {integrity_error}"
+            self.persist_active_run_marker(active)
+            return False
+        if not record and not supersession:
             return False
         active.terminal_result_prepared = True
-        if record.get("retryable") is False:
+        if record.get("retryable") is False and (
+            not supersession
+            or str(record.get("result_status") or "").strip().lower()
+            == "cancelled"
+        ):
             active.state = "finishing"
             active.current_phase = "submit_result_envelope"
             active.current_phase_status = "blocked"
             active.message = "Terminal result submission requires operator intervention."
             self.persist_active_run_marker(active)
             return False
+        artifact_dir = self.isolation.artifacts / active.run_id
+        if supersession:
+            original_outbox = supersession.get("original_outbox")
+            if not isinstance(original_outbox, dict):
+                active.state = "finishing"
+                active.current_phase_status = "blocked"
+                active.message = (
+                    "Terminal result replay blocked: cancellation supersession "
+                    "journal has no original outbox."
+                )
+                self.persist_active_run_marker(active)
+                return False
+            try:
+                accepted = self.supersede_terminal_result_for_cancellation(
+                    active,
+                    artifact_dir,
+                    original_outbox,
+                )
+            except Exception as exc:
+                active.state = "finishing"
+                active.current_phase_status = "failed"
+                active.message = f"Cancellation supersession replay failed locally: {exc}"
+                self.persist_active_run_marker(active)
+                return False
+            if not accepted:
+                return False
+            terminal_state = terminal_state_from_result_status(
+                active.accepted_terminal_result_status or "cancelled"
+            )
+            if terminal_state == "cancelled" and active.run_dir is not None:
+                try:
+                    self.emit_event(
+                        active,
+                        active.run_dir,
+                        "run_cancelled",
+                        "cleanup_active_job",
+                        status="cancelled",
+                        progress=active.overall_percent,
+                        current_phase_percent=100,
+                        message=(
+                            "Run cancelled after server cancellation authority "
+                            "superseded the durable terminal result."
+                        ),
+                        data={"reason": "server_cancellation_authoritative"},
+                    )
+                except Exception:
+                    pass
+            self.clear_active_run_marker(active)
+            self.state.clear_active(terminal_state)
+            self._persisted_unfinished_workspace_names.discard(active.run_id)
+            return True
         identity = {
             "run_id": active.run_id,
             "job_id": active.job_id,
@@ -3208,13 +3481,19 @@ class ReviewWorkerV1:
             and isinstance(payload.get("reviewWorkerProtocol"), dict)
             else {}
         )
-        artifact_dir = self.isolation.artifacts / active.run_id
         try:
             if mismatched:
                 raise RuntimeError(
                     "terminal result outbox identity mismatch: " + ", ".join(mismatched)
                 )
-            validate_result_manifest_matches_uploaded_snapshot(envelope, artifact_dir)
+            manifest_artifact_dir = self._terminal_result_manifest_artifact_dir(
+                artifact_dir,
+                record,
+            )
+            validate_result_manifest_matches_uploaded_snapshot(
+                envelope,
+                manifest_artifact_dir,
+            )
         except Exception as exc:
             active.state = "finishing"
             active.current_phase = "submit_result_envelope"
@@ -3262,8 +3541,28 @@ class ReviewWorkerV1:
             return False
         if not accepted:
             return False
-        terminal_state = terminal_state_from_result_status(record.get("result_status"))
-        if terminal_state == "completed" and active.run_dir is not None:
+        terminal_state = terminal_state_from_result_status(
+            active.accepted_terminal_result_status or record.get("result_status")
+        )
+        if terminal_state == "cancelled" and active.run_dir is not None:
+            try:
+                self.emit_event(
+                    active,
+                    active.run_dir,
+                    "run_cancelled",
+                    "cleanup_active_job",
+                    status="cancelled",
+                    progress=active.overall_percent,
+                    current_phase_percent=100,
+                    message=(
+                        "Run cancelled after server cancellation authority "
+                        "superseded the durable terminal result."
+                    ),
+                    data={"reason": "server_cancellation_authoritative"},
+                )
+            except Exception:
+                pass
+        elif terminal_state == "completed" and active.run_dir is not None:
             try:
                 self.emit_event(
                     active,
@@ -4104,6 +4403,28 @@ class ReviewWorkerV1:
                             terminal_state = "result_submit_failed"
                             return
                         terminal_result_confirmed = True
+                        if active.accepted_terminal_result_status == "cancelled":
+                            terminal_state = "cancelled"
+                            try:
+                                self.emit_event(
+                                    active,
+                                    run_dir,
+                                    "run_cancelled",
+                                    "cleanup_active_job",
+                                    status="cancelled",
+                                    progress=active.overall_percent,
+                                    current_phase_percent=100,
+                                    message=(
+                                        "Run cancelled after server cancellation "
+                                        "authority superseded the durable terminal result."
+                                    ),
+                                    data={
+                                        "reason": "server_cancellation_authoritative"
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            return
                         terminal_state = "completed"
                         self.emit_event(
                             active,
@@ -4158,7 +4479,9 @@ class ReviewWorkerV1:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "cancelled", run_dir), artifact_dir, envelope):
                 terminal_result_confirmed = True
-                terminal_state = "cancelled"
+                terminal_state = terminal_state_from_result_status(
+                    active.accepted_terminal_result_status or "cancelled"
+                )
             else:
                 terminal_state = "result_submit_failed"
                 return
@@ -4196,7 +4519,9 @@ class ReviewWorkerV1:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "partial_completed", run_dir), artifact_dir, envelope):
                 terminal_result_confirmed = True
-                terminal_state = "partial_completed"
+                terminal_state = terminal_state_from_result_status(
+                    active.accepted_terminal_result_status or "partial_completed"
+                )
             else:
                 terminal_state = "result_submit_failed"
                 return
@@ -4225,7 +4550,9 @@ class ReviewWorkerV1:
                 envelope.setdefault("extensions", {}).setdefault("worker_internal", {})["artifact_upload_error"] = upload_error
             if self.submit_result_or_record_failure(active, job_id, result_payload(active, envelope, "failed", run_dir), artifact_dir, envelope):
                 terminal_result_confirmed = True
-                terminal_state = "failed"
+                terminal_state = terminal_state_from_result_status(
+                    active.accepted_terminal_result_status or "failed"
+                )
             else:
                 terminal_state = "result_submit_failed"
                 return
@@ -4365,6 +4692,547 @@ class ReviewWorkerV1:
         write_review_instruction_tree(repo_dir)
         return repo_dir, run_dir, artifact_dir
 
+    @staticmethod
+    def _json_artifact_bytes(value: dict[str, Any]) -> bytes:
+        return (
+            json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
+
+    def _build_cancellation_authority_plan(
+        self,
+        active: ActiveJob,
+        original_outbox: dict[str, Any],
+        *,
+        created_at: str,
+        job_status: str,
+    ) -> dict[str, Any]:
+        original_payload = original_outbox.get("payload")
+        if not isinstance(original_payload, dict):
+            raise RuntimeError("superseded terminal result payload is invalid")
+        original_envelope = original_payload.get("reviewWorkerProtocol")
+        if not isinstance(original_envelope, dict):
+            raise RuntimeError(
+                "superseded terminal result must include reviewWorkerProtocol"
+            )
+        original_sha = str(original_outbox.get("payload_sha256") or "").strip().lower()
+        suffix = original_sha[:12]
+        reason = (
+            "Server cancellation authority superseded a durable terminal result "
+            f"while the job was {job_status or 'cancelling'}."
+        )
+        artifact_values = (
+            (
+                f"cancel-authority-worker-log-{suffix}.jsonl",
+                "worker_log",
+                "application/jsonl",
+                "worker-log",
+                (
+                    json.dumps(
+                        {
+                            "event": "terminal_result_superseded_by_cancellation",
+                            "authority_code": CANCELLATION_AUTHORITY_ERROR_CODE,
+                            "job_id": active.job_id,
+                            "run_id": active.run_id,
+                            "attempt_id": active.attempt_id,
+                            "superseded_payload_sha256": original_sha,
+                            "time": created_at,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8"),
+            ),
+            (
+                f"cancel-authority-qa-{suffix}.json",
+                "qa",
+                "application/json",
+                "qa-gate",
+                self._json_artifact_bytes(
+                    {
+                        "schema_version": "qa/v1",
+                        "status": "warn",
+                        "errors": [],
+                        "warnings": [reason],
+                    }
+                ),
+            ),
+            (
+                f"cancel-authority-error-report-{suffix}.json",
+                "error_report",
+                "application/json",
+                "error-report",
+                self._json_artifact_bytes(
+                    {
+                        "status": "cancelled",
+                        "error": reason,
+                        "authority_code": CANCELLATION_AUTHORITY_ERROR_CODE,
+                        "superseded_payload_sha256": original_sha,
+                        "created_at": created_at,
+                    }
+                ),
+            ),
+        )
+        artifact_files: list[dict[str, Any]] = []
+        manifest: list[dict[str, Any]] = []
+        for name, kind, media_type, schema_id, content in artifact_values:
+            artifact_id = f"art_cancel_authority_{kind}_{suffix}"
+            artifact_files.append(
+                {
+                    "name": name,
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+            manifest.append(
+                {
+                    "artifact_id": artifact_id,
+                    "kind": kind,
+                    "name": name,
+                    "media_type": media_type,
+                    "schema_id": schema_id,
+                    "schema_version": "v1",
+                    "encoding": "utf-8",
+                    "compression": "none",
+                    "required": True,
+                    "storage": {
+                        "type": "server_artifact",
+                        "url": (
+                            f"/v1/review-runs/{active.run_id}/artifacts/{artifact_id}"
+                        ),
+                    },
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                }
+            )
+
+        envelope = copy.deepcopy(original_envelope)
+        envelope["protocol_version"] = PROTOCOL_VERSION
+        envelope["message_type"] = "review_run_result"
+        envelope["created_at"] = created_at
+        job_payload = (
+            dict(envelope.get("job"))
+            if isinstance(envelope.get("job"), dict)
+            else {}
+        )
+        job_payload.update(
+            {
+                "job_id": active.job_id,
+                "run_id": active.run_id,
+                "lease_id": active.lease_id,
+                "job_type": str(job_payload.get("job_type") or "repo_review.full_scan"),
+            }
+        )
+        envelope["job"] = job_payload
+        execution = (
+            dict(envelope.get("execution"))
+            if isinstance(envelope.get("execution"), dict)
+            else {}
+        )
+        execution["status"] = "cancelled"
+        execution["completed_at"] = created_at
+        envelope["execution"] = execution
+        progress_final = (
+            dict(envelope.get("progress_final"))
+            if isinstance(envelope.get("progress_final"), dict)
+            else {}
+        )
+        progress_final.update(
+            {
+                "run_id": active.run_id,
+                "status": "cancelled",
+                "current_phase": "submit_result_envelope",
+                "current_phase_status": "completed",
+                "message": reason,
+            }
+        )
+        envelope["progress_final"] = progress_final
+        error_payload = failure_payload_for_error(
+            reason,
+            status="cancelled",
+            phase="submit_result_envelope",
+        )
+        envelope["error"] = error_payload
+        summary = (
+            dict(envelope.get("summary"))
+            if isinstance(envelope.get("summary"), dict)
+            else {}
+        )
+        summary["result_status"] = "incomplete"
+        envelope["summary"] = summary
+        envelope["quality_gate"] = {
+            "status": "warn",
+            "errors": [],
+            "warnings": [reason],
+        }
+        envelope["artifact_manifest"] = manifest
+        extensions = (
+            dict(envelope.get("extensions"))
+            if isinstance(envelope.get("extensions"), dict)
+            else {}
+        )
+        worker_internal = (
+            dict(extensions.get("worker_internal"))
+            if isinstance(extensions.get("worker_internal"), dict)
+            else {}
+        )
+        worker_internal.update(
+            {
+                "terminal_result_supersession": "server_cancellation_authority",
+                "authority_code": CANCELLATION_AUTHORITY_ERROR_CODE,
+                "authority_job_status": job_status,
+                "supersedes_payload_sha256": original_sha,
+            }
+        )
+        extensions["worker_internal"] = worker_internal
+        envelope["extensions"] = extensions
+
+        replacement_payload = copy.deepcopy(original_payload)
+        replacement_payload.update(
+            {
+                "status": "cancelled",
+                "attempt_id": active.attempt_id,
+                "reviewWorkerProtocol": envelope,
+                "result_checksum": hashlib.sha256(
+                    json.dumps(envelope, sort_keys=True).encode("utf-8")
+                ).hexdigest(),
+                "duration_ms": execution.get("duration_ms", 0),
+                "error": error_payload.get("message", ""),
+                "error_code": error_payload.get("code", ""),
+            }
+        )
+        return {
+            "replacement_payload": replacement_payload,
+            "replacement_payload_sha256": self.terminal_result_payload_sha256(
+                replacement_payload
+            ),
+            "artifact_files": artifact_files,
+            "artifact_snapshot_relpath": (
+                PurePosixPath("cancellation-authority") / active.run_id
+            ).as_posix(),
+        }
+
+    @staticmethod
+    def _write_json_once_durable(path: Path, value: dict[str, Any]) -> None:
+        encoded = (
+            json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
+        try:
+            _write_new_worker_owned_bytes(path, encoded)
+            return
+        except FileExistsError:
+            pass
+        try:
+            existing = json.loads(read_text_no_follow(path, encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"durable audit record already exists but is invalid: {path}") from exc
+        if existing != value:
+            raise RuntimeError(f"durable audit record already exists with different content: {path}")
+
+    def _ensure_cancellation_supersession_journal(
+        self,
+        active: ActiveJob,
+        artifact_dir: Path,
+        original_outbox: dict[str, Any],
+        authority_error: BaseException | None,
+    ) -> dict[str, Any]:
+        existing, integrity_error = self._load_persisted_terminal_supersession(
+            active.run_id
+        )
+        if integrity_error:
+            raise RuntimeError(integrity_error)
+        if existing:
+            if (
+                str(existing.get("original_payload_sha256") or "").strip().lower()
+                != str(original_outbox.get("payload_sha256") or "").strip().lower()
+            ):
+                raise RuntimeError(
+                    "terminal result supersession journal references a different original payload"
+                )
+            return existing
+
+        response = (
+            getattr(authority_error, "response_payload", None)
+            if authority_error is not None
+            else {}
+        )
+        response = response if isinstance(response, dict) else {}
+        job_status = str(response.get("jobStatus") or "cancel_requested").strip().lower()
+        created_at = iso_time(time.time())
+        plan = self._build_cancellation_authority_plan(
+            active,
+            original_outbox,
+            created_at=created_at,
+            job_status=job_status,
+        )
+        journal = {
+            "schema_version": TERMINAL_RESULT_SUPERSESSION_SCHEMA,
+            "run_id": active.run_id,
+            "job_id": active.job_id,
+            "lease_id": active.lease_id,
+            "attempt_id": active.attempt_id,
+            "authority_code": CANCELLATION_AUTHORITY_ERROR_CODE,
+            "job_status": job_status,
+            "original_payload_sha256": original_outbox.get("payload_sha256"),
+            "original_outbox": copy.deepcopy(original_outbox),
+            "state": "authority_recorded",
+            "created_at": created_at,
+            **plan,
+        }
+        journal["journal_sha256"] = self.terminal_result_payload_sha256(
+            journal
+        )
+        self._write_json_once_durable(
+            artifact_dir / TERMINAL_RESULT_SUPERSESSION_FILENAME,
+            journal,
+        )
+        return journal
+
+    def _terminal_result_manifest_artifact_dir(
+        self,
+        artifact_dir: Path,
+        record: dict[str, Any],
+    ) -> Path:
+        relative_text = str(record.get("artifact_snapshot_relpath") or "").strip()
+        if not relative_text:
+            return artifact_dir
+        relative = PurePosixPath(relative_text)
+        if relative.is_absolute() or not relative.parts or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            raise RuntimeError("terminal result outbox artifact snapshot path is invalid")
+        candidate = artifact_dir.joinpath(*relative.parts)
+        artifact_root = artifact_dir.resolve(strict=False)
+        try:
+            candidate.resolve(strict=False).relative_to(artifact_root)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "terminal result outbox artifact snapshot path escapes its run"
+            ) from exc
+        if path_has_symlink_component(candidate):
+            raise RuntimeError(
+                "terminal result outbox artifact snapshot path contains a symlink"
+            )
+        return candidate
+
+    def _materialize_cancellation_supersession_artifacts(
+        self,
+        artifact_dir: Path,
+        journal: dict[str, Any],
+    ) -> Path:
+        replacement_payload = journal.get("replacement_payload")
+        envelope = (
+            replacement_payload.get("reviewWorkerProtocol")
+            if isinstance(replacement_payload, dict)
+            and isinstance(replacement_payload.get("reviewWorkerProtocol"), dict)
+            else {}
+        )
+        manifest = (
+            envelope.get("artifact_manifest")
+            if isinstance(envelope.get("artifact_manifest"), list)
+            else []
+        )
+        artifact_record = {
+            "artifact_snapshot_relpath": journal.get("artifact_snapshot_relpath")
+            or (
+                PurePosixPath("cancellation-authority")
+                / str(journal.get("run_id") or "")
+            ).as_posix()
+        }
+        cancellation_dir = self._terminal_result_manifest_artifact_dir(
+            artifact_dir,
+            artifact_record,
+        )
+        cancellation_dir.mkdir(parents=True, exist_ok=True)
+        files = journal.get("artifact_files")
+        if not isinstance(files, list) or not files:
+            raise RuntimeError(
+                "terminal result supersession journal has no cancellation artifacts"
+            )
+        for item in files:
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    "terminal result supersession artifact entry is invalid"
+                )
+            name = str(item.get("name") or "").strip()
+            if not name or Path(name).name != name:
+                raise RuntimeError(
+                    "terminal result supersession artifact name is invalid"
+                )
+            try:
+                content = base64.b64decode(
+                    str(item.get("content_base64") or ""),
+                    validate=True,
+                )
+            except (ValueError, binascii.Error) as exc:
+                raise RuntimeError(
+                    f"terminal result supersession artifact content is invalid: {name}"
+                ) from exc
+            _write_worker_owned_bytes(cancellation_dir / name, content)
+        active_run_id = str(journal.get("run_id") or "")
+        write_json_durable(
+            cancellation_dir / "artifact-manifest.json",
+            artifact_manifest_payload(active_run_id, manifest),
+        )
+        if cancellation_dir.name != active_run_id:
+            raise RuntimeError(
+                "terminal result supersession artifact directory does not match run_id"
+            )
+        return cancellation_dir
+
+    def supersede_terminal_result_for_cancellation(
+        self,
+        active: ActiveJob,
+        artifact_dir: Path,
+        original_outbox: dict[str, Any],
+        authority_error: BaseException | None = None,
+    ) -> bool:
+        journal = self._ensure_cancellation_supersession_journal(
+            active,
+            artifact_dir,
+            original_outbox,
+            authority_error,
+        )
+        original_outbox = journal.get("original_outbox")
+        if not isinstance(original_outbox, dict):
+            raise RuntimeError("terminal result supersession original outbox is invalid")
+        original_sha = str(journal.get("original_payload_sha256") or "").strip().lower()
+        archive_path = (
+            artifact_dir
+            / f"terminal-result-outbox.superseded.{original_sha}.json"
+        )
+        self._write_json_once_durable(archive_path, original_outbox)
+
+        current_outbox, current_error = self._load_persisted_terminal_outbox(
+            active.run_id
+        )
+        if current_error:
+            raise RuntimeError(current_error)
+        if current_outbox and str(current_outbox.get("result_status") or "") == "cancelled":
+            if (
+                str(current_outbox.get("supersedes_payload_sha256") or "").strip().lower()
+                != original_sha
+            ):
+                raise RuntimeError(
+                    "cancelled terminal outbox supersedes a different payload"
+                )
+            current_payload = current_outbox.get("payload")
+            current_envelope = (
+                current_payload.get("reviewWorkerProtocol")
+                if isinstance(current_payload, dict)
+                and isinstance(current_payload.get("reviewWorkerProtocol"), dict)
+                else {}
+            )
+            validate_result_manifest_matches_uploaded_snapshot(
+                current_envelope,
+                self._terminal_result_manifest_artifact_dir(
+                    artifact_dir,
+                    current_outbox,
+                ),
+            )
+            return self.deliver_terminal_result_outbox(
+                active,
+                artifact_dir,
+                current_outbox,
+            )
+        if current_outbox and (
+            str(current_outbox.get("payload_sha256") or "").strip().lower()
+            != original_sha
+        ):
+            raise RuntimeError(
+                "active terminal outbox changed after cancellation supersession was journaled"
+            )
+
+        if not isinstance(journal.get("replacement_payload"), dict):
+            created_at = str(
+                journal.get("created_at")
+                or original_outbox.get("created_at")
+                or "1970-01-01T00:00:00Z"
+            )
+            journal = {
+                **journal,
+                **self._build_cancellation_authority_plan(
+                    active,
+                    original_outbox,
+                    created_at=created_at,
+                    job_status=str(journal.get("job_status") or "cancel_requested"),
+                ),
+            }
+        cancellation_dir = self._materialize_cancellation_supersession_artifacts(
+            artifact_dir,
+            journal,
+        )
+        replacement_payload = copy.deepcopy(journal["replacement_payload"])
+        envelope = replacement_payload["reviewWorkerProtocol"]
+        upload_error = upload_artifacts_best_effort(
+            self.client,
+            active.job_id,
+            active.attempt_id,
+            cancellation_dir,
+        )
+        if upload_error:
+            envelope.setdefault("extensions", {}).setdefault(
+                "worker_internal",
+                {},
+            )["artifact_upload_error"] = upload_error
+        else:
+            reconcile_envelope_artifact_manifest_with_uploads(
+                envelope,
+                cancellation_dir,
+            )
+        replacement_payload["result_checksum"] = hashlib.sha256(
+            json.dumps(envelope, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        replacement_payload["error"] = (envelope.get("error") or {}).get(
+            "message",
+            "",
+        )
+        replacement_payload["error_code"] = (envelope.get("error") or {}).get(
+            "code",
+            "",
+        )
+        replacement_sha = self.terminal_result_payload_sha256(replacement_payload)
+        now = iso_time(time.time())
+        replacement_outbox = {
+            "schema_version": TERMINAL_RESULT_OUTBOX_SCHEMA,
+            "run_id": active.run_id,
+            "job_id": active.job_id,
+            "lease_id": active.lease_id,
+            "attempt_id": active.attempt_id,
+            "result_status": "cancelled",
+            "payload_sha256": replacement_sha,
+            "payload": replacement_payload,
+            "state": "ready",
+            "attempt_count": 0,
+            "retryable": True,
+            "generation": 2,
+            "supersedes_payload_sha256": original_sha,
+            "authority_code": CANCELLATION_AUTHORITY_ERROR_CODE,
+            "artifact_snapshot_relpath": str(
+                journal.get("artifact_snapshot_relpath") or ""
+            ),
+            "created_at": now,
+            "updated_at": now,
+        }
+        validate_result_manifest_matches_uploaded_snapshot(
+            envelope,
+            cancellation_dir,
+        )
+        write_json_durable(
+            artifact_dir / TERMINAL_RESULT_OUTBOX_FILENAME,
+            replacement_outbox,
+        )
+        active.terminal_result_prepared = True
+        active.state = "finishing"
+        active.current_phase = "submit_result_envelope"
+        active.current_phase_status = "pending"
+        active.message = "Cancellation supersession durably queued for submission."
+        self.persist_active_run_marker(active)
+        return self.deliver_terminal_result_outbox(
+            active,
+            artifact_dir,
+            replacement_outbox,
+        )
+
     def prepare_terminal_result_outbox(
         self,
         active: ActiveJob,
@@ -4375,7 +5243,9 @@ class ReviewWorkerV1:
         result_status = result_status_from_envelope(envelope)
         payload_copy = copy.deepcopy(payload)
         payload_sha256 = self.terminal_result_payload_sha256(payload_copy)
-        existing = self._persisted_terminal_outbox(active.run_id)
+        existing, existing_error = self._load_persisted_terminal_outbox(active.run_id)
+        if existing_error:
+            raise RuntimeError(existing_error)
         if existing and str(existing.get("payload_sha256") or "") != payload_sha256:
             raise RuntimeError("terminal result outbox already contains a different payload")
         now = iso_time(time.time())
@@ -4454,6 +5324,54 @@ class ReviewWorkerV1:
                 active.terminal_result_in_flight = False
             raise
         except Exception as exc:
+            if (
+                str(attempt_record.get("result_status") or "").strip().lower()
+                != "cancelled"
+                and control_plane_error_is_cancellation_authoritative(exc, active)
+            ):
+                with self._progress_lock:
+                    active.terminal_result_in_flight = False
+                    active.state = "finishing"
+                    active.current_phase_status = "pending"
+                    active.message = (
+                        "Server cancellation authority is superseding the durable "
+                        "terminal result."
+                    )
+                    self.persist_active_run_marker(active)
+                try:
+                    return self.supersede_terminal_result_for_cancellation(
+                        active,
+                        artifact_dir,
+                        attempt_record,
+                        exc,
+                    )
+                except Exception as supersession_exc:
+                    with self._progress_lock:
+                        active.state = "finishing"
+                        active.current_phase_status = "failed"
+                        active.message = (
+                            "Cancellation supersession remains durably pending: "
+                            f"{supersession_exc}"
+                        )
+                        try:
+                            write_json_durable(
+                                artifact_dir / "result-submit-failed.json",
+                                {
+                                    "run_id": active.run_id,
+                                    "job_id": active.job_id,
+                                    "lease_id": active.lease_id,
+                                    "attempt_id": active.attempt_id,
+                                    "result_status": "cancelled",
+                                    "status": "result_submit_failed",
+                                    "created_at": iso_time(time.time()),
+                                    "error": str(supersession_exc),
+                                    "retryable": True,
+                                    "authority_code": CANCELLATION_AUTHORITY_ERROR_CODE,
+                                },
+                            )
+                        finally:
+                            self.persist_active_run_marker(active)
+                    return False
             retryable = control_plane_error_is_retryable(exc)
             with self._progress_lock:
                 active.terminal_result_in_flight = False
@@ -4502,6 +5420,7 @@ class ReviewWorkerV1:
                 )
                 active.terminal_result_in_flight = False
                 active.terminal_result_submitted = True
+                active.accepted_terminal_result_status = result_status
                 active.current_phase_status = "completed"
                 active.message = "Terminal result accepted."
         except Exception as exc:
@@ -6555,13 +7474,17 @@ def _write_new_worker_owned_bytes(
     *,
     executable: bool = False,
 ) -> None:
-    """Durably create a unique transaction file at its journaled path."""
+    """Durably publish a unique transaction file without exposing partial bytes."""
     if path_has_symlink_component(path.parent):
         raise OSError(f"worker output parent contains a symlink: {path.parent}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}."
+        f"{random.getrandbits(64):016x}.tmp"
+    )
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
     mode = 0o700 if executable else 0o600
-    descriptor = os.open(path, flags, mode)
+    descriptor = os.open(temporary, flags, mode)
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(descriptor, mode)
@@ -6570,10 +7493,17 @@ def _write_new_worker_owned_bytes(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        os.link(temporary, path)
         _fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        else:
+            _fsync_directory(path.parent)
 
 
 def _validate_worker_owned_output(path: Path, root: Path) -> None:
@@ -13098,7 +14028,7 @@ def clear_uploaded_artifact_manifest(artifact_dir: Path, *, source_run_dir: Path
         paths.append(source_run_dir / UPLOADED_ARTIFACT_MANIFEST_NAME)
     for path in paths:
         try:
-            path.unlink()
+            remove_file_durable(path)
         except FileNotFoundError:
             pass
 
@@ -13116,9 +14046,12 @@ def write_uploaded_artifact_manifest(
     summary["artifacts_total"] = len(uploaded_items)
     summary["required_artifacts"] = sum(1 for item in uploaded_items if item.get("required") is True)
     payload["summary"] = summary
-    write_json_atomic(uploaded_artifact_manifest_path(artifact_dir), payload)
+    write_json_durable(uploaded_artifact_manifest_path(artifact_dir), payload)
     if source_run_dir is not None:
-        write_json_atomic(source_run_dir / UPLOADED_ARTIFACT_MANIFEST_NAME, payload)
+        write_json_durable(
+            source_run_dir / UPLOADED_ARTIFACT_MANIFEST_NAME,
+            payload,
+        )
 
 
 def uploaded_artifact_manifest_items(artifact_dir: Path) -> list[dict[str, Any]]:

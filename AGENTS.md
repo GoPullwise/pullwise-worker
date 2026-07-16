@@ -446,7 +446,21 @@ retry sleep or cleanup IO.
   HTTP request. Attempt once inside `run_job()`; retry only transport failures,
   HTTP 408/429, and server 5xx from the outer control-plane loop. Permanent HTTP
   failures and local validation/integrity failures stay blocked for operator
-  diagnosis. This one-record terminal WAL is not a local job queue.
+  diagnosis. Missing, malformed, checksum-invalid, or identity-invalid outbox
+  evidence must fail closed and keep the slot occupied. This one-record
+  terminal WAL is not a local job queue.
+- A server cancellation may supersede a prepared non-cancelled terminal WAL
+  only on HTTP 409 with `JOB_CANCELLATION_AUTHORITATIVE` and exact job, run,
+  attempt, job-status, and accepted-result-status bindings. First durably
+  publish a checksummed immutable supersession journal and exact original-WAL
+  archive, then materialize/upload unique required cancellation artifacts and
+  replace the active WAL with generation 2 `cancelled`. Restart must resume
+  from the journal or generation-2 WAL without ever resending the superseded
+  result. Ordinary 409 conflicts remain blocked.
+- Publish write-once journal/archive files from a fully written and fsynced
+  sibling temporary file through an atomic no-clobber link, then fsync the
+  directory. A crash must expose either no final file or the complete final
+  bytes, never a truncated immutable record.
 - Result upload payloads should use gzip compression for large JSON. Keep server
   gzip JSON support and worker compression thresholds aligned.
 - Do not add unbounded job-level `time.sleep()` retry loops to `run_job()` or other code
@@ -460,11 +474,15 @@ retry sleep or cleanup IO.
   outbox after heartbeat and before claim. Never claim around a recovered run.
   Clear `runtime/active-run.json` and the outbox only after the control plane
   acknowledgement is durably recorded; blocked/failed submission evidence must
-  keep the slot occupied.
+  keep the slot occupied. A durable success receipt suppresses replay after an
+  ambiguous cleanup crash, but workspace cleanup remains on the post-heartbeat
+  idle path.
 - A completed-result commit must check recorded cancellation under the same
   lock that durably prepares the terminal outbox. Cancellation that wins before
   that boundary produces a cancelled result; cancellation observed after the
-  terminal WAL commit begins must not replace or mutate the prepared outcome.
+  terminal WAL commit begins must not mutate the prepared outcome. Only the
+  bound server-authority protocol above may preserve it as immutable audit
+  evidence and create a separate cancelled generation.
 - Require a positive server-supplied scan wall-time budget. Start one absolute
   monotonic deadline before checkout and pass it
   unchanged through checkout/copy/clone, Codex thread starts and turns,

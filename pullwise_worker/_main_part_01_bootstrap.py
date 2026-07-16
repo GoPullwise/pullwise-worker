@@ -1033,9 +1033,20 @@ class PullwiseRequestError(Exception):
 
 
 class PullwiseHTTPError(PullwiseRequestError):
-    def __init__(self, message: str, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int,
+        *,
+        error_code: str = "",
+        response_payload: dict | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = clean_protocol_text(error_code, 128)
+        self.response_payload = (
+            dict(response_payload) if isinstance(response_payload, dict) else {}
+        )
 
 
 class PullwiseResponse:
@@ -1184,7 +1195,7 @@ class PullwiseClient:
             with self.opener.open(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(read_pullwise_response_body(response))
         except urllib.error.HTTPError as exc:
-            raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
+            raise pullwise_http_error(exc, self.config) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
@@ -1198,7 +1209,7 @@ class PullwiseClient:
             with self.opener.open(request, timeout=WORKER_HTTP_TIMEOUT_SECONDS) as response:
                 return PullwiseResponse(read_pullwise_response_body(response))
         except urllib.error.HTTPError as exc:
-            raise PullwiseHTTPError(http_error_message(exc, self.config), exc.code) from exc
+            raise pullwise_http_error(exc, self.config) from exc
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             raise PullwiseRequestError(str(exc)) from exc
 
@@ -1302,9 +1313,14 @@ def url_path_segment(value: object) -> str:
     return urllib.parse.quote(text, safe="")
 
 
-def http_error_message(exc: urllib.error.HTTPError, config: WorkerConfig | None = None) -> str:
+def http_error_details(
+    exc: urllib.error.HTTPError,
+    config: WorkerConfig | None = None,
+) -> tuple[str, str, dict]:
     reason = getattr(exc, "reason", None) or getattr(exc, "msg", "") or "error"
     detail = ""
+    error_code = ""
+    response_payload: dict = {}
     try:
         body = exc.read(8192)
     except Exception:
@@ -1317,6 +1333,8 @@ def http_error_message(exc: urllib.error.HTTPError, config: WorkerConfig | None 
             detail = text
         else:
             if isinstance(parsed, dict):
+                response_payload = dict(parsed)
+                error_code = clean_protocol_text(parsed.get("code"), 128)
                 for key in ("error", "message", "detail"):
                     value = parsed.get(key)
                     if isinstance(value, str) and value.strip():
@@ -1328,7 +1346,25 @@ def http_error_message(exc: urllib.error.HTTPError, config: WorkerConfig | None 
     message = f"HTTP {exc.code}: {reason}"
     if detail:
         message = f"{message}: {detail}"
-    return redact_secrets(message, config)
+    return redact_secrets(message, config), error_code, response_payload
+
+
+def http_error_message(exc: urllib.error.HTTPError, config: WorkerConfig | None = None) -> str:
+    message, _error_code, _response_payload = http_error_details(exc, config)
+    return message
+
+
+def pullwise_http_error(
+    exc: urllib.error.HTTPError,
+    config: WorkerConfig | None = None,
+) -> PullwiseHTTPError:
+    message, error_code, response_payload = http_error_details(exc, config)
+    return PullwiseHTTPError(
+        message,
+        exc.code,
+        error_code=error_code,
+        response_payload=response_payload,
+    )
 
 
 def unregister_worker_from_server(config: WorkerConfig, *, dry_run: bool = False) -> bool:

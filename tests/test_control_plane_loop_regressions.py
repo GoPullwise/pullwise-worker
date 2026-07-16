@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import io
+import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pullwise_worker._main_part_01_bootstrap import PullwiseHTTPError, PullwiseRequestError
+from pullwise_worker._main_part_01_bootstrap import (
+    PullwiseHTTPError,
+    PullwiseRequestError,
+    pullwise_http_error,
+)
 from pullwise_worker.review_worker_v1 import ReviewWorkerV1, control_plane_error_is_retryable
 
 
@@ -64,6 +71,33 @@ def prepare_worker(
 
 
 class ControlPlaneLoopRegressionTests(unittest.TestCase):
+    def test_http_error_preserves_machine_code_and_cancellation_bindings(self) -> None:
+        response_payload = {
+            "error": "A cancellation-state job only accepts a cancelled result.",
+            "code": "JOB_CANCELLATION_AUTHORITATIVE",
+            "jobStatus": "cancel_requested",
+            "jobId": "job_1",
+            "runId": "run_1",
+            "attemptId": "wk_1-1",
+        }
+        raw_error = urllib.error.HTTPError(
+            "https://pullwise.test/v1/review-runs/run_1/result",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(json.dumps(response_payload).encode("utf-8")),
+        )
+
+        error = pullwise_http_error(raw_error)
+
+        self.assertEqual(error.status_code, 409)
+        self.assertEqual(
+            error.error_code,
+            "JOB_CANCELLATION_AUTHORITATIVE",
+        )
+        self.assertEqual(error.response_payload, response_payload)
+        self.assertIn("cancellation-state job", str(error))
+
     def test_only_retryable_control_plane_errors_are_retried(self) -> None:
         self.assertTrue(control_plane_error_is_retryable(PullwiseRequestError("transport")))
         for status_code in (408, 429, 500, 503, 599):
