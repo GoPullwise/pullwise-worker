@@ -1678,7 +1678,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 {"method": "approval/request", "params": {"type": "fileChange", "paths": [".codex-review/runs/run_1/out.json"]}},
                 workspace,
             )
-            allowed_validation_file, _reason = decide_approval(
+            denied_validation_file, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "fileChange", "paths": [str(workspace.parent / "validation-repo" / "tests" / "itv.test.js")]}},
                 workspace,
             )
@@ -1686,15 +1686,25 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 {"method": "approval/request", "params": {"type": "fileChange", "paths": ["src/app.py"]}},
                 workspace,
             )
-            allowed_command, _reason = decide_approval(
+            denied_helper_command, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "python3 .codex-review/tools/scan.py"}},
+                workspace,
+            )
+            denied_nested_helper_command, _reason = decide_approval(
+                {
+                    "method": "approval/request",
+                    "params": {
+                        "type": "commandExecution",
+                        "command": "python3 .codex-review/output/tools/generated.py",
+                    },
+                },
                 workspace,
             )
             denied_install, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "npm install"}},
                 workspace,
             )
-            allowed_validation_test, _reason = decide_approval(
+            denied_validation_test, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "npm test -- itv.test.js", "cwd": str(workspace.parent / "validation-repo")}},
                 workspace,
             )
@@ -1722,23 +1732,36 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "git clean -fdx", "cwd": str(workspace)}},
                 workspace,
             )
+            denied_git_pager_command, _reason = decide_approval(
+                {
+                    "method": "approval/request",
+                    "params": {
+                        "type": "commandExecution",
+                        "command": "git grep --open-files-in-pager=sh needle",
+                        "cwd": str(workspace),
+                    },
+                },
+                workspace,
+            )
             denied_sed_in_place, _reason = decide_approval(
                 {"method": "approval/request", "params": {"type": "commandExecution", "command": "sed -i s/a/b/ src/app.py", "cwd": str(workspace)}},
                 workspace,
             )
 
         self.assertEqual(allowed_file, "acceptForSession")
-        self.assertEqual(allowed_validation_file, "acceptForSession")
+        self.assertEqual(denied_validation_file, "decline")
         self.assertEqual(denied_file, "decline")
-        self.assertEqual(allowed_command, "acceptForSession")
+        self.assertEqual(denied_helper_command, "decline")
+        self.assertEqual(denied_nested_helper_command, "decline")
         self.assertEqual(denied_install, "decline")
-        self.assertEqual(allowed_validation_test, "acceptForSession")
+        self.assertEqual(denied_validation_test, "decline")
         self.assertEqual(denied_go_mod, "decline")
         self.assertEqual(denied_cargo_metadata, "decline")
         self.assertEqual(denied_make_clean, "decline")
         self.assertEqual(allowed_git_status, "acceptForSession")
         self.assertEqual(denied_cwd, "decline")
         self.assertEqual(denied_git_clean, "decline")
+        self.assertEqual(denied_git_pager_command, "decline")
         self.assertEqual(denied_sed_in_place, "decline")
 
     def test_approval_policy_contains_all_read_command_operands(self) -> None:
@@ -1817,7 +1840,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 workspace,
             )
 
-        self.assertEqual(command_response, {"decision": "acceptForSession"})
+        self.assertEqual(command_response, {"decision": "decline"})
         self.assertEqual(file_response, {"decision": "acceptForSession"})
         self.assertEqual(denied_response, {"decision": "decline"})
 
@@ -1839,7 +1862,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 workspace,
             )
 
-        self.assertEqual(exec_response, {"decision": "approved_for_session"})
+        self.assertEqual(exec_response, {"decision": "denied"})
         self.assertEqual(patch_response, {"decision": "approved_for_session"})
         self.assertEqual(denied_response, {"decision": "denied"})
 
