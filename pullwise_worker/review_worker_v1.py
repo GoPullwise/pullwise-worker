@@ -356,7 +356,7 @@ Rules:
 - Do not install dependencies.
 - Do not call external review or scanning tools.
 - Do not modify application source files.
-- Write only under .codex-review/** when file writes are needed.
+- Write only the declared outputs inside the current writable phase output directory.
 - For dynamic tests, write source only under intent/generated-tests/** in the writable phase output directory; the Worker materializes and executes it in the disposable validation workspace.
 - Helper scripts must use Python 3 standard library only.
 - Helper scripts perform mechanical tasks only.
@@ -688,8 +688,14 @@ class Isolation:
             config_toml.write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
             config_toml.chmod(0o600)
         agents = self.codex_home / "AGENTS.md"
-        if not agents.exists():
-            agents.write_text(GLOBAL_AGENTS_TEXT, encoding="utf-8")
+        try:
+            existing_agents = read_text_no_follow(agents, encoding="utf-8")
+        except FileNotFoundError:
+            existing_agents = ""
+        if not existing_agents or existing_agents.startswith(
+            "# Codex Repo Review Worker Global Instructions"
+        ):
+            _write_worker_owned_bytes(agents, GLOBAL_AGENTS_TEXT.encode("utf-8"))
             agents.chmod(0o600)
 
     def env(self, config: Any) -> dict[str, str]:

@@ -135,6 +135,10 @@ Codex execution rules:
   source repository, with no additional writable roots; source, prior evidence,
   prompts, schemas, tools, configuration, run-state, and logs remain read-only.
   After the turn, publish only that phase's explicit allowlisted outputs.
+- Keep generated global Codex instructions and per-phase prompts consistent
+  with that external writable directory. Refresh the Worker-owned global
+  instructions during isolation preparation so upgrades cannot retain stale
+  `.codex-review` write guidance.
 - Treat every model-turn workspace as hostile. Snapshot/publish only bounded
   regular declared files, reject symlinks and non-regular files, and ignore
   undeclared files. Worker/SDK JSONL appends and JSON reads must also reject

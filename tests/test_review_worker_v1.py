@@ -34,6 +34,7 @@ from pullwise_worker._main_part_07_readiness_doctor import run_doctor, subscript
 from pullwise_worker._main_part_08_lifecycle_cleanup import worker_wrapper_script
 from pullwise_worker.review_worker_v1 import (
     DEBUG_BUNDLE_ARTIFACT_ID,
+    GLOBAL_AGENTS_TEXT,
     INTENT_TEST_CLASSIFICATIONS,
     MECHANICAL_PHASES,
     PIPELINE_PHASES,
@@ -9173,7 +9174,10 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             self.assertIn("Role: Repo Mapper", prompt)
             self.assertIn("Required outputs:", prompt)
-            self.assertIn(f"- Paths are relative to the run artifact directory: {run_dir}", prompt)
+            self.assertIn(
+                f"- Paths are relative to the writable phase output directory: {run_dir}",
+                prompt,
+            )
             self.assertIn("- repo-map.json", prompt)
             self.assertIn("--- 00_repo_mapper.md ---", prompt)
             self.assertIn("CUSTOM REPO MAP TEMPLATE", prompt)
@@ -11655,6 +11659,33 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 str(isolation.codex_home / "bin"),
             ],
         )
+
+    def test_isolation_refreshes_worker_owned_global_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
+            os.environ,
+            {"PULLWISE_WORKER_ROOT": ""},
+            clear=False,
+        ):
+            config = SimpleNamespace(
+                worker_id="wk_agents",
+                service_home=tmp_dir,
+            )
+            isolation = Isolation(config)
+            isolation.prepare()
+            agents_path = isolation.codex_home / "AGENTS.md"
+            agents_path.write_text(
+                "# Codex Repo Review Worker Global Instructions\n\n"
+                "- Write only under .codex-review/** when file writes are needed.\n",
+                encoding="utf-8",
+            )
+
+            isolation.prepare()
+
+            self.assertEqual(
+                agents_path.read_text(encoding="utf-8"),
+                GLOBAL_AGENTS_TEXT,
+            )
+            self.assertNotIn("Write only under .codex-review", GLOBAL_AGENTS_TEXT)
 
     def test_intent_source_repair_recovers_live_generated_file_aliases(self) -> None:
         alias_cases = (

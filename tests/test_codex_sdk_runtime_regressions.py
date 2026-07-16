@@ -18,7 +18,10 @@ class CodexSdkRuntimeRegressionTests(unittest.TestCase):
         server._codex = SimpleNamespace(thread_start=thread_start)
         server._runtime = SimpleNamespace(
             ApprovalMode=SimpleNamespace(deny_all="deny_all"),
-            Sandbox=SimpleNamespace(workspace_write="workspace_write"),
+            Sandbox=SimpleNamespace(
+                read_only="read_only",
+                workspace_write="workspace_write",
+            ),
         )
         return server
 

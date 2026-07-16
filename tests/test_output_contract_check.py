@@ -81,10 +81,15 @@ class OutputContractCheckTest(unittest.TestCase):
                 def __init__(self) -> None:
                     self.calls = 0
 
-                def run_turn(self, **_kwargs: object) -> SimpleNamespace:
+                def run_turn(self, **kwargs: object) -> SimpleNamespace:
                     self.calls += 1
+                    repair_path = (
+                        Path(str(kwargs["turn_cwd"]))
+                        / "raw-reviewers"
+                        / raw_path.name
+                    )
                     write_json(
-                        raw_path,
+                        repair_path,
                         reviewer_payload(with_location=self.calls == 2),
                     )
                     return SimpleNamespace(duration_ms=5)
