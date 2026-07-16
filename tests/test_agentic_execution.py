@@ -1125,6 +1125,103 @@ class AgenticExecutionContractsTest(unittest.TestCase):
         self.assertEqual(repaired["test_runs"][0]["attempt"], 2)
         self.assertEqual(history["attempts"][0]["test_runs"][0]["status"], "failed")
 
+    def test_runtime_repair_refreshes_existing_run_local_generated_test_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            declared_path = (
+                Path("intent") / "generated-tests" / "generated_test.py"
+            ).as_posix()
+            run_dir, validation_repo = _write_intent_run(
+                root,
+                plan={
+                    "schema_version": "intent-test-plan/v1",
+                    "test_targets": [{"test_id": "ITP-001"}],
+                },
+                source={
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "target_test_ids": ["ITP-001"],
+                            "path": declared_path,
+                            "command": [
+                                sys.executable,
+                                "-m",
+                                "unittest",
+                                declared_path,
+                            ],
+                        }
+                    ],
+                },
+            )
+            failing_source = (
+                "import unittest\n"
+                "import unneeded_project_dependency\n"
+                "class GeneratedTest(unittest.TestCase):\n"
+                "    def test_behavior(self): self.assertTrue(True)\n"
+            )
+            generated_source = run_dir / declared_path
+            generated_source.parent.mkdir(parents=True, exist_ok=True)
+            generated_source.write_text(failing_source, encoding="utf-8")
+            validation_path = validation_repo / declared_path
+            write_json(run_dir / "run-state.json", {"thread_id": "thread-1"})
+
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"):
+                initial = run_intent_tests(run_dir)
+            self.assertEqual(initial["test_runs"][0]["status"], "failed")
+            self.assertEqual(validation_path.read_text(encoding="utf-8"), failing_source)
+            write_json(run_dir / "intent" / "intent-test-results.raw.json", initial)
+
+            repaired_source = (
+                "import unittest\n"
+                "class GeneratedTest(unittest.TestCase):\n"
+                "    def test_behavior(self): self.assertTrue(True)\n"
+            )
+
+            class RepairingCodex:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def run_turn(self, **kwargs):
+                    self.calls += 1
+                    _write_staged_generated_test(
+                        kwargs,
+                        "generated_test.py",
+                        repaired_source,
+                    )
+                    return SimpleNamespace(duration_ms=5)
+
+            codex = RepairingCodex()
+            worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+                "pullwise_worker.review_worker_v1.effort_for_phase",
+                return_value="medium",
+            ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
+                repaired = worker.repair_intent_test_runtime(
+                    codex,
+                    root / "repo",
+                    run_dir,
+                    {},
+                    max_attempts=1,
+                )
+
+            source_payload = json.loads(
+                (run_dir / "intent" / "intent-test-source.json").read_text(encoding="utf-8")
+            )
+            history = json.loads(
+                (run_dir / "intent" / "intent-test-execution-history.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            self.assertEqual(codex.calls, 1)
+            self.assertEqual(repaired["test_runs"][0]["status"], "passed")
+            self.assertEqual(repaired["test_runs"][0]["attempt"], 2)
+            self.assertEqual(history["attempts"][0]["test_runs"][0]["status"], "failed")
+            self.assertEqual(source_payload["generated_tests"][0]["path"], declared_path)
+            self.assertEqual(generated_source.read_text(encoding="utf-8"), repaired_source)
+            self.assertEqual(validation_path.read_text(encoding="utf-8"), repaired_source)
+
     def test_runtime_repair_reruns_only_repairable_tests_and_preserves_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

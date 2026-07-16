@@ -5957,7 +5957,7 @@ def _write_worker_owned_bytes(
         temporary.unlink(missing_ok=True)
 
 
-def _remove_worker_owned_output(path: Path, root: Path) -> None:
+def _validate_worker_owned_output(path: Path, root: Path) -> None:
     resolved_root = root.resolve(strict=False)
     if not _path_is_within(path.resolve(strict=False), resolved_root):
         raise OSError(f"worker output path escapes its root: {path}")
@@ -5967,7 +5967,6 @@ def _remove_worker_owned_output(path: Path, root: Path) -> None:
         return
     mode = path.lstat().st_mode
     if stat.S_ISREG(mode):
-        path.unlink()
         return
     if not stat.S_ISDIR(mode):
         raise OSError(f"worker output path is not regular: {path}")
@@ -5981,6 +5980,15 @@ def _remove_worker_owned_output(path: Path, root: Path) -> None:
             child_mode = (current / name).lstat().st_mode
             if not stat.S_ISREG(child_mode) or stat.S_ISLNK(child_mode):
                 raise OSError(f"worker output directory contains an unsafe entry: {current / name}")
+
+
+def _remove_worker_owned_output(path: Path, root: Path) -> None:
+    _validate_worker_owned_output(path, root)
+    if not path.exists():
+        return
+    if _is_regular_file_no_follow(path):
+        path.unlink()
+        return
     shutil.rmtree(path)
 
 
@@ -6033,61 +6041,208 @@ def prepare_model_turn_workspace(
     return staging
 
 
+MODEL_OUTPUT_PUBLICATION_JOURNAL = ".model-output-publication.json"
+
+
+def _model_output_publication_path(run_dir: Path, raw_path: object) -> Path:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise OSError("model output publication journal contains an invalid path")
+    relative = PurePosixPath(raw_path)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise OSError("model output publication journal contains an unsafe path")
+    candidate = run_dir.joinpath(*relative.parts)
+    if not _path_is_within(candidate.resolve(strict=False), run_dir.resolve(strict=False)):
+        raise OSError("model output publication journal path escapes the run directory")
+    return candidate
+
+
+def _write_model_output_publication_journal(
+    run_dir: Path,
+    payload: dict[str, Any],
+) -> None:
+    _write_worker_owned_bytes(
+        run_dir / MODEL_OUTPUT_PUBLICATION_JOURNAL,
+        (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"),
+    )
+
+
+def _recover_model_output_publication(run_dir: Path) -> None:
+    journal_path = run_dir / MODEL_OUTPUT_PUBLICATION_JOURNAL
+    if not journal_path.exists() and not journal_path.is_symlink():
+        return
+    if journal_path.is_symlink():
+        raise OSError("model output publication journal is a symlink")
+    try:
+        journal = json.loads(_bounded_regular_model_file(journal_path).payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError(f"model output publication journal is invalid: {exc}") from exc
+    if not isinstance(journal, dict) or journal.get("schema_version") != "model-output-publication/v1":
+        raise OSError("model output publication journal has an unsupported schema")
+    state = journal.get("state")
+    if state not in {"committing", "committed"}:
+        raise OSError("model output publication journal has an invalid state")
+    raw_items = journal.get("items")
+    if not isinstance(raw_items, list):
+        raise OSError("model output publication journal has invalid items")
+
+    items: list[tuple[Path, Path, Path, bool, bool]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise OSError("model output publication journal contains an invalid item")
+        destination = _model_output_publication_path(run_dir, raw_item.get("destination"))
+        prepared = _model_output_publication_path(run_dir, raw_item.get("prepared"))
+        backup = _model_output_publication_path(run_dir, raw_item.get("backup"))
+        had_destination = raw_item.get("had_destination")
+        has_replacement = raw_item.get("has_replacement")
+        if not isinstance(had_destination, bool) or not isinstance(has_replacement, bool):
+            raise OSError("model output publication journal contains invalid flags")
+        if prepared.parent != destination.parent or backup.parent != destination.parent:
+            raise OSError("model output publication journal paths have different parents")
+        if not prepared.name.startswith(f".{destination.name}.") or not prepared.name.endswith(".publish"):
+            raise OSError("model output publication journal contains an invalid prepared path")
+        if not backup.name.startswith(f".{destination.name}.") or not backup.name.endswith(".backup"):
+            raise OSError("model output publication journal contains an invalid backup path")
+        items.append((destination, prepared, backup, had_destination, has_replacement))
+
+    if state == "committing":
+        for destination, _prepared, backup, had_destination, _has_replacement in reversed(items):
+            backup_exists = backup.exists() or backup.is_symlink()
+            destination_exists = destination.exists() or destination.is_symlink()
+            if backup_exists:
+                if backup.is_symlink():
+                    raise OSError("model output publication backup is a symlink")
+                if destination_exists:
+                    _remove_worker_owned_output(destination, run_dir)
+                os.replace(backup, destination)
+            elif had_destination and not destination_exists:
+                raise OSError("model output publication lost its previous destination")
+            elif not had_destination and destination_exists:
+                _remove_worker_owned_output(destination, run_dir)
+    else:
+        for destination, _prepared, backup, had_destination, has_replacement in items:
+            if has_replacement and not (destination.exists() or destination.is_symlink()):
+                if had_destination and (backup.exists() or backup.is_symlink()) and not backup.is_symlink():
+                    os.replace(backup, destination)
+                raise OSError("committed model output publication is missing its destination")
+
+    for _destination, prepared, backup, _had_destination, _has_replacement in items:
+        if prepared.exists() or prepared.is_symlink():
+            _remove_worker_owned_output(prepared, run_dir)
+        if backup.exists() or backup.is_symlink():
+            _remove_worker_owned_output(backup, run_dir)
+    _remove_worker_owned_output(journal_path, run_dir)
+
+
 def publish_model_turn_outputs(
     staging: Path,
     run_dir: Path,
     declared_outputs: tuple[str, ...],
 ) -> list[str]:
+    _recover_model_output_publication(run_dir)
     snapshot = _declared_model_output_snapshot(staging, declared_outputs)
     resolved_run_dir = run_dir.resolve(strict=False)
+    transaction_id = f"{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+    transaction_items: list[dict[str, Any]] = []
+    prepared_paths: list[Path] = []
     for declared in declared_outputs:
         relative = PurePosixPath(declared)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise OSError(f"model output declaration is unsafe: {declared}")
         source = staging.joinpath(*relative.parts)
         destination = run_dir.joinpath(*relative.parts)
         if not _path_is_within(destination.resolve(strict=False), resolved_run_dir):
             raise OSError(f"model output destination escapes the run directory: {destination}")
-        if not source.exists() and not source.is_symlink():
-            _remove_worker_owned_output(destination, run_dir)
-            continue
-        if path_has_symlink_component(source):
-            raise OSError(f"declared model output contains a symlink: {source}")
-        if source.is_file():
-            output = snapshot.get(relative.as_posix())
-            if output is None:
-                raise OSError(f"declared model output snapshot is missing: {source}")
-            if destination.is_dir():
-                _remove_worker_owned_output(destination, run_dir)
-            elif destination.is_symlink():
-                raise OSError(f"model output destination is a symlink: {destination}")
-            _write_worker_owned_bytes(
-                destination,
-                output.payload,
-                executable=output.executable,
-            )
-            continue
-        if not source.is_dir():
-            raise OSError(f"declared model output is not regular: {source}")
+        if path_has_symlink_component(destination.parent):
+            raise OSError(f"model output destination parent contains a symlink: {destination.parent}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(
-            f".{destination.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.publish"
+        destination_exists = destination.exists() or destination.is_symlink()
+        if destination.is_symlink():
+            raise OSError(f"model output destination is a symlink: {destination}")
+        if destination_exists and not (
+            _is_regular_file_no_follow(destination) or destination.is_dir()
+        ):
+            raise OSError(f"model output destination is not regular: {destination}")
+        if destination_exists:
+            _validate_worker_owned_output(destination, run_dir)
+        prepared = destination.with_name(
+            f".{destination.name}.{transaction_id}.publish"
         )
-        temporary.mkdir(parents=False, exist_ok=False)
-        prefix = relative.as_posix().rstrip("/") + "/"
-        try:
-            for snapshot_path, output in snapshot.items():
-                if not snapshot_path.startswith(prefix):
-                    continue
-                nested = PurePosixPath(snapshot_path[len(prefix) :])
+        backup = destination.with_name(
+            f".{destination.name}.{transaction_id}.backup"
+        )
+        if prepared.exists() or prepared.is_symlink() or backup.exists() or backup.is_symlink():
+            raise OSError(f"model output publication transaction path already exists: {destination}")
+        has_replacement = source.exists() or source.is_symlink()
+        if has_replacement:
+            if path_has_symlink_component(source):
+                raise OSError(f"declared model output contains a symlink: {source}")
+            if source.is_file():
+                output = snapshot.get(relative.as_posix())
+                if output is None:
+                    raise OSError(f"declared model output snapshot is missing: {source}")
                 _write_worker_owned_bytes(
-                    temporary.joinpath(*nested.parts),
+                    prepared,
                     output.payload,
                     executable=output.executable,
                 )
-            _remove_worker_owned_output(destination, run_dir)
-            os.replace(temporary, destination)
-        finally:
-            if temporary.exists() or temporary.is_symlink():
-                _remove_worker_owned_output(temporary, run_dir)
+            elif source.is_dir():
+                prepared.mkdir(parents=False, exist_ok=False)
+                prefix = relative.as_posix().rstrip("/") + "/"
+                for snapshot_path, output in snapshot.items():
+                    if not snapshot_path.startswith(prefix):
+                        continue
+                    nested = PurePosixPath(snapshot_path[len(prefix) :])
+                    _write_worker_owned_bytes(
+                        prepared.joinpath(*nested.parts),
+                        output.payload,
+                        executable=output.executable,
+                    )
+            else:
+                raise OSError(f"declared model output is not regular: {source}")
+            prepared_paths.append(prepared)
+        transaction_items.append(
+            {
+                "destination": destination.relative_to(run_dir).as_posix(),
+                "prepared": prepared.relative_to(run_dir).as_posix(),
+                "backup": backup.relative_to(run_dir).as_posix(),
+                "had_destination": destination_exists,
+                "has_replacement": has_replacement,
+            }
+        )
+
+    journal = {
+        "schema_version": "model-output-publication/v1",
+        "state": "committing",
+        "items": transaction_items,
+    }
+    try:
+        _write_model_output_publication_journal(run_dir, journal)
+        for item in transaction_items:
+            if not item["had_destination"]:
+                continue
+            destination = _model_output_publication_path(run_dir, item["destination"])
+            backup = _model_output_publication_path(run_dir, item["backup"])
+            os.replace(destination, backup)
+        for item in transaction_items:
+            if not item["has_replacement"]:
+                continue
+            prepared = _model_output_publication_path(run_dir, item["prepared"])
+            destination = _model_output_publication_path(run_dir, item["destination"])
+            os.replace(prepared, destination)
+        journal["state"] = "committed"
+        _write_model_output_publication_journal(run_dir, journal)
+    except BaseException as publication_error:
+        try:
+            _recover_model_output_publication(run_dir)
+        except BaseException as rollback_error:
+            raise OSError(
+                f"model output publication failed and rollback could not complete: {rollback_error}"
+            ) from publication_error
+        raise
+    _recover_model_output_publication(run_dir)
+    for prepared in prepared_paths:
+        if prepared.exists() or prepared.is_symlink():
+            _remove_worker_owned_output(prepared, run_dir)
     return sorted(snapshot)
 
 

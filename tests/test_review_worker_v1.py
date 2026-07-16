@@ -88,6 +88,7 @@ from pullwise_worker.review_worker_v1 import (
     location_verification_payload,
     minimal_repo_profile_payload,
     package_json_has_test_script,
+    materialize_generated_intent_test_sources,
     materialize_artifacts,
     materialize_terminal_artifacts,
     normalized_agent_report_finding,
@@ -10310,6 +10311,50 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             self.assertFalse((run_generated / "stale_test.py").exists())
             self.assertTrue((run_dir / "worker-owned.json").is_file())
 
+    def test_model_turn_publication_rolls_back_all_outputs_when_directory_commit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            staging = root / "model-turns" / "run_1" / "intent-writing"
+            run_dir = root / "repo" / ".codex-review" / "runs" / "run_1"
+            staged_source = staging / "intent" / "intent-test-source.json"
+            staged_generated = staging / "intent" / "generated-tests"
+            run_source = run_dir / "intent" / "intent-test-source.json"
+            run_generated = run_dir / "intent" / "generated-tests"
+            staged_generated.mkdir(parents=True)
+            run_generated.mkdir(parents=True)
+            staged_source.write_text('{"version":"new"}\n', encoding="utf-8")
+            (staged_generated / "new_test.py").write_text("new\n", encoding="utf-8")
+            run_source.write_text('{"version":"old"}\n', encoding="utf-8")
+            (run_generated / "old_test.py").write_text("old\n", encoding="utf-8")
+            real_replace = os.replace
+
+            def fail_directory_commit(source: object, destination: object) -> None:
+                source_path = Path(source)
+                destination_path = Path(destination)
+                if source_path.name.endswith(".publish") and destination_path == run_generated:
+                    raise PermissionError("injected directory commit failure")
+                real_replace(source, destination)
+
+            with patch(
+                "pullwise_worker.review_worker_v1.os.replace",
+                side_effect=fail_directory_commit,
+            ), self.assertRaisesRegex(PermissionError, "injected directory commit failure"):
+                publish_model_turn_outputs(
+                    staging,
+                    run_dir,
+                    ("intent/intent-test-source.json", "intent/generated-tests"),
+                )
+
+            self.assertEqual(run_source.read_text(encoding="utf-8"), '{"version":"old"}\n')
+            self.assertEqual((run_generated / "old_test.py").read_text(encoding="utf-8"), "old\n")
+            self.assertFalse((run_generated / "new_test.py").exists())
+            self.assertFalse((run_dir / ".model-output-publication.json").exists())
+            self.assertEqual(
+                list((run_dir / "intent").glob(".*.publish"))
+                + list((run_dir / "intent").glob(".*.backup")),
+                [],
+            )
+
     def test_model_turn_publication_rejects_aggregate_output_over_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -10410,6 +10455,42 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                 run_dir / "intent" / "generated-tests" / "harness"
             ).stat().st_mode & 0o7777
             self.assertEqual(published_mode, 0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX execute bits are not meaningful on Windows")
+    def test_generated_intent_materialization_refreshes_execute_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            run_dir = repo / ".codex-review" / "runs" / "run_1"
+            validation_repo = root / "validation-repo"
+            source_path = run_dir / "intent" / "generated-tests" / "harness"
+            destination = validation_repo / "intent" / "generated-tests" / "harness"
+            source_path.parent.mkdir(parents=True)
+            destination.parent.mkdir(parents=True)
+            source_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            destination.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            source_path.chmod(0o755)
+            destination.chmod(0o600)
+
+            errors = materialize_generated_intent_test_sources(
+                run_dir,
+                validation_repo,
+                {
+                    "validation_repo_root": str(validation_repo),
+                    "source_repo_root": str(repo),
+                },
+                {
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": "intent/generated-tests/harness",
+                        }
+                    ]
+                },
+            )
+
+            self.assertEqual(errors, {})
+            self.assertEqual(destination.stat().st_mode & 0o7777, 0o700)
 
     def test_reviewer_fanout_runs_scoped_assignments_on_bounded_independent_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
