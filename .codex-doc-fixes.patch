@@ -1,0 +1,412 @@
+diff --git a/docs/agent-first-worker-mvp-implementation-design.md b/docs/agent-first-worker-mvp-implementation-design.md
+--- a/docs/agent-first-worker-mvp-implementation-design.md
++++ b/docs/agent-first-worker-mvp-implementation-design.md
+@@ -90,9 +90,13 @@
+ ### 2.2 字符串、时间、ID 和摘要
+ 
+ - 所有 schema 名为 ASCII 小写 kebab-case，格式 `<name>/v1`。
+ - 所有时间为带 `Z` 的 UTC RFC3339，写入时精确到毫秒；控制逻辑使用 monotonic clock，墙钟只用于审计。
+ - 所有持续时间、token、字节、金额和百分比都用整数；内部百分比使用 basis points `0..10000`。Digest-bound 对象禁止浮点数、NaN 和 Infinity。
+-- opaque ID 格式为 `<prefix>_<32 lowercase hex>`，由 128-bit CSPRNG 产生。固定前缀见各 schema。ID 最长 80 字符。
++- `OpaqueId32` 格式为 `<prefix>_<32 lowercase hex>`，由 128-bit CSPRNG 产生，最长 80 字符。
++- `DigestDerivedId64` 使用各 schema 明确声明的 `<prefix>_<64 lowercase hex>`；其最大长度由该 schema 固定，可超过 80 字符。`requirement_id` 与 `fragment_id` 属于此类。
++- `LegacyWireId` 完全遵守冻结的 Server 契约，不套用 `OpaqueId32`/`DigestDerivedId64`；内部引用 legacy 对象时必须另存 identity kind。
+ - SHA-256 文本统一为 64 位小写 hex；字段名为 `sha256`，不带算法前缀。
+ - 自然语言字符串在 hash 前必须是合法 UTF-8 且 Unicode NFC；不得悄悄替换无效字节。
+ - 相对路径使用 `/`、不得以 `/` 开头、不得含空段、`.`、`..`、NUL 或反斜杠；case-fold 后碰撞直接失败。
+@@ -135,10 +139,23 @@
+ 可能缺失的事实使用 `availability-ref/v1` 的严格联合：
+ 
+ - `{"availability":"available","ref":ContentRef}`；
+ - `{"availability":"unavailable","reason_code":StableCode}`；
+ - `{"availability":"not_applicable","reason_code":StableCode}`。
+ 
+-不得用空字符串、缺字段或裸 `null` 表示未知；唯一例外是 TaskResult 明确定义的 `change_set_ref`。
++不得用空字符串、缺字段或裸 `null` 表示未知。只有 schema 对某字段显式声明 `type:[T,"null"]` 时才可使用 `null`；这不是 AvailabilityRef。MVP 明确 nullable 的字段只有各表列出的 lifecycle 时间/owner/interaction/exit code/transport 字段，以及 TaskResult 的 `change_set_ref`。所有证据可用性字段必须用 AvailabilityRef。
++
++所有身份主体统一为严格的 `actor/v1`：
++
++| 字段 | 约束 |
++|---|---|
++| `schema_id` | `actor/v1` |
++| `kind` | `task_owner|quality_verifier|legacy_domain_reviewer|worker_control|server_control|user_control|system_reconciler` |
++| `id` | 非空稳定身份，最长 160 |
++| `session_id` | `task_owner|quality_verifier|legacy_domain_reviewer` 必须为 `OpaqueId32`；其他 kind 必须为 null |
++
++actor 只描述“谁做了记录中的动作”，不隐含权限。权限必须由 policy/grant/keyring 单独证明。
+ 
+ ## 3. 组件边界
+@@ -298,20 +315,34 @@
+ ### 5.1 TaskRequest
+ 
+ `task-request/v1` 必填字段：
+ 
+ | 字段 | 约束 |
+ |---|---|
+ | `schema_id` | `task-request/v1` |
+-| `task_id` | `task_<32hex>`；Pullwise Adapter 可使用稳定映射后的 `scan_id` |
++| `task_id` | `task_<32hex>`；Pullwise Adapter 必须使用下述冻结映射 |
+ | `task_type` | versioned identifier |
+ | `intent_kind` | `change|analysis|diagnosis|report|operation` |
+ | `objective` | 非空，最大 16 KiB |
+ | `acceptance_criteria` | `1..256` 个 `{source_id,statement}`；source_id Task内唯一 |
+ | `constraints` | `0..256` 个 `{source_id,statement}` |
+ | `delivery` | `{kind,required_outputs[],output_language}`；本身是 mandatory constraint |
+ | `requested_capabilities` | 去重排序的 capability ID 数组 |
+ | `requested_budgets` | wall/token/cost/tool/session/attempt 整数上限 |
+ | `interaction_policy` | `supported|unavailable`、input/approval deadline |
+ | `submitted_at`, `submitted_by` | 可信控制面身份与时间 |
+ 
+ TaskRequest 一经 accepted 永不修改。任何补充输入形成 `interaction-response/v1` 和新的 Ledger entry，不改原请求。
++
++Pullwise `legacy-v1-task-mapping/v1` 固定为：
++
++```text
++scan_bytes = UTF8(NFC(scan_id))
++task_hash  = SHA256(UTF8("pullwise-scan-id/v1\0") || scan_bytes)
++task_id    = "task_" || lowercase_hex(task_hash)[0:32]
++transport_epoch = integer(job.attempt)
++```
++
++`scan_id` 必须是非空合法 UTF-8、`job.attempt` 必须是 `1..2^53-1`。数据库以 `task_id` 唯一并同时保存原始 `scan_id`；命中既有 `task_id` 时，原始 `scan_id` 必须逐字节相同，否则 `TASK_ID_COLLISION`，不得复用旧 Task。每次创建 native Attempt 时 `native_epoch=current+1`；process restart 或内部 retry 不得复用 epoch。
++
++claim→TaskRequest/Ledger ingest 顺序也属于契约：固定 objective → 固定 acceptance criteria（按规范列出的 source_id 升序）→ claim constraints。constraint source tuple 为 `(JSON Pointer, array index or -1, canonical scalar/object bytes)`；object keys 按 JCS 排序、array 保持 wire 顺序，Ledger entry 再按 `(source_kind,source_id,requirement_id)` 排序。完整 valid/invalid mapping fixtures必须覆盖相同 claim 重启、Unicode、array、缺字段和 hash collision 注入。
+ 
+ ### 5.2 EffectiveExecutionPolicy
+@@ -321,18 +352,30 @@
+-`effective-execution-policy/v1` 至少含：
++`effective-execution-policy/v1` 的 JSON Schema 必须穷举以下字段：
+ 
+ - `policy_id/policy_version/issued_at/issuer`；
+ - `task_type`、`granted_capabilities[]`、`denied_capabilities[{id,reason_code}]`；
+ - `capability_risk_ceiling`、`quality_risk_floor`；
+ - `source_write_mode = isolated_reversible|read_only`；
+ - `allowed_read_roots[]/allowed_write_roots[]`；
+- - `network {mode:deny|allowlist,hosts[]}`；
++- `agent_tool_network {mode:deny|allowlist,origins[]}`；
+ - `dependency_install = deny|approval_required`；
+ - `command_policy_ref`、`secret_policy_ref`、`redaction_policy_ref`；
+ - `budgets`、`terminalization_reserve_ms`、`max_agents`、`max_agent_sessions_total`、`max_attempts`；
+ - `interaction_mode`、`authorized_waiver_issuers[]`；
+ - `digest`。
+ 
+-请求是能力愿望，不是 grant。Task Owner、repo instructions、tools 和 Adapter 只能请求更低/相同权限。Pullwise full-scan profile 必须拒绝 source modification、dependency install、network、非标准库 helper；这些值来自 Server claim，缺失时 job fail closed，而非本地默认。
++请求是能力愿望，不是 grant。Task Owner、repo instructions、tools 和 Adapter 只能请求更低/相同权限。Pullwise full-scan profile 必须拒绝 Agent tool 的 source modification、dependency install、network、非标准库 helper；这些值来自 Server claim，缺失时 job fail closed，而非本地默认。
++
++Agent 权限面与 Worker 自身 transport 权限面严格分离：
++
++- `AgentToolCapabilityPolicy` 就是上述 effective policy；Codex session、model-issued tool 和 model-turn sandbox只能看到它。Pullwise profile 的 `agent_tool_network.mode=deny`。
++- `WorkerControlTransportPolicy` 是 daemon 启动配置，不是 Agent capability：只允许配置中的单一 Server origin，以及当前 claim `repository` URL 规范化出的单一 clone origin；redirect 到其他 origin 一律拒绝。register/lease/heartbeat/events/artifacts/result 和 materialize clone 只能由 Supervisor/Adapter进程发起。
++- worker token、clone token 和 TLS client secret 只存在 Supervisor/Adapter secret store，不能进入 Agent环境、prompt、tool参数、checkpoint、Observation、artifact或debug。clone 完成即撤销/删除 clone credential。
++- Worker transport 不记作 R2 grant，不形成 Agent tool Observation；它形成独立 `transport-receipt/v1`。任何把 Worker transport client 暴露给 Agent 的实现都以 `POLICY_INVARIANT_BROKEN` 终止。
+ 
+ ### 5.3 Requirement Ledger
+@@ -365,7 +408,14 @@
+ 4. waiver 不删除/停用 entry，只改变允许的 outcome。
+ 5. `COMPLETED/NO_CHANGE_NEEDED` 仍要求所有 active mandatory entry PASS。
+ 
+-`waiver-event/v1` 必须绑定 `task_id/requirement_id/ledger_digest/policy_version/issuer/key_id/reason/issued_at/expires_at/signature`。MVP Pullwise legacy profile 的 `authorized_waiver_issuers=[]`，因此所有 waiver 请求拒绝；local/eval 只有控制面 keyring 验证成功时可接受。Agent 自述“用户同意”不是授权。
++`waiver-event/v1` 必须绑定 `waiver_id/task_id/requirement_id/waived_ledger_version/ledger_digest/policy_version/scope/issuer/key_id/reason/issued_at/expires_at/revokes_waiver_id/signature`。`scope` 只能是 `this_requirement_this_ledger_version`；`revokes_waiver_id` 仅在签名撤销事件中非 null。签名算法固定：
++
++```text
++message = UTF8("pullwise-waiver-event/v1\0") || CanonicalJSON(event_without_signature)
++signature = base64url_no_padding(Ed25519.sign(private_key, message))
++```
++
++验证时 `key_id` 必须在 effective policy 固定 keyring 内、key owner 等于 `issuer`、issuer 位于 `authorized_waiver_issuers`，且 current time 位于 `[issued_at,expires_at)`；ledger/policy/version/Task 任一不匹配、已被有效撤销或签名非 canonical 均拒绝。MVP Pullwise legacy profile 的 issuers/keyring 为空，因此所有 waiver 请求拒绝；Agent 自述“用户同意”不是授权。
+@@ -510,13 +560,17 @@
+ ### 7.1 SourceSelectionPolicy
+ 
+ `source-selection-policy/v1` 是 immutable root，定义哪些 bytes 属于 SourceState。字段：
+ 
+ - `root_identity`（不含宿主绝对路径）。
+-- `include = tracked_and_declared_delivery` 或 Pullwise 的 `all_repository_regular_files`。
++- `include = tracked_preexisting_and_declared_delivery` 或 Pullwise 的 `all_repository_regular_files`。
+ - `excluded_control_roots`，MVP 最少 `.git/` 和 worker-owned runtime roots。
+ - `ephemeral_patterns[]`，只允许 policy 静态签发，Agent 不可追加。
+ - `symlink_policy = record_target_no_follow`。
+ - `case_collision_policy = reject`。
+ - `digest`。
+ 
++通用 profile 的 `tracked_preexisting_and_declared_delivery` 不是“只看 Git tracked”：original manifest 包含所有 tracked path，以及 Task accepted 时存在的全部非 excluded regular file/symlink/gitlink（包括 dirty、untracked 和 ignored）。final scan 取 original paths、当前 tracked paths、声明 delivery paths和所有新出现的非 excluded path的并集；新出现但未声明的 path仍进入 ChangeSet并触发 policy violation，不能借 selection policy 隐藏。pre-existing bytes必须原样保留，除非 R1 grant明确授权对应 path。
++
+ Pullwise full-scan 为了证明只读，使用 `all_repository_regular_files`：除 `.git/` 和显式 worker-owned runtime tree 外，materialized checkout 的所有 regular file、symlink identity、gitlink 都进入 original/final 比较。`run/bundles/**` 虽不能进入 Debug，但仍属于 source-bearing review evidence，不能因 debug 排除而脱离完整性检查。
+@@ -575,16 +629,16 @@
+ ### 8.1 Observation
+ 
+ `observation/v1` 由 Gateway 自动写入，字段全部必填：
+ 
+ - `observation_id = obs_<32hex>`、`task_id/attempt_id/native_epoch`。
+-- actor union `{kind:task_owner|quality_verifier|legacy_domain_reviewer|worker_control, id, session_id|null}`。
++- `actor` 是严格 `actor/v1`；只有 Agent session actor 带非 null `session_id`。
+ - `tool_id/tool_version/tool_invocation_id/idempotency_key/input_digest`。
+-- `status = succeeded|failed|timed_out|cancelled|policy_denied|infrastructure_error`。
++- `status = succeeded|failed|timed_out|cancelled|policy_denied|policy_violation|infrastructure_error`。
+ - `started_at/completed_at/duration_ms/exit_code|null`。
+ - `source_state_before_id/source_state_after_id`。
+ - `execution_state_id|null`。
+ - `stdout_ref/stderr_ref/result_ref` AvailabilityRef。
+ - `redaction_report_ref`。
+@@ -650,15 +704,31 @@
+-### 8.6 EvidenceClosureManifest
++### 8.6 PreGate 与 final EvidenceClosureManifest
+ 
+-Closure 必须包含从 TaskResult 可达的：request、policy、charter、Ledger snapshot、waiver events、proposal、source/execution manifests、change set、pre/final ObservationManifest、每条 Observation raw artifact、verifier input/work/attestation、交付 artifact/report、empty Effect Ledger、budget summary、GateDecision。
++先冻结 `pre-gate-evidence-closure-manifest/v1`。它必须包含 Gate 可验证的全部语义 evidence：request、policy、charter、Ledger snapshot、waiver events、proposal、source/execution manifests、change set、pre/final ObservationManifest、每条 Observation raw artifact、verifier input/work/attestation、交付 artifact/report、empty Effect Ledger 和 budget summary。
++
++PreGate closure 明确排除 `GateInputSnapshot`、`GateDecision`、final `EvidenceClosureManifest`、`TaskResultCore`、完整 TaskResult、WorkerDebugFragment/ServerDebugSnapshot/Assembly 和全部 diagnostics/debug对象。任意 schema registry pointer 若从 PreGate root 可回指这些对象，schema validation直接失败。
+ 
+ 算法固定：
+ 
+ 1. 从声明的 roots 深度优先解析 ContentRef；schema registry 给出每种对象的 ref-bearing JSON pointers。
+ 2. 验证 bytes/size/hash/schema；拒绝 alias、循环、未知 schema、跨 Task ref。
+ 3. 对完全相同 ContentRef 去重；同 artifact ID 不同 digest 冲突。
+-4. 排除 closure manifest 自身和 TaskResult 自身。
++4. 排除 closure manifest 自身和上述所有 Gate/result/debug对象。
+ 5. entries 按 `(content_schema_id,artifact_id,sha256)` 升序。
+-6. `closure_digest = sha256(CanonicalJSON(entries))`；manifest bytes 自身另有 ContentRef SHA。
++6. `pre_gate_closure_digest = sha256(CanonicalJSON(entries))`；manifest bytes 自身另有 ContentRef SHA。
++
++GateDecision 产生后，Worker 机械构造 `evidence-closure-manifest/v1`：entries 恰为 PreGate entries 加上 PreGate manifest自身、`gate-input-snapshot/v1` 和 `gate-decision/v1` 三个 ContentRef，按同一排序/去重规则冻结。GateInput只能指向 PreGate closure，不能指向 final closure；GateDecision只能指向 GateInput。final closure仍排除 TaskResult/Core和全部 debug/diagnostics，因此没有反向边。
++
++唯一合法冻结序列是：
++
++```text
++PreGateEvidenceClosure → GateInputSnapshot → GateDecision
++→ final EvidenceClosureManifest → TaskResultCore
++→ terminal WorkerDebugFragment → complete TaskResult
++```
++
++任一步失败只能重开 proposal round；不得用 placeholder digest，也不得在后一步改写已冻结 bytes。
+@@ -687,7 +757,7 @@
+ ### 9.3 GateInputSnapshot
+ 
+-Gate 前先冻结 `gate-input-snapshot/v1`，绑定当时的：Task version/lifecycle/desired state/epoch、lease、deadline/budget、request/policy/Ledger/proposal/source/execution/manifest/attestations/effects/closure。Gate 只读该 snapshot，不边读边变。
++Gate 前先冻结 `gate-input-snapshot/v1`，绑定当时的：Task version/lifecycle/desired state/epoch、lease、deadline/budget、request/policy/Ledger/proposal/source/execution/manifest/attestations/effects，以及 `pre_gate_evidence_closure_ref/pre_gate_closure_digest`。它不得含 final closure ref。Gate 只读该 snapshot，不边读边变。
+@@ -705,12 +775,14 @@
+ | `GATE_ATTESTATIONS` | 独立性、own Observation、input/final manifest、coverage 与 verdict 聚合有效 |
+ | `GATE_REQUIREMENTS` | COMPLETED/NO_CHANGE 全 mandatory PASS；WITH_WAIVERS 仅有效 waiver 项可非 PASS |
+ | `GATE_OUTCOME_SHAPE` | outcome 的 oneOf 约束成立 |
+ | `GATE_EFFECTS_EMPTY` | Effect Ledger schema 有效且 rows=[]/unknown=0 |
+-| `GATE_EVIDENCE_CLOSURE` | 所有 transitive refs bytes/hash/size/schema 一致 |
++| `GATE_EVIDENCE_CLOSURE` | PreGate closure 的所有 transitive refs bytes/hash/size/schema 一致且无 Gate/result/debug反向边 |
+ | `GATE_BUDGET` | 没有超额/负 reservation/未结算 Agent session |
+ | `GATE_SECRET_SCAN` | 普通 artifacts、result、debug fragment 均通过 secret policy |
+ 
+-Gate 输出 `gate-decision/v1`：每个 predicate 的 boolean、stable failure code、repairability、evidence refs、input digest。相同 input digest 必须返回逐字节相同 decision。
++Gate 输出 `gate-decision/v1`：每个 predicate 的 boolean、stable failure code、repairability、evidence refs、input digest。相同 input digest 必须返回逐字节相同 decision。Gate通过后再按8.6机械冻结 final closure；final closure构造不新增语义判断。
++
++`GATE_SECRET_SCAN` 对 debug 的判断只消费 terminal fragment 之前已冻结的 `debug-redaction-plan/v1` 和被引用普通 evidence，不消费最终 fragment bytes；fragment构造后必须再做同一 secret policy scan，失败则不附 fragment并记录 `DEBUG_REDACTION_FAILED`，不能回写 GateDecision。
+@@ -735,20 +807,26 @@
+ | From | Event | Guard | To | 同一事务写集 |
+ |---|---|---|---|---|
+ | 无 | `task.accepted` | request/policy/ledger/CAS durable | QUEUED | Task v1、roots、accepted event |
+ | QUEUED | `attempt.claimed` | desired RUN、outer lease valid、budget可预留 | ACTIVE | native_epoch+1、Attempt LEASED、Task version+1 |
+ | ACTIVE | `interaction.requested` | channel supported、无 in-flight write | WAITING_INPUT/APPROVAL | checkpoint head、Attempt SUSPENDED、interaction、version+1 |
+ | WAITING_* | `interaction.responded` | 有效 response、未过期 | QUEUED | response、ledger additions、version+1 |
+ | WAITING_* | `interaction.expired` | deadline reached | FINALIZING | reason、version+1 |
+ | ACTIVE | `completion.proposed` | proposal fresh、source frozen | FINALIZING | proposal、write revoke、version+1 |
++| QUEUED/WAITING_* | `supervisor.terminalization_requested` | deadline/budget/interaction/capability/runtime/storage 的权威事实 | FINALIZING | reason、revoke grants、version+1；无 current Attempt 写入 |
++| ACTIVE | `supervisor.terminalization_requested` | 同上，且 tool 已停止或 fenced | FINALIZING | reason、revoke grants、version+1；current Attempt保留到 publication |
+ | FINALIZING | `gate.repairable` | budget/deadline足够、desired RUN | ACTIVE | invalidate round、write grant、version+1 |
+ | FINALIZING | `verification.infrastructure_retry` | 同一 outer lease、attempt budget允许 | QUEUED | fence Attempt、version+1 |
+ | FINALIZING | `result.published` | Gate/terminal CAS | TERMINAL | result + Attempt terminal + version+1 |
+ | 任意非终态 | `cancel.requested` | current version | 原 lifecycle | desired=CANCEL、version+1、revoke grants |
+-| 任意非终态 | `cancel.finalized` | no in-flight tool/effects empty | TERMINAL | CANCELLED result、Attempt CANCELLED |
+-| 任意非终态 | `outer_lease.fenced` | heartbeat/Server权威证明失效 | TERMINAL | abandonment record、Attempt FENCED、无 Worker TaskResult |
++| 任意非终态 | `cancel.finalized` | no in-flight tool/effects empty | TERMINAL | CANCELLED result；仅在 current Attempt存在且非终态时写 Attempt CANCELLED |
++| 任意非终态 | `outer_lease.fenced` | heartbeat/Server权威证明失效 | TERMINAL | abandonment record、无 Worker TaskResult；仅在 current Attempt存在且非终态时写 FENCED |
+ 
+ 未列出的 transition 一律 `STATE_TRANSITION_INVALID`。同一 event retry 使用 idempotency key；版本 CAS 先赢者决定取消/成功竞态。
++
++`supervisor.terminalization_requested` 的 reason enum恰为 `DEADLINE_REACHED|BUDGET_EXHAUSTED|INTERACTION_UNAVAILABLE|CAPABILITY_UNAVAILABLE|RUNTIME_FAILURE|STORAGE_FAILURE|PROTOCOL_FAILURE|POLICY_INVARIANT_BROKEN`。已在 FINALIZING 时同一 reason/idempotency key是 no-op；不同权威事实只 append terminalization fact，只有会改变 outcome选择时 task_version +1。
+@@ -752,7 +830,9 @@
+ ### 10.2 AttemptRecord 与完整转移
+ 
+-`attempt-record/v1` 必填：`attempt_id/task_id/native_epoch/transport binding/state/state_version/predecessor_checkpoint_generation/owner_session_id/lease_acquired_at/started_at/ended_at/termination_reason/budget_reservation_id`。
++`attempt-record/v1` 的 keys 全部必填：`attempt_id/task_id/native_epoch/transport_binding/state/state_version/predecessor_checkpoint_generation/owner_session_id/lease_acquired_at/started_at/ended_at/termination_reason/budget_reservation_id`。nullable规则固定：`predecessor_checkpoint_generation` 在无前驱时 null；`owner_session_id` 在 owner未创建时 null；`lease_acquired_at/started_at` 在对应动作前 null；`ended_at/termination_reason` 在非终态必须同时 null、终态必须同时非 null；`budget_reservation_id` 仅在无需预算的 reconciler path可 null。其他字段不得 null。
++
++Attempt terminal set是 `SUCCEEDED|SUSPENDED|FAILED|CANCELLED|FENCED`。Task transition若没有 current Attempt，禁止伪造一条仅为满足写集的 Attempt；若 current Attempt已terminal，Task终态事务只引用它，不改写它。
+@@ -779,12 +859,12 @@
+ ### 10.3 等待语义
+ 
+ 进入 waiting 的顺序不可调换：
+ 
+ 1. 阻止新 tool dispatch，等候或 fence 在途调用。
+ 2. snapshot SourceState、记录预算/ledger/evidence watermarks。
+-3. durable commit 新 checkpoint generation。
+-4. 同一事务将 Attempt `SUSPENDING→SUSPENDED`、Task `ACTIVE→WAITING_*`、记录 interaction。
++3. 将 checkpoint引用的全部 bytes与manifest原子写入文件 CAS并验证；此时尚不写 checkpoint index/Task pointer。
++4. 单一 SQLite `BEGIN IMMEDIATE` 同时检查 generation/previous hash/task version/epoch，插 checkpoint index、更新 Task checkpoint pointer、写 interaction、将 Attempt `SUSPENDING→SUSPENDED`、将 Task `ACTIVE→WAITING_*`，并令 `task_version` 恰好 +1。
+ 5. archive/close owner runtime，释放 sandbox compute；logical owner_id 保留。
+ 6. 非 Agent supervisor 继续 outer heartbeat；absolute deadline 不暂停。
+@@ -804,13 +884,15 @@
+ ### 10.5 双层 Checkpoint
+ 
+ `committed-checkpoint-manifest/v1` 必填：
+-Commit 协议：所有 referenced bytes 先入 CAS并验证 → 写 manifest CAS → SQLite `BEGIN IMMEDIATE` 检查 `generation=current+1` 和 previous hash → 插 checkpoint index → 更新 Task pointer/version → commit。完全相同 generation/hash 重试幂等；跳代、分叉、同 generation 不同 hash 拒绝。
++普通 checkpoint commit 协议：所有 referenced bytes先入CAS并验证 → 写manifest CAS → SQLite `BEGIN IMMEDIATE`检查 `generation=current+1`、previous hash、task version和epoch → 插checkpoint index → 更新Task pointer并令version恰好+1 → commit。waiting checkpoint使用10.3的合并事务，不能先执行一次普通 commit。完全相同 generation/hash + lifecycle write-set重试幂等；跳代、分叉、同generation不同hash或只完成一半状态写入都拒绝。
++
++CAS bytes/manifest 的存在不等于 committed checkpoint；恢复只读取 SQLite checkpoint index 指向且 hash chain验证成功的 generation。崩溃在CAS写入后、SQLite commit前只留下可GC的孤儿对象，不改变Task版本。
+@@ -851,42 +933,81 @@
+ `task-result/v1` common required fields：
+ 
+ - `schema_id/result_id/task_id/task_type/result_source=worker`。
+ - `outcome/reason_code/summary`。
++- `outcome_details`，使用11.3的严格 discriminator。
+ - `published_from_version/terminal_task_version`。
+ - `attempt_id/native_epoch/owner_id/owner_epoch`。
+ - `request_ref/policy_ref/charter_ref/requirement_ledger_ref`。
+ - `requirement_results[]`，按 requirement ID 排序，含 aggregated `PASS|FAIL|UNVERIFIABLE`、evidence/attestation/waiver refs。
+ - `original_source_state/final_source_state/execution_states` AvailabilityRef。
+ - `change_set_ref`（ContentRef 或 null）。
+ - `completion_proposal`、`observation_manifest`、`attestations`、`gate_decision` AvailabilityRef。
+ - `evidence_closure_ref/evidence_closure_digest`。
+ - `effect_ledger_ref/effects`，MVP count 全为 0。
+ - `artifact_refs[]/report_ref`。
+ - `budget_summary_ref/provenance`。
+ - `diagnostics.worker_debug_fragment`。
+ - `created_at/terminal_at`。
+ 
+ TaskResult 不包含自己的 digest/ref。`result_publications` 保存 TaskResult ContentRef/digest。`TaskResultCore` 是按 JSON Pointer 只删除 `/diagnostics/worker_debug_fragment` 后的对象；保留 `diagnostics:{}` 或其中其他字段，不能删除父对象。`task_result_core_digest` 在 terminal fragment 前计算，完整 result digest 在 fragment descriptor 写入后计算。
+ 
+ ### 11.3 outcome-discriminated oneOf
+ 
+-| Outcome | 必要条件 | 特殊字段 |
+-|---|---|---|
+-| `COMPLETED` | 全部 mandatory PASS；Success Gate pass | analysis/report 可 `change_set_ref=null`；change task 可非空 |
+-| `NO_CHANGE_NEEDED` | `intent_kind=change`；全 mandatory PASS；original=final；运行 Observation 证明已满足 | `change_set_ref=null`，reason=`ALREADY_SATISFIED` |
+-| `COMPLETED_WITH_WAIVERS` | 未 waiver mandatory PASS；其余有当前有效授权 | 不计完整成功；列出每项原 verdict/waiver |
+-| `PARTIAL` | 存在有用且安全的 deliverable；至少一个 mandatory FAIL/UNVERIFIABLE | 必须列 `delivered_scope/gaps/residual_risks` |
+-| `BLOCKED` | 缺输入、权限、capability或必要环境且无可安全 partial deliverable | 必须列 blocker 与解除条件 |
+-| `FAILED` | 不可恢复的 runtime/storage/protocol/quality failure，且无可安全 deliverable | 必须列 failure evidence；不能用于可请求输入的情况 |
+-| `CANCELLED` | desired CANCEL 先线性化；effects empty | 不允许 requirement PASS 推断为成功 |
++`outcome_details` 的 `kind` 必须等于 outcome 的 lowercase discriminator，且各 branch 的 required keys 如表；未列 keys因 `additionalProperties=false` 被禁止：
++
++| Outcome | allowed `reason_code` | `outcome_details` 除 `kind` 外的 required keys | `change_set_ref` |
++|---|---|---|---|
++| `COMPLETED` | `SUCCESS` | `delivered_scope[]` | change task必须available；analysis/diagnosis/report可null |
++| `NO_CHANGE_NEEDED` | `ALREADY_SATISFIED` | `satisfaction_observation_ids[1..]` | 必须null且original=final |
++| `COMPLETED_WITH_WAIVERS` | `AUTHORIZED_WAIVER` | `waiver_ids[1..]`,`original_verdicts[1..]` | 同COMPLETED |
++| `PARTIAL` | `BUDGET_EXHAUSTED|DEADLINE_REACHED|VERIFICATION_INCOMPLETE|CAPABILITY_UNAVAILABLE|INTERACTION_UNAVAILABLE|SAFE_PARTIAL_DELIVERY` | `delivered_scope[1..]`,`gaps[1..]`,`residual_risks[]` | ContentRef或null |
++| `BLOCKED` | `INPUT_REQUIRED|APPROVAL_REQUIRED|CAPABILITY_UNAVAILABLE|ENVIRONMENT_UNAVAILABLE|POLICY_UNSUPPORTED` | `blockers[1..]`，每项含code/requirement_ids/unblock_condition | 必须null |
++| `FAILED` | `RUNTIME_FAILURE|STORAGE_FAILURE|PROTOCOL_FAILURE|QUALITY_GATE_FAILED|POLICY_INVARIANT_BROKEN|SOURCE_MUTATION_FORBIDDEN|CONTRACT_INVALID` | `failures[1..]`，每项含code/evidence_refs | 必须null |
++| `CANCELLED` | `USER_CANCELLED|SERVER_CANCELLED|LEASE_CANCELLED` | `request_id`,`linearized_at`,`requested_by` actor | 必须null |
++
++可用性最低矩阵如下；`A`=available，`U`=AvailabilityRef 且允许 unavailable，`N`=not_applicable，`A/U`=依事实，不能删除字段：
++
++| Outcome | original source | final source | proposal | observation manifest | attestations | gate decision | final closure | report |
++|---|---|---|---|---|---|---|---|---|
++| COMPLETED/NO_CHANGE/WITH_WAIVERS | A | A | A | A | A | A | A | A |
++| PARTIAL | A | A | A | A | A/U | A | A | A |
++| BLOCKED | A/U | A/U | N/U | A/U | N/U | A | A | N/U |
++| FAILED | A/U | A/U | N/U | A/U | N/U | A | A | N/U |
++| CANCELLED | A/U | A/U | N/U | A/U | N/U | A | A | N/U |
++
++`COMPLETED/NO_CHANGE_NEEDED` 要求全部 active mandatory PASS；`COMPLETED_WITH_WAIVERS`要求未waiver项PASS且每个非PASS项有current有效授权；`PARTIAL`至少一个mandatory FAIL/UNVERIFIABLE；`BLOCKED/FAILED/CANCELLED`不得用缺失证据暗示PASS。所有 branch 的effect counts必须从空Effect Ledger重算为0，任何非0/unknown都不匹配MVP schema。
++
++`published_from_version=N` 是 terminal CAS读取的版本；`terminal_task_version=N+1` 是同一事务写入的版本。TaskResult bytes在CAS前按这两个值冻结，事务只在current version仍为N时发布；重试只能提交逐字节相同result。
+ 
+ MVP 不生成 `CANCELLED_WITH_EFFECTS` 或 `TERMINATED_WITH_UNKNOWN_EFFECTS`。
+@@ -898,9 +1019,12 @@
+ Claim 到 `job_type=repo_review.full_scan` 后，Adapter 构造内部 TaskRequest：
+ 
+-- `task_id` 使用 Server `scan_id` 的稳定合法映射；原值保存在 transport binding。
++- `task_id` 严格使用5.1的 `legacy-v1-task-mapping/v1`；原值保存在 transport binding，`transport_epoch=job.attempt`。
+ - `task_type=pullwise.repo-review.full-scan/v1`，`intent_kind=analysis`。
+ - objective 固定为“按 Server policy 和 full-repo-review v1.2 contract 对 materialized repository 完成全仓审查并提交受验证 artifact/result”。
+ - acceptance criteria 包含：required artifacts/QA；findings 的领域 evidence；source byte不变；budget/policy；valid terminal envelope。
+- - constraints 逐项从 `repositoryLimits/model_profile/review_request.policy/review_request.budget/output_language` ingest。
++- constraints 按5.1冻结的JSON Pointer顺序逐项从 `repositoryLimits/model_profile/review_request.policy/review_request.budget/output_language` ingest；不得依语言runtime的map迭代顺序。
+ - delivery 固定为 current v1 required artifact matrix。
+ - QualityRisk floor=Q1；interaction unavailable；waiver issuers empty；source read-only；R2/R3/R4 deny。
++
++Pullwise profile 的“R2 deny”只约束Agent tools；12.3控制面HTTP和claim授权的materialize clone使用5.2的WorkerControlTransportPolicy，不把network/token能力传给任何Agent session。
+@@ -1022,10 +1146,11 @@
+ event 必含 `protocol_version/run_id/worker_id/sequence/timestamp/event_type/phase/severity/message/progress`。sequence 每run正整数严格递增；支持 event type 以 Server validator 枚举为准，冻结清单见附录 A。
+ 
+ 事件 delivery 是 at-most-once：
+ 
+ - 分配 sequence 并先写本地 event outbox。
+ - HTTP 200 后记录 ACK。
+- - 在明确收到 response 前连接中断时，不重发同 sequence；标记 delivery unknown，下一事件使用更大 sequence。Server允许 gap，从而避免把非幂等 event replay当成功。
++- 在明确收到 response 前连接中断时，不重发同 sequence；标记 delivery unknown，下一事件使用更大 sequence。Server允许 gap，从而避免把非幂等 event replay当成功。heartbeat 的 `last_event_sequence` 始终报告“最后明确ACK”的sequence，不报告unknown或仅allocated sequence；本地另存`highest_allocated_sequence`用于恢复和Debug。
+ - 明确 HTTP 409 表示本地/Server sequence或run state不一致，停止后续 event提交并记录 transport consistency failure；不解析英文 message 猜测成功。
+ 
+ Event telemetry failure不得伪造业务PASS；是否可继续由既有 protocol policy决定。
+@@ -1061,32 +1186,37 @@
+ ### 12.10 Result wrapper 与 envelope
+ 
+-外层不是裸协议 envelope：
++外层不是裸协议 envelope。下面是完整 completed valid fixture；五个 artifact 在提交result前都已按12.9上传，fixture中每个上传的exact content bytes均为ASCII `abc`（无换行，SHA-256 `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`，size=3）：
+ 
+ ```json
+ {
+   "status": "done",
+   "attempt_id": "wk_1-1",
+   "duration_ms": 123,
+   "error": "",
+   "error_code": "",
+   "reviewWorkerProtocol": {
+     "protocol_version": "review-worker-protocol/v1",
+     "message_type": "review_run_result",
+     "job": {"job_id": "job_1", "run_id": "run_1", "lease_id": "lease_1", "job_type": "repo_review.full_scan"},
+     "worker": {
+       "worker_id": "wk_1",
+       "worker_version": "<version>",
+       "concurrency": {"max_active_jobs": 1, "maintains_local_queue": false},
+       "engine": {"type": "codex_app_server", "app_server_transport": "stdio"}
+     },
+     "execution": {"status": "completed", "review_mode": "full_repo"},
+     "progress_final": {"overall_percent": 100.0, "current_phase": "submit_result_envelope", "status": "completed", "message": "terminal progress", "steps": []},
+     "summary": {"overall_risk": "unknown", "result_status": "complete", "finding_counts": {}, "coverage": {}, "top_findings": []},
+     "quality_gate": {"status": "pass", "errors": [], "warnings": []},
+-    "artifact_manifest": []
++    "artifact_manifest": [
++      {"artifact_id":"art_report_human","kind":"report.human","name":"report.md","media_type":"text/markdown","schema_id":"human-markdown-report","schema_version":"v1","encoding":"utf-8","compression":"none","required":true,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","size_bytes":3,"storage":{"type":"server_artifact","url":"/v1/review-runs/run_1/artifacts/art_report_human"}},
++      {"artifact_id":"art_report_agent","kind":"report.agent","name":"report.agent.json","media_type":"application/json","schema_id":"codex-full-repo-review","schema_version":"v1","encoding":"utf-8","compression":"none","required":true,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","size_bytes":3,"storage":{"type":"server_artifact","url":"/v1/review-runs/run_1/artifacts/art_report_agent"}},
++      {"artifact_id":"art_coverage","kind":"coverage","name":"coverage.json","media_type":"application/json","schema_id":"coverage","schema_version":"v1","encoding":"utf-8","compression":"none","required":true,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","size_bytes":3,"storage":{"type":"server_artifact","url":"/v1/review-runs/run_1/artifacts/art_coverage"}},
++      {"artifact_id":"art_qa","kind":"qa","name":"qa.json","media_type":"application/json","schema_id":"qa-gate","schema_version":"v1","encoding":"utf-8","compression":"none","required":true,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","size_bytes":3,"storage":{"type":"server_artifact","url":"/v1/review-runs/run_1/artifacts/art_qa"}},
++      {"artifact_id":"art_token_budget","kind":"token_budget","name":"token-budget.json","media_type":"application/json","schema_id":"token-budget","schema_version":"v1","encoding":"utf-8","compression":"none","required":true,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","size_bytes":3,"storage":{"type":"server_artifact","url":"/v1/review-runs/run_1/artifacts/art_token_budget"}}
++    ]
+   }
+ }
+ ```
+@@ -1168,14 +1298,16 @@
+ legacy upload固定：
+ 
+ ```text
+ artifact_id = art_debug_bundle
+ kind = debug_bundle
+ name = debug-bundle.zip
+ media_type = application/zip
+ schema_id = pullwise-debug-bundle
+ schema_version = v1
+ encoding = binary
+ compression = none
+ required = false
+ ```
+ 
++这里的 `art_debug_bundle` 是冻结 `LegacyWireId`，不是内部 `content-ref/v1.artifact_id`。内部terminal fragment先有自己的ContentRef；Adapter再把相同ZIP bytes映射为上述wire artifact并把upload receipt写入descriptor，两个ID域不得互相校验pattern。
++
+ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配。终态refresh使用同一artifact ID和`final_log_upload=true`，其他重传必须exact。Debug upload失败不阻断已满足语义Gate的completed result，因为它不是required artifact；失败原因写入TaskResult diagnostics和terminal logs。
+@@ -1189,14 +1321,18 @@
+ | 类别 | 必备codes |
+ |---|---|
+-| Contract | `SCHEMA_INVALID`, `SCHEMA_VERSION_UNSUPPORTED`, `CANONICALIZATION_FAILED`, `SPEC_GAP` |
+-| Identity/fence | `TASK_VERSION_STALE`, `OWNER_EPOCH_STALE`, `NATIVE_EPOCH_STALE`, `LEASE_INVALID`, `TRANSPORT_IDENTITY_MISMATCH` |
++| Contract | `SCHEMA_INVALID`, `SCHEMA_VERSION_UNSUPPORTED`, `CANONICALIZATION_FAILED`, `SPEC_GAP`, `CONTRACT_INVALID` |
++| Identity/fence | `TASK_VERSION_STALE`, `OWNER_EPOCH_STALE`, `NATIVE_EPOCH_STALE`, `LEASE_INVALID`, `TRANSPORT_IDENTITY_MISMATCH`, `TASK_ID_COLLISION`, `REQUIREMENT_ID_COLLISION` |
+ | State | `STATE_TRANSITION_INVALID`, `TASK_ALREADY_TERMINAL`, `IDEMPOTENCY_CONFLICT` |
+-| Policy | `CAPABILITY_DENIED`, `CAPABILITY_NOT_IMPLEMENTED`, `APPROVAL_REQUIRED`, `SOURCE_MUTATION_FORBIDDEN`, `SECRET_DETECTED`, `POLICY_INVARIANT_BROKEN` |
++| Policy | `CAPABILITY_DENIED`, `CAPABILITY_NOT_IMPLEMENTED`, `APPROVAL_REQUIRED`, `SOURCE_MUTATION_FORBIDDEN`, `SECRET_DETECTED`, `POLICY_INVARIANT_BROKEN`, `POLICY_UNSUPPORTED` |
+ | Evidence | `CONTENT_REF_CONFLICT`, `ARTIFACT_HASH_MISMATCH`, `OBSERVATION_INVALID`, `MANIFEST_STALE`, `CLOSURE_INCOMPLETE`, `ATTESTATION_INVALID`, `VERIFIER_INDEPENDENCE_FAILED` |
+ | Gate | `GATE_FAILED_REPAIRABLE`, `GATE_FAILED_TERMINAL`, `REQUIREMENT_UNVERIFIABLE`, `QUALITY_POLICY_UNSATISFIED` |
+ | Runtime/storage | `RUNTIME_START_FAILED`, `RUNTIME_FENCE_FAILED`, `CHECKPOINT_CORRUPT`, `CHECKPOINT_CHAIN_BROKEN`, `STORAGE_UNAVAILABLE` |
+-| Transport | `HTTP_PERMANENT`, `HTTP_RETRY_EXHAUSTED`, `EVENT_DELIVERY_UNKNOWN`, `RESULT_CONFLICT`, `JOB_CANCELLATION_AUTHORITATIVE` |
+-| Debug | `DEBUG_REDACTION_FAILED`, `DEBUG_FRAGMENT_BUILD_FAILED`, `DEBUG_UPLOAD_FAILED` |
++| Transport | `HTTP_PERMANENT`, `HTTP_RETRY_EXHAUSTED`, `EVENT_DELIVERY_UNKNOWN`, `RESULT_CONFLICT`, `PROTOCOL_FAILURE`, `JOB_CANCELLATION_AUTHORITATIVE` |
++| Debug | `DEBUG_REDACTION_FAILED`, `DEBUG_FRAGMENT_BUILD_FAILED`, `DEBUG_UPLOAD_FAILED`, `DEBUG_RECEIPT_CONFLICT` |
++| Terminal reason | `SUCCESS`, `ALREADY_SATISFIED`, `AUTHORIZED_WAIVER`, `BUDGET_EXHAUSTED`, `DEADLINE_REACHED`, `VERIFICATION_INCOMPLETE`, `CAPABILITY_UNAVAILABLE`, `INTERACTION_UNAVAILABLE`, `SAFE_PARTIAL_DELIVERY`, `INPUT_REQUIRED`, `APPROVAL_REQUIRED`, `ENVIRONMENT_UNAVAILABLE`, `RUNTIME_FAILURE`, `STORAGE_FAILURE`, `QUALITY_GATE_FAILED`, `USER_CANCELLED`, `SERVER_CANCELLED`, `LEASE_CANCELLED` |
++
++正文出现的全大写machine code必须属于本registry或冻结的legacy Server registry。CI用文本抽取与schema enum做双向集合比较；出现未注册code或registry中无schema消费方都失败。
