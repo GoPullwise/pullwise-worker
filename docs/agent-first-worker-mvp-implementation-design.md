@@ -147,11 +147,13 @@ digest = SHA256(canonical_bytes)
 | 字段 | 约束 |
 |---|---|
 | `schema_id` | `actor/v1` |
-| `kind` | `task_owner|quality_verifier|legacy_domain_reviewer|worker_control|server_control|user_control|system_reconciler` |
+| `kind` | `task_owner|quality_verifier|legacy_domain_reviewer|explorer|troubleshooter|implementer|worker_control|server_control|user_control|system_reconciler` |
 | `id` | 非空稳定身份，最长 160 |
-| `session_id` | `task_owner|quality_verifier|legacy_domain_reviewer` 必须为 `OpaqueId32`；其他 kind 必须为 null |
+| `session_id` | `task_owner|quality_verifier|legacy_domain_reviewer|explorer|troubleshooter|implementer` 必须为 `OpaqueId32`；其他 kind 必须为 null |
 
 actor 只描述“谁做了记录中的动作”，不隐含权限。权限必须由 policy/grant/keyring 单独证明。
+`explorer|troubleshooter|implementer`是为Post-MVP预留的v1 enum，MVP profile必须以`ROLE_NOT_ENABLED`拒绝创建或消费它们；预留不授予权限。V1.1只有在`dynamic_agent_roles`被selected后才可产生这些actor，因此无需未版本化扩展`actor/v1`。
+
 
 ## 3. 组件边界
 
@@ -1355,7 +1357,7 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 | Debug | `DEBUG_REDACTION_FAILED`, `DEBUG_LIMIT_EXCEEDED`, `DEBUG_UPLOAD_FAILED`, `DEBUG_UNAVAILABLE`, `DEBUG_RECEIPT_CONFLICT` |
 | Terminal reason | `SUCCESS`, `ALREADY_SATISFIED`, `AUTHORIZED_WAIVER`, `BUDGET_EXHAUSTED`, `DEADLINE_REACHED`, `VERIFICATION_INCOMPLETE`, `CAPABILITY_UNAVAILABLE`, `INTERACTION_UNAVAILABLE`, `SAFE_PARTIAL_DELIVERY`, `INPUT_REQUIRED`, `APPROVAL_REQUIRED`, `ENVIRONMENT_UNAVAILABLE`, `RUNTIME_FAILURE`, `STORAGE_FAILURE`, `QUALITY_GATE_FAILED`, `USER_CANCELLED`, `SERVER_CANCELLED`, `LEASE_CANCELLED` |
 
-`ATTEMPT_NOT_STARTED|OWNER_NOT_STARTED|CHARTER_NOT_CREATED`的`retryable_scope=none`；只允许BLOCKED/FAILED/CANCELLED（charter code也允许尚未开始语义工作的PARTIAL），成功outcome不得消费这些code。
+`ATTEMPT_NOT_STARTED|OWNER_NOT_STARTED|CHARTER_NOT_CREATED`的`retryable_scope=none`；只允许BLOCKED/FAILED/CANCELLED，PARTIAL和全部成功outcome不得消费这些code。
 
 每个code在error registry标注`retryable_scope = none|same_operation|new_attempt|operator`和允许的outcome。未知code不得默认retryable。
 正文出现的全大写machine code必须属于本registry或冻结的legacy Server registry。CI用文本抽取与schema enum做双向集合比较；出现未注册code或registry中无schema消费方都失败。
