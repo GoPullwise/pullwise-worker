@@ -3188,6 +3188,8 @@ class ReviewWorkerV1:
         self.lock.acquire()
         run_error: BaseException | None = None
         try:
+            if self.recover_persisted_active_job() is None:
+                self.state.state = "idle"
             register = getattr(self.client, "register", None)
             if callable(register):
                 while True:
@@ -3203,8 +3205,6 @@ class ReviewWorkerV1:
                                 loop_error=True,
                             )
                         )
-            if self.recover_persisted_active_job() is None:
-                self.state.state = "idle"
             while True:
                 try:
                     self.heartbeat()

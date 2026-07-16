@@ -227,6 +227,29 @@ class ControlPlaneLoopRegressionTests(unittest.TestCase):
                 sleep.assert_not_called()
                 self.assertEqual(releases, ["released"])
 
+    def test_local_recovery_runs_before_control_plane_registration(self) -> None:
+        calls: list[str] = []
+
+        class Client:
+            def register(self) -> dict:
+                calls.append("register")
+                raise PullwiseRequestError("register unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            worker, releases = prepare_worker(Path(tmp_dir), Client())
+
+            def recover() -> None:
+                calls.append("recover")
+                return None
+
+            worker.recover_persisted_active_job = recover  # type: ignore[method-assign]
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "linux"):
+                with self.assertRaisesRegex(PullwiseRequestError, "register unavailable"):
+                    worker.run(once=True)
+
+        self.assertEqual(calls, ["recover", "register"])
+        self.assertEqual(releases, ["released"])
+
     def test_continuous_loop_does_not_retry_nonretryable_http_error(self) -> None:
         calls: list[str] = []
 
