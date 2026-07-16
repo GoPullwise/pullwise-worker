@@ -1,0 +1,12 @@
+diff --git a/.codex-doc-fixes.patch b/.codex-doc-fixes.patch
+--- a/.codex-doc-fixes.patch
++++ b/.codex-doc-fixes.patch
+@@ -85 +85 @@
+-- - `network {mode:deny|allowlist,hosts[]}`；
++-- `network {mode:deny|allowlist,hosts[]}`；
+@@ -319 +319 @@
+-- - constraints 逐项从 `repositoryLimits/model_profile/review_request.policy/review_request.budget/output_language` ingest。
++-- constraints 逐项从 `repositoryLimits/model_profile/review_request.policy/review_request.budget/output_language` ingest。
+@@ -332 +332 @@
+-- - 在明确收到 response 前连接中断时，不重发同 sequence；标记 delivery unknown，下一事件使用更大 sequence。Server允许 gap，从而避免把非幂等 event replay当成功。
++-- 在明确收到 response 前连接中断时，不重发同 sequence；标记 delivery unknown，下一事件使用更大 sequence。Server允许 gap，从而避免把非幂等 event replay当成功。
