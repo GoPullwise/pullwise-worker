@@ -2883,6 +2883,43 @@ class ReviewWorkerV1:
             return {}
         return payload
 
+    def terminal_result_outbox_path(self, run_id: str) -> Path:
+        return self.isolation.artifacts / safe_id(run_id, "run") / TERMINAL_RESULT_OUTBOX_FILENAME
+
+    @staticmethod
+    def terminal_result_payload_sha256(payload: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _persisted_terminal_outbox(self, run_name: str) -> dict[str, Any]:
+        payload = read_json(self.terminal_result_outbox_path(run_name), {})
+        if not isinstance(payload, dict):
+            return {}
+        if payload.get("schema_version") != TERMINAL_RESULT_OUTBOX_SCHEMA:
+            return {}
+        if str(payload.get("run_id") or "").strip() != run_name:
+            return {}
+        terminal_payload = payload.get("payload")
+        if not isinstance(terminal_payload, dict):
+            return {}
+        expected_sha256 = str(payload.get("payload_sha256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            return {}
+        if self.terminal_result_payload_sha256(terminal_payload) != expected_sha256:
+            return {}
+        result_status = str(payload.get("result_status") or "").strip().lower()
+        if result_status not in {"done", "failed", "cancelled", "partial_completed"}:
+            return {}
+        for key in ("job_id", "lease_id", "attempt_id"):
+            if not str(payload.get(key) or "").strip():
+                return {}
+        return payload
+
     def _persisted_run_is_terminal(self, run_name: str, run_state: dict[str, Any]) -> bool:
         if self._persisted_submit_marker(run_name, "result-submit-succeeded.json"):
             return True
@@ -2915,19 +2952,21 @@ class ReviewWorkerV1:
                 cleanup_v1_workspace_path(self.isolation.workspaces, workspace)
                 continue
             active_job = run_state.get("active_job") if isinstance(run_state.get("active_job"), dict) else {}
+            terminal_outbox = self._persisted_terminal_outbox(run_name)
             failed_marker = self._persisted_submit_marker(run_name, "result-submit-failed.json")
             blocked_marker = self._persisted_submit_marker(run_name, "result-submit-blocked.json")
             submit_marker = failed_marker or blocked_marker
             persisted_state = str(active_job.get("state") or "").strip().lower()
-            if not submit_marker and persisted_state not in ACTIVE_HEARTBEAT_STATUSES:
+            if not terminal_outbox and not submit_marker and persisted_state not in ACTIVE_HEARTBEAT_STATUSES:
                 continue
-            evidence_path = (
-                self.isolation.artifacts
-                / run_name
-                / ("result-submit-failed.json" if failed_marker else "result-submit-blocked.json")
-                if submit_marker
-                else run_dir / "run-state.json"
-            )
+            if terminal_outbox:
+                evidence_path = self.terminal_result_outbox_path(run_name)
+            elif submit_marker:
+                evidence_path = self.isolation.artifacts / run_name / (
+                    "result-submit-failed.json" if failed_marker else "result-submit-blocked.json"
+                )
+            else:
+                evidence_path = run_dir / "run-state.json"
             try:
                 evidence_mtime = evidence_path.stat().st_mtime
             except OSError:
@@ -2937,6 +2976,7 @@ class ReviewWorkerV1:
                 "run_dir": run_dir,
                 "run_state": run_state,
                 "active_job": active_job,
+                "terminal_outbox": terminal_outbox,
                 "submit_marker": submit_marker,
                 "evidence_mtime": evidence_mtime,
             }
@@ -2954,13 +2994,18 @@ class ReviewWorkerV1:
             run_name = artifact_run.name
             if run_name in records or self._persisted_submit_marker(run_name, "result-submit-succeeded.json"):
                 continue
+            terminal_outbox = self._persisted_terminal_outbox(run_name)
             failed_marker = self._persisted_submit_marker(run_name, "result-submit-failed.json")
             blocked_marker = self._persisted_submit_marker(run_name, "result-submit-blocked.json")
             submit_marker = failed_marker or blocked_marker
-            if not submit_marker:
+            if not terminal_outbox and not submit_marker:
                 continue
-            evidence_path = artifact_run / (
-                "result-submit-failed.json" if failed_marker else "result-submit-blocked.json"
+            evidence_path = (
+                self.terminal_result_outbox_path(run_name)
+                if terminal_outbox
+                else artifact_run / (
+                    "result-submit-failed.json" if failed_marker else "result-submit-blocked.json"
+                )
             )
             try:
                 evidence_mtime = evidence_path.stat().st_mtime
@@ -2972,6 +3017,7 @@ class ReviewWorkerV1:
                 "run_dir": run_dir,
                 "run_state": {},
                 "active_job": {},
+                "terminal_outbox": terminal_outbox,
                 "submit_marker": submit_marker,
                 "evidence_mtime": evidence_mtime,
             }
@@ -3009,6 +3055,8 @@ class ReviewWorkerV1:
                     "run_dir": existing.get("run_dir") or marker_run_dir,
                     "run_state": existing.get("run_state") or marker_run_state,
                     "active_job": {**runtime_marker, **existing_active},
+                    "terminal_outbox": existing.get("terminal_outbox")
+                    or self._persisted_terminal_outbox(marker_run_name),
                     "submit_marker": existing.get("submit_marker") or {},
                     "evidence_mtime": max(
                         float(existing.get("evidence_mtime") or 0.0),
@@ -3045,6 +3093,11 @@ class ReviewWorkerV1:
                     pass
         record = records[0]
         active_payload = record["active_job"]
+        terminal_outbox = (
+            record.get("terminal_outbox")
+            if isinstance(record.get("terminal_outbox"), dict)
+            else {}
+        )
         submit_marker = record["submit_marker"]
         run_name = str(record["run_name"])
 
@@ -3053,25 +3106,35 @@ class ReviewWorkerV1:
             return safe_id(raw, fallback) if raw else safe_id(fallback, fallback)
 
         run_id = persisted_id(
-            submit_marker.get("run_id") or active_payload.get("run_id") or run_name,
+            terminal_outbox.get("run_id")
+            or submit_marker.get("run_id")
+            or active_payload.get("run_id")
+            or run_name,
             f"recovered_run_{run_name}",
         )
         active = ActiveJob(
             job_id=persisted_id(
-                submit_marker.get("job_id") or active_payload.get("job_id"),
+                terminal_outbox.get("job_id")
+                or submit_marker.get("job_id")
+                or active_payload.get("job_id"),
                 f"recovered_job_{run_id}",
             ),
             run_id=run_id,
             lease_id=persisted_id(
-                submit_marker.get("lease_id") or active_payload.get("lease_id"),
+                terminal_outbox.get("lease_id")
+                or submit_marker.get("lease_id")
+                or active_payload.get("lease_id"),
                 f"recovered_lease_{run_id}",
             ),
             attempt_id=persisted_id(
-                submit_marker.get("attempt_id") or active_payload.get("attempt_id"),
+                terminal_outbox.get("attempt_id")
+                or submit_marker.get("attempt_id")
+                or active_payload.get("attempt_id"),
                 f"{self.config.worker_id}-recovered",
             ),
             state="finishing",
         )
+        active.terminal_result_prepared = bool(terminal_outbox)
         active.run_dir = record["run_dir"] if Path(record["run_dir"]).is_dir() else None
         progress = record["run_state"].get("progress") if isinstance(record["run_state"].get("progress"), dict) else {}
         active.current_phase = str(
@@ -3091,7 +3154,11 @@ class ReviewWorkerV1:
         else:
             active.message = str(
                 progress.get("message")
-                or "Recovered unfinished run; operator intervention is required before this slot can be reused."
+                or (
+                    "Recovered terminal result; durable submission replay is pending."
+                    if terminal_outbox
+                    else "Recovered unfinished run; operator intervention is required before this slot can be reused."
+                )
             )
         try:
             active.overall_percent = max(0.0, min(100.0, float(progress.get("overall_percent") or 0.0)))
@@ -3107,6 +3174,113 @@ class ReviewWorkerV1:
         self.state.set_active(active)
         self.state.state = "finishing"
         return active
+
+    def replay_terminal_result_outbox_once(self) -> bool:
+        active = self.state.active_job
+        if active is None:
+            return False
+        record = self._persisted_terminal_outbox(active.run_id)
+        if not record:
+            return False
+        active.terminal_result_prepared = True
+        if record.get("retryable") is False:
+            active.state = "finishing"
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "blocked"
+            active.message = "Terminal result submission requires operator intervention."
+            self.persist_active_run_marker(active)
+            return False
+        identity = {
+            "run_id": active.run_id,
+            "job_id": active.job_id,
+            "lease_id": active.lease_id,
+            "attempt_id": active.attempt_id,
+        }
+        mismatched = [
+            key
+            for key, expected in identity.items()
+            if str(record.get(key) or "").strip() != expected
+        ]
+        payload = record.get("payload")
+        envelope = (
+            payload.get("reviewWorkerProtocol")
+            if isinstance(payload, dict)
+            and isinstance(payload.get("reviewWorkerProtocol"), dict)
+            else {}
+        )
+        artifact_dir = self.isolation.artifacts / active.run_id
+        try:
+            if mismatched:
+                raise RuntimeError(
+                    "terminal result outbox identity mismatch: " + ", ".join(mismatched)
+                )
+            validate_result_manifest_matches_uploaded_snapshot(envelope, artifact_dir)
+        except Exception as exc:
+            active.state = "finishing"
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "blocked"
+            active.message = f"Terminal result replay blocked: {exc}"
+            try:
+                self.record_terminal_outbox_failure(
+                    artifact_dir,
+                    record,
+                    exc,
+                    retryable=False,
+                )
+                write_json_durable(
+                    artifact_dir / "result-submit-blocked.json",
+                    {
+                        **identity,
+                        "result_status": record.get("result_status"),
+                        "status": "result_submit_blocked",
+                        "created_at": iso_time(time.time()),
+                        "error": str(exc),
+                    },
+                )
+            finally:
+                self.persist_active_run_marker(active)
+            return False
+        try:
+            accepted = self.deliver_terminal_result_outbox(
+                active,
+                artifact_dir,
+                record,
+            )
+        except Exception as exc:
+            active.state = "finishing"
+            active.current_phase_status = "failed"
+            active.message = f"Terminal result replay failed locally: {exc}"
+            try:
+                self.record_terminal_outbox_failure(
+                    artifact_dir,
+                    record,
+                    exc,
+                    retryable=True,
+                )
+            finally:
+                self.persist_active_run_marker(active)
+            return False
+        if not accepted:
+            return False
+        terminal_state = terminal_state_from_result_status(record.get("result_status"))
+        if terminal_state == "completed" and active.run_dir is not None:
+            try:
+                self.emit_event(
+                    active,
+                    active.run_dir,
+                    "run_completed",
+                    "cleanup_active_job",
+                    status="completed",
+                    progress=100,
+                    current_phase_percent=100,
+                    message="Run completed after terminal result replay.",
+                )
+            except Exception:
+                pass
+        self.clear_active_run_marker(active)
+        self.state.clear_active(terminal_state)
+        self._persisted_unfinished_workspace_names.discard(active.run_id)
+        return True
 
     def cleanup_idle_v1_workspaces_if_due(self, *, force: bool = False) -> list[Path]:
         if self.state.active_job is not None or self.state.state != "idle":
@@ -3219,6 +3393,18 @@ class ReviewWorkerV1:
                         self.next_poll_sleep(
                             claimed_job=False,
                             loop_error=True,
+                        )
+                    )
+                    continue
+                replayed_terminal = self.replay_terminal_result_outbox_once()
+                if replayed_terminal:
+                    self.cleanup_idle_v1_workspaces_if_due(force=True)
+                    if once:
+                        return
+                    time.sleep(
+                        self.next_poll_sleep(
+                            claimed_job=False,
+                            loop_error=False,
                         )
                     )
                     continue
@@ -3490,7 +3676,11 @@ class ReviewWorkerV1:
 
     def request_cancel(self, active: ActiveJob, *, reason: str = "server_cancelled") -> bool:
         with self._progress_lock:
-            if active.terminal_result_in_flight or active.terminal_result_submitted:
+            if (
+                active.terminal_result_prepared
+                or active.terminal_result_in_flight
+                or active.terminal_result_submitted
+            ):
                 return False
             reason_text = str(reason or "server_cancelled").strip() or "server_cancelled"
             active.cancel_requested = True
@@ -4175,6 +4365,175 @@ class ReviewWorkerV1:
         write_review_instruction_tree(repo_dir)
         return repo_dir, run_dir, artifact_dir
 
+    def prepare_terminal_result_outbox(
+        self,
+        active: ActiveJob,
+        payload: dict[str, Any],
+        artifact_dir: Path,
+        envelope: dict[str, Any],
+    ) -> dict[str, Any]:
+        result_status = result_status_from_envelope(envelope)
+        payload_copy = copy.deepcopy(payload)
+        payload_sha256 = self.terminal_result_payload_sha256(payload_copy)
+        existing = self._persisted_terminal_outbox(active.run_id)
+        if existing and str(existing.get("payload_sha256") or "") != payload_sha256:
+            raise RuntimeError("terminal result outbox already contains a different payload")
+        now = iso_time(time.time())
+        record = {
+            "schema_version": TERMINAL_RESULT_OUTBOX_SCHEMA,
+            "run_id": active.run_id,
+            "job_id": active.job_id,
+            "lease_id": active.lease_id,
+            "attempt_id": active.attempt_id,
+            "result_status": result_status,
+            "payload_sha256": payload_sha256,
+            "payload": payload_copy,
+            "state": "ready",
+            "attempt_count": int(existing.get("attempt_count") or 0) if existing else 0,
+            "retryable": True,
+            "created_at": str(existing.get("created_at") or now) if existing else now,
+            "updated_at": now,
+        }
+        write_json_durable(artifact_dir / TERMINAL_RESULT_OUTBOX_FILENAME, record)
+        return record
+
+    def record_terminal_outbox_failure(
+        self,
+        artifact_dir: Path,
+        record: dict[str, Any],
+        error: BaseException,
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        failed_record = {
+            **record,
+            "state": "pending" if retryable else "blocked",
+            "retryable": retryable,
+            "last_error": quota_text(error, 1000),
+            "updated_at": iso_time(time.time()),
+        }
+        write_json_durable(
+            artifact_dir / TERMINAL_RESULT_OUTBOX_FILENAME,
+            failed_record,
+        )
+        return failed_record
+
+    def deliver_terminal_result_outbox(
+        self,
+        active: ActiveJob,
+        artifact_dir: Path,
+        record: dict[str, Any],
+    ) -> bool:
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("terminal result outbox payload is invalid")
+        attempt_record = {
+            **record,
+            "state": "submitting",
+            "attempt_count": max(0, int(record.get("attempt_count") or 0)) + 1,
+            "retryable": True,
+            "last_attempt_at": iso_time(time.time()),
+            "updated_at": iso_time(time.time()),
+        }
+        with self._progress_lock:
+            write_json_durable(
+                artifact_dir / TERMINAL_RESULT_OUTBOX_FILENAME,
+                attempt_record,
+            )
+            active.terminal_result_prepared = True
+            active.terminal_result_in_flight = True
+            active.state = "finishing"
+            active.current_phase = "submit_result_envelope"
+            active.current_phase_status = "running"
+            active.message = "Submitting durable terminal result."
+            self.persist_active_run_marker(active)
+        try:
+            self.client.result(active.job_id, payload)
+        except JobCancelled:
+            with self._progress_lock:
+                active.terminal_result_in_flight = False
+            raise
+        except Exception as exc:
+            retryable = control_plane_error_is_retryable(exc)
+            with self._progress_lock:
+                active.terminal_result_in_flight = False
+                active.state = "finishing"
+                active.current_phase_status = "failed"
+                active.message = f"Result submit failed: {exc}"
+                try:
+                    self.record_terminal_outbox_failure(
+                        artifact_dir,
+                        attempt_record,
+                        exc,
+                        retryable=retryable,
+                    )
+                    write_json_durable(
+                        artifact_dir / "result-submit-failed.json",
+                        {
+                            "run_id": active.run_id,
+                            "job_id": active.job_id,
+                            "lease_id": active.lease_id,
+                            "attempt_id": active.attempt_id,
+                            "result_status": attempt_record.get("result_status"),
+                            "status": "result_submit_failed",
+                            "created_at": iso_time(time.time()),
+                            "error": str(exc),
+                            "retryable": retryable,
+                        },
+                    )
+                finally:
+                    self.persist_active_run_marker(active)
+            return False
+
+        result_status = str(attempt_record.get("result_status") or "failed")
+        try:
+            with self._progress_lock:
+                write_json_durable(
+                    artifact_dir / "result-submit-succeeded.json",
+                    {
+                        "run_id": active.run_id,
+                        "job_id": active.job_id,
+                        "lease_id": active.lease_id,
+                        "attempt_id": active.attempt_id,
+                        "result_status": result_status,
+                        "status": "result_submit_succeeded",
+                        "created_at": iso_time(time.time()),
+                    },
+                )
+                active.terminal_result_in_flight = False
+                active.terminal_result_submitted = True
+                active.current_phase_status = "completed"
+                active.message = "Terminal result accepted."
+        except Exception as exc:
+            with self._progress_lock:
+                active.terminal_result_in_flight = False
+                active.terminal_result_submitted = False
+                active.state = "finishing"
+                active.current_phase_status = "failed"
+                active.message = f"Result accepted but local acknowledgement failed: {exc}"
+                try:
+                    self.record_terminal_outbox_failure(
+                        artifact_dir,
+                        attempt_record,
+                        exc,
+                        retryable=True,
+                    )
+                finally:
+                    self.persist_active_run_marker(active)
+            return False
+        try:
+            remove_file_durable(artifact_dir / TERMINAL_RESULT_OUTBOX_FILENAME)
+        except OSError:
+            # The durable success receipt wins during recovery. A stale outbox
+            # is safe to ignore and can be removed by later artifact cleanup.
+            pass
+        for marker_name in ("result-submit-failed.json", "result-submit-blocked.json"):
+            try:
+                remove_file_durable(artifact_dir / marker_name)
+            except OSError:
+                pass
+        return True
+
     def submit_result_or_record_failure(
         self,
         active: ActiveJob,
@@ -4185,6 +4544,26 @@ class ReviewWorkerV1:
     ) -> bool:
         try:
             validate_result_manifest_matches_uploaded_snapshot(envelope, artifact_dir)
+            if str(job_id or "").strip() != active.job_id:
+                raise RuntimeError("terminal result job id does not match the active job")
+            result_status = result_status_from_envelope(envelope)
+            with self._progress_lock:
+                if result_status == "done" and active.cancel_requested:
+                    raise JobCancelled(active.cancel_reason or "cancel requested")
+                outbox = self.prepare_terminal_result_outbox(
+                    active,
+                    payload,
+                    artifact_dir,
+                    envelope,
+                )
+                active.terminal_result_prepared = True
+                active.state = "finishing"
+                active.current_phase = "submit_result_envelope"
+                active.current_phase_status = "pending"
+                active.message = "Terminal result durably queued for submission."
+                self.persist_active_run_marker(active)
+        except JobCancelled:
+            raise
         except Exception as exc:
             active.state = "finishing"
             active.current_phase = "submit_result_envelope"
@@ -4207,34 +4586,7 @@ class ReviewWorkerV1:
             self.persist_active_run_marker(active)
             return False
         try:
-            result_status = result_status_from_envelope(envelope)
-            with self._progress_lock:
-                if result_status == "done" and active.cancel_requested:
-                    raise JobCancelled(active.cancel_reason or "cancel requested")
-                active.terminal_result_in_flight = True
-            self.client.result(job_id, payload)
-            with self._progress_lock:
-                active.terminal_result_in_flight = False
-                active.terminal_result_submitted = True
-            try:
-                write_json(
-                    artifact_dir / "result-submit-succeeded.json",
-                    {
-                        "run_id": active.run_id,
-                        "job_id": active.job_id,
-                        "lease_id": active.lease_id,
-                        "attempt_id": active.attempt_id,
-                        "result_status": result_status_from_envelope(envelope),
-                        "status": "result_submit_succeeded",
-                        "created_at": iso_time(time.time()),
-                    },
-                )
-            except Exception:
-                # The control plane has already accepted the terminal result.
-                # A local marker failure must not be reclassified as a failed
-                # submission; recovery remains conservatively blocked instead.
-                pass
-            return True
+            return self.deliver_terminal_result_outbox(active, artifact_dir, outbox)
         except JobCancelled:
             with self._progress_lock:
                 active.terminal_result_in_flight = False
@@ -4247,7 +4599,7 @@ class ReviewWorkerV1:
             active.current_phase_status = "failed"
             active.message = f"Result submit failed: {exc}"
             write_json(artifact_dir / "result-envelope.json", envelope)
-            write_json(
+            write_json_durable(
                 artifact_dir / "result-submit-failed.json",
                 {
                     "run_id": active.run_id,
@@ -4258,6 +4610,7 @@ class ReviewWorkerV1:
                     "status": "result_submit_failed",
                     "created_at": iso_time(time.time()),
                     "error": str(exc),
+                    "retryable": True,
                 },
             )
             self.persist_active_run_marker(active)
@@ -16998,6 +17351,23 @@ def write_json_atomic(path: Path, value: Any) -> None:
             temp_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def write_json_durable(path: Path, value: Any) -> None:
+    payload = (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    _write_worker_owned_bytes(path, payload)
+
+
+def remove_file_durable(path: Path) -> None:
+    if path.is_symlink() or path_has_symlink_component(path.parent):
+        raise OSError(f"durable worker file contains a symlink: {path}")
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_directory(path.parent)
 
 
 def append_jsonl(path: Path, value: Any) -> None:

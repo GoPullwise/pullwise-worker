@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -118,6 +119,14 @@ class LifecycleReadinessRegressionTests(unittest.TestCase):
                         "schema_version": "terminal-result-outbox/v1",
                         **active_marker,
                         "result_status": "done",
+                        "payload_sha256": hashlib.sha256(
+                            json.dumps(
+                                terminal_payload,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest(),
                         "payload": terminal_payload,
                         "attempt_count": 1,
                         "retryable": True,

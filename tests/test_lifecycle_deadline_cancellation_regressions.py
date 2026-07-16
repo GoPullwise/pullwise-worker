@@ -386,8 +386,11 @@ class LifecycleDeadlineCancellationRegressionsTest(unittest.TestCase):
                 heartbeat_thread.join(2)
                 self.assertFalse(heartbeat_thread.is_alive())
                 self.assertFalse(active.cancel_requested)
-                self.assertEqual(active.state, initial_state)
-                self.assertEqual(persisted_states, [])
+                self.assertNotEqual(active.state, initial_state)
+                self.assertEqual(active.state, "finishing")
+                self.assertTrue(active.terminal_result_prepared)
+                self.assertGreaterEqual(len(persisted_states), 1)
+                self.assertEqual(set(persisted_states), {"finishing"})
                 self.assertEqual(emitted_cancellations, [])
                 self.assertEqual(cancellation_results, [False])
             finally:
