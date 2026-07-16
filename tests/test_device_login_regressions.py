@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from pullwise_worker import _main_part_07_readiness_doctor as readiness_doctor
 
 
 class DeviceLoginRegressionsTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "worker runtime service paths target Linux")
     def test_device_login_prepares_instance_scoped_codex_home_before_sdk_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             worker_root = Path(tmp_dir) / "worker"

@@ -6096,6 +6096,29 @@ def _declared_model_output_snapshot(
     return snapshot
 
 
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory_tree(path: Path) -> None:
+    if os.name == "nt":
+        return
+    for current_root, _directories, _filenames in os.walk(path, topdown=False):
+        _fsync_directory(Path(current_root))
+    _fsync_directory(path.parent)
+
+
 def _write_worker_owned_bytes(
     path: Path,
     payload: bytes,
@@ -6116,7 +6139,9 @@ def _write_worker_owned_bytes(
             descriptor = -1
             handle.write(payload)
             handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -6154,8 +6179,24 @@ def _remove_worker_owned_output(path: Path, root: Path) -> None:
         return
     if _is_regular_file_no_follow(path):
         path.unlink()
+        _fsync_directory(path.parent)
         return
     shutil.rmtree(path)
+    _fsync_directory(path.parent)
+
+
+def _remove_model_output_transaction_path(path: Path, root: Path) -> None:
+    resolved_root = root.resolve(strict=False)
+    resolved_parent = path.parent.resolve(strict=False)
+    if not _path_is_within(resolved_parent, resolved_root) or path.parent == path:
+        raise OSError(f"model output transaction path escapes its root: {path}")
+    if path_has_symlink_component(path.parent):
+        raise OSError(f"model output transaction parent contains a symlink: {path.parent}")
+    if path.is_symlink():
+        path.unlink()
+        _fsync_directory(path.parent)
+        return
+    _remove_worker_owned_output(path, root)
 
 
 def cleanup_model_turn_workspace(repo_dir: Path, staging: Path) -> None:
