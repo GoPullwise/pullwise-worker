@@ -61,6 +61,7 @@ MAX_REVIEWER_ASSIGNMENTS = 128
 MODEL_TURN_WORKSPACES_DIR_NAME = "model-turns"
 MAX_MODEL_OUTPUT_FILES = 2048
 MAX_MODEL_OUTPUT_FILE_BYTES = 16 * 1024 * 1024
+MAX_MODEL_OUTPUT_TOTAL_BYTES = 64 * 1024 * 1024
 LOW_MEMORY_REVIEWER_TOTAL_BYTES = 6 * 1024**3
 LOW_MEMORY_REVIEWER_AVAILABLE_BYTES = 2 * 1024**3
 CODEX_THREAD_ARCHIVE_TIMEOUT_SECONDS = 15
@@ -2139,12 +2140,29 @@ def read_command_operands_are_contained(executable: str, argv: list[str], worksp
 
 
 def git_command_is_read_only(argv: list[str], workspace: Path, cwd: Path) -> bool:
-    unsafe_options = {"--no-index", "--ext-diff", "--textconv", "--open-files-in-pager"}
+    unsafe_options = {
+        "--no-index",
+        "--ext-diff",
+        "--textconv",
+        "--open-files-in-pager",
+        "--output",
+    }
     lowered = {str(part).lower() for part in argv[1:]}
     if lowered.intersection(unsafe_options) or any(
         str(part).lower().startswith(f"{option}=")
         for part in argv[1:]
-        for option in (*unsafe_options, "--output")
+        for option in unsafe_options
+    ):
+        return False
+    option_parts = argv[1 : argv.index("--") if "--" in argv else len(argv)]
+    if any(
+        part == "-O"
+        or (
+            part.startswith("-")
+            and not part.startswith("--")
+            and "O" in part[1:]
+        )
+        for part in option_parts
     ):
         return False
     if "--" in argv:
@@ -2638,6 +2656,7 @@ class ReviewerAssignmentOutcome:
     valid_output: bool = False
     finding_count: int = 0
     duration_ms: int = 0
+    output_payload: bytes | None = None
     error: BaseException | None = None
 
 
@@ -4255,7 +4274,20 @@ class ReviewWorkerV1:
             reported_duration = (time.monotonic() - started_monotonic) * 1000
         duration_ms = max(0, int(reported_duration))
 
-        payload = read_json(work.staging_output_path, None)
+        try:
+            output_payload = _bounded_regular_file_bytes(work.staging_output_path)
+        except OSError as exc:
+            return ReviewerAssignmentOutcome(
+                work=work,
+                thread_id=thread_id,
+                attempt=attempt,
+                duration_ms=duration_ms,
+                error=exc,
+            )
+        try:
+            payload = json.loads(output_payload)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
         covered = _reviewer_output_assignments(payload, work.staging_output_path, expected_assignments)
         valid_output = (
             isinstance(payload, dict)
@@ -4270,6 +4302,7 @@ class ReviewWorkerV1:
             valid_output=valid_output,
             finding_count=finding_count,
             duration_ms=duration_ms,
+            output_payload=output_payload if valid_output else None,
         )
 
     def run_reviewer_fanout_phase(
@@ -4643,9 +4676,11 @@ class ReviewWorkerV1:
 
                     if outcome.valid_output:
                         try:
-                            os.replace(
-                                outcome.work.staging_output_path,
+                            if outcome.output_payload is None:
+                                raise OSError("validated reviewer output payload is missing")
+                            _write_worker_owned_bytes(
                                 work.output_path,
+                                outcome.output_payload,
                             )
                         except OSError as exc:
                             outcome.error = exc
@@ -5774,7 +5809,13 @@ def model_turn_workspace_path(
     return candidate
 
 
-def _bounded_regular_file_bytes(path: Path) -> bytes:
+@dataclass(frozen=True)
+class ModelOutputFile:
+    payload: bytes
+    executable: bool = False
+
+
+def _bounded_regular_model_file(path: Path) -> ModelOutputFile:
     if path_has_symlink_component(path):
         raise OSError(f"model output path contains a symlink: {path}")
     flags = (
@@ -5795,18 +5836,41 @@ def _bounded_regular_file_bytes(path: Path) -> bytes:
             payload = handle.read(MAX_MODEL_OUTPUT_FILE_BYTES + 1)
         if len(payload) > MAX_MODEL_OUTPUT_FILE_BYTES:
             raise OSError(f"model output exceeds the per-file limit: {path}")
-        return payload
+        return ModelOutputFile(
+            payload=payload,
+            executable=bool(stat.S_IMODE(stat_result.st_mode) & 0o111),
+        )
     finally:
         if descriptor >= 0:
             os.close(descriptor)
 
 
+def _bounded_regular_file_bytes(path: Path) -> bytes:
+    return _bounded_regular_model_file(path).payload
+
+
 def _declared_model_output_snapshot(
     source_root: Path,
     declared_outputs: tuple[str, ...],
-) -> dict[str, bytes]:
-    snapshot: dict[str, bytes] = {}
+) -> dict[str, ModelOutputFile]:
+    snapshot: dict[str, ModelOutputFile] = {}
+    total_bytes = 0
     resolved_root = source_root.resolve(strict=False)
+
+    def record(relative_file: str, file_path: Path) -> None:
+        nonlocal total_bytes
+        previous = snapshot.get(relative_file)
+        if previous is None and len(snapshot) >= MAX_MODEL_OUTPUT_FILES:
+            raise OSError("model output exceeds the file-count limit")
+        output = _bounded_regular_model_file(file_path)
+        projected_total = total_bytes - (
+            len(previous.payload) if previous is not None else 0
+        ) + len(output.payload)
+        if projected_total > MAX_MODEL_OUTPUT_TOTAL_BYTES:
+            raise OSError("model output exceeds the aggregate byte limit")
+        snapshot[relative_file] = output
+        total_bytes = projected_total
+
     for declared in declared_outputs:
         relative = PurePosixPath(declared)
         if relative.is_absolute() or ".." in relative.parts:
@@ -5819,7 +5883,7 @@ def _declared_model_output_snapshot(
         if not _path_is_within(source.resolve(strict=False), resolved_root):
             raise OSError(f"declared model output escapes staging: {source}")
         if source.is_file():
-            snapshot[relative.as_posix()] = _bounded_regular_file_bytes(source)
+            record(relative.as_posix(), source)
             continue
         if not source.is_dir():
             raise OSError(f"declared model output is not a file or directory: {source}")
@@ -5831,23 +5895,27 @@ def _declared_model_output_snapshot(
                     raise OSError(f"declared model output directory contains a symlink: {directory}")
             for name in filenames:
                 file_path = current / name
-                if len(snapshot) >= MAX_MODEL_OUTPUT_FILES:
-                    raise OSError("model output exceeds the file-count limit")
                 relative_file = file_path.relative_to(source_root).as_posix()
-                snapshot[relative_file] = _bounded_regular_file_bytes(file_path)
-        if len(snapshot) > MAX_MODEL_OUTPUT_FILES:
-            raise OSError("model output exceeds the file-count limit")
+                record(relative_file, file_path)
     return snapshot
 
 
-def _write_worker_owned_bytes(path: Path, payload: bytes) -> None:
+def _write_worker_owned_bytes(
+    path: Path,
+    payload: bytes,
+    *,
+    executable: bool = False,
+) -> None:
     if path_has_symlink_component(path.parent):
         raise OSError(f"worker output parent contains a symlink: {path.parent}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(temporary, flags, 0o600)
+    mode = 0o700 if executable else 0o600
+    descriptor = os.open(temporary, flags, mode)
     try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, mode)
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
             handle.write(payload)
@@ -5857,6 +5925,54 @@ def _write_worker_owned_bytes(path: Path, payload: bytes) -> None:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+
+
+def _remove_worker_owned_output(path: Path, root: Path) -> None:
+    resolved_root = root.resolve(strict=False)
+    if not _path_is_within(path.resolve(strict=False), resolved_root):
+        raise OSError(f"worker output path escapes its root: {path}")
+    if path.is_symlink() or path_has_symlink_component(path.parent):
+        raise OSError(f"worker output path contains a symlink: {path}")
+    if not path.exists():
+        return
+    mode = path.lstat().st_mode
+    if stat.S_ISREG(mode):
+        path.unlink()
+        return
+    if not stat.S_ISDIR(mode):
+        raise OSError(f"worker output path is not regular: {path}")
+    for current_root, directories, filenames in os.walk(path, followlinks=False):
+        current = Path(current_root)
+        for name in directories:
+            child_mode = (current / name).lstat().st_mode
+            if not stat.S_ISDIR(child_mode) or stat.S_ISLNK(child_mode):
+                raise OSError(f"worker output directory contains an unsafe entry: {current / name}")
+        for name in filenames:
+            child_mode = (current / name).lstat().st_mode
+            if not stat.S_ISREG(child_mode) or stat.S_ISLNK(child_mode):
+                raise OSError(f"worker output directory contains an unsafe entry: {current / name}")
+    shutil.rmtree(path)
+
+
+def cleanup_model_turn_workspace(repo_dir: Path, staging: Path) -> None:
+    workspace_root = (repo_dir.parent / MODEL_TURN_WORKSPACES_DIR_NAME).resolve(
+        strict=False
+    )
+    if not _path_is_within(staging.resolve(strict=False), workspace_root):
+        raise OSError("model turn cleanup path escapes the staging root")
+    if staging.is_symlink():
+        staging.unlink()
+    elif staging.exists():
+        shutil.rmtree(staging)
+    parent = staging.parent
+    while parent != workspace_root and _path_is_within(
+        parent.resolve(strict=False), workspace_root
+    ):
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
 
 
 def prepare_model_turn_workspace(
@@ -5878,8 +5994,12 @@ def prepare_model_turn_workspace(
     elif staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True, exist_ok=False)
-    for relative, payload in existing.items():
-        _write_worker_owned_bytes(staging.joinpath(*PurePosixPath(relative).parts), payload)
+    for relative, output in existing.items():
+        _write_worker_owned_bytes(
+            staging.joinpath(*PurePosixPath(relative).parts),
+            output.payload,
+            executable=output.executable,
+        )
     return staging
 
 
@@ -5889,11 +6009,55 @@ def publish_model_turn_outputs(
     declared_outputs: tuple[str, ...],
 ) -> list[str]:
     snapshot = _declared_model_output_snapshot(staging, declared_outputs)
-    for relative, payload in snapshot.items():
-        destination = run_dir.joinpath(*PurePosixPath(relative).parts)
-        if not _path_is_within(destination.resolve(strict=False), run_dir.resolve(strict=False)):
+    resolved_run_dir = run_dir.resolve(strict=False)
+    for declared in declared_outputs:
+        relative = PurePosixPath(declared)
+        source = staging.joinpath(*relative.parts)
+        destination = run_dir.joinpath(*relative.parts)
+        if not _path_is_within(destination.resolve(strict=False), resolved_run_dir):
             raise OSError(f"model output destination escapes the run directory: {destination}")
-        _write_worker_owned_bytes(destination, payload)
+        if not source.exists() and not source.is_symlink():
+            _remove_worker_owned_output(destination, run_dir)
+            continue
+        if path_has_symlink_component(source):
+            raise OSError(f"declared model output contains a symlink: {source}")
+        if source.is_file():
+            output = snapshot.get(relative.as_posix())
+            if output is None:
+                raise OSError(f"declared model output snapshot is missing: {source}")
+            if destination.is_dir():
+                _remove_worker_owned_output(destination, run_dir)
+            elif destination.is_symlink():
+                raise OSError(f"model output destination is a symlink: {destination}")
+            _write_worker_owned_bytes(
+                destination,
+                output.payload,
+                executable=output.executable,
+            )
+            continue
+        if not source.is_dir():
+            raise OSError(f"declared model output is not regular: {source}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.publish"
+        )
+        temporary.mkdir(parents=False, exist_ok=False)
+        prefix = relative.as_posix().rstrip("/") + "/"
+        try:
+            for snapshot_path, output in snapshot.items():
+                if not snapshot_path.startswith(prefix):
+                    continue
+                nested = PurePosixPath(snapshot_path[len(prefix) :])
+                _write_worker_owned_bytes(
+                    temporary.joinpath(*nested.parts),
+                    output.payload,
+                    executable=output.executable,
+                )
+            _remove_worker_owned_output(destination, run_dir)
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists() or temporary.is_symlink():
+                _remove_worker_owned_output(temporary, run_dir)
     return sorted(snapshot)
 
 

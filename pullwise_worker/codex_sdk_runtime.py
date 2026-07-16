@@ -28,7 +28,12 @@ def path_has_symlink_component(path: Path) -> bool:
 def read_text_no_follow(path: Path, *, encoding: str = "utf-8") -> str:
     if path_has_symlink_component(path):
         raise OSError(f"refusing to read through a symlink: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     descriptor = os.open(path, flags)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -51,6 +56,7 @@ def append_text_no_follow(path: Path, text: str, *, encoding: str = "utf-8") -> 
         | os.O_APPEND
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
     )
     descriptor = os.open(path, flags, 0o600)
     try:
