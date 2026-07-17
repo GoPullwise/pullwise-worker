@@ -1,0 +1,290 @@
+{
+  "schema_id": "pullwise-agent-first-slice-0-baseline/v1",
+  "baseline_id": "worker-current-implementation-2026-07-17",
+  "captured_head": "c707003960b853ec87fd4dfc7323b0d3d1d63528",
+  "line_count_profile": "physical-lf/v1",
+  "document": {
+    "path": "docs/agent-first-worker-current-code-map.md",
+    "start_marker": "<!-- BEGIN GENERATED WORKER SLICE 0 BASELINE -->",
+    "end_marker": "<!-- END GENERATED WORKER SLICE 0 BASELINE -->"
+  },
+  "pipeline": {
+    "path": "pullwise_worker/review_worker_v1.py",
+    "symbol": "PIPELINE_PHASES",
+    "values": [
+      ["prepare_workspace", 3],
+      ["start_codex_app_server", 7],
+      ["initialize_codex_connection", 10],
+      ["check_codex_auth", 12],
+      ["bootstrap_helper_scripts", 17],
+      ["inventory_repository", 24],
+      ["token_budget", 27],
+      ["repo_map", 33],
+      ["risk_routing", 39],
+      ["bundle_planning", 43],
+      ["bundle_packing", 47],
+      ["reviewer_fanout", 70],
+      ["reviewer_json_validation", 73],
+      ["location_validation", 76],
+      ["clustering_and_voting", 81],
+      ["intent_test_validation", 82],
+      ["intent_mining", 84],
+      ["intent_test_planning", 86],
+      ["validation_workspace_prepare", 88],
+      ["intent_test_writing", 90],
+      ["intent_test_running", 92],
+      ["intent_test_failure_analysis", 94],
+      ["validator_disproof", 96],
+      ["final_report_json", 97],
+      ["render_markdown_report", 98],
+      ["qa_gate", 99],
+      ["hash_artifacts", 99],
+      ["upload_artifacts", 100],
+      ["submit_result_envelope", 100],
+      ["cleanup_active_job", 100]
+    ]
+  },
+  "code_map": [
+    {
+      "id": "cli-composition",
+      "paths": [{"path": "pullwise_worker/main.py", "anchors": ["def build_parser", "ReviewWorkerV1(config, client=PullwiseClient(config))"]}, {"path": "pullwise_worker/__main__.py", "anchors": ["from .main import main"]}],
+      "current_responsibilities": "Dispatch CLI commands and compose WorkerConfig, PullwiseClient, and the single ReviewWorkerV1 instance.",
+      "boundary": "Lifecycle and readiness commands are imported lazily; the run path owns only composition.",
+      "candidate_extraction_seam": "Keep this as the narrow composition root while legacy command implementations remain in their current modules."
+    },
+    {
+      "id": "configuration-http-control-plane",
+      "paths": [{"path": "pullwise_worker/_main_part_01_bootstrap.py", "anchors": ["class WorkerConfig", "class PullwiseClient", "def worker_registration_payload"]}],
+      "current_responsibilities": "Parse instance configuration, isolate provider paths, collect host metrics, build strict-v1 registration and heartbeat HTTP requests, and normalize control-plane errors.",
+      "boundary": "Owns transport/configuration mechanics; review semantics remain in review_worker_v1.py.",
+      "candidate_extraction_seam": "Separate host/provider configuration and metrics from the Pullwise HTTP client and strict-v1 payload builders."
+    },
+    {
+      "id": "readiness-doctor",
+      "paths": [{"path": "pullwise_worker/_main_part_07_readiness_doctor.py", "anchors": ["def worker_readiness_state", "def run_doctor", "def codex_ready_check"]}],
+      "current_responsibilities": "Evaluate provider, plan, runtime, path, disk, and Codex readiness and expose doctor and device-login flows.",
+      "boundary": "Produces readiness facts used before leasing; it does not execute review phases.",
+      "candidate_extraction_seam": "Separate plan/provider validation, Codex readiness probing, and operator-facing doctor rendering."
+    },
+    {
+      "id": "host-lifecycle",
+      "paths": [{"path": "pullwise_worker/_main_part_08_lifecycle_cleanup.py", "anchors": ["class WorkerLifecycleWatcher", "def update_worker", "def cleanup_worker_resources"]}],
+      "current_responsibilities": "Run service actions and log streaming, supervise lifecycle commands, update the Worker and Codex CLI, and perform contained instance cleanup.",
+      "boundary": "Owns host lifecycle and idle cleanup; it must not become a review job queue or semantic pipeline.",
+      "candidate_extraction_seam": "Split log streaming, watcher command state, staged update/install, destructive instance cleanup, and idle cache pruning."
+    },
+    {
+      "id": "active-slot-daemon",
+      "paths": [{"path": "pullwise_worker/review_worker_v1.py", "anchors": ["class ActiveJob", "class WorkerState", "class ReviewWorkerV1", "def run_job"]}],
+      "current_responsibilities": "Maintain the one active job slot, register/heartbeat/lease loop, cancellation supervisor, current job lifecycle, and phase dispatch.",
+      "boundary": "The Server owns the global queue and outer lease; this module owns one in-process active slot and no local queue.",
+      "candidate_extraction_seam": "Extract active-marker recovery, control-loop transport, cancellation supervision, and phase orchestration behind narrow state interfaces."
+    },
+    {
+      "id": "codex-runtime-isolation",
+      "paths": [{"path": "pullwise_worker/codex_sdk_runtime.py", "anchors": ["class CodexRuntimeResources", "class TurnEventScope", "def run_bounded_call"]}, {"path": "pullwise_worker/review_worker_v1.py", "anchors": ["class Isolation", "class CodexSdkClient", "def approval_response_for_request"]}],
+      "current_responsibilities": "Contain worker-scoped Codex runtime resources, event scopes, token usage, bounded SDK calls, approval denial, and model-turn workspace publication.",
+      "boundary": "The SDK owns App Server lifecycle; Worker code owns containment, fencing, bounded waits, and declared output publication.",
+      "candidate_extraction_seam": "Move remaining SDK client/quota and model-turn publication responsibilities out of review_worker_v1.py into runtime-focused modules."
+    },
+    {
+      "id": "fixed-review-pipeline",
+      "paths": [{"path": "pullwise_worker/review_worker_v1.py", "anchors": ["PIPELINE_PHASES", "SEMANTIC_PHASES", "def run_semantic_phase", "def run_mechanical_phase"]}, {"path": "pullwise_worker/agentic_execution.py", "anchors": ["def collect_execution_candidates", "def build_execution_capabilities"]}],
+      "current_responsibilities": "Execute the fixed 30-phase full-repository review flow, prepare phase-specific prompts, fan out domain reviewers, and derive bounded intent execution capabilities.",
+      "boundary": "Codex owns semantic outputs; deterministic Worker validators, phase ordering, safety limits, and artifact contracts remain mechanical.",
+      "candidate_extraction_seam": "Extract phase registry/dispatch, prompt construction, fanout, bundle planning, and intent execution into cohesive one-way modules."
+    },
+    {
+      "id": "source-evidence-quality-artifacts",
+      "paths": [{"path": "pullwise_worker/review_worker_v1.py", "anchors": ["def inventory", "def write_immutable_inventory_baseline", "def qa_gate_payload", "def artifact_manifest_payload", "def materialize_artifacts"]}],
+      "current_responsibilities": "Freeze repository inventory, protect disposable validation source, validate evidence/report bindings, run legacy QA, and materialize/upload versioned artifacts.",
+      "boundary": "Current inventory and QA are legacy full-scan facts; this map does not assign future SourceState, Gate, or Agent Kernel ownership.",
+      "candidate_extraction_seam": "Separate source inventory/integrity, intent workspace validation, QA/report validation, and artifact manifest/upload responsibilities."
+    },
+    {
+      "id": "durable-terminal-publication",
+      "paths": [{"path": "pullwise_worker/review_worker_v1.py", "anchors": ["def active_run_marker_path", "def recover_persisted_active_job", "def prepare_terminal_result_outbox", "def replay_terminal_result_outbox_once", "def supersede_terminal_result_for_cancellation"]}],
+      "current_responsibilities": "Persist active-run identity, recover unfinished publication state, journal immutable terminal result payloads, replay retryable submissions, and record cancellation supersession.",
+      "boundary": "This is the sole current terminal-result outbox path; it recovers publication transactions, not mid-pipeline semantic execution.",
+      "candidate_extraction_seam": "Extract active-slot persistence, terminal outbox validation/replay, and cancellation supersession into a durable publication module."
+    },
+    {
+      "id": "debug-audit",
+      "paths": [{"path": "pullwise_worker/review_worker_v1.py", "anchors": ["def write_debug_bundle", "def pipeline_diagnostics_payload"]}, {"path": "pullwise_worker/debug_bundle_audit.py", "anchors": ["class BundleAudit", "def audit_bundle", "def markdown_report"]}],
+      "current_responsibilities": "Build the current Worker debug bundle and independently audit bundle structure, counters, finding/evidence bindings, and redaction boundaries.",
+      "boundary": "Debug evidence excludes source-bearing bundles and is distinct from audit download and future cross-end Assembly semantics.",
+      "candidate_extraction_seam": "Separate bundle input loading, rule groups, issue aggregation, and CLI/report rendering; keep builder and independent auditor distinct."
+    },
+    {
+      "id": "current-run-eta",
+      "paths": [{"path": "pullwise_worker/current_run_eta.py", "anchors": ["class CurrentRunEstimator", "class ResourcePool", "class WorkUnit"]}, {"path": "pullwise_worker/review_worker_v1.py", "anchors": ["def current_run_estimator_for_job", "def phase_progress_data"]}],
+      "current_responsibilities": "Estimate whole-scan remaining time from the current run dependency graph and publish sanitized progress snapshots.",
+      "boundary": "Uses current-run monotonic observations only and does not own phase semantics or cross-run forecasting.",
+      "candidate_extraction_seam": "Keep the estimator independent; move only orchestration-specific work-unit wiring behind an adapter if the phase registry is extracted."
+    }
+  ],
+  "file_baselines": [
+    {
+      "path": "pullwise_worker/review_worker_v1.py",
+      "kind": "production",
+      "classification": "oversized_legacy",
+      "physical_lines": 18531,
+      "anchors": ["PIPELINE_PHASES", "class ReviewWorkerV1", "def run_job", "def prepare_terminal_result_outbox", "def qa_gate_payload", "def write_debug_bundle"],
+      "current_responsibilities": "Strict-v1 daemon, active slot, Codex runtime bridge, fixed review pipeline, integrity/QA, artifacts, terminal outbox, debug, and checkout utilities.",
+      "candidate_extraction_seam": "Control loop and active slot; runtime/quota; phase registry and executors; intent validation; evidence/QA; artifacts/result/debug; checkout and storage utilities."
+    },
+    {
+      "path": "tests/test_review_worker_v1.py",
+      "kind": "test",
+      "classification": "oversized_legacy",
+      "physical_lines": 13075,
+      "anchors": ["class ReviewWorkerV1ContractsTest"],
+      "current_responsibilities": "Legacy broad contract and behavior coverage for review_worker_v1.py.",
+      "candidate_extraction_seam": "Move cases by contract or failure mode into focused active-slot, pipeline, intent, artifact, terminal-publication, and checkout suites."
+    },
+    {
+      "path": "pullwise_worker/_main_part_08_lifecycle_cleanup.py",
+      "kind": "production",
+      "classification": "oversized_legacy",
+      "physical_lines": 1898,
+      "anchors": ["class WorkerLifecycleWatcher", "def update_worker", "def cleanup_worker_resources"],
+      "current_responsibilities": "Service/log commands, lifecycle watcher, staged updates, uninstall, contained cleanup, and idle cache/log pruning.",
+      "candidate_extraction_seam": "Log streaming; watcher state; update/install; uninstall containment; idle workspace/cache/log cleanup."
+    },
+    {
+      "path": "tests/test_agentic_execution.py",
+      "kind": "test",
+      "classification": "oversized_legacy",
+      "physical_lines": 1724,
+      "anchors": ["class AgenticExecutionContractsTest"],
+      "current_responsibilities": "Agentic execution, intent source materialization, workspace integrity, preflight, repair, and evidence contract coverage.",
+      "candidate_extraction_seam": "Split capability discovery, source materialization, integrity, preflight, execution, repair, and result-contract cases."
+    },
+    {
+      "path": "pullwise_worker/debug_bundle_audit.py",
+      "kind": "production",
+      "classification": "oversized_legacy",
+      "physical_lines": 1566,
+      "anchors": ["class BundleAudit", "def audit_bundle", "def markdown_report"],
+      "current_responsibilities": "Load debug bundle evidence, execute cross-artifact audit rules, aggregate issues, and render machine/Markdown reports.",
+      "candidate_extraction_seam": "Bundle loading; lifecycle/progress checks; finding/evidence checks; intent checks; report rendering and CLI."
+    },
+    {
+      "path": "pullwise_worker/_main_part_01_bootstrap.py",
+      "kind": "production",
+      "classification": "oversized_legacy",
+      "physical_lines": 1485,
+      "anchors": ["class WorkerConfig", "class PullwiseClient", "def worker_registration_payload"],
+      "current_responsibilities": "Host/provider setup, safe file helpers, metrics, Worker configuration, strict-v1 payload builders, HTTP client, and uninstall entry compatibility.",
+      "candidate_extraction_seam": "Host dependencies/provider environment; safe IO/metrics; configuration; protocol payloads; HTTP transport/errors."
+    },
+    {
+      "path": "tests/test_lifecycle_readiness_regressions.py",
+      "kind": "test",
+      "classification": "oversized_legacy",
+      "physical_lines": 939,
+      "anchors": ["class LifecycleReadinessRegressionTests"],
+      "current_responsibilities": "Control-loop retry, readiness, heartbeat/lease, lock release, and recovered active-job regressions.",
+      "candidate_extraction_seam": "Split readiness/lease eligibility, retry/backoff, active-job supervision, recovery, and lock cleanup failure modes."
+    },
+    {
+      "path": "tests/test_codex_sdk_runtime_regressions.py",
+      "kind": "test",
+      "classification": "oversized_legacy",
+      "physical_lines": 819,
+      "anchors": ["class CodexSdkRuntimeRegressionTests"],
+      "current_responsibilities": "Codex SDK timeout, cancellation, event scope, runtime health, shutdown, and archive regressions.",
+      "candidate_extraction_seam": "Split bounded RPC/runtime health, event scopes, turn lifecycle, archive, and shutdown failure suites."
+    },
+    {
+      "path": "tests/test_lifecycle_deadline_cancellation_regressions.py",
+      "kind": "test",
+      "classification": "oversized_legacy",
+      "physical_lines": 799,
+      "anchors": ["class LifecycleDeadlineCancellationRegressionsTest"],
+      "current_responsibilities": "Absolute deadline, cancellation supervision, child process termination, and terminal publication race regressions.",
+      "candidate_extraction_seam": "Split deadline propagation, cancellation state/events, subprocess termination, and terminal race cases."
+    },
+    {
+      "path": "tests/test_debug_bundle_audit.py",
+      "kind": "test",
+      "classification": "oversized_legacy",
+      "physical_lines": 784,
+      "anchors": ["class DebugBundleAuditTest"],
+      "current_responsibilities": "Debug bundle audit coverage across identity, artifacts, progress, findings, intent evidence, and redaction.",
+      "candidate_extraction_seam": "Split bundle structure/identity, progress/artifacts, findings/validation, intent evidence, and redaction suites."
+    },
+    {
+      "path": "tests/test_intent_execution_resource_regressions.py",
+      "kind": "test",
+      "classification": "oversized_legacy",
+      "physical_lines": 743,
+      "anchors": ["class BundleResourceLimitRegressionTest", "class IntentSubprocessResourceRegressionTest", "class IntentPreflightBindingRegressionTest"],
+      "current_responsibilities": "Bundle resource limits and intent subprocess, repair, executable preflight, and approved-snapshot binding regressions.",
+      "candidate_extraction_seam": "The existing test classes are direct seams for separate bundle-limit, subprocess, repair, executable, and binding files."
+    },
+    {
+      "path": "tests/test_codex_usage_ledger.py",
+      "kind": "test",
+      "classification": "review_trigger_existing",
+      "physical_lines": 553,
+      "anchors": ["class CodexUsageLedgerTests"],
+      "current_responsibilities": "Thread-cumulative Codex token attribution and run/phase usage ledger regressions.",
+      "candidate_extraction_seam": "Keep cohesive unless phase aggregation and concurrent-thread attribution need independent suites."
+    },
+    {
+      "path": "pullwise_worker/_main_part_07_readiness_doctor.py",
+      "kind": "production",
+      "classification": "review_trigger_existing",
+      "physical_lines": 548,
+      "anchors": ["def worker_readiness_state", "def run_doctor", "def codex_ready_check"],
+      "current_responsibilities": "Provider/plan/host readiness evaluation plus doctor and Codex login presentation.",
+      "candidate_extraction_seam": "Plan/provider validation, readiness probes, and operator presentation are the natural seams if growth is required."
+    },
+    {
+      "path": "tests/test_reviewer_fanout_concurrency.py",
+      "kind": "test",
+      "classification": "review_trigger_existing",
+      "physical_lines": 538,
+      "anchors": ["class ReviewerFanoutConcurrencyTest"],
+      "current_responsibilities": "Deterministic reviewer scheduling, concurrency reduction, retry, cancellation, output budget, and thread archive behavior.",
+      "candidate_extraction_seam": "Separate scheduling/concurrency, retry/cancellation, output budget, and archive cleanup failure modes if the suite grows."
+    },
+    {
+      "path": "tests/test_agentic_bundle_planning.py",
+      "kind": "test",
+      "classification": "review_trigger_existing",
+      "physical_lines": 532,
+      "anchors": ["class AgenticBundlePlanningTest"],
+      "current_responsibilities": "Semantic grouping validation, exact coverage, bounded rendering/splitting, assignments, and plan resource limits.",
+      "candidate_extraction_seam": "Separate grouping contract, renderer/splitting, assignment derivation, and resource-limit suites if growth is required."
+    },
+    {
+      "path": "tests/test_worker_main.py",
+      "kind": "test",
+      "classification": "review_trigger_existing",
+      "physical_lines": 504,
+      "anchors": ["class WorkerMainContractsTest"],
+      "current_responsibilities": "CLI dispatch and host lifecycle/readiness/update/uninstall command contracts.",
+      "candidate_extraction_seam": "Split CLI parser/dispatch from lifecycle, update, uninstall, and doctor command tests if growth is required."
+    },
+    {
+      "path": "tests/test_current_run_eta.py",
+      "kind": "test",
+      "classification": "review_trigger_existing",
+      "physical_lines": 469,
+      "anchors": ["class CurrentRunEstimatorTest"],
+      "current_responsibilities": "Dependency scheduling, resource concurrency, retry rewiring, confidence, deadline, and sanitized ETA snapshot tests.",
+      "candidate_extraction_seam": "Keep estimator tests cohesive; split scheduling from snapshot/confidence behavior only if growth is required."
+    },
+    {
+      "path": "pullwise_worker/codex_sdk_runtime.py",
+      "kind": "production",
+      "classification": "review_trigger_existing",
+      "physical_lines": 463,
+      "anchors": ["class CodexRuntimeResources", "class TurnEventScope", "def run_bounded_call"],
+      "current_responsibilities": "Symlink-safe SDK log IO, event/turn usage scoping, runtime resource health/close, bounded calls, and identifier validation.",
+      "candidate_extraction_seam": "Keep the runtime resource aggregate cohesive; safe IO and token/event accounting are the first seams if new duties are added."
+    }
+  ]
+}
