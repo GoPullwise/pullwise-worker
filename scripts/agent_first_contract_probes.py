@@ -41,6 +41,20 @@ RUNNER_CATALOG: dict[str, dict[str, Any]] = {
         "minimum_tests": 1,
         "allowed_skips": 0,
     },
+    "server.progress-eta-fixtures": {
+        "repo": "server",
+        "runner": "python_unittest",
+        "nodes": (
+            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_progress_records_worker_reported_phase_steps_message_and_log_summary",
+            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_eta_persists_and_batch_status_exposes_arbitrary_concurrency",
+            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_eta_rejects_invalid_numbers_ranges_and_terminal_payloads",
+            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_heartbeat_eta_is_persisted_and_terminal_result_clears_scan_eta",
+            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_delayed_lower_sequence_event_cannot_overwrite_newer_scan_progress",
+        ),
+        "timeout_seconds": 300,
+        "minimum_tests": 5,
+        "allowed_skips": 0,
+    },
     "server.result-fixtures": {
         "repo": "server",
         "runner": "python_unittest",

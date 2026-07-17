@@ -61,12 +61,15 @@ implementation.
   path, command, test node, cwd, timeout, or shell fragment.
 - Contract text hashes use strict UTF-8 with CRLF/CR normalized to LF. Git HEAD
   and unlisted paths are informational; blocking fixture drift fails, while a
-  watched-file drift is only a warning after all linked fixed probes pass.
+  watched-file drift remains indeterminate pending both owners' review even
+  after all linked fixed probes pass.
 - Do not hand-edit the generated Appendix A block between its markers. Render
   it from the manifest and keep it byte-for-byte synchronized.
-- `candidate` is a read-only proposal command. Never apply or write a refreshed
-  baseline automatically; accepting one requires both the Worker compatibility
-  owner and the affected Server or Web owner.
+- `candidate` is a read-only proposal command. It requires every fixed probe to
+  pass against the same stable input snapshot and binds that snapshot digest to
+  the candidate. Never apply or write a refreshed baseline automatically;
+  accepting one requires both the Worker compatibility owner and the affected
+  Server or Web owner.
 
 ## Worker Host Platform
 

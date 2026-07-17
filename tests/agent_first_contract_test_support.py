@@ -3,11 +3,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,10 +153,52 @@ class AgentFirstContractTestCase(unittest.TestCase):
         self.manifest_path.parent.mkdir()
         self._write_manifest()
         self._write_matching_appendix()
-        for root in (self.server, self.web, self.worker):
-            self._initialize_git_repository(root)
+        self.unavailable_git_repos: set[str] = set()
+        self.git_heads = {
+            "server": "a" * 40,
+            "web": "b" * 40,
+            "worker": "c" * 40,
+        }
+        real_input_snapshot = baseline.input_snapshot
+
+        def observed_snapshot(manifest, roots):
+            snapshot = real_input_snapshot(manifest, roots)
+            for repo_id in roots:
+                available = repo_id not in self.unavailable_git_repos
+                snapshot[f"head:{repo_id}"] = (
+                    self.git_heads[repo_id] if available else None
+                )
+                snapshot[f"worktree:{repo_id}"] = "d" * 64 if available else None
+            return snapshot
+
+        def observed_head(root):
+            repo_id = {
+                "pullwise-server": "server",
+                "pullwise-web": "web",
+                "pullwise-worker": "worker",
+            }[root.name]
+            return (
+                self.git_heads[repo_id]
+                if repo_id not in self.unavailable_git_repos
+                else None
+            )
+
+        self.input_snapshot_patch = mock.patch.object(
+            baseline,
+            "input_snapshot",
+            side_effect=observed_snapshot,
+        )
+        self.git_head_patch = mock.patch.object(
+            baseline,
+            "git_head",
+            side_effect=observed_head,
+        )
+        self.input_snapshot_patch.start()
+        self.git_head_patch.start()
 
     def tearDown(self) -> None:
+        self.git_head_patch.stop()
+        self.input_snapshot_patch.stop()
         self.temp_dir.cleanup()
 
     def _write_manifest(self) -> None:
@@ -188,35 +229,3 @@ class AgentFirstContractTestCase(unittest.TestCase):
 
     def _surface(self, surface_id: str) -> dict[str, object]:
         return next(item for item in self.manifest["surfaces"] if item["id"] == surface_id)
-
-    @staticmethod
-    def _initialize_git_repository(root: Path) -> None:
-        environment = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": "Pullwise Contract Test",
-            "GIT_AUTHOR_EMAIL": "contract-test@pullwise.invalid",
-            "GIT_COMMITTER_NAME": "Pullwise Contract Test",
-            "GIT_COMMITTER_EMAIL": "contract-test@pullwise.invalid",
-        }
-        subprocess.run(
-            ["git", "init", "--quiet"],
-            cwd=root,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=root,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["git", "commit", "--quiet", "--allow-empty", "-m", "contract fixture"],
-            cwd=root,
-            check=True,
-            env=environment,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )

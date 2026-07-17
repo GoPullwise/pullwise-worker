@@ -119,9 +119,11 @@ def text_sha256(path: Path) -> str:
     return hashlib.sha256(canonical_text(path).encode("utf-8")).hexdigest()
 
 
-def python_collection_values(path: Path, symbol: str, *, ordered: bool) -> list[str]:
+def python_collection_values_from_text(
+    text: str, symbol: str, *, ordered: bool
+) -> list[str]:
     try:
-        tree = ast.parse(canonical_text(path))
+        tree = ast.parse(text)
     except SyntaxError as exc:
         raise BaselineEnvironmentError("registry_source_invalid_python") from exc
     matches: list[ast.expr] = []
@@ -146,3 +148,11 @@ def python_collection_values(path: Path, symbol: str, *, ordered: bool) -> list[
     if len(values) != len(set(values)):
         raise BaselineEnvironmentError("registry_values_not_unique")
     return values if ordered else sorted(values)
+
+
+def python_collection_values(path: Path, symbol: str, *, ordered: bool) -> list[str]:
+    return python_collection_values_from_text(
+        canonical_text(path),
+        symbol,
+        ordered=ordered,
+    )

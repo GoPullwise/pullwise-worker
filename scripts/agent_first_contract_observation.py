@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -66,3 +67,13 @@ def input_snapshot(
         snapshot[f"head:{repo_id}"] = git_head(roots[repo_id])
         snapshot[f"worktree:{repo_id}"] = git_worktree_digest(roots[repo_id])
     return snapshot
+
+
+def input_snapshot_sha256(snapshot: dict[str, str | None]) -> str:
+    payload = json.dumps(
+        snapshot,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()

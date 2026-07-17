@@ -47,13 +47,9 @@ class AgentFirstContractBaselineTest(AgentFirstContractTestCase):
         self.assertEqual("informational", report["repositories"][0]["head_status"])
 
     def test_unavailable_git_observation_is_indeterminate(self) -> None:
-        git_directory = self.server / ".git"
-        disabled_directory = self.server / ".git-disabled"
-        git_directory.rename(disabled_directory)
-        try:
-            report = self._verify()
-        finally:
-            disabled_directory.rename(git_directory)
+        self.unavailable_git_repos.add("server")
+
+        report = self._verify()
 
         self.assertEqual("indeterminate", report["status"])
         self.assertIn(

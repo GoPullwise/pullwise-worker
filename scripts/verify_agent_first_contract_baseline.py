@@ -4,17 +4,20 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 try:
+    from scripts.agent_first_contract_candidate import (
+        candidate_payload,
+        create_candidate as build_candidate,
+    )
     from scripts.agent_first_contract_files import (
         BaselineEnvironmentError,
         canonical_text,
-        python_collection_values,
+        python_collection_values_from_text,
         repository_roots,
         surface_path,
         text_sha256,
@@ -31,12 +34,20 @@ try:
         build_test_argv,
         run_probe,
     )
-    from scripts.agent_first_contract_observation import git_head, input_snapshot
+    from scripts.agent_first_contract_observation import (
+        git_head,
+        input_snapshot,
+        input_snapshot_sha256,
+    )
 except ModuleNotFoundError:
+    from agent_first_contract_candidate import (  # type: ignore[no-redef]
+        candidate_payload,
+        create_candidate as build_candidate,
+    )
     from agent_first_contract_files import (  # type: ignore[no-redef]
         BaselineEnvironmentError,
         canonical_text,
-        python_collection_values,
+        python_collection_values_from_text,
         repository_roots,
         surface_path,
         text_sha256,
@@ -56,13 +67,13 @@ except ModuleNotFoundError:
     from agent_first_contract_observation import (  # type: ignore[no-redef]
         git_head,
         input_snapshot,
+        input_snapshot_sha256,
     )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "contracts" / "agent-first" / "legacy-v1-contract-baseline.json"
 REPORT_SCHEMA_ID = "pullwise-contract-baseline-report/v1"
-CANDIDATE_SCHEMA_ID = "pullwise-contract-baseline-candidate/v1"
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -107,6 +118,15 @@ def verify_baseline(
     failures: list[dict[str, Any]] = []
     indeterminate: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    for repo in manifest["repositories"]:
+        repo_id = repo["id"]
+        if (
+            initial_inputs[f"head:{repo_id}"] is None
+            or initial_inputs[f"worktree:{repo_id}"] is None
+        ):
+            indeterminate.append(
+                _issue("repository_observation_unavailable", repo=repo_id)
+            )
 
     repositories = []
     for repo in manifest["repositories"]:
@@ -123,6 +143,7 @@ def verify_baseline(
 
     drifted_watched: list[dict[str, Any]] = []
     surface_reports: list[dict[str, Any]] = []
+    surface_texts: dict[tuple[str, str], str] = {}
     hashes_match = True
     for surface in manifest["surfaces"]:
         path = surface_path(roots[surface["repo"]], surface["path"])
@@ -130,6 +151,7 @@ def verify_baseline(
         missing_anchors: list[str] = []
         if path is not None:
             text = canonical_text(path)
+            surface_texts[(surface["repo"], surface["path"])] = text
             actual_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
             missing_anchors = [
                 anchor for anchor in surface["anchors"] if anchor not in text
@@ -153,12 +175,12 @@ def verify_baseline(
 
     registry_reports: list[dict[str, Any]] = []
     for registry in manifest["registries"]:
-        path = surface_path(roots[registry["repo"]], registry["path"])
+        text = surface_texts.get((registry["repo"], registry["path"]))
         actual_values = (
-            python_collection_values(
-                path, registry["symbol"], ordered=registry["ordered"]
+            python_collection_values_from_text(
+                text, registry["symbol"], ordered=registry["ordered"]
             )
-            if path
+            if text is not None
             else None
         )
         matches = actual_values == registry["values"]
@@ -244,6 +266,7 @@ def verify_baseline(
         "schema_id": REPORT_SCHEMA_ID,
         "baseline_id": manifest["baseline_id"],
         "protocol_version": manifest["protocol_version"],
+        "input_snapshot_sha256": input_snapshot_sha256(initial_inputs),
         "status": status,
         "compatible": status == "compatible",
         "hashes_match": hashes_match,
@@ -266,60 +289,20 @@ def create_candidate(
     runner_catalog: RunnerCatalog = RUNNER_CATALOG,
     evidence_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    validate_manifest(manifest, runner_catalog=runner_catalog)
-    evidence = evidence_report or verify_baseline(
+    return build_candidate(
         manifest,
         workspace_root,
-        run_tests=True,
+        verifier=verify_baseline,
         runner_catalog=runner_catalog,
+        snapshotter=input_snapshot,
+        evidence_report=evidence_report,
     )
-    if any(test["status"] != "passed" for test in evidence["tests"]):
-        raise BaselineEnvironmentError("candidate_probe_evidence_incomplete")
-    unsafe_codes = {"inputs_changed_during_inspection", "inputs_changed_during_probe"}
-    if unsafe_codes & {item["code"] for item in evidence["indeterminate_reasons"]}:
-        raise BaselineEnvironmentError("candidate_inputs_unstable")
-    candidate = copy.deepcopy(manifest)
-    roots = repository_roots(workspace_root)
-    before_inputs = input_snapshot(manifest, roots)
-    for repo in candidate["repositories"]:
-        current = git_head(roots[repo["id"]])
-        if current:
-            repo["frozen_head"] = current
-    for surface in candidate["surfaces"]:
-        path = surface_path(roots[surface["repo"]], surface["path"])
-        if path is None:
-            raise BaselineEnvironmentError(f"candidate_surface_missing:{surface['id']}")
-        text = canonical_text(path)
-        if any(anchor not in text for anchor in surface["anchors"]):
-            raise BaselineEnvironmentError(f"candidate_anchor_missing:{surface['id']}")
-        surface["sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    for registry in candidate["registries"]:
-        path = surface_path(roots[registry["repo"]], registry["path"])
-        if path is None:
-            raise BaselineEnvironmentError(f"candidate_registry_missing:{registry['id']}")
-        registry["values"] = python_collection_values(
-            path, registry["symbol"], ordered=registry["ordered"]
-        )
-    if before_inputs != input_snapshot(manifest, roots):
-        raise BaselineEnvironmentError("candidate_inputs_changed")
-    return candidate
 
 
 def _candidate_payload(
     candidate: dict[str, Any], evidence: dict[str, Any]
 ) -> dict[str, Any]:
-    report_bytes = json.dumps(
-        evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
-    return {
-        "schema_id": CANDIDATE_SCHEMA_ID,
-        "candidate_manifest": candidate,
-        "probe_evidence": {
-            "source_status": evidence["status"],
-            "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
-            "tests": evidence["tests"],
-        },
-    }
+    return candidate_payload(candidate, evidence)
 
 
 def _error_report(kind: str) -> dict[str, Any]:

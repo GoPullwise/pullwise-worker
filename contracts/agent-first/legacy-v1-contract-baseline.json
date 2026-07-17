@@ -175,6 +175,24 @@
       ]
     },
     {
+      "id": "server.progress-estimate-confidence",
+      "repo": "server",
+      "path": "pullwise_server/_app_part_04_scan_audit_bundle.py",
+      "surface_id": "server.progress-debug-projection",
+      "symbol": "SCAN_ESTIMATE_CONFIDENCE",
+      "ordered": false,
+      "values": ["high", "low", "medium"]
+    },
+    {
+      "id": "server.progress-estimate-states",
+      "repo": "server",
+      "path": "pullwise_server/_app_part_04_scan_audit_bundle.py",
+      "surface_id": "server.progress-debug-projection",
+      "symbol": "SCAN_ESTIMATE_STATES",
+      "ordered": false,
+      "values": ["available", "estimating", "unavailable"]
+    },
+    {
       "id": "server.results-required-completed-artifact-kinds",
       "repo": "server",
       "path": "pullwise_server/_app_part_05_worker_results.py",
@@ -234,6 +252,54 @@
         "verified_reviewer_output",
         "worker_log"
       ]
+    },
+    {
+      "id": "server.status-job-statuses",
+      "repo": "server",
+      "path": "pullwise_server/_app_part_01_bootstrap_state.py",
+      "surface_id": "server.status-projection",
+      "symbol": "SCAN_JOB_STATUSES",
+      "ordered": false,
+      "values": [
+        "cancel_requested",
+        "cancelled",
+        "cancelling",
+        "claimed",
+        "done",
+        "failed",
+        "lost",
+        "partial_completed",
+        "queued",
+        "running",
+        "uploading_result"
+      ]
+    },
+    {
+      "id": "server.status-public-statuses",
+      "repo": "server",
+      "path": "pullwise_server/_app_part_01_bootstrap_state.py",
+      "surface_id": "server.status-projection",
+      "symbol": "SCAN_STATUSES",
+      "ordered": false,
+      "values": [
+        "cancel_requested",
+        "cancelled",
+        "cancelling",
+        "done",
+        "failed",
+        "partial_completed",
+        "queued",
+        "running"
+      ]
+    },
+    {
+      "id": "server.status-terminal-retention-statuses",
+      "repo": "server",
+      "path": "pullwise_server/_app_part_01_bootstrap_state.py",
+      "surface_id": "server.status-projection",
+      "symbol": "TERMINAL_SCAN_RETENTION_STATUSES",
+      "ordered": false,
+      "values": ["cancelled", "done", "failed", "lost", "partial_completed"]
     }
   ],
   "surfaces": [
@@ -265,7 +331,11 @@
         "worker_v1_lease_validation_error"
       ],
       "enforcement": "watched",
-      "probe_ids": ["server.result-fixtures", "server.route-fixtures"],
+      "probe_ids": [
+        "server.progress-eta-fixtures",
+        "server.result-fixtures",
+        "server.route-fixtures"
+      ],
       "sha256": "8ac81d754fdf84c2c7aacd3f18754e015973b204bb935a91c874ebffac4852b7"
     },
     {
@@ -340,6 +410,7 @@
       "enforcement": "watched",
       "probe_ids": [
         "server.cancellation-fixtures",
+        "server.progress-eta-fixtures",
         "server.result-fixtures",
         "server.route-fixtures"
       ],
@@ -369,6 +440,7 @@
       "enforcement": "watched",
       "probe_ids": [
         "server.cancellation-fixtures",
+        "server.progress-eta-fixtures",
         "server.result-fixtures",
         "server.route-fixtures"
       ],
@@ -393,18 +465,28 @@
       "path": "pullwise_server/_app_part_04_scan_audit_bundle.py",
       "roles": ["producer", "projection"],
       "anchors": [
+        "INCOMPLETE_TERMINAL_SCAN_PROGRESS_MAX",
+        "MAX_SCAN_ESTIMATE_PARALLEL_UNITS",
+        "MAX_SCAN_ESTIMATE_SECONDS",
+        "SCAN_ESTIMATE_CONFIDENCE",
+        "SCAN_ESTIMATE_STATES",
         "public_result_status",
         "public_review_run_artifact_payload",
         "public_review_run_payload",
+        "public_scan_display_progress",
         "public_scan_error_code",
+        "public_scan_estimate",
+        "public_scan_progress_step_status",
         "public_scan_progress_steps",
         "public_scan_status",
         "review_run_debug_bundle_url",
         "scan_debug_bundle_url",
+        "scan_estimate_validation_error",
         "scan_payload"
       ],
       "enforcement": "watched",
       "probe_ids": [
+        "server.progress-eta-fixtures",
         "server.route-fixtures",
         "web.flow-fixtures",
         "web.history-fixtures",
@@ -446,6 +528,7 @@
         "audit_result_fields",
         "protocol_artifact_manifest",
         "protocol_summary",
+        "test_delayed_lower_sequence_event_cannot_overwrite_newer_scan_progress",
         "test_legacy_worker_review_routes_are_removed",
         "test_scan_job_payload_uses_repository_scan_context",
         "test_scan_job_payload_uses_subscription_plan_worker_config_and_limits",
@@ -454,13 +537,20 @@
         "test_v1_worker_register_rejects_mismatch_prefetch_and_non_linux",
         "test_v1_worker_result_accepts_cancelled_terminal_status",
         "test_v1_worker_result_accepts_partial_completed_terminal_status",
+        "test_worker_eta_persists_and_batch_status_exposes_arbitrary_concurrency",
+        "test_worker_eta_rejects_invalid_numbers_ranges_and_terminal_payloads",
+        "test_worker_heartbeat_eta_is_persisted_and_terminal_result_clears_scan_eta",
+        "test_worker_progress_records_worker_reported_phase_steps_message_and_log_summary",
         "test_worker_result_fallback_checksum_includes_review_decision_events",
         "test_worker_result_must_match_current_claim_attempt",
         "v1_worker_heartbeat_payload",
         "v1_worker_lease_payload"
       ],
       "enforcement": "watched",
-      "probe_ids": ["server.route-fixtures"],
+      "probe_ids": [
+        "server.progress-eta-fixtures",
+        "server.route-fixtures"
+      ],
       "sha256": "b49b68cb33bd3b006598deecbacf8262637868c573959129cfe9671cd957d031"
     },
     {
