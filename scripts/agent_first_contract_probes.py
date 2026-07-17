@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from typing import Any, Mapping
 
 
@@ -118,29 +119,39 @@ def build_test_argv(
     raise ValueError("unsupported_fixed_runner")
 
 
-def _probe_environment() -> dict[str, str]:
+def _probe_environment(scratch_root: Path) -> dict[str, str]:
     allowed = {
         "CI",
         "COMSPEC",
-        "HOME",
         "LANG",
         "LC_ALL",
-        "LOCALAPPDATA",
         "PATH",
         "PATHEXT",
         "SYSTEMDRIVE",
         "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "USERPROFILE",
         "WINDIR",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
     }
     env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    scratch = str(scratch_root)
+    for key in (
+        "APPDATA",
+        "HOME",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+    ):
+        env[key] = scratch
     env["CI"] = "1"
+    env["NPM_CONFIG_CACHE"] = scratch
+    env["NPM_CONFIG_USERCONFIG"] = str(scratch_root / "npmrc")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONHASHSEED"] = "0"
+    env["PYTHONNOUSERSITE"] = "1"
     return env
 
 
@@ -209,29 +220,19 @@ def _indeterminate_result(runner_id: str, reason: str) -> dict[str, Any]:
     }
 
 
-def run_probe(
+def _execute_probe(
     runner_id: str,
     repo_root: Path,
     *,
-    runner_catalog: RunnerCatalog,
+    spec: Mapping[str, Any],
+    argv: list[str],
+    scratch_root: Path,
 ) -> dict[str, Any]:
-    spec = runner_catalog[runner_id]
-    node = shutil.which("node")
-    if spec["runner"] == "node_vitest" and not node:
-        return _indeterminate_result(runner_id, "tool_unavailable")
-    executable = sys.executable if spec["runner"] == "python_unittest" else node
-    assert executable is not None
-    argv = build_test_argv(
-        runner_id,
-        runner_catalog=runner_catalog,
-        python_executable=sys.executable,
-        npm_executable=executable,
-    )
     popen_options: dict[str, Any] = {
         "cwd": repo_root,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
-        "env": _probe_environment(),
+        "env": _probe_environment(scratch_root),
         "shell": False,
     }
     if os.name == "nt":
@@ -301,3 +302,31 @@ def run_probe(
         "observed_tests": observed,
         "observed_skips": skipped,
     }
+
+
+def run_probe(
+    runner_id: str,
+    repo_root: Path,
+    *,
+    runner_catalog: RunnerCatalog,
+) -> dict[str, Any]:
+    spec = runner_catalog[runner_id]
+    node = shutil.which("node")
+    if spec["runner"] == "node_vitest" and not node:
+        return _indeterminate_result(runner_id, "tool_unavailable")
+    executable = sys.executable if spec["runner"] == "python_unittest" else node
+    assert executable is not None
+    argv = build_test_argv(
+        runner_id,
+        runner_catalog=runner_catalog,
+        python_executable=sys.executable,
+        npm_executable=executable,
+    )
+    with tempfile.TemporaryDirectory(prefix="pullwise-contract-probe-") as scratch:
+        return _execute_probe(
+            runner_id,
+            repo_root,
+            spec=spec,
+            argv=argv,
+            scratch_root=Path(scratch),
+        )

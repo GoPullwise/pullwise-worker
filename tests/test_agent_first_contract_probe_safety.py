@@ -60,16 +60,28 @@ class AgentFirstContractProbeSafetyTest(unittest.TestCase):
         self.assertEqual(("indeterminate", "unexpected_skips"), (skipped_result["status"], skipped_result["reason"]))
 
     def test_probe_environment_does_not_inherit_provider_secrets(self) -> None:
+        sensitive_home = self.repo / "sensitive-home"
+        sensitive_home.mkdir()
+        (sensitive_home / "provider-token").write_text("secret", encoding="utf-8")
         path = self.repo / "tests" / "test_environment.py"
         path.write_text(
             "import os\n"
+            "from pathlib import Path\n"
             "import unittest\n\n"
             "class EnvironmentTest(unittest.TestCase):\n"
             "    def test_secret_is_absent(self):\n"
-            "        self.assertIsNone(os.getenv('OPENAI_API_KEY'))\n",
+            "        self.assertIsNone(os.getenv('OPENAI_API_KEY'))\n"
+            "        self.assertFalse((Path.home() / 'provider-token').exists())\n",
             encoding="utf-8",
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "must-not-leak"}):
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": str(sensitive_home),
+                "OPENAI_API_KEY": "must-not-leak",
+                "USERPROFILE": str(sensitive_home),
+            },
+        ):
             result = run_probe(
                 "server.safety-probe",
                 self.repo,

@@ -45,6 +45,29 @@ for an agent or reviewer to understand without loading an unrelated subsystem.
   considered split seam, owner, and removal condition. An undocumented exception
   fails completion.
 
+## Strict V1 Cross-Repository Baseline
+
+`contracts/agent-first/legacy-v1-contract-baseline.json` is the machine source
+for the current Server/Web `review-worker-protocol/v1` compatibility snapshot.
+It does not freeze the Worker producer or authorize Agent Kernel production
+implementation.
+
+- Run `python scripts/verify_agent_first_contract_baseline.py check
+  --workspace-root ..` from the Worker repository before relying on the
+  snapshot. Exit `0` is compatible, `1` is a deterministic incompatibility,
+  and `2` is indeterminate.
+- Repository directories and executable probe commands belong to the fixed
+  verifier catalog. The manifest may reference their IDs but must not add a
+  path, command, test node, cwd, timeout, or shell fragment.
+- Contract text hashes use strict UTF-8 with CRLF/CR normalized to LF. Git HEAD
+  and unlisted paths are informational; blocking fixture drift fails, while a
+  watched-file drift is only a warning after all linked fixed probes pass.
+- Do not hand-edit the generated Appendix A block between its markers. Render
+  it from the manifest and keep it byte-for-byte synchronized.
+- `candidate` is a read-only proposal command. Never apply or write a refreshed
+  baseline automatically; accepting one requires both the Worker compatibility
+  owner and the affected Server or Web owner.
+
 ## Worker Host Platform
 
 Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,
