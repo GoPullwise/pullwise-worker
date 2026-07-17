@@ -31,6 +31,11 @@ SOURCE_TARGET_ID_KEYS = (
     "targets",
 )
 
+CANDIDATE_CWD_KEYS = (
+    "cwd",
+    "working_directory",
+)
+
 
 def _text(value: object) -> str:
     return str(value or "").strip()
@@ -48,7 +53,9 @@ def _skip_reason(value: object) -> str:
 
 def _command(value: object) -> list[str]:
     if isinstance(value, list):
-        return [_text(part) for part in value if _text(part)]
+        if not value or any(not isinstance(part, str) or not part.strip() for part in value):
+            return []
+        return [part.strip() for part in value]
     if isinstance(value, str) and value.strip():
         try:
             return shlex.split(value)
@@ -76,13 +83,23 @@ def _candidate_values(target: dict[str, Any]) -> list[object]:
     return candidates
 
 
+def _candidate_cwd(candidate: object) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    for key in CANDIDATE_CWD_KEYS:
+        cwd = candidate.get(key)
+        if isinstance(cwd, str) and cwd.strip():
+            return cwd.strip()
+    return ""
+
+
 def _target_ids(record: dict[str, Any]) -> list[str]:
     target_ids: list[str] = []
     for key in SOURCE_TARGET_ID_KEYS:
         raw = record.get(key)
         values = raw if isinstance(raw, list) else [raw] if isinstance(raw, str) else []
         for value in values:
-            target_id = _text(value)
+            target_id = value.strip() if isinstance(value, str) else ""
             if target_id and target_id not in target_ids:
                 target_ids.append(target_id)
     return target_ids
@@ -104,6 +121,8 @@ def intent_plan_target_contract_errors(payload: dict[str, Any]) -> list[str]:
         for candidate_index, candidate in enumerate(candidates):
             if not _record_command(candidate, COMMAND_KEYS):
                 errors.append(f"{field}[{candidate_index}].command is missing or empty")
+            if not _candidate_cwd(candidate):
+                errors.append(f"{field}[{candidate_index}].cwd is missing or empty")
     return errors
 
 

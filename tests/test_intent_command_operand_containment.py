@@ -50,6 +50,7 @@ class IntentCommandOperandContainmentTest(unittest.TestCase):
             outside.mkdir()
             (validation_repo / "escape-link").symlink_to(outside, target_is_directory=True)
             commands = (
+                ["pytest", "escape-link"],
                 ["make", "-Cescape-link", "test"],
                 ["make", "-C", "escape-link", "test"],
                 ["make", "--directory=escape-link", "test"],

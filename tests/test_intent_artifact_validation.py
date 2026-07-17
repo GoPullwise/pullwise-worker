@@ -58,6 +58,32 @@ class IntentArtifactValidationTest(unittest.TestCase):
             errors,
         )
 
+    def test_plan_execution_candidate_requires_command_and_cwd(self) -> None:
+        cases = (
+            (
+                {"command": [], "cwd": "."},
+                "intent-test-plan.json test_targets[0].execution_candidates[0].command is missing or empty",
+            ),
+            (
+                {"command": ["python3", "-m", "unittest"], "cwd": ""},
+                "intent-test-plan.json test_targets[0].execution_candidates[0].cwd is missing or empty",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = _run_dir(Path(tmp_dir))
+            for candidate, expected_error in cases:
+                with self.subTest(candidate=candidate):
+                    errors = intent_test_plan_errors(
+                        run_dir,
+                        {
+                            "schema_version": "intent-test-plan/v1",
+                            "test_targets": [
+                                _plan_target(execution_candidates=[candidate])
+                            ],
+                        },
+                    )
+                    self.assertIn(expected_error, errors)
+
     def test_generated_source_requires_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = _run_dir(Path(tmp_dir))
@@ -97,6 +123,34 @@ class IntentArtifactValidationTest(unittest.TestCase):
 
             errors = intent_test_source_errors(run_dir, payload)
 
+        self.assertIn(
+            "intent-test-source.json generated_tests[0].target_test_ids is missing or empty",
+            errors,
+        )
+
+    def test_generated_source_rejects_empty_normalized_command_and_target_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = _run_dir(Path(tmp_dir))
+            path = _write_generated_test(run_dir)
+            errors = intent_test_source_errors(
+                run_dir,
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": path,
+                            "command": [{}],
+                            "target_test_ids": ["", None, 123],
+                        }
+                    ],
+                },
+            )
+
+        self.assertIn(
+            "intent-test-source.json generated_tests[0].command is missing or empty",
+            errors,
+        )
         self.assertIn(
             "intent-test-source.json generated_tests[0].target_test_ids is missing or empty",
             errors,

@@ -36,7 +36,7 @@ from ._main_part_01_bootstrap import (
     worker_machine_metrics_payload,
     worker_memory_payload,
 )
-from .agentic_execution import build_execution_capabilities, command_argument_path_containment
+from .agentic_execution import build_execution_capabilities, command_argument_path_containment, command_path_operands
 from .codex_sdk_runtime import (
     append_text_no_follow,
     CodexRuntimeResources,
@@ -2496,7 +2496,7 @@ def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: P
         argument = str(raw_argument).strip()
         if re.search(r"[a-z][a-z0-9+.-]*://", argument, flags=re.IGNORECASE):
             return False, "test commands may not contain network URLs"
-        # None means the argument does not carry a recognizable filesystem operand.
+    for argument in command_path_operands(argv, cwd=cwd):
         containment = command_argument_path_containment(
             argument,
             cwd=cwd,
