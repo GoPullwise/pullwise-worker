@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { registerHooks } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -22,6 +23,9 @@ const WEB_MODULE_PATH = resolve(
   "lib",
   "pullwise-data.js"
 );
+const WEB_ENV_MODULE_URL = pathToFileURL(
+  resolve(WORKSPACE_ROOT, "pullwise-web", "src", "config", "env.js")
+).href;
 const SCHEMA_ID = "pullwise-public-scan-fixture-pack/v1";
 const CASE_IDS = [
   "running_with_estimate",
@@ -85,10 +89,30 @@ function validatePack(pack) {
   }
 }
 
+function installWebEnvironmentHook() {
+  registerHooks({
+    load(url, context, nextLoad) {
+      const loaded = nextLoad(url, context);
+      if (url !== WEB_ENV_MODULE_URL) return loaded;
+      const source =
+        typeof loaded.source === "string"
+          ? loaded.source
+          : Buffer.from(loaded.source).toString("utf8");
+      const viteExpression = "parseEnv(import.meta.env,";
+      assert.ok(source.includes(viteExpression), "unexpected Web environment bootstrap");
+      return {
+        ...loaded,
+        source: source.replace(viteExpression, "parseEnv({},"),
+      };
+    },
+  });
+}
+
 async function main() {
   const pack = JSON.parse(await readFile(FIXTURE_PATH, "utf8"));
   validatePack(pack);
 
+  installWebEnvironmentHook();
   const web = await import(pathToFileURL(WEB_MODULE_PATH).href);
   for (const exportName of [
     "normalizeScan",
@@ -117,7 +141,17 @@ async function main() {
     );
   }
 
-  console.log(`public scan fixture verified: ${pack.cases.length} cases`);
+  console.log(
+    JSON.stringify({
+      success: true,
+      numTotalTests: pack.cases.length,
+      numPassedTests: pack.cases.length,
+      numFailedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
+      numFailedTestSuites: 0,
+    })
+  );
 }
 
 main().catch((error) => {

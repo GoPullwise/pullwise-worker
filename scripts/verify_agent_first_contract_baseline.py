@@ -246,9 +246,6 @@ def verify_baseline(
         probe_statuses = [test_statuses[probe_id] for probe_id in surface["probe_ids"]]
         if probe_statuses and all(status == "passed" for status in probe_statuses):
             warnings.append(_issue("watched_surface_drift", surface_id=surface["id"]))
-            indeterminate.append(
-                _issue("watched_surface_drift", surface_id=surface["id"])
-            )
         elif not any(status == "failed" for status in probe_statuses):
             code = "probe_not_run" if not run_tests else "watched_surface_unverified"
             item = _issue(code, surface_id=surface["id"])

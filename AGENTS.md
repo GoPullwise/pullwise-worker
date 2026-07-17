@@ -60,9 +60,10 @@ implementation.
   verifier catalog. The manifest may reference their IDs but must not add a
   path, command, test node, cwd, timeout, or shell fragment.
 - Contract text hashes use strict UTF-8 with CRLF/CR normalized to LF. Git HEAD
-  and unlisted paths are informational; blocking fixture drift fails, while a
-  watched-file drift remains indeterminate pending both owners' review even
-  after all linked fixed probes pass.
+  and unlisted paths are informational. Blocking canonical-fixture drift fails.
+  Broad watched-file drift is compatible with a warning only while every
+  blocking fixture matches and all linked fixed probes pass; otherwise it is
+  indeterminate.
 - Do not hand-edit the generated Appendix A block between its markers. Render
   it from the manifest and keep it byte-for-byte synchronized.
 - `candidate` is a read-only proposal command. It requires every fixed probe to

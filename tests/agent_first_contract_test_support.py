@@ -77,7 +77,7 @@ class AgentFirstContractTestCase(unittest.TestCase):
                 "head_drift": "informational",
                 "unlisted_path_drift": "ignored",
                 "blocking_surface_drift": "incompatible",
-                "watched_surface_drift": "indeterminate_pending_review",
+                "watched_surface_drift": "compatible_warning_after_linked_probes",
                 "probe_failure": "incompatible",
                 "probe_indeterminate": "indeterminate",
                 "required_review": "baseline_owner_and_affected_repo_owner",

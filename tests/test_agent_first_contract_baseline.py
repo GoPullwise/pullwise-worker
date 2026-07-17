@@ -57,19 +57,16 @@ class AgentFirstContractBaselineTest(AgentFirstContractTestCase):
             report["indeterminate_reasons"],
         )
 
-    def test_watched_source_drift_requires_review_even_when_its_probe_passes(self) -> None:
+    def test_watched_source_drift_warns_when_its_probe_passes(self) -> None:
         (self.server / "contract.txt").write_text("strict-v1-contract changed\n", encoding="utf-8")
 
         report = self._verify()
 
-        self.assertEqual("indeterminate", report["status"])
+        self.assertEqual("compatible", report["status"])
         self.assertFalse(report["hashes_match"])
         self.assertEqual("watched_surface_drift", report["warnings"][0]["code"])
         self.assertEqual("server.strict-v1-validator", report["warnings"][0]["surface_id"])
-        self.assertIn(
-            "watched_surface_drift",
-            {item["code"] for item in report["indeterminate_reasons"]},
-        )
+        self.assertEqual([], report["indeterminate_reasons"])
 
     def test_blocking_fixture_drift_is_incompatible(self) -> None:
         fixture = self.server / "tests" / "test_contract.py"

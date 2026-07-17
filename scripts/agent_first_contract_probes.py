@@ -23,114 +23,10 @@ except ModuleNotFoundError:
     )
 
 
-RUNNER_CATALOG: dict[str, dict[str, Any]] = {
-    "server.cancellation-fixtures": {
-        "repo": "server",
-        "runner": "python_unittest",
-        "nodes": ("tests.test_cancellation_handshake",),
-        "timeout_seconds": 300,
-        "minimum_tests": 17,
-        "allowed_skips": 0,
-    },
-    "server.policy-fixtures": {
-        "repo": "server",
-        "runner": "python_unittest",
-        "nodes": (
-            "tests.test_worker_admin_routes.WorkerAdminRoutesTest.test_admin_plan_agent_config_keeps_only_canonical_review_worker_policy",
-        ),
-        "timeout_seconds": 300,
-        "minimum_tests": 1,
-        "allowed_skips": 0,
-    },
-    "server.progress-eta-fixtures": {
-        "repo": "server",
-        "runner": "python_unittest",
-        "nodes": (
-            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_progress_records_worker_reported_phase_steps_message_and_log_summary",
-            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_eta_persists_and_batch_status_exposes_arbitrary_concurrency",
-            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_eta_rejects_invalid_numbers_ranges_and_terminal_payloads",
-            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_worker_heartbeat_eta_is_persisted_and_terminal_result_clears_scan_eta",
-            "tests.test_worker_pull_routes.WorkerPullRoutesTest.test_delayed_lower_sequence_event_cannot_overwrite_newer_scan_progress",
-        ),
-        "timeout_seconds": 300,
-        "minimum_tests": 5,
-        "allowed_skips": 0,
-    },
-    "server.result-fixtures": {
-        "repo": "server",
-        "runner": "python_unittest",
-        "nodes": ("tests.test_review_worker_protocol_v1",),
-        "timeout_seconds": 300,
-        "minimum_tests": 28,
-        "allowed_skips": 0,
-    },
-    "server.route-fixtures": {
-        "repo": "server",
-        "runner": "python_unittest",
-        "nodes": ("tests.test_worker_pull_routes",),
-        "timeout_seconds": 300,
-        "minimum_tests": 123,
-        "allowed_skips": 0,
-    },
-    "server.system-limit-fixtures": {
-        "repo": "server",
-        "runner": "python_unittest",
-        "nodes": (
-            "tests.test_configuration_contracts.ConfigurationContractsTest.test_review_phase_limits_are_global_admin_config",
-        ),
-        "timeout_seconds": 300,
-        "minimum_tests": 1,
-        "allowed_skips": 0,
-    },
-    "web.api-fixtures": {
-        "repo": "web",
-        "runner": "node_vitest",
-        "nodes": ("src/api/pullwise.test.js",),
-        "timeout_seconds": 300,
-        "minimum_tests": 8,
-        "allowed_skips": 0,
-    },
-    "web.flow-fixtures": {
-        "repo": "web",
-        "runner": "node_vitest",
-        "nodes": ("src/screens/flow.test.jsx",),
-        "timeout_seconds": 300,
-        "minimum_tests": 75,
-        "allowed_skips": 0,
-    },
-    "web.history-fixtures": {
-        "repo": "web",
-        "runner": "node_vitest",
-        "nodes": ("src/screens/issues.test.jsx",),
-        "timeout_seconds": 300,
-        "minimum_tests": 69,
-        "allowed_skips": 0,
-    },
-    "web.normalizer-fixtures": {
-        "repo": "web",
-        "runner": "node_vitest",
-        "nodes": ("src/lib/pullwise-data.test.js",),
-        "timeout_seconds": 300,
-        "minimum_tests": 75,
-        "allowed_skips": 0,
-    },
-    "web.progress-fixtures": {
-        "repo": "web",
-        "runner": "node_vitest",
-        "nodes": ("src/components/scan-progress.test.jsx",),
-        "timeout_seconds": 300,
-        "minimum_tests": 1,
-        "allowed_skips": 0,
-    },
-    "web.timing-fixtures": {
-        "repo": "web",
-        "runner": "node_vitest",
-        "nodes": ("src/components/scan-timing.test.jsx",),
-        "timeout_seconds": 300,
-        "minimum_tests": 6,
-        "allowed_skips": 0,
-    },
-}
+try:
+    from scripts.agent_first_contract_runner_catalog import RUNNER_CATALOG
+except ModuleNotFoundError:
+    from agent_first_contract_runner_catalog import RUNNER_CATALOG  # type: ignore[no-redef]
 RunnerCatalog = Mapping[str, Mapping[str, Any]]
 UNITTEST_COUNT = re.compile(rb"Ran ([0-9]+) tests? in")
 UNITTEST_SKIPS = re.compile(rb"skipped=([0-9]+)")
@@ -156,6 +52,8 @@ def build_test_argv(
     spec = runner_catalog[runner_id]
     if spec["runner"] == "python_unittest":
         return [python_executable, "-B", "-m", "unittest", *spec["nodes"]]
+    if spec["runner"] == "python_script":
+        return [python_executable, "-B", *spec["nodes"]]
     if spec["runner"] == "node_vitest":
         return [
             npm_executable,
@@ -164,11 +62,13 @@ def build_test_argv(
             "--reporter=json",
             *spec["nodes"],
         ]
+    if spec["runner"] == "node_script":
+        return [npm_executable, *spec["nodes"]]
     raise ValueError("unsupported_fixed_runner")
 
 
 def _parse_counts(spec: Mapping[str, Any], output: bytes) -> tuple[int | None, int | None]:
-    if spec["runner"] == "python_unittest":
+    if spec["runner"] in {"python_script", "python_unittest"}:
         count_matches = UNITTEST_COUNT.findall(output)
         if not count_matches:
             return None, None
@@ -190,8 +90,8 @@ def _parse_counts(spec: Mapping[str, Any], output: bytes) -> tuple[int | None, i
     return observed, pending + todo
 
 
-def _vitest_declares_failure(spec: Mapping[str, Any], output: bytes) -> bool:
-    if spec["runner"] != "node_vitest":
+def _node_report_declares_failure(spec: Mapping[str, Any], output: bytes) -> bool:
+    if spec["runner"] not in {"node_script", "node_vitest"}:
         return False
     try:
         payload = json.loads(output.decode("utf-8"))
@@ -274,7 +174,7 @@ def _execute_probe(
             observed_skips=skipped,
         )
         return result
-    if process["returncode"] != 0 or _vitest_declares_failure(spec, output):
+    if process["returncode"] != 0 or _node_report_declares_failure(spec, output):
         return {
             "id": runner_id,
             "runner_id": runner_id,
@@ -308,6 +208,11 @@ def _fixed_entries_available(spec: Mapping[str, Any], repo_root: Path) -> bool:
     if spec["runner"] == "node_vitest":
         vitest = repo_root / "node_modules" / "vitest" / "vitest.mjs"
         return vitest.is_file() and not vitest.is_symlink() and all(
+            (repo_root / node).is_file() and not (repo_root / node).is_symlink()
+            for node in spec["nodes"]
+        )
+    if spec["runner"] in {"node_script", "python_script"}:
+        return all(
             (repo_root / node).is_file() and not (repo_root / node).is_symlink()
             for node in spec["nodes"]
         )
@@ -350,11 +255,15 @@ def run_probe(
 ) -> dict[str, Any]:
     spec = runner_catalog[runner_id]
     node = shutil.which("node")
-    if spec["runner"] == "node_vitest" and not node:
+    if spec["runner"] in {"node_script", "node_vitest"} and not node:
         return _indeterminate_result(runner_id, "tool_unavailable")
     if not _fixed_entries_available(spec, repo_root):
         return _indeterminate_result(runner_id, "fixed_entry_unavailable")
-    executable = sys.executable if spec["runner"] == "python_unittest" else node
+    executable = (
+        sys.executable
+        if spec["runner"] in {"python_script", "python_unittest"}
+        else node
+    )
     assert executable is not None
     argv = build_test_argv(
         runner_id,

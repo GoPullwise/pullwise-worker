@@ -14,7 +14,7 @@
     "head_drift": "informational",
     "unlisted_path_drift": "ignored",
     "blocking_surface_drift": "incompatible",
-    "watched_surface_drift": "indeterminate_pending_review",
+    "watched_surface_drift": "compatible_warning_after_linked_probes",
     "probe_failure": "incompatible",
     "probe_indeterminate": "indeterminate",
     "required_review": "baseline_owner_and_affected_repo_owner"
@@ -859,6 +859,41 @@
         "web.timing-fixtures"
       ],
       "sha256": "5674e3cc0fd5e6f312dcc1a7fa740a1ed1ecdbce01c392f20fe4ed57f0b62db8"
+    },
+    {
+      "id": "worker.public-scan-canonical-fixture",
+      "repo": "worker",
+      "path": "contracts/agent-first/fixtures/public-scan-v1.json",
+      "roles": ["fixture"],
+      "anchors": [
+        "completed_with_debug_bundle_and_duration",
+        "partial_completed",
+        "pullwise-public-scan-fixture-pack/v1",
+        "running_with_estimate"
+      ],
+      "enforcement": "blocking",
+      "probe_ids": ["worker.public-scan-canonical-fixture"],
+      "sha256": "8346fd058fbca1885b5c9c76c970eea533df90d3e4a08dba8aa44c6135e61f7e"
+    },
+    {
+      "id": "worker.strict-v1-wire-canonical-fixture",
+      "repo": "worker",
+      "path": "contracts/agent-first/fixtures/review-worker-protocol-v1.json",
+      "roles": ["fixture"],
+      "anchors": [
+        "artifact_report_agent",
+        "event_progress",
+        "heartbeat_active_with_estimate",
+        "heartbeat_idle",
+        "lease",
+        "register",
+        "result_completed",
+        "result_partial_completed",
+        "review-worker-protocol/v1"
+      ],
+      "enforcement": "blocking",
+      "probe_ids": ["worker.strict-v1-wire-canonical-fixture"],
+      "sha256": "a4e7870d78fa076bd9a6427b3875be82dd0bcfcc73a778b72414f2c015c45089"
     }
   ],
   "tests": [
@@ -873,6 +908,8 @@
     {"id": "web.history-fixtures", "runner_id": "web.history-fixtures"},
     {"id": "web.normalizer-fixtures", "runner_id": "web.normalizer-fixtures"},
     {"id": "web.progress-fixtures", "runner_id": "web.progress-fixtures"},
-    {"id": "web.timing-fixtures", "runner_id": "web.timing-fixtures"}
+    {"id": "web.timing-fixtures", "runner_id": "web.timing-fixtures"},
+    {"id": "worker.public-scan-canonical-fixture", "runner_id": "worker.public-scan-canonical-fixture"},
+    {"id": "worker.strict-v1-wire-canonical-fixture", "runner_id": "worker.strict-v1-wire-canonical-fixture"}
   ]
 }

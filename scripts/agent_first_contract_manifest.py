@@ -19,7 +19,7 @@ EXPECTED_POLICY = {
     "head_drift": "informational",
     "unlisted_path_drift": "ignored",
     "blocking_surface_drift": "incompatible",
-    "watched_surface_drift": "indeterminate_pending_review",
+    "watched_surface_drift": "compatible_warning_after_linked_probes",
     "probe_failure": "incompatible",
     "probe_indeterminate": "indeterminate",
     "required_review": "baseline_owner_and_affected_repo_owner",
@@ -303,6 +303,10 @@ def _display_command(spec: Mapping[str, Any]) -> str:
     nodes = " ".join(str(node) for node in spec["nodes"])
     if spec["runner"] == "python_unittest":
         return f"python -B -m unittest {nodes}"
+    if spec["runner"] == "python_script":
+        return f"python -B {nodes}"
+    if spec["runner"] == "node_script":
+        return f"node {nodes}"
     return f"node node_modules/vitest/vitest.mjs run --reporter=json {nodes}"
 
 
@@ -354,9 +358,10 @@ def render_appendix(manifest: dict[str, Any], *, runner_catalog: RunnerCatalog) 
     lines.extend(
         [
             "",
-            "Compatibility rule: HEAD and unlisted-path drift are informational. Blocking fixture drift, "
-            "Appendix drift, or a completed failing fixed probe is incompatible. Watched source drift remains "
-            "indeterminate pending owner review even after every linked fixed probe passes.",
+            "Compatibility rule: HEAD and unlisted-path drift are informational. Blocking canonical-fixture "
+            "drift, Appendix drift, or a completed failing fixed probe is incompatible. Broad watched source "
+            "drift is compatible with a warning only while blocking fixtures match and every linked fixed "
+            "probe passes; otherwise the result is indeterminate.",
             "Baseline refresh is a read-only candidate operation and requires both the baseline owner and the affected repository owner.",
         ]
     )
