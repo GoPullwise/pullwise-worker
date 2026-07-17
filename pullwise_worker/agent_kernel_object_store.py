@@ -170,8 +170,9 @@ class ObjectStore:
         if isinstance(size, bool) or not isinstance(size, int):
             raise CasCorruptError("CAS_CORRUPT: invalid ContentRef size")
         path = self.path_for_digest(digest)
-        self._verify_path(path, digest, size)
-        return path.read_bytes()
+        payload = self._verify_path(path, digest, size, capture=True)
+        assert payload is not None
+        return payload
 
     def collect_orphans(
         self, *, idle: bool, older_than_seconds: int, now: float | None = None
@@ -323,25 +324,32 @@ class ObjectStore:
                 raise
 
     @staticmethod
-    def _verify_path(path: Path, digest: str, size: int) -> None:
+    def _verify_path(
+        path: Path, digest: str, size: int, *, capture: bool = False
+    ) -> bytes | None:
         try:
-            metadata = path.lstat()
-        except FileNotFoundError as exc:
-            raise CasCorruptError("CAS_CORRUPT: object missing") from exc
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            raise CasCorruptError("CAS_CORRUPT: object is not a regular file")
-        if metadata.st_nlink != 1:
-            raise CasCorruptError("CAS_CORRUPT: object has unexpected hardlinks")
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise CasCorruptError("CAS_CORRUPT: object permissions are not private")
-        if metadata.st_size != size:
-            raise CasCorruptError("CAS_CORRUPT: object size mismatch")
-        observed = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                observed.update(chunk)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
+                metadata = os.fstat(handle.fileno())
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise CasCorruptError("CAS_CORRUPT: object is not a regular file")
+                if metadata.st_nlink != 1:
+                    raise CasCorruptError("CAS_CORRUPT: object has unexpected hardlinks")
+                if stat.S_IMODE(metadata.st_mode) != 0o600:
+                    raise CasCorruptError("CAS_CORRUPT: object permissions are not private")
+                if metadata.st_size != size:
+                    raise CasCorruptError("CAS_CORRUPT: object size mismatch")
+                observed = hashlib.sha256()
+                captured: list[bytes] | None = [] if capture else None
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    observed.update(chunk)
+                    if captured is not None:
+                        captured.append(chunk)
+        except OSError as exc:
+            raise CasCorruptError("CAS_CORRUPT: object missing or unreadable") from exc
         if observed.hexdigest() != digest:
             raise CasCorruptError("CAS_CORRUPT: object digest mismatch")
+        return b"".join(captured) if captured is not None else None
 
     @classmethod
     def _verify_concurrent_publish(cls, path: Path, digest: str, size: int) -> None:
