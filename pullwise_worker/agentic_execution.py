@@ -80,6 +80,35 @@ CANDIDATE_KEYS = (
 )
 
 
+def command_argument_path_containment(
+    value: object,
+    *,
+    cwd: Path,
+    validation_root: Path,
+) -> bool | None:
+    """Return containment for a recognizable path operand, otherwise ``None``."""
+
+    argument = str(value or "").strip()
+    if argument.startswith("-"):
+        _option, separator, argument = argument.partition("=")
+        if not separator:
+            return None
+        argument = argument.strip()
+    if not argument:
+        return None
+    candidate = Path(argument)
+    path_like = candidate.is_absolute() or argument in {".", ".."} or "/" in argument or "\\" in argument
+    if not path_like:
+        return None
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    try:
+        candidate.resolve(strict=False).relative_to(validation_root.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
 def _command(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(part) for part in value if str(part).strip()]

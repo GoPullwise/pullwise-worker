@@ -19,9 +19,9 @@ class IntentCommandOperandContainmentTest(unittest.TestCase):
             validation_repo.mkdir()
             outside = root / "outside"
             commands = (
-                ["go", "test", f"-coverprofile={outside / 'coverage.out'}"],
-                ["pytest", f"--basetemp={outside / 'pytest'}"],
-                ["cargo", "test", "--target-dir=../outside/cargo"],
+                ["go", "test", f"--coverprofile={outside / 'coverage.out'}"],
+                ["pytest", "--config=../outside/config.toml"],
+                ["pytest", "--config=.."],
             )
 
             for command in commands:
