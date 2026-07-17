@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "effective-execution-policy/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "policy_id", "policy_version", "issued_at", "issuer", "task_type",
+    "granted_capabilities", "denied_capabilities", "capability_risk_ceiling",
+    "quality_risk_floor", "source_write_mode", "allowed_read_roots", "allowed_write_roots",
+    "agent_tool_network", "dependency_install", "command_policy_ref", "secret_policy_ref",
+    "redaction_policy_ref", "budgets", "terminalization_reserve_ms", "max_agents",
+    "max_agent_sessions_total", "max_attempts", "interaction_mode",
+    "authorized_waiver_issuers", "digest"
+  ],
+  "properties": {
+    "schema_id": {"const": "effective-execution-policy/v1"},
+    "policy_id": {"type": "string", "pattern": "^policy_[0-9a-f]{32}$"},
+    "policy_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "issued_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "issuer": {"$ref": "actor/v1"},
+    "task_type": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*/v[1-9][0-9]*$"},
+    "granted_capabilities": {
+      "type": "array", "maxItems": 256, "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"}
+    },
+    "denied_capabilities": {
+      "type": "array", "maxItems": 256,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "reason_code"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"},
+          "reason_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$"}
+        }
+      }
+    },
+    "capability_risk_ceiling": {"enum": ["R0", "R1", "R2", "R3", "R4"]},
+    "quality_risk_floor": {"enum": ["Q0", "Q1", "Q2", "Q3"]},
+    "source_write_mode": {"enum": ["isolated_reversible", "read_only"]},
+    "allowed_read_roots": {
+      "type": "array", "maxItems": 256, "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 4096}
+    },
+    "allowed_write_roots": {
+      "type": "array", "maxItems": 256, "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 4096}
+    },
+    "agent_tool_network": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "origins"],
+      "properties": {
+        "mode": {"enum": ["deny", "allowlist"]},
+        "origins": {
+          "type": "array", "maxItems": 256, "uniqueItems": true,
+          "x-pullwise-sorted-unique": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 2048, "x-pullwise-ascii": true}
+        }
+      }
+    },
+    "dependency_install": {"enum": ["deny", "approval_required"]},
+    "command_policy_ref": {"$ref": "content-ref/v1"},
+    "secret_policy_ref": {"$ref": "content-ref/v1"},
+    "redaction_policy_ref": {"$ref": "content-ref/v1"},
+    "budgets": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_ms", "token_input", "token_output", "cost_micros", "tool_calls", "agent_sessions", "attempts", "output_bytes"],
+      "properties": {
+        "wall_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "token_input": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "token_output": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "cost_micros": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "tool_calls": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "agent_sessions": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "attempts": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "output_bytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "terminalization_reserve_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "max_agents": {"type": "integer", "minimum": 1, "maximum": 256},
+    "max_agent_sessions_total": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "max_attempts": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "interaction_mode": {"enum": ["supported", "unavailable"]},
+    "authorized_waiver_issuers": {
+      "type": "array", "maxItems": 256, "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 160}
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -78,6 +78,56 @@
       ]
     },
     {
+      "schema_id": "effective-execution-policy/v1",
+      "valid": {
+        "schema_id": "effective-execution-policy/v1",
+        "policy_id": "policy_11111111111111111111111111111111",
+        "policy_version": 1,
+        "issued_at": "2026-07-17T12:00:00.000Z",
+        "issuer": {"schema_id": "actor/v1", "kind": "server_control", "id": "pullwise-server", "session_id": null},
+        "task_type": "repo_review.full_scan/v1",
+        "granted_capabilities": ["repository.read"],
+        "denied_capabilities": [
+          {"id": "dependency.install", "reason_code": "CAPABILITY_DENIED"},
+          {"id": "network", "reason_code": "CAPABILITY_DENIED"},
+          {"id": "repository.write", "reason_code": "SOURCE_MUTATION_FORBIDDEN"}
+        ],
+        "capability_risk_ceiling": "R1",
+        "quality_risk_floor": "Q1",
+        "source_write_mode": "read_only",
+        "allowed_read_roots": ["repository"],
+        "allowed_write_roots": [],
+        "agent_tool_network": {"mode": "deny", "origins": []},
+        "dependency_install": "deny",
+        "command_policy_ref": {
+          "schema_id": "content-ref/v1", "artifact_id": "art_11111111111111111111111111111111", "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "size_bytes": 10, "media_type": "application/json", "content_schema_id": "command-policy/v1", "encoding": "utf-8"
+        },
+        "secret_policy_ref": {
+          "schema_id": "content-ref/v1", "artifact_id": "art_22222222222222222222222222222222", "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "size_bytes": 10, "media_type": "application/json", "content_schema_id": "secret-policy/v1", "encoding": "utf-8"
+        },
+        "redaction_policy_ref": {
+          "schema_id": "content-ref/v1", "artifact_id": "art_33333333333333333333333333333333", "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "size_bytes": 10, "media_type": "application/json", "content_schema_id": "redaction-policy/v1", "encoding": "utf-8"
+        },
+        "budgets": {"wall_ms": 3600000, "token_input": 1000000, "token_output": 250000, "cost_micros": 0, "tool_calls": 1000, "agent_sessions": 12, "attempts": 3, "output_bytes": 67108864},
+        "terminalization_reserve_ms": 60000,
+        "max_agents": 4,
+        "max_agent_sessions_total": 12,
+        "max_attempts": 3,
+        "interaction_mode": "unavailable",
+        "authorized_waiver_issuers": [],
+        "digest": "0ceedb89a2010798ea5ab12a1ccf5956bce4d7000b9e542940b4d54085142c70"
+      },
+      "canonical_sha256": "1c97b63372a979fa09ea5f55b5d58cacc9a8eae9f6f314caf5f4756e6140c4fc",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/network", "value": true},
+        {"category": "enum", "operation": "replace", "path": "/agent_tool_network/mode", "value": "open"},
+        {"category": "size", "operation": "replace", "path": "/max_agents", "value": 257}
+      ]
+    },
+    {
       "schema_id": "legacy-v1-task-mapping/v1",
       "valid": {
         "schema_id": "legacy-v1-task-mapping/v1",
@@ -177,6 +227,34 @@
         {"category": "unknown_field", "operation": "add", "path": "/queue_position", "value": 1},
         {"category": "enum", "operation": "replace", "path": "/lifecycle", "value": "RECONCILING"},
         {"category": "size", "operation": "replace", "path": "/terminalization_reserve_ms", "unsafe_integer": "9007199254740992"}
+      ]
+    },
+    {
+      "schema_id": "task-request/v1",
+      "valid": {
+        "schema_id": "task-request/v1",
+        "task_id": "task_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "task_type": "repo_review.full_scan/v1",
+        "intent_kind": "analysis",
+        "objective": "Perform a complete read-only repository review.",
+        "acceptance_criteria": [
+          {"source_id": "complete-coverage", "statement": "All review tiers are covered."}
+        ],
+        "constraints": [
+          {"source_id": "read-only", "statement": "Do not modify repository source."}
+        ],
+        "delivery": {"kind": "review_report", "required_outputs": ["report.agent", "report.human"], "output_language": "zh-CN"},
+        "requested_capabilities": ["repository.read"],
+        "requested_budgets": {"wall_ms": 3600000, "token_input": 1000000, "token_output": 250000, "cost_micros": 0, "tool_calls": 1000, "agent_sessions": 12, "attempts": 3, "output_bytes": 67108864},
+        "interaction_policy": {"mode": "unavailable", "input_deadline_ms": 0, "approval_deadline_ms": 0},
+        "submitted_at": "2026-07-17T12:00:00.000Z",
+        "submitted_by": {"schema_id": "actor/v1", "kind": "server_control", "id": "pullwise-server", "session_id": null}
+      },
+      "canonical_sha256": "8615003f3fb34698510ec9bcb3ad5351eb82565c1ac3ec55f493ac871d7cb369",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/workflow", "value": []},
+        {"category": "enum", "operation": "replace", "path": "/intent_kind", "value": "workflow"},
+        {"category": "size", "operation": "replace", "path": "/objective", "repeat": {"text": "x", "count": 16385}}
       ]
     }
   ]

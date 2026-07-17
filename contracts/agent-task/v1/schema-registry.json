@@ -22,6 +22,11 @@
       "sha256": "df30625941befb97b88e3c36ac1d45046ae360f7d1b549e8d05b0c5b02ae5eb5"
     },
     {
+      "schema_id": "effective-execution-policy/v1",
+      "path": "effective-execution-policy.schema.json",
+      "sha256": "d76d8085f0dc15e20915bdabcec5ae5dd6f093a00adfdc01394ac0e30112e0e9"
+    },
+    {
       "schema_id": "legacy-v1-task-mapping/v1",
       "path": "legacy-v1-task-mapping.schema.json",
       "sha256": "0f1258cd6efa24aab864c84109438b8c3957436665e381cf8674de21e1f6b216"
@@ -35,6 +40,11 @@
       "schema_id": "task-record/v1",
       "path": "task-record.schema.json",
       "sha256": "685e6d6fbda0571eb2f7f3e2ba90960fd4ea0c90ba1aa0ebea23db61449de71e"
+    },
+    {
+      "schema_id": "task-request/v1",
+      "path": "task-request.schema.json",
+      "sha256": "82886198ec8928ad52f1c8571b9c9ec7560f5b60e7c3ba9027e634357a528073"
     }
   ]
 }

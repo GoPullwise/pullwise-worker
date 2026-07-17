@@ -12,6 +12,7 @@ from .agent_kernel_canonical import (
     canonical_sha256,
     load_strict_json,
 )
+from .agent_kernel_contract_semantics import validate_contract_semantics
 from .agent_kernel_schema_validation import (
     SchemaValidationError,
     validate_instance,
@@ -65,6 +66,7 @@ class SchemaRegistry:
         try:
             canonical_bytes(instance)
             validate_instance(instance, schema, resolve=self._resolve)
+            validate_contract_semantics(schema_id, instance)
         except CanonicalizationError as exc:
             raise SchemaValidationError(exc.code, detail=exc.detail) from exc
 

@@ -54,9 +54,11 @@ class AgentKernelSchemaRegistryTest(unittest.TestCase):
                 "availability-ref/v1",
                 "budget-entry/v1",
                 "content-ref/v1",
+                "effective-execution-policy/v1",
                 "legacy-v1-task-mapping/v1",
                 "requirement-entry/v1",
                 "task-record/v1",
+                "task-request/v1",
             },
             set(registry.schema_ids),
         )

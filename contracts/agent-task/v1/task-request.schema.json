@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task-request/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "task_id", "task_type", "intent_kind", "objective",
+    "acceptance_criteria", "constraints", "delivery", "requested_capabilities",
+    "requested_budgets", "interaction_policy", "submitted_at", "submitted_by"
+  ],
+  "properties": {
+    "schema_id": {"const": "task-request/v1"},
+    "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{32}$"},
+    "task_type": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*/v[1-9][0-9]*$"},
+    "intent_kind": {"enum": ["change", "analysis", "diagnosis", "report", "operation"]},
+    "objective": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 16384},
+    "acceptance_criteria": {
+      "type": "array", "minItems": 1, "maxItems": 256,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source_id", "statement"],
+        "properties": {
+          "source_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "statement": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 16384}
+        }
+      }
+    },
+    "constraints": {
+      "type": "array", "maxItems": 256,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source_id", "statement"],
+        "properties": {
+          "source_id": {"type": "string", "minLength": 1, "maxLength": 160},
+          "statement": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 16384}
+        }
+      }
+    },
+    "delivery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "required_outputs", "output_language"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 80},
+        "required_outputs": {
+          "type": "array", "maxItems": 64, "uniqueItems": true,
+          "x-pullwise-sorted-unique": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 160}
+        },
+        "output_language": {"type": "string", "minLength": 1, "maxLength": 35}
+      }
+    },
+    "requested_capabilities": {
+      "type": "array", "maxItems": 256, "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"}
+    },
+    "requested_budgets": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_ms", "token_input", "token_output", "cost_micros", "tool_calls", "agent_sessions", "attempts", "output_bytes"],
+      "properties": {
+        "wall_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "token_input": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "token_output": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "cost_micros": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "tool_calls": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "agent_sessions": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "attempts": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "output_bytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "interaction_policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "input_deadline_ms", "approval_deadline_ms"],
+      "properties": {
+        "mode": {"enum": ["supported", "unavailable"]},
+        "input_deadline_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "approval_deadline_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "submitted_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "submitted_by": {"$ref": "actor/v1"}
+  }
+}
