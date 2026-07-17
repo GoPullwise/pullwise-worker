@@ -59,6 +59,10 @@ implementation.
 - Repository directories and executable probe commands belong to the fixed
   verifier catalog. The manifest may reference their IDs but must not add a
   path, command, test node, cwd, timeout, or shell fragment.
+- A fixed probe that reports zero executed tests is indeterminate
+  (`insufficient_tests`), including Python `unittest` runtimes that return a
+  nonzero no-tests exit code. A nonzero run with actual test evidence remains a
+  deterministic failure.
 - Contract text hashes use strict UTF-8 with CRLF/CR normalized to LF. Git HEAD
   and unlisted paths are informational. Blocking canonical-fixture drift fails.
   Broad watched-file drift is compatible with a warning only while every
