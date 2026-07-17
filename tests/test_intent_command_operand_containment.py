@@ -35,23 +35,25 @@ class IntentCommandOperandContainmentTest(unittest.TestCase):
                     self.assertFalse(allowed)
                     self.assertIn("outside the validation workspace", reason)
 
-    def test_policy_allows_an_embedded_output_path_inside_workspace(self) -> None:
+    def test_policy_allows_contained_paths_and_non_path_option_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             validation_repo = Path(tmp_dir) / "validation-repo"
             validation_repo.mkdir()
-            command = [
-                "go",
-                "test",
-                f"-coverprofile={validation_repo / 'build' / 'coverage.out'}",
-            ]
-
-            allowed, _reason = intent_test_command_policy(
-                command,
-                validation_repo,
-                validation_repo,
+            commands = (
+                ["go", "test", f"-coverprofile={validation_repo / 'build' / 'coverage.out'}"],
+                ["pytest", "--config=."],
+                ["pytest", "--color=auto"],
             )
 
-        self.assertTrue(allowed)
+            for command in commands:
+                with self.subTest(command=command):
+                    allowed, _reason = intent_test_command_policy(
+                        command,
+                        validation_repo,
+                        validation_repo,
+                    )
+
+                    self.assertTrue(allowed)
 
     def test_preflight_rejects_embedded_path_escape_before_runtime_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

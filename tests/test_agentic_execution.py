@@ -1104,7 +1104,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
             codex = RepairingCodex()
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
-            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "darwin"), patch(
                 "pullwise_worker.review_worker_v1.effort_for_phase",
                 return_value="medium",
             ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
@@ -1193,7 +1193,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
 
             codex = RepairingCodex()
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
-            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "darwin"), patch(
                 "pullwise_worker.review_worker_v1.effort_for_phase",
                 return_value="medium",
             ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
@@ -1286,7 +1286,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     return SimpleNamespace(duration_ms=5)
 
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
-            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "darwin"), patch(
                 "pullwise_worker.review_worker_v1.effort_for_phase",
                 return_value="medium",
             ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
@@ -1373,7 +1373,7 @@ class AgenticExecutionContractsTest(unittest.TestCase):
                     return SimpleNamespace(duration_ms=5)
 
             worker = ReviewWorkerV1(SimpleNamespace(worker_id="wk_1", service_home=str(root)))
-            with patch("pullwise_worker.review_worker_v1.sys.platform", "win32"), patch(
+            with patch("pullwise_worker.review_worker_v1.sys.platform", "darwin"), patch(
                 "pullwise_worker.review_worker_v1.effort_for_phase",
                 return_value="medium",
             ), patch("pullwise_worker.review_worker_v1.turn_timeout_for_job", return_value=30):
