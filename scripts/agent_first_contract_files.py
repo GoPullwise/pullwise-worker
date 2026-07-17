@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -116,3 +117,32 @@ def canonical_text(path: Path) -> str:
 
 def text_sha256(path: Path) -> str:
     return hashlib.sha256(canonical_text(path).encode("utf-8")).hexdigest()
+
+
+def python_collection_values(path: Path, symbol: str, *, ordered: bool) -> list[str]:
+    try:
+        tree = ast.parse(canonical_text(path))
+    except SyntaxError as exc:
+        raise BaselineEnvironmentError("registry_source_invalid_python") from exc
+    matches: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == symbol for target in node.targets):
+                matches.append(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == symbol and node.value:
+                matches.append(node.value)
+    if len(matches) != 1:
+        raise BaselineEnvironmentError("registry_symbol_missing_or_ambiguous")
+    try:
+        literal = ast.literal_eval(matches[0])
+    except (ValueError, SyntaxError) as exc:
+        raise BaselineEnvironmentError("registry_value_not_literal") from exc
+    if not isinstance(literal, (list, tuple, set, frozenset)):
+        raise BaselineEnvironmentError("registry_value_not_collection")
+    values = list(literal)
+    if any(not isinstance(value, str) or not value for value in values):
+        raise BaselineEnvironmentError("registry_value_not_string")
+    if len(values) != len(set(values)):
+        raise BaselineEnvironmentError("registry_values_not_unique")
+    return values if ordered else sorted(values)

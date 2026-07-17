@@ -37,6 +37,11 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
 
         contract_path = self.server / "contract.txt"
         contract_path.write_text("strict-v1-contract\n", encoding="utf-8")
+        registry_path = self.server / "registry.py"
+        registry_path.write_text(
+            "EVENT_TYPES = {'run_completed', 'run_started'}\n",
+            encoding="utf-8",
+        )
         tests_dir = self.server / "tests"
         tests_dir.mkdir()
         (tests_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -74,7 +79,7 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
                 "head_drift": "informational",
                 "unlisted_path_drift": "ignored",
                 "blocking_surface_drift": "incompatible",
-                "watched_surface_drift": "warning_if_fixed_probes_pass",
+                "watched_surface_drift": "indeterminate_pending_review",
                 "probe_failure": "incompatible",
                 "probe_indeterminate": "indeterminate",
                 "required_review": "baseline_owner_and_affected_repo_owner",
@@ -84,7 +89,28 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
                 {"id": "web", "owner": "Pullwise Web projection owner", "frozen_head": "2" * 40},
                 {"id": "worker", "owner": "Pullwise Worker compatibility owner", "frozen_head": "3" * 40},
             ],
+            "registries": [
+                {
+                    "id": "server.event-types",
+                    "repo": "server",
+                    "path": "registry.py",
+                    "surface_id": "server.registry-source",
+                    "symbol": "EVENT_TYPES",
+                    "ordered": False,
+                    "values": ["run_completed", "run_started"],
+                }
+            ],
             "surfaces": [
+                {
+                    "id": "server.registry-source",
+                    "repo": "server",
+                    "path": "registry.py",
+                    "roles": ["registry"],
+                    "anchors": ["EVENT_TYPES"],
+                    "enforcement": "watched",
+                    "probe_ids": ["server.strict-v1-probe"],
+                    "sha256": canonical_sha256(registry_path),
+                },
                 {
                     "id": "server.strict-v1-fixture",
                     "repo": "server",
@@ -174,15 +200,19 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
         self.assertEqual("compatible", report["status"])
         self.assertEqual("informational", report["repositories"][0]["head_status"])
 
-    def test_watched_source_drift_warns_when_its_fixed_probe_passes(self) -> None:
+    def test_watched_source_drift_requires_review_even_when_its_probe_passes(self) -> None:
         (self.server / "contract.txt").write_text("strict-v1-contract changed\n", encoding="utf-8")
 
         report = self._verify()
 
-        self.assertEqual("compatible", report["status"])
+        self.assertEqual("indeterminate", report["status"])
         self.assertFalse(report["hashes_match"])
         self.assertEqual("watched_surface_drift", report["warnings"][0]["code"])
         self.assertEqual("server.strict-v1-validator", report["warnings"][0]["surface_id"])
+        self.assertIn(
+            "watched_surface_drift",
+            {item["code"] for item in report["indeterminate_reasons"]},
+        )
 
     def test_blocking_fixture_drift_is_incompatible(self) -> None:
         fixture = self.server / "tests" / "test_contract.py"
@@ -252,6 +282,19 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
         self.assertEqual("incompatible", report["status"])
         self.assertFalse(report["appendix_matches"])
         self.assertEqual("appendix_drift", report["failures"][-1]["code"])
+
+    def test_registry_value_drift_is_incompatible_and_located(self) -> None:
+        (self.server / "registry.py").write_text(
+            "EVENT_TYPES = {'run_failed', 'run_started'}\n",
+            encoding="utf-8",
+        )
+
+        report = self._verify()
+
+        self.assertEqual("incompatible", report["status"])
+        self.assertEqual("registry_mismatch", report["failures"][0]["code"])
+        self.assertEqual("server.event-types", report["failures"][0]["registry_id"])
+        self.assertEqual("drift", report["registries"][0]["status"])
 
     def test_candidate_is_read_only_and_uses_canonical_hashes(self) -> None:
         original = copy.deepcopy(self.manifest)

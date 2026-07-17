@@ -19,7 +19,7 @@ EXPECTED_POLICY = {
     "head_drift": "informational",
     "unlisted_path_drift": "ignored",
     "blocking_surface_drift": "incompatible",
-    "watched_surface_drift": "warning_if_fixed_probes_pass",
+    "watched_surface_drift": "indeterminate_pending_review",
     "probe_failure": "incompatible",
     "probe_indeterminate": "indeterminate",
     "required_review": "baseline_owner_and_affected_repo_owner",
@@ -37,6 +37,7 @@ ALLOWED_ROLES = {
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+PYTHON_SYMBOL_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RESERVED_WINDOWS_NAMES = {
     "aux",
     "con",
@@ -143,6 +144,7 @@ def validate_manifest(payload: object, *, runner_catalog: RunnerCatalog) -> None
             "appendix",
             "compatibility_policy",
             "repositories",
+            "registries",
             "surfaces",
             "tests",
         },
@@ -252,6 +254,50 @@ def validate_manifest(payload: object, *, runner_catalog: RunnerCatalog) -> None
     if referenced_probes != known_tests:
         raise ManifestError("tests:must_be_referenced_by_surfaces")
 
+    surface_by_id = {surface["id"]: surface for surface in surfaces}
+    registries = root["registries"]
+    if not isinstance(registries, list) or not registries:
+        raise ManifestError("registries:not_nonempty_array")
+    registry_ids: list[str] = []
+    registry_keys: set[tuple[str, str, str]] = set()
+    for index, item in enumerate(registries):
+        registry = _exact(
+            item,
+            {"id", "repo", "path", "surface_id", "symbol", "ordered", "values"},
+            f"registries[{index}]",
+        )
+        registry_id = _identifier(registry["id"], f"registries[{index}].id")
+        repo_id = _identifier(registry["repo"], f"registries[{index}].repo")
+        relative = _relative_path(registry["path"], f"registries[{index}].path")
+        surface_id = _identifier(
+            registry["surface_id"], f"registries[{index}].surface_id"
+        )
+        symbol = _text(registry["symbol"], f"registries[{index}].symbol", single_line=True)
+        if not PYTHON_SYMBOL_PATTERN.fullmatch(symbol):
+            raise ManifestError(f"registries[{index}].symbol:invalid")
+        ordered = registry["ordered"]
+        if not isinstance(ordered, bool):
+            raise ManifestError(f"registries[{index}].ordered:not_boolean")
+        raw_values = registry["values"]
+        if not isinstance(raw_values, list) or not raw_values:
+            raise ManifestError(f"registries[{index}].values:not_nonempty_array")
+        values = [
+            _text(value, f"registries[{index}].values[]", single_line=True)
+            for value in raw_values
+        ]
+        if len(values) != len(set(values)) or (not ordered and values != sorted(values)):
+            raise ManifestError(f"registries[{index}].values:not_canonical")
+        surface = surface_by_id.get(surface_id)
+        if surface is None or surface["repo"] != repo_id or surface["path"] != relative:
+            raise ManifestError(f"registries[{index}]:surface_mismatch")
+        key = (repo_id, relative.casefold(), symbol)
+        if key in registry_keys:
+            raise ManifestError("registries:duplicate_symbol")
+        registry_keys.add(key)
+        registry_ids.append(registry_id)
+    if registry_ids != sorted(set(registry_ids)):
+        raise ManifestError("registries:not_sorted_unique")
+
 
 def _display_command(spec: Mapping[str, Any]) -> str:
     nodes = " ".join(str(node) for node in spec["nodes"])
@@ -285,6 +331,19 @@ def render_appendix(manifest: dict[str, Any], *, runner_catalog: RunnerCatalog) 
             f"| `{surface['id']}` | `{full_path}` | `{','.join(surface['roles'])}` | "
             f"`{surface['enforcement']}` | `{','.join(surface['probe_ids'])}` | `{surface['sha256']}` |"
         )
+    lines.extend(
+        [
+            "",
+            "| Exact registry | Source symbol | Ordered | Values |",
+            "|---|---|---|---|",
+        ]
+    )
+    for registry in manifest["registries"]:
+        source = f"{REPOSITORY_DIRS[registry['repo']]}/{registry['path']}#{registry['symbol']}"
+        values = ", ".join(f"`{value}`" for value in registry["values"])
+        lines.append(
+            f"| `{registry['id']}` | `{source}` | `{str(registry['ordered']).lower()}` | {values} |"
+        )
     lines.extend(["", "Fixed executable probes:", ""])
     for test in manifest["tests"]:
         spec = runner_catalog[test["runner_id"]]
@@ -296,8 +355,8 @@ def render_appendix(manifest: dict[str, Any], *, runner_catalog: RunnerCatalog) 
         [
             "",
             "Compatibility rule: HEAD and unlisted-path drift are informational. Blocking fixture drift, "
-            "Appendix drift, or a completed failing fixed probe is incompatible. Watched source drift is "
-            "a warning only after every linked fixed probe passes; an unavailable or incomplete probe is indeterminate.",
+            "Appendix drift, or a completed failing fixed probe is incompatible. Watched source drift remains "
+            "indeterminate pending owner review even after every linked fixed probe passes.",
             "Baseline refresh is a read-only candidate operation and requires both the baseline owner and the affected repository owner.",
         ]
     )
