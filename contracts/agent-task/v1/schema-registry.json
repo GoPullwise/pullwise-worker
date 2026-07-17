@@ -1,0 +1,20 @@
+{
+  "schema_id": "agent-task-schema-registry/v1",
+  "schemas": [
+    {
+      "schema_id": "actor/v1",
+      "path": "actor.schema.json",
+      "sha256": "328b367ccf8e32200604fc11a29ac0b31d67c41a67e622ae9324206cbcf8d7a1"
+    },
+    {
+      "schema_id": "availability-ref/v1",
+      "path": "availability-ref.schema.json",
+      "sha256": "a60fc470546f287e9402e9b1ae7670ba48f69367730261a2466ca308758493a2"
+    },
+    {
+      "schema_id": "content-ref/v1",
+      "path": "content-ref.schema.json",
+      "sha256": "df30625941befb97b88e3c36ac1d45046ae360f7d1b549e8d05b0c5b02ae5eb5"
+    }
+  ]
+}

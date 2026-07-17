@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "availability-ref/v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "ref"],
+      "properties": {
+        "availability": {"const": "available"},
+        "ref": {"$ref": "content-ref/v1"}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "reason_code"],
+      "properties": {
+        "availability": {"enum": ["unavailable", "not_applicable"]},
+        "reason_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,127}$"}
+      }
+    }
+  ]
+}

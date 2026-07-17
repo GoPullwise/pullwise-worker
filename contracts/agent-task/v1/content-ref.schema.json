@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "content-ref/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "artifact_id",
+    "sha256",
+    "size_bytes",
+    "media_type",
+    "content_schema_id",
+    "encoding"
+  ],
+  "properties": {
+    "schema_id": {"const": "content-ref/v1"},
+    "artifact_id": {"type": "string", "pattern": "^art_[0-9a-f]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "size_bytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "media_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "x-pullwise-ascii": true
+    },
+    "content_schema_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*/v[1-9][0-9]*$"
+    },
+    "encoding": {"enum": ["utf-8", "binary"]}
+  }
+}

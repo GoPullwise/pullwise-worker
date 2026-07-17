@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "actor/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_id", "kind", "id", "session_id"],
+  "properties": {
+    "schema_id": {"const": "actor/v1"},
+    "kind": {
+      "enum": [
+        "task_owner",
+        "quality_verifier",
+        "legacy_domain_reviewer",
+        "explorer",
+        "troubleshooter",
+        "implementer",
+        "worker_control",
+        "server_control",
+        "user_control",
+        "system_reconciler"
+      ]
+    },
+    "id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "session_id": {"type": ["string", "null"]}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "enum": [
+            "task_owner",
+            "quality_verifier",
+            "legacy_domain_reviewer",
+            "explorer",
+            "troubleshooter",
+            "implementer"
+          ]
+        },
+        "session_id": {"type": "string", "pattern": "^sess_[0-9a-f]{32}$"}
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "enum": [
+            "worker_control",
+            "server_control",
+            "user_control",
+            "system_reconciler"
+          ]
+        },
+        "session_id": {"const": null}
+      }
+    }
+  ]
+}
