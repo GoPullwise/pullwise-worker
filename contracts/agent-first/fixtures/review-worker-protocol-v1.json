@@ -1,0 +1,449 @@
+{
+  "protocol_version": "review-worker-protocol/v1",
+  "cases": {
+    "register": {
+      "protocol_version": "review-worker-protocol/v1",
+      "worker": {
+        "worker_id": "wk_1",
+        "worker_group": "default",
+        "worker_version": "0.1.0",
+        "hostname": "worker-host",
+        "concurrency": {
+          "max_active_jobs": 1,
+          "maintains_local_queue": false,
+          "prefetch_jobs": false
+        },
+        "platform": {
+          "os": "linux",
+          "arch": "x86_64"
+        },
+        "capabilities": {
+          "codex_app_server": true,
+          "full_repo_scan": true,
+          "progress_events": true,
+          "cancellation": true,
+          "intent_test_validation": true,
+          "max_active_jobs": 1
+        }
+      }
+    },
+    "lease": {
+      "protocol_version": "review-worker-protocol/v1",
+      "worker_id": "wk_1",
+      "capacity": {
+        "available_job_slots": 1,
+        "active_jobs": 0,
+        "maintains_local_queue": false,
+        "local_queue_depth": 0
+      },
+      "capabilities": {
+        "full_repo_scan": true,
+        "codex_app_server": true,
+        "isolated_codex_home": true,
+        "progress_events": true,
+        "cancellation": true,
+        "intent_test_validation": true
+      }
+    },
+    "heartbeat_idle": {
+      "protocol_version": "review-worker-protocol/v1",
+      "worker_id": "wk_1",
+      "status": "idle",
+      "active_run_id": null,
+      "concurrency": {
+        "max_active_jobs": 1,
+        "active_jobs": 0,
+        "available_job_slots": 1,
+        "maintains_local_queue": false,
+        "local_queue_depth": 0
+      },
+      "codex_app_server": {
+        "status": "ready",
+        "transport": "stdio",
+        "active_thread_id": null
+      }
+    },
+    "heartbeat_active_with_estimate": {
+      "protocol_version": "review-worker-protocol/v1",
+      "worker_id": "wk_1",
+      "status": "busy",
+      "active_run_id": "run_job_1",
+      "concurrency": {
+        "max_active_jobs": 1,
+        "active_jobs": 1,
+        "available_job_slots": 0,
+        "maintains_local_queue": false,
+        "local_queue_depth": 0
+      },
+      "codex_app_server": {
+        "status": "ready",
+        "transport": "stdio",
+        "active_thread_id": "thr_1"
+      },
+      "progress": {
+        "run_id": "run_job_1",
+        "overall_percent": 12.5,
+        "current_phase": "repo_map",
+        "current_phase_status": "running",
+        "current_phase_percent": 50.0,
+        "message": "Mapping repository.",
+        "counters": {
+          "source_like_files_total": 10,
+          "source_like_files_classified": 10,
+          "bundles_total": 2,
+          "bundles_packed": 2,
+          "reviewer_runs_total": 4,
+          "reviewer_runs_completed": 1,
+          "intent_tests_total": 0,
+          "intent_tests_written": 0,
+          "intent_tests_run": 0,
+          "validator_candidates_total": 0,
+          "validator_candidates_completed": 0,
+          "artifacts_total": 0,
+          "artifacts_uploaded": 0
+        },
+        "active_unit": {},
+        "last_event_sequence": 4,
+        "updated_at": "2026-07-01T10:42:00Z",
+        "estimate": {
+          "state": "available",
+          "basis": "current_run_work_graph",
+          "remainingSeconds": 900,
+          "lowerSeconds": 780,
+          "upperSeconds": 1080,
+          "confidence": "medium",
+          "updatedAt": "2026-07-01T10:42:00Z",
+          "parallel": {
+            "configuredConcurrency": 3,
+            "effectiveConcurrency": 3,
+            "activeUnits": 2,
+            "pendingUnits": 6,
+            "retryingUnits": 0
+          }
+        }
+      }
+    },
+    "event_progress": {
+      "protocol_version": "review-worker-protocol/v1",
+      "run_id": "run_job_1",
+      "worker_id": "wk_1",
+      "sequence": 2,
+      "timestamp": "2026-07-01T10:25:00Z",
+      "event_type": "progress_updated",
+      "phase": "reviewer_fanout",
+      "severity": "info",
+      "message": "Invalid supported event shape.",
+      "progress": {
+        "overall_percent": 45.0,
+        "current_phase_percent": 15,
+        "status": "running"
+      },
+      "data": {}
+    },
+    "artifact_report_agent": {
+      "protocol_version": "review-worker-protocol/v1",
+      "attempt_id": "wk_1-1",
+      "run_id": "run_job_1",
+      "artifact": {
+        "artifact_id": "art_report_agent",
+        "kind": "report.agent",
+        "name": "report.agent.json",
+        "media_type": "application/json",
+        "schema_id": "codex-full-repo-review",
+        "schema_version": "v1",
+        "encoding": "utf-8",
+        "compression": "none",
+        "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "size_bytes": 2,
+        "required": true
+      },
+      "content_base64": "e30="
+    },
+    "result_completed": {
+      "status": "done",
+      "attempt_id": "wk_1-1",
+      "summary": {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0
+      },
+      "reviewWorkerProtocol": {
+        "protocol_version": "review-worker-protocol/v1",
+        "message_type": "review_run_result",
+        "job": {
+          "job_id": "job_1",
+          "run_id": "run_job_1",
+          "lease_id": "lease_job_1",
+          "job_type": "repo_review.full_scan"
+        },
+        "worker": {
+          "worker_id": "wk_1",
+          "worker_version": "0.1.0",
+          "concurrency": {
+            "max_active_jobs": 1,
+            "maintains_local_queue": false
+          },
+          "engine": {
+            "type": "codex_app_server",
+            "app_server_transport": "stdio"
+          }
+        },
+        "execution": {
+          "status": "completed",
+          "review_mode": "full_repo"
+        },
+        "progress_final": {
+          "overall_percent": 100.0,
+          "current_phase": "submit_result_envelope",
+          "status": "completed",
+          "message": "terminal progress"
+        },
+        "quality_gate": {
+          "status": "pass",
+          "errors": [],
+          "warnings": []
+        },
+        "artifact_manifest": [
+          {
+            "artifact_id": "art_report_human",
+            "kind": "report.human",
+            "name": "report.md",
+            "media_type": "text/markdown",
+            "schema_id": "human-markdown-report",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_report_human"
+            },
+            "sha256": "c48c9545ace440f91d31ab6289d2f23470d20e0aafbbc82198ba5c01c1729db8",
+            "size_bytes": 23
+          },
+          {
+            "artifact_id": "art_report_agent",
+            "kind": "report.agent",
+            "name": "report.agent.json",
+            "media_type": "application/json",
+            "schema_id": "codex-full-repo-review",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_report_agent"
+            },
+            "sha256": "8ac0efd12cca871b08b2229a5afd59d2a19ff89035b5bbcec517c4dc82545dea",
+            "size_bytes": 31
+          },
+          {
+            "artifact_id": "art_coverage",
+            "kind": "coverage",
+            "name": "coverage.json",
+            "media_type": "application/json",
+            "schema_id": "coverage",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_coverage"
+            },
+            "sha256": "b884f0f43b64cde50a1a95e40bb729574a51fef2c88e1ead15ea6200dc85119f",
+            "size_bytes": 23
+          },
+          {
+            "artifact_id": "art_qa",
+            "kind": "qa",
+            "name": "qa.json",
+            "media_type": "application/json",
+            "schema_id": "qa-gate",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_qa"
+            },
+            "sha256": "db8763b58180d615120bd125e9fec0279d42a80f30cb5aa59956fce5ca66a2a1",
+            "size_bytes": 11
+          },
+          {
+            "artifact_id": "art_token_budget",
+            "kind": "token_budget",
+            "name": "token-budget.json",
+            "media_type": "application/json",
+            "schema_id": "token-budget",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_token_budget"
+            },
+            "sha256": "e0627d5c041d23a6b57b843610d1cc9e69edb57d46acf1c6024d30a860d19cb0",
+            "size_bytes": 31
+          }
+        ],
+        "summary": {
+          "overall_risk": "unknown",
+          "result_status": "complete",
+          "finding_counts": {
+            "confirmed_critical": 0,
+            "confirmed_high": 0,
+            "confirmed_medium": 0,
+            "confirmed_low": 0,
+            "plausible": 0,
+            "weak_appendix": 0,
+            "disproven": 0,
+            "suppressed": 0
+          },
+          "coverage": {
+            "source_like_files_total": 0,
+            "deep_reviewed_files": 0,
+            "standard_reviewed_files": 0,
+            "light_reviewed_files": 0,
+            "inventory_only_files": 0,
+            "skipped_files": 0,
+            "intent_tests_planned": 0,
+            "intent_tests_run": 0
+          },
+          "top_findings": []
+        }
+      }
+    },
+    "result_partial_completed": {
+      "status": "partial_completed",
+      "attempt_id": "wk_1-1",
+      "summary": {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0
+      },
+      "reviewWorkerProtocol": {
+        "protocol_version": "review-worker-protocol/v1",
+        "message_type": "review_run_result",
+        "job": {
+          "job_id": "job_1",
+          "run_id": "run_job_1",
+          "lease_id": "lease_job_1",
+          "job_type": "repo_review.full_scan"
+        },
+        "worker": {
+          "worker_id": "wk_1",
+          "worker_version": "0.1.0",
+          "concurrency": {
+            "max_active_jobs": 1,
+            "maintains_local_queue": false
+          },
+          "engine": {
+            "type": "codex_app_server",
+            "app_server_transport": "stdio"
+          }
+        },
+        "execution": {
+          "status": "partial_completed",
+          "review_mode": "full_repo"
+        },
+        "progress_final": {
+          "overall_percent": 41.5,
+          "current_phase": "failure_handling",
+          "status": "partial_completed",
+          "message": "terminal progress"
+        },
+        "quality_gate": {
+          "status": "fail",
+          "errors": [],
+          "warnings": []
+        },
+        "artifact_manifest": [
+          {
+            "artifact_id": "art_worker_log",
+            "kind": "worker_log",
+            "name": "worker.log.jsonl",
+            "media_type": "application/jsonl",
+            "schema_id": "worker-log",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_worker_log"
+            },
+            "sha256": "7d9fc380f02f7cf25e939ce85b588f9a91e8ae3cd423e4f17be6f3c7102e3307",
+            "size_bytes": 28
+          },
+          {
+            "artifact_id": "art_qa",
+            "kind": "qa",
+            "name": "qa.json",
+            "media_type": "application/json",
+            "schema_id": "qa-gate",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_qa"
+            },
+            "sha256": "db8763b58180d615120bd125e9fec0279d42a80f30cb5aa59956fce5ca66a2a1",
+            "size_bytes": 11
+          },
+          {
+            "artifact_id": "art_error_report",
+            "kind": "error_report",
+            "name": "error-report.json",
+            "media_type": "application/json",
+            "schema_id": "error-report",
+            "schema_version": "v1",
+            "encoding": "utf-8",
+            "compression": "none",
+            "required": true,
+            "storage": {
+              "type": "server_artifact",
+              "url": "/v1/review-runs/run_job_1/artifacts/art_error_report"
+            },
+            "sha256": "ed8040194dc05a674fba9163bd3c8d9d753841a3ef609b84a5a3f0f1e7ab16a4",
+            "size_bytes": 31
+          }
+        ],
+        "summary": {
+          "overall_risk": "unknown",
+          "result_status": "incomplete",
+          "finding_counts": {
+            "confirmed_critical": 0,
+            "confirmed_high": 0,
+            "confirmed_medium": 0,
+            "confirmed_low": 0,
+            "plausible": 0,
+            "weak_appendix": 0,
+            "disproven": 0,
+            "suppressed": 0
+          },
+          "coverage": {
+            "source_like_files_total": 0,
+            "deep_reviewed_files": 0,
+            "standard_reviewed_files": 0,
+            "light_reviewed_files": 0,
+            "inventory_only_files": 0,
+            "skipped_files": 0,
+            "intent_tests_planned": 0,
+            "intent_tests_run": 0
+          },
+          "top_findings": []
+        }
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -135,6 +136,16 @@ UNITTEST_COUNT = re.compile(rb"Ran ([0-9]+) tests? in")
 UNITTEST_SKIPS = re.compile(rb"skipped=([0-9]+)")
 
 
+def runner_catalog_sha256(runner_catalog: RunnerCatalog) -> str:
+    payload = json.dumps(
+        runner_catalog,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def build_test_argv(
     runner_id: str,
     *,
@@ -158,11 +169,11 @@ def build_test_argv(
 
 def _parse_counts(spec: Mapping[str, Any], output: bytes) -> tuple[int | None, int | None]:
     if spec["runner"] == "python_unittest":
-        count_match = UNITTEST_COUNT.search(output)
-        if count_match is None:
+        count_matches = UNITTEST_COUNT.findall(output)
+        if not count_matches:
             return None, None
-        skip_match = UNITTEST_SKIPS.search(output)
-        return int(count_match.group(1)), int(skip_match.group(1)) if skip_match else 0
+        skip_matches = UNITTEST_SKIPS.findall(output)
+        return int(count_matches[-1]), int(skip_matches[-1]) if skip_matches else 0
     try:
         payload = json.loads(output.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
@@ -177,6 +188,22 @@ def _parse_counts(spec: Mapping[str, Any], output: bytes) -> tuple[int | None, i
     if any(isinstance(value, bool) or not isinstance(value, int) for value in (pending, todo)):
         return None, None
     return observed, pending + todo
+
+
+def _vitest_declares_failure(spec: Mapping[str, Any], output: bytes) -> bool:
+    if spec["runner"] != "node_vitest":
+        return False
+    try:
+        payload = json.loads(output.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return True
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        return True
+    for field in ("numFailedTests", "numFailedTestSuites"):
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+            return True
+    return False
 
 
 def _indeterminate_result(runner_id: str, reason: str) -> dict[str, Any]:
@@ -209,6 +236,11 @@ def _execute_probe(
     )
     if process["status"] == "start_failed":
         return _indeterminate_result(runner_id, "process_start_failed")
+    output_sha256 = process["output_sha256"]
+    if process["output_too_large"]:
+        result = _indeterminate_result(runner_id, "output_too_large")
+        result.update(returncode=process["returncode"], output_sha256=output_sha256)
+        return result
     if process["status"] in {"timeout", "cleanup_unconfirmed"}:
         result = _indeterminate_result(
             runner_id,
@@ -216,14 +248,9 @@ def _execute_probe(
             if process["status"] == "timeout"
             else "process_tree_cleanup_unconfirmed",
         )
-        result["output_sha256"] = process["output_sha256"]
+        result["output_sha256"] = output_sha256
         return result
     output = process["output"]
-    output_sha256 = process["output_sha256"]
-    if process["output_too_large"]:
-        result = _indeterminate_result(runner_id, "output_too_large")
-        result.update(returncode=process["returncode"], output_sha256=output_sha256)
-        return result
     observed, skipped = _parse_counts(spec, output)
     if observed is None or skipped is None:
         result = _indeterminate_result(runner_id, "test_count_unparseable")
@@ -247,7 +274,7 @@ def _execute_probe(
             observed_skips=skipped,
         )
         return result
-    if process["returncode"] != 0:
+    if process["returncode"] != 0 or _vitest_declares_failure(spec, output):
         return {
             "id": runner_id,
             "runner_id": runner_id,

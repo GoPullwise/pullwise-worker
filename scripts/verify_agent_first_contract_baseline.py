@@ -32,6 +32,7 @@ try:
     from scripts.agent_first_contract_probes import (
         RUNNER_CATALOG,
         build_test_argv,
+        runner_catalog_sha256,
         run_probe,
     )
     from scripts.agent_first_contract_observation import (
@@ -62,6 +63,7 @@ except ModuleNotFoundError:
     from agent_first_contract_probes import (  # type: ignore[no-redef]
         RUNNER_CATALOG,
         build_test_argv,
+        runner_catalog_sha256,
         run_probe,
     )
     from agent_first_contract_observation import (  # type: ignore[no-redef]
@@ -267,6 +269,7 @@ def verify_baseline(
         "baseline_id": manifest["baseline_id"],
         "protocol_version": manifest["protocol_version"],
         "input_snapshot_sha256": input_snapshot_sha256(initial_inputs),
+        "runner_catalog_sha256": runner_catalog_sha256(runner_catalog),
         "status": status,
         "compatible": status == "compatible",
         "hashes_match": hashes_match,

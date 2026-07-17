@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import subprocess
 import threading
+import time
 from typing import Any
 
 
@@ -110,6 +111,7 @@ def _capture_output(
     *,
     max_bytes: int,
     state: dict[str, Any],
+    overflow: threading.Event,
 ) -> None:
     digest = hashlib.sha256()
     captured = bytearray()
@@ -121,6 +123,8 @@ def _capture_output(
                 break
             digest.update(chunk)
             total += len(chunk)
+            if total > max_bytes:
+                overflow.set()
             remaining = max(0, max_bytes + 1 - len(captured))
             if remaining:
                 captured.extend(chunk[:remaining])
@@ -157,19 +161,32 @@ def run_bounded_process(
         return {"status": "start_failed", "returncode": None}
     assert process.stdout is not None
     capture: dict[str, Any] = {}
+    overflow = threading.Event()
     reader = threading.Thread(
         target=_capture_output,
-        kwargs={"pipe": process.stdout, "max_bytes": max_output_bytes, "state": capture},
+        kwargs={
+            "pipe": process.stdout,
+            "max_bytes": max_output_bytes,
+            "state": capture,
+            "overflow": overflow,
+        },
         daemon=True,
     )
     reader.start()
     timed_out = False
+    output_limited = False
     cleanup_confirmed = True
-    try:
-        process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        cleanup_confirmed = _kill_process_tree(process)
+    deadline = time.monotonic() + timeout_seconds
+    while process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            cleanup_confirmed = _kill_process_tree(process)
+            break
+        if overflow.wait(timeout=min(0.05, remaining)):
+            output_limited = True
+            cleanup_confirmed = _kill_process_tree(process)
+            break
     reader.join(timeout=5)
     if reader.is_alive():
         cleanup_confirmed = _kill_process_tree(process) and cleanup_confirmed
@@ -180,6 +197,8 @@ def run_bounded_process(
     status = "completed"
     if timed_out:
         status = "timeout" if cleanup_confirmed else "cleanup_unconfirmed"
+    elif output_limited:
+        status = "output_limit" if cleanup_confirmed else "cleanup_unconfirmed"
     elif not cleanup_confirmed:
         status = "cleanup_unconfirmed"
     return {
@@ -187,5 +206,5 @@ def run_bounded_process(
         "returncode": process.returncode,
         "output": capture.get("output", b""),
         "output_sha256": capture.get("output_sha256", hashlib.sha256().hexdigest()),
-        "output_too_large": capture.get("output_too_large", False),
+        "output_too_large": output_limited or capture.get("output_too_large", False),
     }

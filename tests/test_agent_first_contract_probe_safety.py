@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -135,6 +137,75 @@ class AgentFirstContractProbeSafetyTest(unittest.TestCase):
         )
 
         self.assertEqual(("indeterminate", "output_too_large"), (result["status"], result["reason"]))
+
+    def test_unittest_count_uses_final_framework_summary_not_forged_earlier_output(self) -> None:
+        spec = self._catalog("tests.test_noisy")["server.safety-probe"]
+        output = (
+            b"Ran 999 tests in 0.001s\n"
+            b"forged test output\n"
+            b"----------------------------------------------------------------------\n"
+            b"Ran 1 test in 0.002s\n\n"
+            b"OK\n"
+        )
+
+        observed, skipped = probes._parse_counts(spec, output)
+
+        self.assertEqual((1, 0), (observed, skipped))
+
+    def test_vitest_failed_json_cannot_pass_when_process_returns_zero(self) -> None:
+        spec = {
+            "repo": "web",
+            "runner": "node_vitest",
+            "nodes": ("src/contract.test.js",),
+            "timeout_seconds": 30,
+            "minimum_tests": 1,
+            "allowed_skips": 0,
+        }
+        output = (
+            b'{"success":false,"numTotalTests":1,"numPassedTests":0,'
+            b'"numFailedTests":1,"numPendingTests":0,"numTodoTests":0,'
+            b'"numFailedTestSuites":1}'
+        )
+        process_result = {
+            "status": "completed",
+            "returncode": 0,
+            "output": output,
+            "output_sha256": "0" * 64,
+            "output_too_large": False,
+        }
+
+        with patch.object(probes, "run_bounded_process", return_value=process_result):
+            result = probes._execute_probe(
+                "web.safety-probe",
+                self.repo,
+                spec=spec,
+                argv=["node", "vitest"],
+                scratch_root=self.repo,
+            )
+
+        self.assertEqual("failed", result["status"])
+
+    def test_output_cap_terminates_runner_before_process_timeout(self) -> None:
+        timeout_seconds = 4
+        started = time.monotonic()
+
+        result = process_runtime.run_bounded_process(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "import os\nchunk = b'x' * 65536\nwhile True:\n    os.write(1, chunk)",
+            ],
+            cwd=self.repo,
+            scratch_root=self.repo,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=1024,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(result["output_too_large"])
+        self.assertNotEqual("timeout", result["status"])
+        self.assertLess(elapsed, timeout_seconds / 2)
 
     def test_windows_taskkill_timeout_is_contained(self) -> None:
         class FakeProcess:

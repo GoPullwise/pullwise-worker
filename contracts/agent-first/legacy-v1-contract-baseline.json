@@ -649,8 +649,10 @@
         "does not render a debug bundle action for a backslash-prefixed artifact URL",
         "does not render a debug bundle action for an executable URL scheme",
         "preserves worker-reported node status when the scan is cancelled",
+        "renders scan detail progress as a plain bar in the header",
         "shows failed scan progress as stopped before completion",
         "shows partial completed progress nodes without downgrading them to queued",
+        "shows the whole-scan ETA in the execution panel",
         "shows worker-reported scan phases without a web-owned fixed flow"
       ],
       "enforcement": "watched",
@@ -664,12 +666,15 @@
       "roles": ["consumer", "projection"],
       "anchors": [
         "ReviewRunSummary",
+        "ScanProgressBar",
+        "ScanTiming",
         "ScanningScreen",
         "reviewRunArtifactHref",
         "reviewRunDebugBundleArtifact",
         "reviewRunDebugBundleHref",
         "scanDebugBundleHref",
         "scanPhasesForScan",
+        "scanProgressPresentation",
         "terminalProgressStepStatus"
       ],
       "enforcement": "watched",
@@ -688,9 +693,11 @@
       "roles": ["fixture"],
       "anchors": [
         "does not substitute audit bundle URLs when worker debug artifacts are missing",
+        "hides terminal duration from",
         "omits worker debug bundle downloads from scan history rows",
         "opens partial-completed scan results from history",
-        "shows cancelled scans as cancelled and disables result actions"
+        "shows cancelled scans as cancelled and disables result actions",
+        "shows whole-scan ETA on a running history row"
       ],
       "enforcement": "watched",
       "probe_ids": ["web.history-fixtures"],
@@ -703,9 +710,12 @@
       "roles": ["consumer", "projection"],
       "anchors": [
         "HistoryScreen",
+        "ScanProgressBar",
         "ScanRow",
+        "ScanTiming",
         "scanCanDownloadAuditBundle",
         "scanHistorySummary",
+        "scanProgressPresentation",
         "scansFromStatusPayload"
       ],
       "enforcement": "watched",
@@ -723,11 +733,18 @@
       "path": "src/lib/pullwise-data.js",
       "roles": ["consumer", "projection"],
       "anchors": [
+        "MAX_SCAN_ESTIMATE_PARALLEL_UNITS",
+        "MAX_SCAN_ESTIMATE_SECONDS",
+        "availableRunningScanEstimate",
         "inferredScanStatus",
         "normalizeArtifactUrl",
+        "normalizeEstimateInteger",
         "normalizeScan",
+        "normalizeScanEstimate",
         "normalizeScanProgressSteps",
         "normalizeScanStatus",
+        "retainLatestRunningEstimate",
+        "retainLatestRunningEstimates",
         "reviewRunDebugBundleUrl",
         "scanCanDownloadAuditBundle",
         "scanHasBlockingError",
@@ -750,13 +767,19 @@
       "path": "src/lib/pullwise-data.test.js",
       "roles": ["fixture"],
       "anchors": [
+        "applies live ETA changes from bulk active-scan polling",
+        "does not regress a running ETA when an older poll response arrives late",
         "drops unsafe worker debug bundle URLs during scan normalization",
         "infers terminal scan status from terminal review run payloads",
         "matches scan audit bundle eligibility to result-bearing non-blocked scans",
+        "normalizes only safe current-run ETA values for active scans",
         "normalizes scan progress into a finite percentage range",
         "normalizes worker debug bundle URLs from review-run artifacts",
         "preserves partial completed scans as result-bearing terminal scans",
-        "preserves server review-run metadata from scan payloads"
+        "preserves server review-run metadata from scan payloads",
+        "retains an existing scan detail ETA when its refresh omits the estimate",
+        "retains the last usable ETA across empty running status updates until status changes",
+        "retains the last usable ETA across quiet list refreshes until status changes"
       ],
       "enforcement": "watched",
       "probe_ids": ["web.normalizer-fixtures"],
@@ -841,6 +864,7 @@
   "tests": [
     {"id": "server.cancellation-fixtures", "runner_id": "server.cancellation-fixtures"},
     {"id": "server.policy-fixtures", "runner_id": "server.policy-fixtures"},
+    {"id": "server.progress-eta-fixtures", "runner_id": "server.progress-eta-fixtures"},
     {"id": "server.result-fixtures", "runner_id": "server.result-fixtures"},
     {"id": "server.route-fixtures", "runner_id": "server.route-fixtures"},
     {"id": "server.system-limit-fixtures", "runner_id": "server.system-limit-fixtures"},

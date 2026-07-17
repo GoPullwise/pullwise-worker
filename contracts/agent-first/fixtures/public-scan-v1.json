@@ -1,0 +1,126 @@
+{
+  "schema_id": "pullwise-public-scan-fixture-pack/v1",
+  "source": {
+    "repository": "pullwise-web",
+    "path": "src/lib/pullwise-data.test.js",
+    "description": "Current public scan normalization, terminal-state, ETA, duration, and debug-bundle examples."
+  },
+  "cases": [
+    {
+      "id": "running_with_estimate",
+      "input": {
+        "id": "sc_eta",
+        "status": "running",
+        "estimate": {
+          "state": "available",
+          "basis": "current_run_work_graph",
+          "remainingSeconds": 900,
+          "lowerSeconds": 780,
+          "upperSeconds": 1080,
+          "confidence": "medium",
+          "updatedAt": "2026-07-01T10:42:00Z",
+          "parallel": {
+            "configuredConcurrency": 8,
+            "effectiveConcurrency": 3,
+            "activeUnits": 2,
+            "pendingUnits": 6,
+            "retryingUnits": 1
+          }
+        }
+      },
+      "expected": {
+        "normalized_subset": {
+          "id": "sc_eta",
+          "status": "running",
+          "estimate": {
+            "state": "available",
+            "basis": "current_run_work_graph",
+            "remainingSeconds": 900,
+            "lowerSeconds": 780,
+            "upperSeconds": 1080,
+            "confidence": "medium",
+            "updatedAt": "2026-07-01T10:42:00Z",
+            "parallel": {
+              "configuredConcurrency": 8,
+              "effectiveConcurrency": 3,
+              "activeUnits": 2,
+              "pendingUnits": 6,
+              "retryingUnits": 1
+            }
+          },
+          "durationMs": null,
+          "debugBundleUrl": ""
+        },
+        "is_terminal": false,
+        "can_download_audit_bundle": false
+      }
+    },
+    {
+      "id": "partial_completed",
+      "input": {
+        "id": "sc_partial",
+        "status": "partial_completed",
+        "progress": 87,
+        "progressSteps": [
+          {
+            "id": "qa_gate",
+            "label": "QA gate",
+            "status": "partial_completed",
+            "percent": 100
+          }
+        ]
+      },
+      "expected": {
+        "normalized_subset": {
+          "id": "sc_partial",
+          "status": "partial_completed",
+          "progress": 87,
+          "progressSteps": [
+            {
+              "id": "qa_gate",
+              "label": "QA gate",
+              "status": "partial_completed",
+              "percent": 100
+            }
+          ]
+        },
+        "is_terminal": true,
+        "can_download_audit_bundle": true
+      }
+    },
+    {
+      "id": "completed_with_debug_bundle_and_duration",
+      "input": {
+        "id": "sc_debug",
+        "status": "done",
+        "reviewRun": {
+          "runId": "run_job_1",
+          "durationMs": 720000,
+          "artifacts": [
+            {
+              "artifactId": "art_debug_bundle",
+              "kind": "debug_bundle",
+              "name": "debug-bundle.zip",
+              "storage": {
+                "type": "server_artifact",
+                "url": "/v1/review-runs/run_job_1/artifacts/art_debug_bundle"
+              }
+            }
+          ]
+        }
+      },
+      "expected": {
+        "normalized_subset": {
+          "id": "sc_debug",
+          "status": "done",
+          "progress": 100,
+          "estimate": null,
+          "durationMs": 720000,
+          "debugBundleUrl": "/v1/review-runs/run_job_1/artifacts/art_debug_bundle"
+        },
+        "is_terminal": true,
+        "can_download_audit_bundle": true
+      }
+    }
+  ]
+}

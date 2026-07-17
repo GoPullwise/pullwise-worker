@@ -25,6 +25,7 @@ try:
         input_snapshot,
         input_snapshot_sha256,
     )
+    from scripts.agent_first_contract_probes import runner_catalog_sha256
 except ModuleNotFoundError:
     from agent_first_contract_files import (  # type: ignore[no-redef]
         BaselineEnvironmentError,
@@ -42,6 +43,7 @@ except ModuleNotFoundError:
         input_snapshot,
         input_snapshot_sha256,
     )
+    from agent_first_contract_probes import runner_catalog_sha256  # type: ignore[no-redef]
 
 
 CANDIDATE_SCHEMA_ID = "pullwise-contract-baseline-candidate/v1"
@@ -60,7 +62,9 @@ def _json_sha256(value: Any) -> str:
 
 
 def _validate_evidence(
-    manifest: dict[str, Any], evidence: dict[str, Any]
+    manifest: dict[str, Any],
+    evidence: dict[str, Any],
+    runner_catalog: RunnerCatalog,
 ) -> None:
     if (
         not isinstance(evidence, dict)
@@ -73,6 +77,8 @@ def _validate_evidence(
     digest = evidence.get("input_snapshot_sha256")
     if not isinstance(digest, str) or not SHA256_PATTERN.fullmatch(digest):
         raise BaselineEnvironmentError("candidate_evidence_invalid")
+    if evidence.get("runner_catalog_sha256") != runner_catalog_sha256(runner_catalog):
+        raise BaselineEnvironmentError("candidate_runner_catalog_mismatch")
     tests = evidence.get("tests")
     expected = [
         (test["id"], test["runner_id"], "passed")
@@ -117,7 +123,7 @@ def create_candidate(
         run_tests=True,
         runner_catalog=runner_catalog,
     )
-    _validate_evidence(manifest, evidence)
+    _validate_evidence(manifest, evidence, runner_catalog)
     roots = repository_roots(workspace_root)
     before_inputs = snapshotter(manifest, roots)
     for repo in manifest["repositories"]:
@@ -172,6 +178,7 @@ def candidate_payload(
         "probe_evidence": {
             "source_status": evidence["status"],
             "input_snapshot_sha256": evidence["input_snapshot_sha256"],
+            "runner_catalog_sha256": evidence["runner_catalog_sha256"],
             "report_sha256": _json_sha256(evidence),
             "tests": evidence["tests"],
         },
