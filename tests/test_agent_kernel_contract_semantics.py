@@ -18,14 +18,12 @@ CONTRACT_ROOT = (
 
 
 def _fixture(schema_id: str) -> dict[str, object]:
-    payload = json.loads(
-        (CONTRACT_ROOT / "fixtures" / "schema-golden.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    return copy.deepcopy(
-        next(case["valid"] for case in payload["cases"] if case["schema_id"] == schema_id)
-    )
+    for path in sorted((CONTRACT_ROOT / "fixtures").glob("schema-golden*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for case in payload["cases"]:
+            if case["schema_id"] == schema_id:
+                return copy.deepcopy(case["valid"])
+    raise AssertionError(f"missing fixture for {schema_id}")
 
 
 def _redigest(instance: dict[str, object]) -> dict[str, object]:
@@ -140,6 +138,49 @@ class AgentKernelContractSemanticsTest(unittest.TestCase):
         self.assertEqual(
             policy["digest"], canonical_sha256(policy, digest_field="digest")
         )
+
+    def test_charter_digest_and_revision_predecessor_are_coherent(self) -> None:
+        valid = _fixture("task-charter/v1")
+        self.registry.validate("task-charter/v1", valid)
+        wrong_digest = copy.deepcopy(valid)
+        wrong_digest["digest"] = "0" * 64
+        missing_predecessor = copy.deepcopy(valid)
+        missing_predecessor["charter_version"] = 2
+        missing_predecessor["digest"] = canonical_sha256(
+            missing_predecessor, digest_field="digest"
+        )
+        for instance in (wrong_digest, missing_predecessor):
+            with self.subTest(instance=instance), self.assertRaises(
+                SchemaValidationError
+            ):
+                self.registry.validate("task-charter/v1", instance)
+
+    def test_interaction_kind_capability_and_timestamps_are_coherent(self) -> None:
+        valid = _fixture("interaction-request/v1")
+        self.registry.validate("interaction-request/v1", valid)
+        approval_without_capability = copy.deepcopy(valid)
+        approval_without_capability["kind"] = "approval"
+        input_with_capability = copy.deepcopy(valid)
+        input_with_capability["requested_capability"] = "repository.write"
+        deadline_before_creation = copy.deepcopy(valid)
+        deadline_before_creation["deadline_at"] = "2026-07-17T11:59:59.999Z"
+        for instance in (
+            approval_without_capability,
+            input_with_capability,
+            deadline_before_creation,
+        ):
+            with self.subTest(instance=instance), self.assertRaises(
+                SchemaValidationError
+            ):
+                self.registry.validate("interaction-request/v1", instance)
+
+    def test_waiver_expiry_must_follow_issue_time(self) -> None:
+        valid = _fixture("waiver-event/v1")
+        self.registry.validate("waiver-event/v1", valid)
+        invalid = copy.deepcopy(valid)
+        invalid["expires_at"] = invalid["issued_at"]
+        with self.assertRaisesRegex(SchemaValidationError, "waiver_time_window_invalid"):
+            self.registry.validate("waiver-event/v1", invalid)
 
 
 if __name__ == "__main__":

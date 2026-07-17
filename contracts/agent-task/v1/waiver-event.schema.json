@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "waiver-event/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "waiver_id", "task_id", "requirement_id", "waived_ledger_version",
+    "ledger_digest", "policy_version", "scope", "issuer", "key_id", "reason",
+    "issued_at", "expires_at", "revokes_waiver_id", "signature"
+  ],
+  "properties": {
+    "schema_id": {"const": "waiver-event/v1"},
+    "waiver_id": {"type": "string", "pattern": "^waiver_[0-9a-f]{32}$"},
+    "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{32}$"},
+    "requirement_id": {"type": "string", "pattern": "^req_[a-z_]+_[0-9a-f]{64}$"},
+    "waived_ledger_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "ledger_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "scope": {"const": "this_requirement_this_ledger_version"},
+    "issuer": {"type": "string", "minLength": 1, "maxLength": 160},
+    "key_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "reason": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 16384},
+    "issued_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "expires_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "revokes_waiver_id": {
+      "type": ["string", "null"],
+      "pattern": "^waiver_[0-9a-f]{32}$"
+    },
+    "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"}
+  }
+}

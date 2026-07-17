@@ -107,6 +107,45 @@ def _validate_task_request(instance: dict[str, object]) -> None:
             _fail("unavailable_interaction_deadline_nonzero")
 
 
+def _validate_charter(instance: dict[str, object]) -> None:
+    if instance.get("digest") != canonical_sha256(instance, digest_field="digest"):
+        _fail("digest_mismatch", "$.digest")
+    version = instance.get("charter_version")
+    predecessor = instance.get("previous_charter_ref")
+    if version == 1 and predecessor is not None:
+        _fail("genesis_charter_has_predecessor", "$.previous_charter_ref")
+    if isinstance(version, int) and version > 1 and predecessor is None:
+        _fail("charter_predecessor_missing", "$.previous_charter_ref")
+    if isinstance(predecessor, dict) and predecessor.get("content_schema_id") != (
+        "task-charter/v1"
+    ):
+        _fail("charter_predecessor_schema_invalid", "$.previous_charter_ref")
+
+
+def _validate_interaction_request(instance: dict[str, object]) -> None:
+    kind = instance.get("kind")
+    capability = instance.get("requested_capability")
+    if kind == "approval" and capability is None:
+        _fail("approval_capability_missing", "$.requested_capability")
+    if kind == "input" and capability is not None:
+        _fail("input_capability_forbidden", "$.requested_capability")
+    created_at = instance.get("created_at")
+    deadline_at = instance.get("deadline_at")
+    if isinstance(created_at, str) and isinstance(deadline_at, str) and (
+        deadline_at <= created_at
+    ):
+        _fail("interaction_deadline_invalid", "$.deadline_at")
+
+
+def _validate_waiver(instance: dict[str, object]) -> None:
+    issued_at = instance.get("issued_at")
+    expires_at = instance.get("expires_at")
+    if isinstance(issued_at, str) and isinstance(expires_at, str) and (
+        expires_at <= issued_at
+    ):
+        _fail("waiver_time_window_invalid", "$.expires_at")
+
+
 def _validate_requirement(instance: dict[str, object]) -> None:
     source_kind = instance.get("source_kind")
     requirement_id = instance.get("requirement_id")
@@ -148,10 +187,13 @@ def _validate_legacy_mapping(instance: dict[str, object]) -> None:
 
 VALIDATORS: dict[str, SemanticValidator] = {
     "effective-execution-policy/v1": _validate_policy,
+    "interaction-request/v1": _validate_interaction_request,
     "legacy-v1-task-mapping/v1": _validate_legacy_mapping,
     "requirement-entry/v1": _validate_requirement,
+    "task-charter/v1": _validate_charter,
     "task-record/v1": _validate_task_record,
     "task-request/v1": _validate_task_request,
+    "waiver-event/v1": _validate_waiver,
 }
 
 

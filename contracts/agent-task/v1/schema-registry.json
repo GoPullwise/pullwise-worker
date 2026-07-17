@@ -27,6 +27,16 @@
       "sha256": "d76d8085f0dc15e20915bdabcec5ae5dd6f093a00adfdc01394ac0e30112e0e9"
     },
     {
+      "schema_id": "interaction-request/v1",
+      "path": "interaction-request.schema.json",
+      "sha256": "7cafd08dfa7010c65200ad2eb4cead0651b072f9cf61f16a790d73ca1de818af"
+    },
+    {
+      "schema_id": "interaction-response/v1",
+      "path": "interaction-response.schema.json",
+      "sha256": "a54bc271c905ca29f381470e12f7aa8510a0a6785aaaf2bbac763dcaedf81fc3"
+    },
+    {
       "schema_id": "legacy-v1-task-mapping/v1",
       "path": "legacy-v1-task-mapping.schema.json",
       "sha256": "0f1258cd6efa24aab864c84109438b8c3957436665e381cf8674de21e1f6b216"
@@ -37,6 +47,11 @@
       "sha256": "e70fe1bdff820d9e89fe3233d4c854e1ace4a93ad842942485b48a99fc8f5a10"
     },
     {
+      "schema_id": "task-charter/v1",
+      "path": "task-charter.schema.json",
+      "sha256": "6fb96f865d698f7692b43bf7b2ad6605b1ed8fc55e883fc8dffc2e4857f39962"
+    },
+    {
       "schema_id": "task-record/v1",
       "path": "task-record.schema.json",
       "sha256": "685e6d6fbda0571eb2f7f3e2ba90960fd4ea0c90ba1aa0ebea23db61449de71e"
@@ -45,6 +60,11 @@
       "schema_id": "task-request/v1",
       "path": "task-request.schema.json",
       "sha256": "82886198ec8928ad52f1c8571b9c9ec7560f5b60e7c3ba9027e634357a528073"
+    },
+    {
+      "schema_id": "waiver-event/v1",
+      "path": "waiver-event.schema.json",
+      "sha256": "a7e08bc3f63f94662121725b926241ad8c0541be9b0a60e44b5bde2944571f4f"
     }
   ]
 }

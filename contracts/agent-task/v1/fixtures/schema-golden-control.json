@@ -1,0 +1,110 @@
+{
+  "schema_id": "agent-task-schema-golden-fixtures/v1",
+  "cases": [
+    {
+      "schema_id": "interaction-request/v1",
+      "valid": {
+        "schema_id": "interaction-request/v1",
+        "interaction_id": "interaction_11111111111111111111111111111111",
+        "task_id": "task_22222222222222222222222222222222",
+        "kind": "input",
+        "question": "Which behavior is authoritative?",
+        "requested_capability": null,
+        "choices": ["current behavior", "documented behavior"],
+        "deadline_at": "2026-07-17T12:30:00.000Z",
+        "blocking_requirement_ids": ["req_user_objective_3333333333333333333333333333333333333333333333333333333333333333"],
+        "requested_by": {
+          "schema_id": "actor/v1", "kind": "task_owner",
+          "id": "owner_44444444444444444444444444444444",
+          "session_id": "sess_55555555555555555555555555555555"
+        },
+        "created_at": "2026-07-17T12:00:00.000Z",
+        "idempotency_key": "idem_66666666666666666666666666666666"
+      },
+      "canonical_sha256": "0005f8b84f0c8d0f1c6cb7670a2954860c840a873c94975754176c8d4ee9c99b",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/status", "value": "pending"},
+        {"category": "enum", "operation": "replace", "path": "/kind", "value": "confirmation"},
+        {"category": "size", "operation": "replace", "path": "/question", "repeat": {"text": "x", "count": 16385}}
+      ]
+    },
+    {
+      "schema_id": "interaction-response/v1",
+      "valid": {
+        "schema_id": "interaction-response/v1",
+        "interaction_id": "interaction_11111111111111111111111111111111",
+        "task_id": "task_22222222222222222222222222222222",
+        "response_id": "response_77777777777777777777777777777777",
+        "answer": "Use the documented behavior.",
+        "actor": {"schema_id": "actor/v1", "kind": "user_control", "id": "user-1", "session_id": null},
+        "authority_scope": "task:task_22222222222222222222222222222222",
+        "received_at": "2026-07-17T12:10:00.000Z",
+        "signature_or_null": null
+      },
+      "canonical_sha256": "ff4fefec83a357b091458b97ad2a8a338c88834f8b2424480134e363a541b898",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/accepted", "value": true},
+        {"category": "enum", "operation": "replace", "path": "/schema_id", "value": "interaction-response/v2"},
+        {"category": "size", "operation": "replace", "path": "/answer", "repeat": {"text": "x", "count": 16385}}
+      ]
+    },
+    {
+      "schema_id": "task-charter/v1",
+      "valid": {
+        "schema_id": "task-charter/v1",
+        "task_id": "task_88888888888888888888888888888888",
+        "charter_version": 1,
+        "previous_charter_ref": null,
+        "objective_restated": "Review the complete repository without modifying source.",
+        "scope_in": ["repository"],
+        "scope_out": ["external systems"],
+        "assumptions": [
+          {"statement": "The checked-out revision is authoritative.", "impact": "Analysis is revision-scoped.", "reversible": true}
+        ],
+        "plan": ["Inventory the repository.", "Run the fixed review pipeline.", "Validate the evidence."],
+        "requirement_ids": ["req_user_objective_9999999999999999999999999999999999999999999999999999999999999999"],
+        "unresolved_questions": [],
+        "delivery_plan": {"kind": "review_report", "required_outputs": ["report.agent", "report.human"], "output_language": "zh-CN"},
+        "created_by": {
+          "schema_id": "actor/v1", "kind": "task_owner",
+          "id": "owner_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "session_id": "sess_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "created_at": "2026-07-17T12:00:00.000Z",
+        "digest": "55e64652a536234dac46db2c1f1c194f60885d77379bab44e362c9a55735b46c"
+      },
+      "canonical_sha256": "72043690b9dae8c33c7f59ee3e456408901237fd16a7326c86d138eb50ce7147",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/risk", "value": "medium"},
+        {"category": "enum", "operation": "replace", "path": "/schema_id", "value": "task-charter/v2"},
+        {"category": "size", "operation": "replace", "path": "/objective_restated", "repeat": {"text": "x", "count": 16385}}
+      ]
+    },
+    {
+      "schema_id": "waiver-event/v1",
+      "valid": {
+        "schema_id": "waiver-event/v1",
+        "waiver_id": "waiver_cccccccccccccccccccccccccccccccc",
+        "task_id": "task_dddddddddddddddddddddddddddddddd",
+        "requirement_id": "req_user_constraint_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "waived_ledger_version": 3,
+        "ledger_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "policy_version": 2,
+        "scope": "this_requirement_this_ledger_version",
+        "issuer": "security-owner",
+        "key_id": "security-owner-key-1",
+        "reason": "The scoped exception was explicitly authorized.",
+        "issued_at": "2026-07-17T12:00:00.000Z",
+        "expires_at": "2026-07-17T13:00:00.000Z",
+        "revokes_waiver_id": null,
+        "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "canonical_sha256": "eab1685f8fa1a380770b5bdd00255be51a6f37b4414391fc3220877f3c7bb5f1",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/algorithm", "value": "Ed25519"},
+        {"category": "enum", "operation": "replace", "path": "/scope", "value": "all_requirements"},
+        {"category": "size", "operation": "replace", "path": "/reason", "repeat": {"text": "x", "count": 16385}}
+      ]
+    }
+  ]
+}

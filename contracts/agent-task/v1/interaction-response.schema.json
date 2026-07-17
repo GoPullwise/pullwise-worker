@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "interaction-response/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "interaction_id", "task_id", "response_id", "answer", "actor",
+    "authority_scope", "received_at", "signature_or_null"
+  ],
+  "properties": {
+    "schema_id": {"const": "interaction-response/v1"},
+    "interaction_id": {"type": "string", "pattern": "^interaction_[0-9a-f]{32}$"},
+    "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{32}$"},
+    "response_id": {"type": "string", "pattern": "^response_[0-9a-f]{32}$"},
+    "answer": {"type": "string", "x-pullwise-max-utf8-bytes": 16384},
+    "actor": {"$ref": "actor/v1"},
+    "authority_scope": {"type": "string", "minLength": 1, "maxLength": 160},
+    "received_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "signature_or_null": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9_-]{1,512}$"
+    }
+  }
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import sysconfig
 
 from .agent_kernel_canonical import (
     CanonicalizationError,
@@ -30,9 +31,18 @@ class SchemaRegistryError(RuntimeError):
 
 
 def _default_contract_root() -> Path:
-    source_root = Path(__file__).resolve().parents[1] / "contracts" / "agent-task" / "v1"
-    if source_root.is_dir():
-        return source_root
+    candidates = (
+        Path(__file__).resolve().parents[1] / "contracts" / "agent-task" / "v1",
+        Path(sysconfig.get_path("data"))
+        / "share"
+        / "pullwise-worker"
+        / "contracts"
+        / "agent-task"
+        / "v1",
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
     raise SchemaRegistryError("default_schema_root_unavailable")
 
 

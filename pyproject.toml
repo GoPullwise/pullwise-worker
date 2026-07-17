@@ -19,3 +19,10 @@ pullwise-worker = "pullwise_worker.main:main"
 [tool.setuptools.packages.find]
 include = ["pullwise_worker"]
 
+[tool.setuptools.data-files]
+"share/pullwise-worker/contracts/agent-task/v1" = [
+    "contracts/agent-task/v1/*.json",
+]
+"share/pullwise-worker/contracts/agent-task/v1/fixtures" = [
+    "contracts/agent-task/v1/fixtures/*.json",
+]

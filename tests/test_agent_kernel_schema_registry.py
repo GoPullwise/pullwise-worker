@@ -22,7 +22,10 @@ CONTRACT_ROOT = REPO_ROOT / "contracts" / "agent-task" / "v1"
 def _mutated(instance: object, mutation: dict[str, object]) -> object:
     result = copy.deepcopy(instance)
     assert isinstance(result, dict)
-    segments = [part.replace("~1", "/").replace("~0", "~") for part in str(mutation["path"]).split("/")[1:]]
+    segments = [
+        part.replace("~1", "/").replace("~0", "~")
+        for part in str(mutation["path"]).split("/")[1:]
+    ]
     target: object = result
     for segment in segments[:-1]:
         assert isinstance(target, dict)
@@ -42,11 +45,10 @@ def _mutated(instance: object, mutation: dict[str, object]) -> object:
 class AgentKernelSchemaRegistryTest(unittest.TestCase):
     def test_registry_verifies_schema_identity_digest_and_golden_fixtures(self) -> None:
         registry = SchemaRegistry(CONTRACT_ROOT)
-        fixture = json.loads(
-            (CONTRACT_ROOT / "fixtures" / "schema-golden.json").read_text(
-                encoding="utf-8"
-            )
-        )
+        cases = []
+        for path in sorted((CONTRACT_ROOT / "fixtures").glob("schema-golden*.json")):
+            fixture = json.loads(path.read_text(encoding="utf-8"))
+            cases.extend(fixture["cases"])
 
         self.assertEqual(
             {
@@ -55,17 +57,21 @@ class AgentKernelSchemaRegistryTest(unittest.TestCase):
                 "budget-entry/v1",
                 "content-ref/v1",
                 "effective-execution-policy/v1",
+                "interaction-request/v1",
+                "interaction-response/v1",
                 "legacy-v1-task-mapping/v1",
                 "requirement-entry/v1",
+                "task-charter/v1",
                 "task-record/v1",
                 "task-request/v1",
+                "waiver-event/v1",
             },
             set(registry.schema_ids),
         )
         self.assertEqual(set(registry.schema_ids), {
-            case["schema_id"] for case in fixture["cases"]
+            case["schema_id"] for case in cases
         })
-        for case in fixture["cases"]:
+        for case in cases:
             with self.subTest(schema_id=case["schema_id"]):
                 registry.validate(case["schema_id"], case["valid"])
                 self.assertEqual(

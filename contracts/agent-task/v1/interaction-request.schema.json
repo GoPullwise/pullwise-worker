@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "interaction-request/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "interaction_id", "task_id", "kind", "question",
+    "requested_capability", "choices", "deadline_at", "blocking_requirement_ids",
+    "requested_by", "created_at", "idempotency_key"
+  ],
+  "properties": {
+    "schema_id": {"const": "interaction-request/v1"},
+    "interaction_id": {"type": "string", "pattern": "^interaction_[0-9a-f]{32}$"},
+    "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{32}$"},
+    "kind": {"enum": ["input", "approval"]},
+    "question": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 16384},
+    "requested_capability": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+    },
+    "choices": {
+      "type": "array", "maxItems": 64, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 4096}
+    },
+    "deadline_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "blocking_requirement_ids": {
+      "type": "array", "maxItems": 256, "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "pattern": "^req_[a-z_]+_[0-9a-f]{64}$"}
+    },
+    "requested_by": {"$ref": "actor/v1"},
+    "created_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "idempotency_key": {"type": "string", "pattern": "^idem_[0-9a-f]{32}$"}
+  }
+}
