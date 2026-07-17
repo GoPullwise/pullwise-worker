@@ -876,6 +876,24 @@
       "sha256": "8346fd058fbca1885b5c9c76c970eea533df90d3e4a08dba8aa44c6135e61f7e"
     },
     {
+      "id": "worker.public-scan-fixture-validator",
+      "repo": "worker",
+      "path": "scripts/verify_public_scan_fixture.mjs",
+      "roles": ["validator"],
+      "anchors": [
+        "assertSubset",
+        "createServer",
+        "isTerminalScan",
+        "loadWebModule",
+        "normalizeScan",
+        "scanCanDownloadAuditBundle",
+        "ssrLoadModule"
+      ],
+      "enforcement": "blocking",
+      "probe_ids": ["worker.public-scan-canonical-fixture"],
+      "sha256": "a7eab3195176a0f7fae01c148e1cc31516d9f3743f8ee86fe6c30851a740417c"
+    },
+    {
       "id": "worker.strict-v1-wire-canonical-fixture",
       "repo": "worker",
       "path": "contracts/agent-first/fixtures/review-worker-protocol-v1.json",
@@ -894,6 +912,25 @@
       "enforcement": "blocking",
       "probe_ids": ["worker.strict-v1-wire-canonical-fixture"],
       "sha256": "a4e7870d78fa076bd9a6427b3875be82dd0bcfcc73a778b72414f2c015c45089"
+    },
+    {
+      "id": "worker.strict-v1-wire-fixture-validator",
+      "repo": "worker",
+      "path": "tests/test_agent_first_contract_wire_fixture.py",
+      "roles": ["fixture", "validator"],
+      "anchors": [
+        "AgentFirstContractWireFixtureTest",
+        "test_fixture_has_only_the_named_strict_v1_cases",
+        "test_idle_and_active_heartbeats_are_accepted",
+        "test_lease_is_accepted_by_the_current_server_validator",
+        "test_progress_event_is_accepted_and_uses_a_supported_type",
+        "test_register_preserves_current_one_slot_linux_invariants",
+        "test_report_agent_artifact_is_accepted_and_content_addressed",
+        "test_terminal_result_envelopes_are_accepted"
+      ],
+      "enforcement": "blocking",
+      "probe_ids": ["worker.strict-v1-wire-canonical-fixture"],
+      "sha256": "7f7f58700a611f4addd3278f6ac6e10f526f3d819474ab96ed6f772045e05848"
     }
   ],
   "tests": [

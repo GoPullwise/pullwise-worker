@@ -185,6 +185,35 @@ class AgentFirstContractProbeSafetyTest(unittest.TestCase):
 
         self.assertEqual("failed", result["status"])
 
+    def test_nonzero_unparseable_fixture_output_is_failed(self) -> None:
+        spec = {
+            "repo": "worker",
+            "runner": "node_script",
+            "nodes": ("scripts/verify_fixture.mjs",),
+            "timeout_seconds": 30,
+            "minimum_tests": 1,
+            "allowed_skips": 0,
+        }
+        process_result = {
+            "status": "completed",
+            "returncode": 1,
+            "output": b"fixture mismatch",
+            "output_sha256": "0" * 64,
+            "output_too_large": False,
+        }
+
+        with patch.object(probes, "run_bounded_process", return_value=process_result):
+            result = probes._execute_probe(
+                "worker.safety-probe",
+                self.repo,
+                spec=spec,
+                argv=["node", "fixture"],
+                scratch_root=self.repo,
+            )
+
+        self.assertEqual("failed", result["status"])
+        self.assertIsNone(result["observed_tests"])
+
     def test_output_cap_terminates_runner_before_process_timeout(self) -> None:
         timeout_seconds = 4
         started = time.monotonic()
