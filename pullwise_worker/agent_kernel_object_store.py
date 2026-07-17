@@ -296,6 +296,10 @@ class ObjectStore:
             raise CasCorruptError("CAS_CORRUPT: object missing") from exc
         if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
             raise CasCorruptError("CAS_CORRUPT: object is not a regular file")
+        if metadata.st_nlink != 1:
+            raise CasCorruptError("CAS_CORRUPT: object has unexpected hardlinks")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise CasCorruptError("CAS_CORRUPT: object permissions are not private")
         if metadata.st_size != size:
             raise CasCorruptError("CAS_CORRUPT: object size mismatch")
         observed = hashlib.sha256()

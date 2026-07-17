@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .agent_kernel_migrations import MIGRATIONS, Migration
 
@@ -68,10 +68,16 @@ def _ensure_private_directory(path: Path) -> None:
 
 
 class AgentKernelDatabase:
-    def __init__(self, worker_root: Path) -> None:
+    def __init__(
+        self,
+        worker_root: Path,
+        *,
+        stage_hook: Callable[[str], None] | None = None,
+    ) -> None:
         self.worker_root = Path(worker_root)
         self.root = self.worker_root / "agent-kernel"
         self.path = self.root / "state.sqlite3"
+        self.stage_hook = stage_hook
 
     def initialize(self) -> None:
         _ensure_private_directory(self.worker_root)
@@ -142,10 +148,12 @@ class AgentKernelDatabase:
             raise AgentKernelStorageError("schema_migration_history_missing")
         connection.execute("BEGIN IMMEDIATE")
         try:
+            changed = False
             if not has_history:
                 if user_version != 0:
                     raise AgentKernelStorageError("schema_migration_state_invalid")
                 self._apply_migration(connection, MIGRATIONS[0])
+                changed = True
                 start = 1
             else:
                 start = 0
@@ -171,7 +179,10 @@ class AgentKernelDatabase:
                 if migration.version < start + 1:
                     raise AgentKernelStorageError("schema_migration_history_invalid")
                 self._apply_migration(connection, migration)
+                changed = True
             connection.execute(f"PRAGMA user_version={LATEST_SCHEMA_VERSION}")
+            if changed:
+                self._stage("before_migration_commit")
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -204,3 +215,7 @@ class AgentKernelDatabase:
         missing = sorted(REQUIRED_TABLES - tables)
         if missing:
             raise AgentKernelStorageError(f"schema_tables_missing: {missing}")
+
+    def _stage(self, name: str) -> None:
+        if self.stage_hook is not None:
+            self.stage_hook(name)

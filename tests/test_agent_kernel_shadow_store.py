@@ -52,6 +52,13 @@ class AgentKernelShadowStoreTest(unittest.TestCase):
         self.assertEqual("effective-execution-policy/v1", ref["content_schema_id"])
         self.assertEqual(canonical_bytes(policy), self.store.objects.read_verified(ref))
         self.assertEqual(policy, self.store.read_contract(ref))
+        metrics = self.store.metrics.snapshot()
+        self.assertEqual(1, metrics["agent_kernel_shadow_contract_writes_total"])
+        self.assertEqual(1, metrics["agent_kernel_shadow_contract_reads_total"])
+        self.assertEqual(
+            len(canonical_bytes(policy)),
+            metrics["agent_kernel_shadow_contract_write_bytes_total"],
+        )
         with self.store.database.connect() as connection:
             self.assertEqual(
                 0, connection.execute("SELECT COUNT(*) FROM result_publications").fetchone()[0]
@@ -77,6 +84,12 @@ class AgentKernelShadowStoreTest(unittest.TestCase):
             self.assertEqual(
                 0, connection.execute("SELECT COUNT(*) FROM content_bindings").fetchone()[0]
             )
+        self.assertEqual(
+            1,
+            self.store.metrics.snapshot()[
+                "agent_kernel_shadow_contract_validation_failures_total"
+            ],
+        )
 
     def test_same_artifact_id_cannot_be_rebound_to_another_contract(self) -> None:
         task_id = "task_" + "5" * 32
@@ -98,6 +111,10 @@ class AgentKernelShadowStoreTest(unittest.TestCase):
                 schema_id="task-request/v1",
                 instance=changed,
             )
+        self.assertEqual(
+            1,
+            self.store.metrics.snapshot()["agent_kernel_shadow_cas_conflicts_total"],
+        )
 
     def test_read_revalidates_bytes_and_declared_schema(self) -> None:
         request = _fixture("task-request/v1")

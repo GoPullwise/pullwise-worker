@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import random
@@ -84,6 +85,27 @@ class AgentKernelStorageTest(unittest.TestCase):
         with self.assertRaisesRegex(AgentKernelStorageError, "schema_version_unsupported"):
             database.initialize()
 
+    def test_migration_crash_rolls_back_and_clean_restart_applies_once(self) -> None:
+        def crash(stage: str) -> None:
+            if stage == "before_migration_commit":
+                raise InjectedCrash(stage)
+
+        database = AgentKernelDatabase(self.worker_root, stage_hook=crash)
+        with self.assertRaisesRegex(InjectedCrash, "before_migration_commit"):
+            database.initialize()
+
+        recovered = AgentKernelDatabase(self.worker_root)
+        recovered.initialize()
+        with recovered.connect() as connection:
+            self.assertEqual(
+                1,
+                connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
+            )
+            self.assertEqual(
+                LATEST_SCHEMA_VERSION,
+                connection.execute("PRAGMA user_version").fetchone()[0],
+            )
+
     def test_put_publishes_durable_bytes_then_database_reference(self) -> None:
         database = self._database()
         store = ObjectStore(database)
@@ -151,6 +173,35 @@ class AgentKernelStorageTest(unittest.TestCase):
                 content_schema_id="opaque-bytes/v1",
                 encoding="binary",
             )
+
+    def test_existing_hardlink_or_overbroad_permissions_are_corruption(self) -> None:
+        cases = ("hardlink", "permissions")
+        for case in cases:
+            with self.subTest(case=case):
+                database = AgentKernelDatabase(self.worker_root / case)
+                database.initialize()
+                store = ObjectStore(database)
+                payload = case.encode()
+                digest = store.digest_bytes(payload)
+                path = store.path_for_digest(digest)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if case == "hardlink":
+                    outside = self.worker_root / f"{case}.bin"
+                    outside.parent.mkdir(parents=True, exist_ok=True)
+                    outside.write_bytes(payload)
+                    os.link(outside, path)
+                else:
+                    path.write_bytes(payload)
+                    path.chmod(0o644)
+                with self.assertRaisesRegex(CasCorruptError, "CAS_CORRUPT"):
+                    store.put_bytes(
+                        payload,
+                        task_id="task_" + "c" * 32,
+                        artifact_id="art_" + "d" * 32,
+                        media_type="application/octet-stream",
+                        content_schema_id="opaque-bytes/v1",
+                        encoding="binary",
+                    )
 
     def test_crash_boundaries_never_publish_database_before_bytes(self) -> None:
         stages = {
@@ -225,6 +276,34 @@ class AgentKernelStorageTest(unittest.TestCase):
                 encoding="binary",
             )
             self.assertEqual(payload, store.read_verified(ref))
+
+    def test_concurrent_identical_publishers_converge_on_one_object_and_binding(self) -> None:
+        database = self._database()
+        store = ObjectStore(database)
+        arguments = {
+            "task_id": "task_" + "e" * 32,
+            "artifact_id": "art_" + "f" * 32,
+            "media_type": "application/octet-stream",
+            "content_schema_id": "opaque-bytes/v1",
+            "encoding": "binary",
+        }
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            refs = list(
+                executor.map(
+                    lambda _: store.put_bytes(b"same immutable bytes", **arguments),
+                    range(24),
+                )
+            )
+
+        self.assertTrue(all(ref == refs[0] for ref in refs))
+        with database.connect() as connection:
+            self.assertEqual(
+                1, connection.execute("SELECT COUNT(*) FROM content_objects").fetchone()[0]
+            )
+            self.assertEqual(
+                1, connection.execute("SELECT COUNT(*) FROM content_bindings").fetchone()[0]
+            )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import random
+import subprocess
+import sys
 import unittest
 
 from pullwise_worker.agent_kernel_canonical import (
@@ -85,6 +88,40 @@ class AgentKernelCanonicalTest(unittest.TestCase):
         value = load_strict_json(payload)
 
         self.assertEqual(b'{"a":[true,null,-3],"z":2}', canonical_bytes(value))
+
+    def test_golden_digest_is_identical_in_a_fresh_process(self) -> None:
+        script = (
+            "import json; from pathlib import Path; "
+            "from pullwise_worker.agent_kernel_canonical import canonical_sha256; "
+            f"p=json.loads(Path({str(FIXTURE_PATH)!r}).read_text(encoding='utf-8')); "
+            "print(canonical_sha256(p['cases'][0]['input']))"
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["cases"][0]["sha256"], completed.stdout.strip())
+
+    def test_property_key_permutations_never_change_bytes(self) -> None:
+        randomizer = random.Random(8785)
+        for index in range(128):
+            pairs = [
+                (f"k{item:02d}", [index, item, bool(item % 2), None])
+                for item in range(randomizer.randrange(1, 24))
+            ]
+            randomizer.shuffle(pairs)
+            first = dict(pairs)
+            randomizer.shuffle(pairs)
+            second = dict(pairs)
+            self.assertEqual(canonical_bytes(first), canonical_bytes(second))
 
 
 if __name__ == "__main__":
