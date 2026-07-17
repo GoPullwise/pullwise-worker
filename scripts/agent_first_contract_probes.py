@@ -15,30 +15,80 @@ from typing import Any, Mapping
 
 
 RUNNER_CATALOG: dict[str, dict[str, Any]] = {
-    "server.review-worker-protocol-v1": {
+    "server.cancellation-fixtures": {
+        "repo": "server",
+        "runner": "python_unittest",
+        "nodes": ("tests.test_cancellation_handshake",),
+        "timeout_seconds": 300,
+        "minimum_tests": 17,
+        "allowed_skips": 0,
+    },
+    "server.policy-fixtures": {
         "repo": "server",
         "runner": "python_unittest",
         "nodes": (
-            "tests.test_cancellation_handshake",
-            "tests.test_configuration_contracts.ConfigurationContractTest.test_review_phase_limits_are_global_admin_config",
-            "tests.test_review_worker_protocol_v1",
             "tests.test_worker_admin_routes.WorkerAdminRoutesTest.test_admin_plan_agent_config_keeps_only_canonical_review_worker_policy",
-            "tests.test_worker_pull_routes",
         ),
         "timeout_seconds": 300,
-        "minimum_tests": 170,
+        "minimum_tests": 1,
         "allowed_skips": 0,
     },
-    "web.review-worker-protocol-v1": {
-        "repo": "web",
-        "runner": "node_vitest",
+    "server.result-fixtures": {
+        "repo": "server",
+        "runner": "python_unittest",
+        "nodes": ("tests.test_review_worker_protocol_v1",),
+        "timeout_seconds": 300,
+        "minimum_tests": 28,
+        "allowed_skips": 0,
+    },
+    "server.route-fixtures": {
+        "repo": "server",
+        "runner": "python_unittest",
+        "nodes": ("tests.test_worker_pull_routes",),
+        "timeout_seconds": 300,
+        "minimum_tests": 123,
+        "allowed_skips": 0,
+    },
+    "server.system-limit-fixtures": {
+        "repo": "server",
+        "runner": "python_unittest",
         "nodes": (
-            "src/lib/pullwise-data.test.js",
-            "src/screens/flow.test.jsx",
-            "src/screens/issues.test.jsx",
+            "tests.test_configuration_contracts.ConfigurationContractsTest.test_review_phase_limits_are_global_admin_config",
         ),
         "timeout_seconds": 300,
-        "minimum_tests": 219,
+        "minimum_tests": 1,
+        "allowed_skips": 0,
+    },
+    "web.api-fixtures": {
+        "repo": "web",
+        "runner": "node_vitest",
+        "nodes": ("src/api/pullwise.test.js",),
+        "timeout_seconds": 300,
+        "minimum_tests": 8,
+        "allowed_skips": 0,
+    },
+    "web.flow-fixtures": {
+        "repo": "web",
+        "runner": "node_vitest",
+        "nodes": ("src/screens/flow.test.jsx",),
+        "timeout_seconds": 300,
+        "minimum_tests": 75,
+        "allowed_skips": 0,
+    },
+    "web.history-fixtures": {
+        "repo": "web",
+        "runner": "node_vitest",
+        "nodes": ("src/screens/issues.test.jsx",),
+        "timeout_seconds": 300,
+        "minimum_tests": 69,
+        "allowed_skips": 0,
+    },
+    "web.normalizer-fixtures": {
+        "repo": "web",
+        "runner": "node_vitest",
+        "nodes": ("src/lib/pullwise-data.test.js",),
+        "timeout_seconds": 300,
+        "minimum_tests": 75,
         "allowed_skips": 0,
     },
 }
@@ -137,12 +187,13 @@ def _parse_counts(spec: Mapping[str, Any], output: bytes) -> tuple[int | None, i
     if not isinstance(payload, dict):
         return None, None
     observed = payload.get("numTotalTests")
-    skipped = payload.get("numPendingTests", 0) + payload.get("numTodoTests", 0)
+    pending = payload.get("numPendingTests", 0)
+    todo = payload.get("numTodoTests", 0)
     if isinstance(observed, bool) or not isinstance(observed, int):
         return None, None
-    if isinstance(skipped, bool) or not isinstance(skipped, int):
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (pending, todo)):
         return None, None
-    return observed, skipped
+    return observed, pending + todo
 
 
 def _indeterminate_result(runner_id: str, reason: str) -> dict[str, Any]:
