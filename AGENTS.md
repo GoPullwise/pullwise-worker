@@ -89,15 +89,16 @@ implementation.
 ## Agent-First Slice 0 Evidence
 
 `contracts/agent-first/worker-slice-0-baseline.json` is the machine source for
-the current Worker module, 30-phase pipeline, and file-size evidence. It
+the current Worker module, 30-entry phase/progress registry, and file-size
+evidence. It
 describes the current implementation only; it neither assigns future Agent
 Kernel ownership nor authorizes production implementation.
 
 - Run `python scripts/agent_first_slice0_baseline.py check --repo-root .` from
   the Worker repository. Exit `0` is compatible, `1` is deterministic drift,
   and `2` is indeterminate.
-- Keep the generated `docs/agent-first-worker-current-code-map.md` view
-  byte-for-byte synchronized with the machine source.
+- Keep the generated `docs/agent-first-worker-current-code-map.md` block
+  synchronized with the machine source after canonical LF normalization.
 - Git HEAD and dirty state are informational. Exact pipeline phases, anchors,
   and every tracked handwritten code, test, or maintenance script over 400
   physical lines are blocking evidence.

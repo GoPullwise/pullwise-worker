@@ -4,19 +4,35 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import hashlib
 import json
 import os
 import stat
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 try:
+    from scripts.agent_first_slice0_gate import (
+        GateObservationError,
+        git_bytes,
+        historical_ratchet_baselines,
+        is_handwritten,
+        pipeline_values,
+        ratchet_failures,
+        tracked_handwritten_files,
+    )
     from scripts.agent_first_slice0_render import render_document
 except ModuleNotFoundError:
+    from agent_first_slice0_gate import (  # type: ignore[no-redef]
+        GateObservationError,
+        git_bytes,
+        historical_ratchet_baselines,
+        is_handwritten,
+        pipeline_values,
+        ratchet_failures,
+        tracked_handwritten_files,
+    )
     from agent_first_slice0_render import render_document  # type: ignore[no-redef]
 
 
@@ -25,10 +41,6 @@ REPORT_SCHEMA_ID = "pullwise-agent-first-slice-0-baseline-report/v1"
 LINE_COUNT_PROFILE = "physical-lf/v1"
 REVIEW_TRIGGER = 400
 OVERSIZED_LIMIT = 600
-HANDWRITTEN_SUFFIXES = {
-    ".bash", ".cjs", ".js", ".jsx", ".mjs", ".ps1",
-    ".py", ".pyi", ".sh", ".ts", ".tsx", ".zsh",
-}
 TOP_LEVEL_KEYS = {
     "schema_id", "baseline_id", "captured_head", "line_count_profile",
     "document", "pipeline", "code_map", "file_baselines",
@@ -74,7 +86,14 @@ def _text_list(value: object, label: str) -> list[str]:
 def _relative_path(value: object, label: str) -> str:
     text = _text(value, label)
     path = PurePosixPath(text)
-    if path.is_absolute() or text != path.as_posix() or any(part in {"", ".", ".."} for part in path.parts):
+    if (
+        chr(92) in text
+        or "\0" in text
+        or ":" in text
+        or path.is_absolute()
+        or text != path.as_posix()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise BaselineFormatError(f"{label}:relative_path")
     return text
 
@@ -169,7 +188,13 @@ def load_baseline(path: Path) -> dict[str, Any]:
 
 
 def _repo_path(repo_root: Path, relative: str) -> Path:
-    return repo_root.joinpath(*PurePosixPath(relative).parts)
+    root = repo_root.resolve()
+    candidate = root.joinpath(*PurePosixPath(relative).parts)
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise BaselineObservationError(f"outside_repo:{relative}") from exc
+    return candidate
 
 
 def _regular_bytes(repo_root: Path, relative: str) -> bytes:
@@ -190,61 +215,25 @@ def _canonical_text(repo_root: Path, relative: str) -> str:
         raise BaselineObservationError(f"not_utf8:{relative}") from exc
 
 
-def _git(repo_root: Path, *args: str) -> bytes:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), *args],
-            check=False,
-            capture_output=True,
-            timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise BaselineObservationError(f"git_unavailable:{args[0]}:{exc}") from exc
-    if result.returncode != 0:
-        raise BaselineObservationError(f"git_failed:{args[0]}:{result.returncode}")
-    return result.stdout
-
-
-def _tracked_paths(repo_root: Path) -> tuple[str, ...]:
-    try:
-        values = _git(repo_root, "ls-files", "-z").decode("utf-8").split("\0")
-    except UnicodeError as exc:
-        raise BaselineObservationError("git_paths_not_utf8") from exc
-    return tuple(sorted(value.replace("\\", "/") for value in values if value))
-
-
-def _pipeline_values(text: str, symbol: str) -> list[list[Any]] | None:
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return None
-    for node in tree.body:
-        targets: list[ast.expr] = []
-        value: ast.expr | None = None
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign):
-            targets, value = [node.target], node.value
-        if value is not None and any(isinstance(target, ast.Name) and target.id == symbol for target in targets):
-            try:
-                raw = ast.literal_eval(value)
-                return [[str(name), int(progress)] for name, progress in raw]
-            except (TypeError, ValueError, SyntaxError):
-                return None
-    return None
-
-
 def _document_matches(baseline: dict[str, Any], repo_root: Path) -> bool:
     document = baseline["document"]
     text = _canonical_text(repo_root, document["path"])
     start, end = document["start_marker"], document["end_marker"]
     if text.count(start) != 1 or text.count(end) != 1:
         return False
-    start_index = text.index(start) + len(start)
-    end_index = text.index(end, start_index)
-    if end_index <= start_index:
+    start_token = f"{start}\n"
+    end_token = f"\n{end}"
+    start_index = text.find(start_token)
+    if start_index < 0 or (start_index > 0 and text[start_index - 1] != "\n"):
         return False
-    return text[start_index:end_index].strip("\n") == render_document(baseline)
+    body_start = start_index + len(start_token)
+    end_index = text.find(end_token, body_start)
+    if end_index < body_start:
+        return False
+    marker_end = end_index + len(end_token)
+    if marker_end < len(text) and text[marker_end] != "\n":
+        return False
+    return text[body_start:end_index] == render_document(baseline)
 
 
 def verify_baseline(
@@ -252,16 +241,28 @@ def verify_baseline(
     repo_root: Path,
     *,
     tracked_paths: Iterable[str] | None = None,
+    tracked_executable_paths: Iterable[str] = (),
+    ratchet_baselines: Iterable[dict[str, Any]] | None = None,
     check_document: bool = True,
 ) -> dict[str, Any]:
     validate_baseline(baseline)
     root = repo_root.resolve()
     failures: list[dict[str, Any]] = []
     try:
-        tracked = tuple(tracked_paths) if tracked_paths is not None else _tracked_paths(root)
-        current_head = _git(root, "rev-parse", "HEAD").decode("ascii").strip() if tracked_paths is None else None
-        current_dirty = bool(_git(root, "status", "--porcelain=v1", "--untracked-files=all")) if tracked_paths is None else None
-    except (BaselineObservationError, UnicodeError) as exc:
+        if tracked_paths is None:
+            inventory = tracked_handwritten_files(root)
+            tracked = tuple(path for path, _executable in inventory)
+            executable_paths = {path for path, executable in inventory if executable}
+            current_head = git_bytes(root, "rev-parse", "HEAD").decode("ascii").strip()
+            current_dirty = bool(git_bytes(root, "status", "--porcelain=v1", "--untracked-files=all"))
+            history = historical_ratchet_baselines(root, baseline["baseline_id"], current_head)
+        else:
+            tracked = tuple(tracked_paths)
+            executable_paths = set(tracked_executable_paths)
+            current_head = current_dirty = None
+            history = tuple(ratchet_baselines or ())
+        history = tuple(validate_baseline(snapshot) for snapshot in history)
+    except (BaselineFormatError, BaselineObservationError, GateObservationError, UnicodeError) as exc:
         return {
             "schema_id": REPORT_SCHEMA_ID,
             "baseline_id": baseline["baseline_id"],
@@ -287,7 +288,7 @@ def verify_baseline(
     pipeline = baseline["pipeline"]
     try:
         pipeline_text = text_cache.setdefault(pipeline["path"], _canonical_text(root, pipeline["path"]))
-        actual_pipeline = _pipeline_values(pipeline_text, pipeline["symbol"])
+        actual_pipeline = pipeline_values(pipeline_text, pipeline["symbol"])
     except BaselineObservationError:
         actual_pipeline = None
     if actual_pipeline != pipeline["values"]:
@@ -296,7 +297,7 @@ def verify_baseline(
     actual_trigger: dict[str, int] = {}
     for path in tracked:
         normalized = path.replace("\\", "/")
-        if PurePosixPath(normalized).suffix.lower() not in HANDWRITTEN_SUFFIXES:
+        if not is_handwritten(normalized, executable=normalized in executable_paths):
             continue
         try:
             count = physical_line_count(_regular_bytes(root, normalized))
@@ -305,6 +306,8 @@ def verify_baseline(
             continue
         if count > REVIEW_TRIGGER:
             actual_trigger[normalized] = count
+
+    failures.extend(ratchet_failures(baseline, history))
 
     expected = {entry["path"]: entry for entry in baseline["file_baselines"]}
     for path in sorted(set(actual_trigger) - set(expected)):
@@ -353,6 +356,7 @@ def verify_baseline(
         "pipeline_phase_count": len(actual_pipeline or []),
         "oversized_legacy_count": sum(count > OVERSIZED_LIMIT for count in actual_trigger.values()),
         "review_trigger_count": sum(REVIEW_TRIGGER < count <= OVERSIZED_LIMIT for count in actual_trigger.values()),
+        "ratchet_history_count": len(history),
         "failures": failures,
         "indeterminate_reasons": [],
     }

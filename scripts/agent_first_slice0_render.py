@@ -25,7 +25,7 @@ def render_document(baseline: dict[str, Any]) -> str:
         lines.append(
             f"| `{entry['id']}` | {paths} | {_markdown(entry['current_responsibilities'])} | {_markdown(entry['boundary'])} | {_markdown(entry['candidate_extraction_seam'])} |"
         )
-    lines.extend(["", "### Current fixed pipeline", "", "| Order | Phase | Progress ceiling |", "|---:|---|---:|"])
+    lines.extend(["", "### Current PIPELINE_PHASES registry", "", "| Order | Phase | Progress ceiling |", "|---:|---|---:|"])
     for index, (phase, progress) in enumerate(baseline["pipeline"]["values"], start=1):
         lines.append(f"| {index} | `{phase}` | {progress} |")
     lines.extend(
