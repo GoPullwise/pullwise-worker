@@ -1,208 +1,354 @@
 from __future__ import annotations
 
 import copy
-import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.agent_first_decision_catalog import (
+    NORMATIVE_PATHS,
+    NORMATIVE_UNIT_CATALOG,
+)
+from scripts.agent_first_decision_core import decision_applicability
 from scripts.agent_first_decision_gate import (
-    git_history_failures,
-    historical_resolution_failures,
-    normative_marker_failures,
+    normative_reference_failures,
+    resolved_history_failures,
+    verify_register,
 )
 from scripts.agent_first_decision_register import (
+    DecisionRegisterFormatError,
     canonical_resolution_sha256,
     load_register,
     validate_register,
 )
-from scripts.agent_first_decision_render import render_normative_marker
+from scripts.agent_first_decision_render import render_document
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-REGISTER_PATH = REPO_ROOT / "contracts" / "agent-first" / "spec-decision-register.json"
-NORMATIVE_PATHS = (
-    "docs/agent-first-worker-design.md",
-    "docs/agent-first-worker-mvp-implementation-design.md",
-    "docs/agent-first-worker-post-mvp-implementation-design.md",
+REGISTER_PATH = (
+    REPO_ROOT / "contracts" / "agent-first" / "spec-decision-register.json"
 )
-
-
 def _resolution(
     decision_id: str,
     selected_option_id: str,
     *,
-    supersedes: str | None = None,
-    text: str | None = None,
+    decision_text: str | None = None,
+    supersedes: tuple[str, ...] = (),
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "kind": "option",
         "selected_option_id": selected_option_id,
         "custom_text": None,
-        "decision_text": text or f"Confirmed {selected_option_id}.",
+        "decision_text": decision_text or f"Confirmed {selected_option_id}.",
         "authority": "architecture_owner",
         "decided_at": "2026-07-17",
         "evidence_refs": ["conversation:synthetic-test"],
-        "supersedes_resolution_sha256": supersedes,
     }
-    payload["resolution_sha256"] = canonical_resolution_sha256(decision_id, payload)
+    payload["resolution_sha256"] = canonical_resolution_sha256(
+        decision_id, payload, supersedes
+    )
     return payload
 
 
-def _resolved_d1(register: dict[str, object]) -> dict[str, object]:
+def _resolve(
+    register: dict[str, object],
+    decision_id: str,
+    option_id: str,
+    *,
+    supersedes: tuple[str, ...] = (),
+) -> dict[str, object]:
     changed = copy.deepcopy(register)
-    decision = changed["decisions"][0]
+    decision = next(
+        item for item in changed["decisions"] if item["id"] == decision_id
+    )
     decision["status"] = "resolved"
-    decision["resolution"] = _resolution("D1", "pullwise_full_scan")
-    changed["active_decision_id"] = "D3"
+    decision["supersedes"] = list(supersedes)
+    decision["resolution"] = _resolution(
+        decision_id, option_id, supersedes=supersedes
+    )
     return changed
 
 
-def _with_unit(register: dict[str, object]) -> dict[str, object]:
-    changed = copy.deepcopy(register)
-    changed["normative_units"] = [
-        {
-            "id": "mvp.authority-scope",
-            "path": "docs/agent-first-worker-mvp-implementation-design.md",
-            "decision_ids": ["D1"],
-        }
-    ]
-    changed["decisions"][0]["normative_unit_ids"] = ["mvp.authority-scope"]
-    validate_register(changed)
-    return changed
+def _resolved_d1(option_id: str = "pullwise_full_scan") -> dict[str, object]:
+    changed = _resolve(load_register(REGISTER_PATH), "D1", option_id)
+    changed["active_decision_id"] = (
+        "D2" if option_id == "generic_agent_worker" else "D3"
+    )
+    return validate_register(changed)
 
 
-def _write_docs(root: Path, marker: str | None) -> None:
+def _unit_body(
+    register: dict[str, object], unit_id: str
+) -> str | None:
+    decisions = {item["id"]: item for item in register["decisions"]}
+    unit = next(
+        item for item in register["normative_units"] if item["id"] == unit_id
+    )
+    tokens: list[str] = []
+    for decision_id in unit["decision_ids"]:
+        applicability = decision_applicability(register, decision_id)
+        if applicability == "inactive":
+            continue
+        decision = decisions[decision_id]
+        if applicability != "active" or decision["status"] != "resolved":
+            return None
+        digest = decision["resolution"]["resolution_sha256"]
+        tokens.append(f"<!-- {decision_id}@sha256:{digest} -->")
+    return "\n".join(tokens)
+
+
+def _write_normative_docs(
+    root: Path,
+    register: dict[str, object],
+    *,
+    overrides: dict[str, str | None] | None = None,
+    include_ready: bool = True,
+) -> None:
+    overrides = overrides or {}
     for relative in NORMATIVE_PATHS:
+        lines = ["# Synthetic normative document", ""]
+        for unit in NORMATIVE_UNIT_CATALOG:
+            if unit["path"] != relative:
+                continue
+            body = (
+                overrides[unit["id"]]
+                if unit["id"] in overrides
+                else _unit_body(register, unit["id"])
+            )
+            if body is None or (
+                not include_ready and unit["id"] not in overrides
+            ):
+                continue
+            lines.extend(
+                [unit["start_marker"], body, unit["end_marker"], ""]
+            )
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        selected = relative.endswith("mvp-implementation-design.md")
-        path.write_text(
-            (marker if selected and marker else "No marker.") + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+
+
+def _append_decision(
+    register: dict[str, object],
+    *,
+    decision_id: str = "D27",
+    question_index: int = 2,
+) -> dict[str, object]:
+    changed = copy.deepcopy(register)
+    template = copy.deepcopy(changed["decisions"][-1])
+    template.update(
+        {
+            "id": decision_id,
+            "key": f"synthetic-{decision_id.lower()}",
+            "scope": "test-only",
+            "title": f"Synthetic {decision_id}",
+            "question": f"Resolve synthetic {decision_id}?",
+            "status": "pending",
+            "depends_on": [],
+            "activation": None,
+            "required_by_slice": "S8",
+            "effects": ["authority"],
+            "source_refs": ["test:synthetic"],
+            "affected_units": ["post-closure"],
+            "resolution": None,
+            "supersedes": [],
+        }
+    )
+    changed["decisions"].append(template)
+    next(
+        item
+        for item in changed["normative_units"]
+        if item["id"] == "post-closure"
+    )["decision_ids"].append(decision_id)
+    changed["question_order"].insert(question_index, decision_id)
+    return changed
 
 
 class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
-    def test_normative_registration_must_be_bidirectional(self) -> None:
-        register = _with_unit(_resolved_d1(load_register(REGISTER_PATH)))
-        register["decisions"][0]["normative_unit_ids"] = []
-        with self.assertRaisesRegex(Exception, "normative_units:bidirectional"):
+    def test_bidirectional_registration_rejects_one_sided_change(self) -> None:
+        register = load_register(REGISTER_PATH)
+        register["normative_units"][0]["decision_ids"].remove("D1")
+        with self.assertRaisesRegex(
+            DecisionRegisterFormatError, "normative_units:bidirectional"
+        ):
             validate_register(register)
 
-    def test_current_resolution_marker_passes_required_slice_gate(self) -> None:
-        register = _with_unit(_resolved_d1(load_register(REGISTER_PATH)))
-        marker = render_normative_marker(register, register["normative_units"][0])
+    def test_resolved_references_are_required_even_without_slice_flag(self) -> None:
+        register = _resolved_d1()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            _write_docs(root, marker)
-            failures = normative_marker_failures(register, root, "S2")
-        self.assertEqual([], failures)
+            _write_normative_docs(root, register, include_ready=False)
+            missing = normative_reference_failures(
+                register, root, require_slice=None
+            )
+            _write_normative_docs(root, register)
+            complete = normative_reference_failures(
+                register, root, require_slice=None
+            )
+        missing_units = {
+            item["unit_id"]
+            for item in missing
+            if item["code"] == "normative_unit_reference_missing"
+        }
+        self.assertEqual(
+            {
+                "target-authority-scope",
+                "mvp-authority-scope",
+                "post-authority-scope",
+            },
+            missing_units,
+        )
+        self.assertEqual([], complete)
 
-    def test_pending_unknown_and_stale_markers_fail_closed(self) -> None:
-        pending = _with_unit(load_register(REGISTER_PATH))
-        pending_marker = render_normative_marker(pending, pending["normative_units"][0])
-        resolved = _with_unit(_resolved_d1(load_register(REGISTER_PATH)))
-        current_marker = render_normative_marker(
-            resolved, resolved["normative_units"][0]
+    def test_pending_empty_marker_is_allowed_but_pending_token_is_not(self) -> None:
+        register = load_register(REGISTER_PATH)
+        unit_id = "target-authority-scope"
+        pending_token = f"<!-- D1@sha256:{'0' * 64} -->"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_normative_docs(
+                root, register, overrides={unit_id: ""}
+            )
+            empty_failures = normative_reference_failures(
+                register, root, require_slice=None
+            )
+            _write_normative_docs(
+                root, register, overrides={unit_id: pending_token}
+            )
+            pending_failures = normative_reference_failures(
+                register, root, require_slice=None
+            )
+        self.assertEqual([], empty_failures)
+        self.assertIn(
+            "pending_decision_reference",
+            {item["code"] for item in pending_failures},
         )
-        digest = resolved["decisions"][0]["resolution"]["resolution_sha256"]
-        cases = (
-            (pending, pending_marker, "pending_decision_marker"),
-            (resolved, current_marker.replace(digest, "0" * 64), "stale_decision_marker"),
-            (resolved, current_marker.replace("D1@", "D99@"), "unknown_decision_marker"),
-        )
-        for register, marker, expected in cases:
-            with self.subTest(code=expected), tempfile.TemporaryDirectory() as temp_dir:
+
+    def test_unknown_stale_malformed_and_unscoped_references_fail(self) -> None:
+        register = _resolved_d1()
+        decision = register["decisions"][0]
+        digest = decision["resolution"]["resolution_sha256"]
+        token = f"D1@sha256:{digest}"
+        cases = {
+            "unknown_decision_reference": token.replace("D1@", "D99@"),
+            "stale_decision_reference": token.replace(digest, "0" * 64),
+            "malformed_decision_reference": "D1@sha256:ABC",
+        }
+        for expected, replacement in cases.items():
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
-                _write_docs(root, marker)
+                body = f"<!-- {replacement} -->"
+                _write_normative_docs(
+                    root,
+                    register,
+                    overrides={"target-authority-scope": body},
+                )
                 codes = {
                     item["code"]
-                    for item in normative_marker_failures(register, root, "S2")
+                    for item in normative_reference_failures(
+                        register, root, require_slice=None
+                    )
                 }
                 self.assertIn(expected, codes)
 
-    def test_resolved_required_decision_without_unit_fails(self) -> None:
-        register = _resolved_d1(load_register(REGISTER_PATH))
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            _write_docs(root, None)
-            failures = normative_marker_failures(register, root, "S2")
-        self.assertIn(
-            {"code": "resolved_decision_missing_normative_unit", "decision_id": "D1"},
-            failures,
-        )
+            _write_normative_docs(root, register)
+            path = root / NORMATIVE_PATHS[0]
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + f"\n<!-- {token} -->\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            codes = {
+                item["code"]
+                for item in normative_reference_failures(
+                    register, root, require_slice=None
+                )
+            }
+        self.assertIn("unscoped_decision_reference", codes)
 
-    def test_historical_resolution_requires_explicit_supersession(self) -> None:
-        base = load_register(REGISTER_PATH)
-        prior = _resolved_d1(base)
-        changed = _resolved_d1(base)
-        changed["decisions"][0]["resolution"] = _resolution(
-            "D1", "generic_agent_worker", text="Changed in place."
+    def test_slice_gate_reports_every_due_active_pending_decision(self) -> None:
+        register = load_register(REGISTER_PATH)
+        report = verify_register(
+            register,
+            REPO_ROOT,
+            require_slice="S3",
+            check_document=False,
+            check_history=False,
         )
-        changed["active_decision_id"] = "D2"
-        failures = historical_resolution_failures(changed, [prior])
-        prior_digest = prior["decisions"][0]["resolution"]["resolution_sha256"]
-        self.assertIn(
-            {
-                "code": "historical_resolution_missing",
-                "decision_id": "D1",
-                "resolution_sha256": prior_digest,
-            },
-            failures,
+        blocker = next(
+            item
+            for item in report["failures"]
+            if item["code"] == "slice_blocked_by_pending_decisions"
         )
-
-    def test_explicit_supersession_preserves_prior_resolution(self) -> None:
-        prior = _resolved_d1(load_register(REGISTER_PATH))
-        prior_resolution = prior["decisions"][0]["resolution"]
-        changed = copy.deepcopy(prior)
-        changed["decisions"][0]["superseded_resolutions"] = [prior_resolution]
-        changed["decisions"][0]["resolution"] = _resolution(
-            "D1",
-            "generic_agent_worker",
-            supersedes=prior_resolution["resolution_sha256"],
-            text="Explicitly superseded after owner review.",
+        self.assertEqual(
+            ["D1", "D3", "D4", "D11", "D15", "D16", "D17"],
+            blocker["decision_ids"],
         )
-        changed["active_decision_id"] = "D2"
-        validate_register(changed)
-        self.assertEqual([], historical_resolution_failures(changed, [prior]))
+        self.assertTrue(report["valid"])
+        self.assertFalse(report["ready"])
 
-    def test_git_history_scan_detects_in_place_rewrite(self) -> None:
-        base = load_register(REGISTER_PATH)
-        prior = _resolved_d1(base)
-        current = _resolved_d1(base)
-        current["decisions"][0]["resolution"] = _resolution(
-            "D1", "generic_agent_worker", text="Rewritten."
+    def test_rendered_resolution_contains_text_evidence_digest_and_relation(self) -> None:
+        register = _resolved_d1()
+        rendered = render_document(register)
+        resolution = register["decisions"][0]["resolution"]
+        self.assertIn(resolution["decision_text"], rendered)
+        self.assertIn("conversation:synthetic-test", rendered)
+        self.assertIn(resolution["resolution_sha256"], rendered)
+        self.assertIn("**Supersedes:** none", rendered)
+
+    def test_resolved_history_is_immutable(self) -> None:
+        prior = _resolved_d1()
+        self.assertEqual([], resolved_history_failures(prior, [prior]))
+
+        changed = _resolved_d1("generic_agent_worker")
+        codes = {
+            item["code"]
+            for item in resolved_history_failures(changed, [prior])
+        }
+        self.assertIn("resolved_decision_not_immutable", codes)
+
+        removed = copy.deepcopy(prior)
+        removed["decisions"] = removed["decisions"][1:]
+        codes = {
+            item["code"]
+            for item in resolved_history_failures(removed, [prior])
+        }
+        self.assertIn("resolved_decision_not_immutable", codes)
+
+    def test_explicit_new_resolved_decision_can_supersede_frozen_one(self) -> None:
+        prior = _resolved_d1()
+        pending = _append_decision(prior)
+        pending["active_decision_id"] = "D27"
+        validate_register(pending)
+
+        invalid = copy.deepcopy(pending)
+        invalid["decisions"][-1]["supersedes"] = ["D1"]
+        with self.assertRaisesRegex(
+            DecisionRegisterFormatError, "superseder_not_resolved"
+        ):
+            validate_register(invalid)
+
+        current = _resolve(
+            pending,
+            "D27",
+            pending["decisions"][-1]["options"][0]["id"],
+            supersedes=("D1",),
         )
-        current["active_decision_id"] = "D2"
-        relative = "contracts/agent-first/spec-decision-register.json"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
+        current["active_decision_id"] = "D3"
+        validate_register(current)
+        self.assertEqual([], resolved_history_failures(current, [prior]))
+        self.assertIn("**Supersedes:** D1", render_document(current))
 
-            def git(*args: str) -> str:
-                return subprocess.run(
-                    ["git", "-C", str(root), *args],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip()
-
-            git("init", "-q")
-            git("config", "user.email", "decision-gate@example.invalid")
-            git("config", "user.name", "Decision Gate Test")
-            path = root / relative
-            path.parent.mkdir(parents=True)
-            path.write_text(json.dumps(prior), encoding="utf-8", newline="\n")
-            git("add", ".")
-            git("commit", "-qm", "resolved decision")
-            path.write_text(json.dumps(current), encoding="utf-8", newline="\n")
-            failures = git_history_failures(current, root, relative)
-        self.assertIn(
-            "historical_resolution_missing", {item["code"] for item in failures}
-        )
-
+    def test_resolved_decisions_cannot_skip_the_question_order(self) -> None:
+        register = load_register(REGISTER_PATH)
+        option_id = register["decisions"][6]["options"][0]["id"]
+        changed = _resolve(register, "D7", option_id)
+        with self.assertRaisesRegex(
+            DecisionRegisterFormatError, "out_of_question_order"
+        ):
+            validate_register(changed)
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,10 +16,12 @@ from scripts.agent_first_decision_catalog import (
     NORMATIVE_UNIT_CATALOG,
     QUESTION_ORDER,
     REQUIRED_CATALOG,
+    REQUIRED_DEFINITION_SHA256,
     RESOLUTION_DOMAIN,
     SCHEMA_ID,
     SLICES,
 )
+from scripts.agent_first_decision_definition import required_definition_sha256
 
 
 TOP_LEVEL_KEYS = {
@@ -83,11 +85,16 @@ def _relative_path(value: object, label: str) -> str:
 
 
 def canonical_resolution_sha256(
-    decision_id: str, resolution: dict[str, object]
+    decision_id: str,
+    resolution: dict[str, object],
+    supersedes: list[str] | tuple[str, ...] = (),
 ) -> str:
     payload = {key: value for key, value in resolution.items() if key != "resolution_sha256"}
     canonical = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        {"resolution": payload, "supersedes": list(supersedes)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     identity = decision_id.encode("utf-8")
     material = RESOLUTION_DOMAIN + len(identity).to_bytes(4, "big") + identity + canonical
@@ -113,6 +120,8 @@ def decision_applicability(
     source = decisions[activation["decision_id"]]
     if source["status"] != "resolved":
         return "unknown"
+    if source["resolution"]["kind"] == "custom":
+        return "active"
     return (
         "active"
         if selected_option_id(source) == activation["selected_option_id"]
@@ -169,7 +178,9 @@ def _validate_resolution(decision: dict[str, Any], label: str) -> None:
         raise DecisionRegisterFormatError(f"{label}.resolution.decided_at")
     _text_list(item["evidence_refs"], f"{label}.resolution.evidence_refs")
     digest = _text(item["resolution_sha256"], f"{label}.resolution.resolution_sha256")
-    if digest != canonical_resolution_sha256(decision["id"], item):
+    if digest != canonical_resolution_sha256(
+        decision["id"], item, decision["supersedes"]
+    ):
         raise DecisionRegisterFormatError(f"{label}.resolution.resolution_sha256")
 
 
@@ -295,6 +306,10 @@ def validate_register(register: object) -> dict[str, Any]:
     for index, item in enumerate(root["decisions"]):
         if not set(item["depends_on"]) <= id_set or not set(item["supersedes"]) <= set(ids[:index]):
             raise DecisionRegisterFormatError(f"decisions[{index}]:reference")
+        if item["supersedes"] and item["status"] != "resolved":
+            raise DecisionRegisterFormatError(
+                f"decisions[{index}].supersedes:superseder_not_resolved"
+            )
         for target_id in item["supersedes"]:
             target = root["decisions"][ids.index(target_id)]
             if target["status"] != "resolved":
@@ -317,6 +332,8 @@ def validate_register(register: object) -> dict[str, Any]:
                 raise DecisionRegisterFormatError(f"decisions[{index}].activation:selected_option")
     _assert_acyclic(root["decisions"])
     _validate_units(root)
+    if required_definition_sha256(root) != REQUIRED_DEFINITION_SHA256:
+        raise DecisionRegisterFormatError("register:required_definition")
 
     order = _text_list(root["question_order"], "question_order")
     if set(order) != id_set or [item for item in order if item in CATALOG_BY_ID] != list(QUESTION_ORDER):
@@ -327,6 +344,19 @@ def validate_register(register: object) -> dict[str, Any]:
                 raise DecisionRegisterFormatError(f"decisions[{index}].resolution:inactive")
             if not all(_dependency_satisfied(root, dependency) for dependency in item["depends_on"]):
                 raise DecisionRegisterFormatError(f"decisions[{index}].depends_on:unresolved")
+    pending_seen = False
+    for decision_id in root["question_order"]:
+        if decision_applicability(root, decision_id) == "inactive":
+            continue
+        decision = next(
+            item for item in root["decisions"] if item["id"] == decision_id
+        )
+        if decision["status"] == "pending":
+            pending_seen = True
+        elif pending_seen:
+            raise DecisionRegisterFormatError(
+                f"{decision_id}.resolution:out_of_question_order"
+            )
     expected_active = expected_active_decision(root)
     if root["active_decision_id"] != expected_active:
         raise DecisionRegisterFormatError("active_decision_id:first_ready_pending")

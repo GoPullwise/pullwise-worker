@@ -25,11 +25,18 @@ from scripts.agent_first_decision_render import render_document
 
 
 REFERENCE_RE = re.compile(r"D[1-9][0-9]*@sha256:[0-9a-f]{64}")
+REFERENCE_CANDIDATE_RE = re.compile(r"D[0-9]+@sha256:[A-Za-z0-9_-]*")
 MANIFEST_PATH = "contracts/agent-first/spec-decision-register.json"
 
 
 class DecisionRegisterObservationError(RuntimeError):
     pass
+
+
+class DecisionRegisterDriftError(RuntimeError):
+    def __init__(self, code: str, path: str) -> None:
+        super().__init__(f"{code}:{path}")
+        self.failure = {"code": code, "path": path}
 
 
 def _repo_path(repo_root: Path, relative: str) -> Path:
@@ -45,9 +52,17 @@ def _repo_path(repo_root: Path, relative: str) -> Path:
 def _canonical_regular_text(repo_root: Path, relative: str) -> str:
     path = _repo_path(repo_root, relative)
     try:
-        if not stat.S_ISREG(os.lstat(path).st_mode):
-            raise DecisionRegisterObservationError(f"not_regular:{relative}")
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError as exc:
+        raise DecisionRegisterDriftError("tracked_file_missing", relative) from exc
+    except OSError as exc:
+        raise DecisionRegisterObservationError(f"unreadable:{relative}:{exc}") from exc
+    if not stat.S_ISREG(mode):
+        raise DecisionRegisterDriftError("tracked_file_not_regular", relative)
+    try:
         return path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except FileNotFoundError as exc:
+        raise DecisionRegisterDriftError("tracked_file_missing", relative) from exc
     except (OSError, UnicodeError) as exc:
         raise DecisionRegisterObservationError(f"unreadable:{relative}:{exc}") from exc
 
@@ -110,28 +125,35 @@ def normative_reference_failures(
     texts = {path: _canonical_regular_text(repo_root, path) for path in NORMATIVE_PATHS}
     decisions = {item["id"]: item for item in register["decisions"]}
     spans_by_path: dict[str, list[tuple[int, int, str]]] = {path: [] for path in texts}
-    slice_index = SLICES.index(require_slice) if require_slice is not None else None
 
     for unit in NORMATIVE_UNIT_CATALOG:
         text = texts[unit["path"]]
         span = _unit_span(text, unit)
         expected = _expected_unit_body(register, unit)
-        due = slice_index is not None and SLICES.index(unit["required_by_slice"]) <= slice_index
         if span == (-1, -1):
             failures.append({"code": "normative_unit_markers_invalid", "unit_id": unit["id"], "path": unit["path"]})
             continue
         if span is None:
-            if due and expected is not None:
+            if expected is not None:
                 failures.append({"code": "normative_unit_reference_missing", "unit_id": unit["id"], "path": unit["path"]})
             continue
         spans_by_path[unit["path"]].append((span[0], span[1], unit["id"]))
         actual = text[span[0]:span[1]]
-        if expected is None or actual != expected:
+        if (expected is None and actual) or (
+            expected is not None and actual != expected
+        ):
             failures.append({"code": "normative_unit_reference_drift", "unit_id": unit["id"], "path": unit["path"]})
 
     for path, text in texts.items():
-        for match in REFERENCE_RE.finditer(text):
+        for match in REFERENCE_CANDIDATE_RE.finditer(text):
             token = match.group(0)
+            if REFERENCE_RE.fullmatch(token) is None:
+                failures.append({
+                    "code": "malformed_decision_reference",
+                    "path": path,
+                    "reference": token,
+                })
+                continue
             scoped = any(start <= match.start() < end for start, end, _unit in spans_by_path[path])
             if not scoped:
                 failures.append({"code": "unscoped_decision_reference", "path": path, "reference": token})
@@ -187,26 +209,52 @@ def _git(repo_root: Path, *args: str) -> bytes:
     return result.stdout
 
 
-def _history(repo_root: Path) -> list[dict[str, Any]]:
+def _history(
+    repo_root: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if _git(repo_root, "rev-parse", "--is-shallow-repository").strip() == b"true":
         raise DecisionRegisterObservationError("git_history_shallow")
     commits = _git(
         repo_root, "log", "--full-history", "--format=%H", "--", MANIFEST_PATH
     ).decode("ascii").split()
     snapshots: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     for commit in reversed(commits):
+        names = _git(
+            repo_root, "ls-tree", "--name-only", commit, "--", MANIFEST_PATH
+        ).decode("utf-8", "replace").splitlines()
+        if MANIFEST_PATH not in names:
+            failures.append({
+                "code": "historical_manifest_deleted",
+                "commit": commit,
+            })
+            continue
         raw = _git(repo_root, "show", f"{commit}:{MANIFEST_PATH}")
         try:
             value = json.loads(raw.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
-            raise DecisionRegisterObservationError(f"historical_manifest_invalid:{commit}:{exc}") from exc
+            failures.append({
+                "code": "historical_manifest_invalid",
+                "commit": commit,
+                "detail": str(exc),
+            })
+            continue
         if value.get("schema_id") != SCHEMA_ID:
+            failures.append({
+                "code": "historical_schema_unsupported",
+                "commit": commit,
+                "schema_id": value.get("schema_id"),
+            })
             continue
         try:
             snapshots.append(validate_register(value))
         except ValueError as exc:
-            raise DecisionRegisterObservationError(f"historical_manifest_invalid:{commit}:{exc}") from exc
-    return snapshots
+            failures.append({
+                "code": "historical_manifest_invalid",
+                "commit": commit,
+                "detail": str(exc),
+            })
+    return snapshots, failures
 
 
 def verify_register(
@@ -217,34 +265,56 @@ def verify_register(
     if require_slice is not None and require_slice not in SLICES:
         raise ValueError("require_slice:value")
     failures: list[dict[str, Any]] = []
+    indeterminate_reasons: list[dict[str, Any]] = []
+    document_matches: bool | None = True if not check_document else None
+
+    if check_document:
+        try:
+            document_matches = _generated_document_matches(register, repo_root)
+            if not document_matches:
+                failures.append({
+                    "code": "generated_document_drift",
+                    "path": register["document"]["path"],
+                })
+        except DecisionRegisterDriftError as exc:
+            document_matches = False
+            failures.append(exc.failure)
+        except DecisionRegisterObservationError as exc:
+            indeterminate_reasons.append({"code": str(exc)})
+
     try:
-        document_matches = not check_document or _generated_document_matches(register, repo_root)
-        if check_document and not document_matches:
-            failures.append({"code": "generated_document_drift", "path": register["document"]["path"]})
         failures.extend(normative_reference_failures(register, repo_root, require_slice=require_slice))
-        if check_history:
-            failures.extend(resolved_history_failures(register, _history(repo_root)))
+    except DecisionRegisterDriftError as exc:
+        failures.append(exc.failure)
     except DecisionRegisterObservationError as exc:
-        return {
-            "schema_id": REPORT_SCHEMA_ID, "status": "indeterminate", "valid": False,
-            "ready": False, "failures": [], "indeterminate_reasons": [{"code": str(exc)}],
-        }
-    inactive = sorted(
-        item["id"] for item in register["decisions"]
-        if decision_applicability(register, item["id"]) == "inactive"
-    )
+        indeterminate_reasons.append({"code": str(exc)})
+
+    if check_history:
+        try:
+            history, history_failures = _history(repo_root)
+            failures.extend(history_failures)
+            failures.extend(resolved_history_failures(register, history))
+        except DecisionRegisterObservationError as exc:
+            indeterminate_reasons.append({"code": str(exc)})
+
+    decisions = {item["id"]: item for item in register["decisions"]}
+    inactive = [
+        decision_id for decision_id in register["question_order"]
+        if decision_applicability(register, decision_id) == "inactive"
+    ]
     pending = [
-        item for item in register["decisions"]
-        if item["status"] == "pending" and item["id"] not in inactive
+        decisions[decision_id] for decision_id in register["question_order"]
+        if decisions[decision_id]["status"] == "pending"
+        and decision_id not in inactive
     ]
     slice_blockers: list[str] = []
     if require_slice is not None:
         limit = SLICES.index(require_slice)
-        slice_blockers = sorted(
+        slice_blockers = [
             item["id"] for item in pending
             if decision_applicability(register, item["id"]) == "active"
             and SLICES.index(item["required_by_slice"]) <= limit
-        )
+        ]
         if slice_blockers:
             failures.append({
                 "code": "slice_blocked_by_pending_decisions", "slice": require_slice,
@@ -253,12 +323,15 @@ def verify_register(
     readiness_only = bool(failures) and all(
         item["code"] == "slice_blocked_by_pending_decisions" for item in failures
     )
-    valid = not failures or readiness_only
-    ready = not pending
-    status = (
-        "blocked" if readiness_only else "invalid" if failures
-        else "valid_pending" if pending else "ready"
-    )
+    if indeterminate_reasons:
+        valid, ready, status = False, False, "indeterminate"
+    else:
+        valid = not failures or readiness_only
+        ready = not pending
+        status = (
+            "blocked" if readiness_only else "invalid" if failures
+            else "valid_pending" if pending else "ready"
+        )
     failures.sort(key=lambda item: json.dumps(item, sort_keys=True))
     return {
         "schema_id": REPORT_SCHEMA_ID, "register_id": register["register_id"],
@@ -268,5 +341,5 @@ def verify_register(
         "resolved_decision_count": sum(item["status"] == "resolved" for item in register["decisions"]),
         "inactive_decision_count": len(inactive), "inactive_decision_ids": inactive,
         "document_matches": document_matches, "required_slice": require_slice,
-        "failures": failures, "indeterminate_reasons": [],
+        "failures": failures, "indeterminate_reasons": indeterminate_reasons,
     }

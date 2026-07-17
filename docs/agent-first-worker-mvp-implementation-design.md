@@ -19,6 +19,33 @@
 
 若前四项仍无法唯一决定行为，实现 Agent 必须停止对应切片，把问题记录为 `SPEC_GAP`，不得通过解析 Agent 自然语言、沿用偶然实现行为或放宽 Gate 来猜测。
 
+### 决策闭合门禁（后续实现切片的前置条件）
+
+未闭合的架构事项以
+contracts/agent-first/spec-decision-register.json
+为唯一机器源，其生成视图是
+[Agent-First 规范决策登记](agent-first-worker-spec-decision-register.md)。
+recommendation 仅用于逐题评审，不是选择、默认值或实现授权；现有正文、当前代码、用户沉默和 Agent 推断均不能把 pending 改为 resolved。
+
+从 Worker 仓库运行：
+
+    python scripts/agent_first_decision_register.py check --repo-root .
+
+普通检查用于证明登记结构、生成视图、规范引用和完整 Git 历史仍可信；
+进入 S2-S8 任一切片前，还必须使用对应的 --require-slice Sx。
+任何适用且 required_by_slice 不晚于目标切片的 pending 决策都必须阻断。
+只有带 user、architecture_owner 或 operator 权威、日期、证据和 canonical
+digest 的明确回答才能形成 resolution；custom 回答不得推断条件分支，
+而要 fail-closed 地激活相应后续问题。记录明确回答后运行：
+
+    python scripts/agent_first_decision_register.py sync-document --repo-root .
+
+已解决记录不得原地改写或删除；改变结论必须新增有序决策并显式
+supersede 保持不变的旧记录。受影响的规范单元必须引用当前
+decision-id@resolution-digest；unknown、pending、malformed、stale 或
+unscoped 引用均失败。该门禁只授权规范闭合工作，不授权 Agent Kernel
+生产代码实现。
+
 ### 0.1 本次设计的证据边界
 
 本设计只读核对了 Server/API validator、fixtures、公开 DTO、Server/Web 项目规则和根协议，没有读取当时的 Worker 源码、测试或运行实现。这样可避免把现状偶然结构误写成目标架构。真正开始实现时，执行 Agent 必须先读取 Worker 的 `AGENTS.md`，再只读建立“现有模块 → 本文逻辑组件”的代码地图；代码地图不能改变本文契约。

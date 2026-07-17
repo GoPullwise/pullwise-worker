@@ -111,6 +111,46 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
   every committed blob revision for each genesis path, so a source-only
   historical reduction also lowers the floor or retires the path.
 
+## Agent-First Specification Decision Gate
+
+contracts/agent-first/spec-decision-register.json is the only machine source
+for unresolved Agent-First specification decisions. The generated human view is
+docs/agent-first-worker-spec-decision-register.md. Recommendations in either
+artifact are non-normative: current code, existing prose, silence, and Agent
+inference never select an option or authorize production implementation.
+
+- Run the canonical structural/provenance check from the Worker repository:
+
+    python scripts/agent_first_decision_register.py check --repo-root .
+
+  Exit 0 means valid_pending or ready, exit 1 means blocked or invalid, and
+  exit 2 means observation was indeterminate.
+- Before starting an implementation slice, add --require-slice S2 through S8
+  as appropriate. Every applicable pending decision required by that slice
+  blocks it, even when another dependency is not yet ready to ask.
+- After recording an explicit owner resolution, regenerate the human view:
+
+    python scripts/agent_first_decision_register.py sync-document --repo-root .
+
+- Ask only active_decision_id. A resolution requires an option-anchored decision
+  text, user/architecture_owner/operator authority, date, evidence references,
+  and its canonical digest. A custom resolution activates conditional follow-up
+  questions fail-closed instead of inferring a branch.
+- The reviewed D1-D26 question, option, recommendation, dependency, slice, and
+  normative-unit definitions are digest-frozen. Resolved records are immutable
+  through full Git history. Reversal requires a new, ordered, resolved decision
+  that explicitly supersedes the unchanged prior record.
+- Controlled normative units use exact decision-id and resolution-digest
+  markers. A resolved applicable unit must be referenced on every check;
+  unknown, pending, malformed, stale, or unscoped references fail.
+
+The generated Markdown view is a generated-file size exception owned by the
+Worker specification owner. It stays atomic because it is one ordered decision
+packet produced by the small checked-in renderer. The considered split is
+summary versus per-decision detail; remove the exception when a deterministic
+include publisher can preserve one order, one digest gate, and byte-exact
+verification.
+
 ## Worker Host Platform
 
 Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,

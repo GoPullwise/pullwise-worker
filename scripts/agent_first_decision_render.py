@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scripts.agent_first_decision_core import decision_applicability
@@ -68,9 +72,70 @@ def render_document(register: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
+                f"**Supersedes:** {', '.join(decision['supersedes']) or 'none'}",
+                "",
                 f"**Effects:** {', '.join(f'`{item}`' for item in decision['effects'])}",
                 "",
                 f"**Sources:** {', '.join(f'`{item}`' for item in decision['source_refs'])}",
             ]
         )
     return "\n".join(lines)
+
+
+def render_generated_file(register: dict[str, Any]) -> str:
+    document = register["document"]
+    return "\n".join(
+        [
+            "# Agent-First Worker Specification Decision Register",
+            "",
+            "Status: generated S1 decision packet. Pending recommendations are "
+            "non-normative and grant no implementation authority.",
+            "",
+            "Machine source: "
+            "contracts/agent-first/spec-decision-register.json.",
+            "",
+            document["start_marker"],
+            render_document(register),
+            document["end_marker"],
+            "",
+        ]
+    )
+
+
+def sync_generated_file(
+    register: dict[str, Any], repo_root: Path
+) -> Path:
+    root = repo_root.resolve()
+    relative = register["document"]["path"]
+    target = root.joinpath(*PurePosixPath(relative).parts)
+    try:
+        if target.resolve(strict=False).relative_to(root) != Path(relative):
+            raise ValueError
+        if target.exists() or target.is_symlink():
+            if not stat.S_ISREG(os.lstat(target).st_mode):
+                raise ValueError
+        if not target.parent.is_dir():
+            raise ValueError
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"generated_document:unsafe_path:{relative}") from exc
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(render_generated_file(register))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return target

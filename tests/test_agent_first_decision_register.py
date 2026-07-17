@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -9,6 +12,7 @@ from scripts.agent_first_decision_register import (
     DecisionRegisterFormatError,
     canonical_resolution_sha256,
     load_register,
+    load_repo_register,
     validate_register,
     verify_register,
 )
@@ -104,10 +108,48 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         custom["decisions"][0]["resolution"] = _resolution(
             "D1",
             selected_option_id="pullwise_full_scan",
-            custom_text="Use a bounded hybrid scope.",
+            custom_text="Use a bounded hybrid scope that needs explicit branch review.",
         )
-        custom["active_decision_id"] = "D3"
+        custom["active_decision_id"] = "D2"
         validate_register(custom)
+        self.assertEqual("D2", custom["active_decision_id"])
+
+    def test_required_definition_freezes_questions_options_and_unit_mapping(self) -> None:
+        register = load_register(REGISTER_PATH)
+        mutations = []
+
+        title = copy.deepcopy(register)
+        title["decisions"][0]["title"] = "Rewritten before owner review"
+        mutations.append(title)
+
+        option = copy.deepcopy(register)
+        option["decisions"][0]["options"][0]["summary"] = "Rewritten option"
+        mutations.append(option)
+
+        mapping = copy.deepcopy(register)
+        mapping["decisions"][0]["affected_units"].remove("target-authority-scope")
+        mapping["normative_units"][0]["decision_ids"].remove("D1")
+        mutations.append(mapping)
+
+        for changed in mutations:
+            with self.subTest(change=changed["decisions"][0]["title"]):
+                with self.assertRaisesRegex(
+                    DecisionRegisterFormatError, "register:required_definition"
+                ):
+                    validate_register(changed)
+
+    def test_resolution_date_must_be_a_real_canonical_date(self) -> None:
+        register = _resolve(
+            load_register(REGISTER_PATH), "D1", "pullwise_full_scan"
+        )
+        register["active_decision_id"] = "D3"
+        resolution = register["decisions"][0]["resolution"]
+        resolution["decided_at"] = "2026-99-99"
+        resolution["resolution_sha256"] = canonical_resolution_sha256(
+            "D1", resolution
+        )
+        with self.assertRaisesRegex(DecisionRegisterFormatError, "decided_at"):
+            validate_register(register)
 
     def test_resolution_rejects_untrusted_authority_and_digest_tampering(self) -> None:
         register = load_register(REGISTER_PATH)
@@ -175,6 +217,30 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             with self.subTest(path=relative):
                 self.assertIn(command, text)
                 self.assertIn(manifest, text)
+
+    def test_documented_cli_runs_and_is_bound_to_canonical_manifest(self) -> None:
+        command = [
+            sys.executable,
+            "-B",
+            "scripts/agent_first_decision_register.py",
+            "check",
+            "--repo-root",
+            ".",
+        ]
+        result = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("valid_pending", json.loads(result.stdout)["status"])
+        with self.assertRaisesRegex(
+            DecisionRegisterFormatError, "manifest:canonical_path"
+        ):
+            load_repo_register(REPO_ROOT, "alternate.json")
 
 
 if __name__ == "__main__":
