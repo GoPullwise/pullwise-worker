@@ -121,7 +121,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
   `compatible`（14 个 fixed runner 全部通过）。
 - wheel 隔离安装成功，默认 registry 包含 13 个 schema 和 3 个 fixture pack，
   SQLite/CAS round-trip 通过。
-- GitHub Actions CI run 792（Python 3.10、dependency audit、全量测试）通过。
+- GitHub Actions CI run 798（Python 3.10、dependency audit、隔离 wheel、全量测试）通过。
 
 ## 文件规模与模块化报告
 
