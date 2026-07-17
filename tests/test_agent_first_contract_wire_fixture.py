@@ -18,10 +18,6 @@ FIXTURE_PATH = (
     / "fixtures"
     / "review-worker-protocol-v1.json"
 )
-BASELINE_PATH = (
-    WORKER_ROOT / "contracts" / "agent-first" / "legacy-v1-contract-baseline.json"
-)
-CI_WORKFLOW_PATH = WORKER_ROOT / ".github" / "workflows" / "ci.yml"
 
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
@@ -59,19 +55,6 @@ class AgentFirstContractWireFixtureTest(unittest.TestCase):
         for name, body in self.cases.items():
             envelope = body.get("reviewWorkerProtocol") if name.startswith("result_") else body
             self.assertEqual(envelope["protocol_version"], self.protocol_version, name)
-
-    def test_ci_checks_out_the_frozen_server_as_a_sibling(self) -> None:
-        baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
-        server = next(
-            item for item in baseline["repositories"] if item["id"] == "server"
-        )
-        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
-
-        self.assertIn("working-directory: pullwise-worker", workflow)
-        self.assertIn("repository: GoPullwise/pullwise-server", workflow)
-        self.assertIn(f"ref: {server['frozen_head']}", workflow)
-        self.assertIn("path: pullwise-server", workflow)
-        self.assertIn("python -m pip install -e ../pullwise-server", workflow)
 
     def test_register_preserves_current_one_slot_linux_invariants(self) -> None:
         body = self.case("register")

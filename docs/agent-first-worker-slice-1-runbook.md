@@ -121,7 +121,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `pullwise_worker/agent_kernel_schema_registry.py` | 187 | digest-bound schema loading |
 | `pullwise_worker/agent_kernel_schema_validation.py` | 331 | 受控 schema 子集 |
 | `pullwise_worker/agent_kernel_shadow_store.py` | 126 | validation/CAS composition |
-| `tests/test_agent_first_contract_wire_fixture.py` | 201 | pinned cross-repo CI contract |
+| `tests/test_ci_cross_repo_contract.py` | 31 | pinned sibling CI contract |
 | `tests/test_agent_kernel_canonical.py` | 128 | canonical contract/property |
 | `tests/test_agent_kernel_contract_semantics.py` | 187 | semantic invariants |
 | `tests/test_agent_kernel_legacy_mapping.py` | 67 | identity/collision |
