@@ -133,7 +133,7 @@ def _append_decision(
     question_index: int = 1,
 ) -> dict[str, object]:
     changed = copy.deepcopy(register)
-    template = copy.deepcopy(changed["decisions"][-1])
+    template = copy.deepcopy(changed["decisions"][0])
     affected_units = list(changed["decisions"][0]["affected_units"])
     template.update(
         {
@@ -156,6 +156,41 @@ def _append_decision(
     changed["decisions"].append(template)
     for unit in changed["normative_units"]:
         if unit["id"] in affected_units:
+            unit["decision_ids"].append(decision_id)
+    changed["question_order"].insert(question_index, decision_id)
+    return changed
+
+
+def _append_followup(
+    register: dict[str, object],
+    *,
+    source_id: str = "D27",
+    decision_id: str = "D28",
+    question_index: int = 2,
+) -> dict[str, object]:
+    changed = copy.deepcopy(register)
+    template = copy.deepcopy(changed["decisions"][1])
+    template.update(
+        {
+            "id": decision_id,
+            "key": f"synthetic-{decision_id.lower()}",
+            "status": "pending",
+            "depends_on": [source_id],
+            "activation": {
+                "decision_id": source_id,
+                "selected_option_id": "generic_agent_worker",
+            },
+            "source_refs": [
+                *template["source_refs"],
+                "test:synthetic-followup",
+            ],
+            "resolution": None,
+            "supersedes": [],
+        }
+    )
+    changed["decisions"].append(template)
+    for unit in changed["normative_units"]:
+        if unit["id"] in template["affected_units"]:
             unit["decision_ids"].append(decision_id)
     changed["question_order"].insert(question_index, decision_id)
     return changed
@@ -314,56 +349,6 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
             for item in resolved_history_failures(removed, [prior])
         }
         self.assertIn("resolved_decision_not_immutable", codes)
-
-    def test_explicit_new_resolved_decision_can_supersede_frozen_one(self) -> None:
-        prior = _resolved_d1()
-        pending = _append_decision(prior)
-        pending["active_decision_id"] = "D27"
-        validate_register(pending)
-
-        invalid = copy.deepcopy(pending)
-        invalid["decisions"][-1]["supersedes"] = ["D1"]
-        with self.assertRaisesRegex(
-            DecisionRegisterFormatError, "superseder_not_resolved"
-        ):
-            validate_register(invalid)
-
-        current = _resolve(
-            pending,
-            "D27",
-            pending["decisions"][-1]["options"][0]["id"],
-            supersedes=("D1",),
-        )
-        current["active_decision_id"] = "D2"
-        validate_register(current)
-        self.assertEqual([], resolved_history_failures(current, [prior]))
-        self.assertIn("**Supersedes:** D1", render_document(current))
-
-        target_pending = _append_decision(load_register(REGISTER_PATH))
-        target_pending = _resolve(
-            target_pending,
-            "D27",
-            target_pending["decisions"][-1]["options"][0]["id"],
-            supersedes=("D1",),
-        )
-        with self.assertRaisesRegex(
-            DecisionRegisterFormatError, "target_not_resolved"
-        ):
-            validate_register(target_pending)
-
-        duplicate = _append_decision(
-            current, decision_id="D28", question_index=2
-        )
-        duplicate = _resolve(
-            duplicate,
-            "D28",
-            duplicate["decisions"][-1]["options"][0]["id"],
-            supersedes=("D1",),
-        )
-        with self.assertRaisesRegex(
-            DecisionRegisterFormatError, "duplicate_target"
-        ):
-            validate_register(duplicate)
 
     def test_resolved_decisions_cannot_skip_the_question_order(self) -> None:
         register = load_register(REGISTER_PATH)

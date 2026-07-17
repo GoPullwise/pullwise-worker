@@ -23,6 +23,7 @@ from scripts.agent_first_decision_catalog import (
     SLICES,
 )
 from scripts.agent_first_decision_definition import required_definition_sha256
+from scripts.agent_first_decision_supersession import supersession_error
 
 
 TOP_LEVEL_KEYS = {
@@ -129,11 +130,6 @@ def decision_applicability(
     source = decisions[activation["decision_id"]]
     if source["status"] != "resolved":
         return "unknown"
-    if any(
-        source["id"] in item["supersedes"] and item["status"] == "resolved"
-        for item in register["decisions"]
-    ):
-        return "active"
     if source["resolution"]["kind"] == "custom":
         return "active"
     return (
@@ -316,29 +312,9 @@ def validate_register(register: object) -> dict[str, Any]:
         if actual["activation"] != expected_activation or expected["source_ref"] not in actual["source_refs"]:
             raise DecisionRegisterFormatError("decisions:required_catalog")
     id_set = set(ids)
-    superseded_targets: set[str] = set()
     for index, item in enumerate(root["decisions"]):
         if not set(item["depends_on"]) <= id_set or not set(item["supersedes"]) <= set(ids[:index]):
             raise DecisionRegisterFormatError(f"decisions[{index}]:reference")
-        if item["supersedes"] and item["status"] != "resolved":
-            raise DecisionRegisterFormatError(
-                f"decisions[{index}].supersedes:superseder_not_resolved"
-            )
-        for target_id in item["supersedes"]:
-            target = root["decisions"][ids.index(target_id)]
-            if target["status"] != "resolved":
-                raise DecisionRegisterFormatError(
-                    f"decisions[{index}].supersedes:target_not_resolved"
-                )
-            if not set(target["affected_units"]) <= set(item["affected_units"]):
-                raise DecisionRegisterFormatError(
-                    f"decisions[{index}].supersedes:affected_units"
-                )
-            if target_id in superseded_targets:
-                raise DecisionRegisterFormatError(
-                    f"decisions[{index}].supersedes:duplicate_target"
-                )
-            superseded_targets.add(target_id)
         activation = item["activation"]
         if activation is not None:
             if activation["decision_id"] not in set(ids[:index]):
@@ -356,6 +332,9 @@ def validate_register(register: object) -> dict[str, Any]:
     order = _text_list(root["question_order"], "question_order")
     if set(order) != id_set or [item for item in order if item in CATALOG_BY_ID] != list(QUESTION_ORDER):
         raise DecisionRegisterFormatError("question_order:required_catalog")
+    supersession_failure = supersession_error(root)
+    if supersession_failure is not None:
+        raise DecisionRegisterFormatError(supersession_failure)
     for index, item in enumerate(root["decisions"]):
         if item["status"] == "resolved":
             if decision_applicability(root, item["id"]) != "active":

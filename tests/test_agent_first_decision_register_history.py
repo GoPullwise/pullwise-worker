@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 
 from scripts.agent_first_decision_gate import verify_register
+from scripts.agent_first_decision_register import validate_register
 from tests.test_agent_first_decision_register_gate import (
+    _append_decision,
+    _append_followup,
+    _resolve,
     _resolved_d1,
     _write_normative_docs,
 )
@@ -39,6 +43,35 @@ def _write_manifest(root: Path, register: dict[str, object]) -> Path:
 
 
 class AgentFirstDecisionRegisterHistoryTest(unittest.TestCase):
+    def test_supersession_after_prior_answers_preserves_question_order(self) -> None:
+        progressed = _resolved_d1()
+        d3_option = progressed["decisions"][2]["options"][0]["id"]
+        progressed = _resolve(progressed, "D3", d3_option)
+        progressed["active_decision_id"] = "D4"
+
+        pending = _append_decision(progressed, question_index=3)
+        pending = _append_followup(pending, question_index=4)
+        pending["active_decision_id"] = "D27"
+        successor = _resolve(
+            pending,
+            "D27",
+            "generic_agent_worker",
+            supersedes=("D1",),
+        )
+        successor["active_decision_id"] = "D28"
+        followup = next(
+            item for item in successor["decisions"] if item["id"] == "D28"
+        )
+        closed = _resolve(
+            successor, "D28", followup["options"][0]["id"]
+        )
+        closed["active_decision_id"] = "D4"
+
+        validate_register(progressed)
+        validate_register(pending)
+        validate_register(successor)
+        validate_register(closed)
+
     def test_git_history_detects_rewrite_deletion_and_unknown_schema(self) -> None:
         prior = _resolved_d1()
         with tempfile.TemporaryDirectory() as temp_dir:

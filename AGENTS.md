@@ -139,7 +139,9 @@ inference never select an option or authorize production implementation.
 - The reviewed D1-D26 question, option, recommendation, dependency, slice, and
   normative-unit definitions are digest-frozen. Resolved records are immutable
   through full Git history. Reversal requires a new, ordered, resolved decision
-  that explicitly supersedes the unchanged prior record.
+  that explicitly supersedes the unchanged prior record. Supersession never
+  reactivates an old question ID; newly applicable follow-up questions require
+  new ordered decision records.
 - Controlled normative units use exact decision-id and resolution-digest
   markers. A resolved applicable unit must be referenced on every check;
   unknown, pending, malformed, stale, or unscoped references fail.
