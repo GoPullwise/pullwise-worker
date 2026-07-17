@@ -106,6 +106,15 @@ python3 -m pip wheel --no-deps --no-build-isolation --wheel-dir /tmp/pullwise-wh
 最后一条只验证 wheel 可构建且包含 schema/fixture package data，不安装或发布它。
 decision check 的 pending/blocked 是规范状态证据，不应伪装成测试故障。
 
+## 最近验证结果
+
+- Python 3.10/3.12 Slice 1 聚焦测试：47/47 通过。
+- Python 3.12 Worker 全量：700 tests 通过，4 个既有条件性 skip。
+- output contracts 4/4、Slice 0 baseline `compatible`、cross-repo baseline
+  `compatible`（14 个 fixed runner 全部通过）。
+- wheel 构建成功并包含 9 个 Agent Kernel 模块、13 个 schema 和 3 个 fixture pack。
+- GitHub Actions CI run 792（Python 3.10、dependency audit、全量测试）通过。
+
 ## 文件规模与模块化报告
 
 以下为本 Slice 新增或修改文件的物理行数。
@@ -148,7 +157,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `pyproject.toml` | 28 | wheel package data |
 | `.github/workflows/ci.yml` | 47 | pinned Server contract-test checkout |
 | `AGENTS.md` | 935 | 持久工程规则（非代码阈值） |
-| `docs/agent-first-worker-slice-1-runbook.md` | 155 | 本证据 |
+| `docs/agent-first-worker-slice-1-runbook.md` | 164 | 本证据 |
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行说明项，没有超过 600 行
 的新增文件，也没有生成/第三方/原子 registry 例外需要登记。S1 未触及任何超过
