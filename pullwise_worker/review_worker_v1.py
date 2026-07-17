@@ -2496,10 +2496,18 @@ def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: P
         argument = str(raw_argument).strip()
         if re.search(r"[a-z][a-z0-9+.-]*://", argument, flags=re.IGNORECASE):
             return False, "test commands may not contain network URLs"
-        if not argument or argument.startswith("-"):
+        if not argument:
             continue
-        candidate = Path(argument)
-        if candidate.is_absolute() or "/" in argument or chr(92) in argument:
+        path_operand = argument
+        if argument.startswith("-"):
+            _option, separator, embedded_value = argument.partition("=")
+            if not separator:
+                continue
+            path_operand = embedded_value.strip()
+            if not path_operand:
+                continue
+        candidate = Path(path_operand)
+        if candidate.is_absolute() or "/" in path_operand or chr(92) in path_operand:
             if not candidate.is_absolute():
                 candidate = cwd / candidate
             if not path_is_under(candidate, validation_repo):
