@@ -243,13 +243,19 @@
       "path": "pullwise_server/_app_part_10_handler_main.py",
       "roles": ["producer", "registry", "validator"],
       "anchors": [
+        "REPLACEABLE_REVIEW_LOG_ARTIFACT_KINDS",
         "REVIEW_RUN_EVENT_TYPES",
         "WORKER_PROTOCOL_VERSION",
         "WORKER_REVIEW_ARTIFACT_KINDS",
+        "WORKER_V1_ACTIVE_HEARTBEAT_STATUSES",
+        "WORKER_V1_PROGRESS_COUNTER_KEYS",
+        "WORKER_V1_PROGRESS_PHASE_STATUSES",
         "handle_worker_run_artifact_upload",
         "handle_worker_run_event",
         "handle_worker_run_result",
         "handle_worker_v1_heartbeat",
+        "handle_worker_v1_job_artifact_upload",
+        "handle_worker_v1_job_result",
         "handle_worker_v1_lease",
         "handle_worker_v1_register",
         "worker_artifact_upload_payload",
@@ -274,7 +280,7 @@
         "test_deadline_cancelled_job_accepts_late_cancelled_worker_receipt",
         "test_running_user_cancel_waits_for_worker_evidence_before_terminal"
       ],
-      "enforcement": "blocking",
+      "enforcement": "watched",
       "probe_ids": ["server.cancellation-fixtures"],
       "sha256": "ef6a10348ecdfcbaafc6541ecbdc81fd7b7dd2be17992ac7ded7fd94e9dc51a0"
     },
@@ -306,17 +312,30 @@
       "roles": ["producer", "projection", "validator"],
       "anchors": [
         "REQUIRED_COMPLETED_REVIEW_ARTIFACT_KINDS",
+        "REQUIRED_TERMINAL_REVIEW_ARTIFACT_ALTERNATIVES",
         "REQUIRED_TERMINAL_REVIEW_ARTIFACT_KINDS",
         "WORKER_REVIEW_ARTIFACT_KINDS",
+        "apply_prepared_worker_job_result_to_state_locked",
         "apply_worker_job_result",
+        "apply_worker_job_result_to_state_locked",
+        "converge_worker_job_result",
+        "expected_worker_attempt_id",
+        "installation_clone_token_payload",
         "prepare_worker_job_result_state",
         "public_review_worker_protocol",
+        "review_job_intent_policy",
+        "review_job_model_profile",
+        "review_job_repository_payload",
         "review_job_review_request_payload",
+        "review_worker_protocol_envelope",
+        "scan_job_attempt_run_id",
         "scan_job_payload",
         "validate_review_worker_protocol_artifacts",
         "validate_review_worker_protocol_envelope",
+        "worker_result_cancellation_is_authoritative",
         "worker_result_checksum",
-        "worker_result_projection_fields"
+        "worker_result_projection_fields",
+        "worker_result_resolved_commit"
       ],
       "enforcement": "watched",
       "probe_ids": [
@@ -332,14 +351,20 @@
       "path": "pullwise_server/db.py",
       "roles": ["storage", "validator"],
       "anchors": [
+        "REPLACEABLE_REVIEW_LOG_ARTIFACT_KINDS",
         "_finalize_recovered_review_run_locked",
         "_insert_review_run_event_locked",
+        "_upsert_review_run_claimed_locked",
+        "claim_next_scan_job",
+        "finalize_review_run_result",
+        "get_completed_scan_job_result",
         "inspect_scan_job_result_submission",
         "record_scan_job_result",
         "recover_expired_scan_jobs",
         "store_review_run_artifact",
         "store_review_run_event",
-        "store_review_run_event_and_progress"
+        "store_review_run_event_and_progress",
+        "upsert_review_run_claimed"
       ],
       "enforcement": "watched",
       "probe_ids": [
@@ -383,7 +408,9 @@
         "server.route-fixtures",
         "web.flow-fixtures",
         "web.history-fixtures",
-        "web.normalizer-fixtures"
+        "web.normalizer-fixtures",
+        "web.progress-fixtures",
+        "web.timing-fixtures"
       ],
       "sha256": "9b36d719d2c4f3fc99dce1490a11b6154cd7538c95441cf8053fa8a3b195362c"
     },
@@ -405,7 +432,7 @@
         "test_worker_artifact_upload_payload_validates_hash_and_size",
         "v1_envelope"
       ],
-      "enforcement": "blocking",
+      "enforcement": "watched",
       "probe_ids": ["server.result-fixtures"],
       "sha256": "b2dba4e5be8ea3814e3879e77361d7dfbd2caa9de3f82a1b5fa33e51d1853d8b"
     },
@@ -432,7 +459,7 @@
         "v1_worker_heartbeat_payload",
         "v1_worker_lease_payload"
       ],
-      "enforcement": "blocking",
+      "enforcement": "watched",
       "probe_ids": ["server.route-fixtures"],
       "sha256": "b49b68cb33bd3b006598deecbacf8262637868c573959129cfe9671cd957d031"
     },
@@ -445,9 +472,12 @@
         "SCAN_JOB_STATUSES",
         "SCAN_STATUSES",
         "TERMINAL_SCAN_RETENTION_STATUSES",
+        "apply_recovered_scan_jobs_locked",
+        "reconcile_completed_scan_job_results_locked",
         "reconcile_scan_job_state_locked",
         "reconcile_terminal_scan_job_locked",
         "recover_expired_scan_leases_once",
+        "reject_worker_protocol_completed_result_locked",
         "scan_status_from_job_status",
         "scan_status_from_recovered_job"
       ],
@@ -457,7 +487,9 @@
         "server.route-fixtures",
         "web.flow-fixtures",
         "web.history-fixtures",
-        "web.normalizer-fixtures"
+        "web.normalizer-fixtures",
+        "web.progress-fixtures",
+        "web.timing-fixtures"
       ],
       "sha256": "0e72dd9bfe230cb47968c2143af69cb440e907002ca20fb3cc2894c1d4344b97"
     },
@@ -551,7 +583,12 @@
         "terminalProgressStepStatus"
       ],
       "enforcement": "watched",
-      "probe_ids": ["web.flow-fixtures", "web.normalizer-fixtures"],
+      "probe_ids": [
+        "web.flow-fixtures",
+        "web.normalizer-fixtures",
+        "web.progress-fixtures",
+        "web.timing-fixtures"
+      ],
       "sha256": "539c679ad8f6c8ba3f7a9d2e6fb08d8d0f4958c8e45138b9d43b37df1ed80ff5"
     },
     {
@@ -582,7 +619,12 @@
         "scansFromStatusPayload"
       ],
       "enforcement": "watched",
-      "probe_ids": ["web.history-fixtures", "web.normalizer-fixtures"],
+      "probe_ids": [
+        "web.history-fixtures",
+        "web.normalizer-fixtures",
+        "web.progress-fixtures",
+        "web.timing-fixtures"
+      ],
       "sha256": "9f27e78aa3894b8681b88bc4a2285004df1be889f342937bf270ede5d4e2357b"
     },
     {
@@ -606,7 +648,9 @@
       "probe_ids": [
         "web.flow-fixtures",
         "web.history-fixtures",
-        "web.normalizer-fixtures"
+        "web.normalizer-fixtures",
+        "web.progress-fixtures",
+        "web.timing-fixtures"
       ],
       "sha256": "d9692900267375f54321957c3b14ffda27ba99734b987878edb2619892651c03"
     },
@@ -627,6 +671,81 @@
       "enforcement": "watched",
       "probe_ids": ["web.normalizer-fixtures"],
       "sha256": "c6a9ba002a89953a175e00919f352e7132a7e3b5a80fafa974d4071bbcf74ed3"
+    },
+    {
+      "id": "web.progress-fixtures",
+      "repo": "web",
+      "path": "src/components/scan-progress.test.jsx",
+      "roles": ["fixture"],
+      "anchors": [
+        "presents partial completion as a terminal partial result",
+        "scanProgressPresentation"
+      ],
+      "enforcement": "watched",
+      "probe_ids": ["web.progress-fixtures"],
+      "sha256": "2435a63a90ee89947cd53cf7f61ebe8ff2d7611a1583a32a35f2e678196b597b"
+    },
+    {
+      "id": "web.progress-projection",
+      "repo": "web",
+      "path": "src/components/scan-progress.jsx",
+      "roles": ["consumer", "projection"],
+      "anchors": [
+        "INCOMPLETE_TERMINAL_SCAN_PROGRESS_MAX",
+        "ScanProgressBar",
+        "clampProgress",
+        "presentationProgress",
+        "scanProgressPresentation"
+      ],
+      "enforcement": "watched",
+      "probe_ids": [
+        "web.flow-fixtures",
+        "web.history-fixtures",
+        "web.normalizer-fixtures",
+        "web.progress-fixtures"
+      ],
+      "sha256": "6b509d2e8a9567b9e5e97f8c6b4585a0a0ab806fe3ed14fc166070c2693e2c7e"
+    },
+    {
+      "id": "web.timing-fixtures",
+      "repo": "web",
+      "path": "src/components/scan-timing.test.jsx",
+      "roles": ["fixture"],
+      "anchors": [
+        "ScanTiming",
+        "keeps ETA hidden until a usable running estimate exists",
+        "keeps the timing block square-edged and safe on narrow layouts",
+        "prefers the review-run duration to a stale scan mirror when timestamps are absent",
+        "renders a rounded minute range without fake second-level precision",
+        "replaces ETA with actual terminal duration",
+        "uses the terminal timestamps when a reported duration has the wrong unit"
+      ],
+      "enforcement": "watched",
+      "probe_ids": ["web.timing-fixtures"],
+      "sha256": "1b32ee6dbedd36f17bb30b34a221731cd96e9a686b088f6d80a43a9ab46a6070"
+    },
+    {
+      "id": "web.timing-projection",
+      "repo": "web",
+      "path": "src/components/scan-timing.jsx",
+      "roles": ["consumer", "projection"],
+      "anchors": [
+        "ScanTiming",
+        "TERMINAL_STATUSES",
+        "durationText",
+        "estimateRangeText",
+        "scanDurationMs",
+        "scanTimingPresentation",
+        "timestampMilliseconds"
+      ],
+      "enforcement": "watched",
+      "probe_ids": [
+        "web.flow-fixtures",
+        "web.history-fixtures",
+        "web.normalizer-fixtures",
+        "web.timing-fixtures"
+      ],
+      "sha256": "5674e3cc0fd5e6f312dcc1a7fa740a1ed1ecdbce01c392f20fe4ed57f0b62db8"
     }
   ],
   "tests": [
@@ -638,6 +757,8 @@
     {"id": "web.api-fixtures", "runner_id": "web.api-fixtures"},
     {"id": "web.flow-fixtures", "runner_id": "web.flow-fixtures"},
     {"id": "web.history-fixtures", "runner_id": "web.history-fixtures"},
-    {"id": "web.normalizer-fixtures", "runner_id": "web.normalizer-fixtures"}
+    {"id": "web.normalizer-fixtures", "runner_id": "web.normalizer-fixtures"},
+    {"id": "web.progress-fixtures", "runner_id": "web.progress-fixtures"},
+    {"id": "web.timing-fixtures", "runner_id": "web.timing-fixtures"}
   ]
 }
