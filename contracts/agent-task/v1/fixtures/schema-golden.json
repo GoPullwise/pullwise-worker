@@ -1,0 +1,137 @@
+{
+  "schema_id": "agent-task-schema-golden-fixtures/v1",
+  "cases": [
+    {
+      "schema_id": "actor/v1",
+      "valid": {
+        "schema_id": "actor/v1",
+        "kind": "task_owner",
+        "id": "owner_11111111111111111111111111111111",
+        "session_id": "sess_22222222222222222222222222222222"
+      },
+      "canonical_sha256": "40b74a75cc78451ab993cc392776593232e54e1a12d6590a0ce9fda6501db0dd",
+      "invalid": [
+        {
+          "category": "unknown_field",
+          "instance": {
+            "schema_id": "actor/v1",
+            "kind": "worker_control",
+            "id": "worker-1",
+            "session_id": null,
+            "extra": true
+          }
+        },
+        {
+          "category": "enum",
+          "instance": {
+            "schema_id": "actor/v1",
+            "kind": "administrator",
+            "id": "worker-1",
+            "session_id": null
+          }
+        },
+        {
+          "category": "size",
+          "instance": {
+            "schema_id": "actor/v1",
+            "kind": "worker_control",
+            "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "session_id": null
+          }
+        }
+      ]
+    },
+    {
+      "schema_id": "availability-ref/v1",
+      "valid": {
+        "availability": "available",
+        "ref": {
+          "schema_id": "content-ref/v1",
+          "artifact_id": "art_33333333333333333333333333333333",
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "size_bytes": 5,
+          "media_type": "application/json",
+          "content_schema_id": "example/v1",
+          "encoding": "utf-8"
+        }
+      },
+      "canonical_sha256": "7008491a0d50c234055ae3fc51a8497a84eb63261e4016762ba7ba114c5a4b23",
+      "invalid": [
+        {
+          "category": "unknown_field",
+          "instance": {
+            "availability": "unavailable",
+            "reason_code": "MISSING",
+            "extra": true
+          }
+        },
+        {
+          "category": "enum",
+          "instance": {
+            "availability": "unknown",
+            "reason_code": "MISSING"
+          }
+        },
+        {
+          "category": "size",
+          "instance": {
+            "availability": "unavailable",
+            "reason_code": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          }
+        }
+      ]
+    },
+    {
+      "schema_id": "content-ref/v1",
+      "valid": {
+        "schema_id": "content-ref/v1",
+        "artifact_id": "art_55555555555555555555555555555555",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "size_bytes": 12,
+        "media_type": "application/json",
+        "content_schema_id": "task-request/v1",
+        "encoding": "utf-8"
+      },
+      "canonical_sha256": "7c677075fe4eeeb9f1fdaeaa26c1b4837db0e964f1862957f3ddab81bb77773a",
+      "invalid": [
+        {
+          "category": "unknown_field",
+          "instance": {
+            "schema_id": "content-ref/v1",
+            "artifact_id": "art_55555555555555555555555555555555",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size_bytes": 12,
+            "media_type": "application/json",
+            "content_schema_id": "task-request/v1",
+            "encoding": "utf-8",
+            "url": "https://replaceable.invalid"
+          }
+        },
+        {
+          "category": "enum",
+          "instance": {
+            "schema_id": "content-ref/v1",
+            "artifact_id": "art_55555555555555555555555555555555",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size_bytes": 12,
+            "media_type": "application/json",
+            "content_schema_id": "task-request/v1",
+            "encoding": "base64"
+          }
+        },
+        {
+          "category": "size",
+          "instance": {
+            "schema_id": "content-ref/v1",
+            "artifact_id": "art_55555555555555555555555555555555",
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "size_bytes": 12,
+            "media_type": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "content_schema_id": "task-request/v1",
+            "encoding": "utf-8"
+          }
+        }
+      ]
+    }
+  ]
+}
