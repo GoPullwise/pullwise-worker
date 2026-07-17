@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task-record/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id", "task_id", "task_type", "request_ref", "request_digest",
+    "policy_ref", "policy_digest", "policy_version", "protocol_mode", "lifecycle",
+    "desired_state", "task_version", "deletion_version", "outer_job_id", "run_id",
+    "lease_id", "transport_epoch", "native_epoch", "current_attempt_id", "owner_id",
+    "owner_epoch", "ledger_version", "ledger_head_digest", "charter_version", "charter_ref",
+    "current_checkpoint_generation", "current_checkpoint_hash", "quality_risk",
+    "absolute_deadline_at", "terminalization_reserve_ms", "completion_proposal_ref",
+    "final_observation_manifest_ref", "terminal_kind", "result_ref", "result_digest",
+    "outcome", "created_at", "updated_at", "terminal_at"
+  ],
+  "properties": {
+    "schema_id": {"const": "task-record/v1"},
+    "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{32}$"},
+    "task_type": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*/v[1-9][0-9]*$"},
+    "request_ref": {"$ref": "content-ref/v1"},
+    "request_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_ref": {"$ref": "content-ref/v1"},
+    "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "protocol_mode": {"const": "legacy_v1"},
+    "lifecycle": {"enum": ["QUEUED", "ACTIVE", "WAITING_INPUT", "WAITING_APPROVAL", "FINALIZING", "TERMINAL"]},
+    "desired_state": {"enum": ["RUN", "CANCEL"]},
+    "task_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "deletion_version": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "outer_job_id": {"type": ["string", "null"]},
+    "run_id": {"type": ["string", "null"]},
+    "lease_id": {"type": ["string", "null"]},
+    "transport_epoch": {"type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991},
+    "native_epoch": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "current_attempt_id": {"type": ["string", "null"], "pattern": "^attempt_[0-9a-f]{32}$"},
+    "owner_id": {"type": "string", "pattern": "^owner_[0-9a-f]{32}$"},
+    "owner_epoch": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "ledger_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "ledger_head_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "charter_version": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "charter_ref": {"oneOf": [{"$ref": "content-ref/v1"}, {"type": "null"}]},
+    "current_checkpoint_generation": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "current_checkpoint_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "quality_risk": {"enum": ["Q0", "Q1", "Q2", "Q3"]},
+    "absolute_deadline_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "terminalization_reserve_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "completion_proposal_ref": {"oneOf": [{"$ref": "content-ref/v1"}, {"type": "null"}]},
+    "final_observation_manifest_ref": {"oneOf": [{"$ref": "content-ref/v1"}, {"type": "null"}]},
+    "terminal_kind": {"type": ["string", "null"], "enum": [null, "task_result", "transport_abandoned"]},
+    "result_ref": {"oneOf": [{"$ref": "content-ref/v1"}, {"type": "null"}]},
+    "result_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "outcome": {"type": ["string", "null"]},
+    "created_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "updated_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "terminal_at": {"type": ["string", "null"], "format": "utc-rfc3339-ms"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "outer_job_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "lease_id": {"type": "string", "minLength": 1},
+        "transport_epoch": {"type": "integer", "minimum": 1}
+      }
+    },
+    {
+      "properties": {
+        "outer_job_id": {"const": null},
+        "run_id": {"const": null},
+        "lease_id": {"const": null},
+        "transport_epoch": {"const": null}
+      }
+    }
+  ]
+}

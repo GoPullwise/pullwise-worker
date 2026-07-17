@@ -19,6 +19,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_ROOT = REPO_ROOT / "contracts" / "agent-task" / "v1"
 
 
+def _mutated(instance: object, mutation: dict[str, object]) -> object:
+    result = copy.deepcopy(instance)
+    assert isinstance(result, dict)
+    segments = [part.replace("~1", "/").replace("~0", "~") for part in str(mutation["path"]).split("/")[1:]]
+    target: object = result
+    for segment in segments[:-1]:
+        assert isinstance(target, dict)
+        target = target[segment]
+    assert isinstance(target, dict)
+    if isinstance(mutation.get("repeat"), dict):
+        repeat = mutation["repeat"]
+        value = str(repeat["text"]) * int(repeat["count"])
+    elif "unsafe_integer" in mutation:
+        value = int(str(mutation["unsafe_integer"]))
+    else:
+        value = mutation.get("value")
+    target[segments[-1]] = value
+    return result
+
+
 class AgentKernelSchemaRegistryTest(unittest.TestCase):
     def test_registry_verifies_schema_identity_digest_and_golden_fixtures(self) -> None:
         registry = SchemaRegistry(CONTRACT_ROOT)
@@ -29,7 +49,15 @@ class AgentKernelSchemaRegistryTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            {"actor/v1", "availability-ref/v1", "content-ref/v1"},
+            {
+                "actor/v1",
+                "availability-ref/v1",
+                "budget-entry/v1",
+                "content-ref/v1",
+                "legacy-v1-task-mapping/v1",
+                "requirement-entry/v1",
+                "task-record/v1",
+            },
             set(registry.schema_ids),
         )
         self.assertEqual(set(registry.schema_ids), {
@@ -43,13 +71,15 @@ class AgentKernelSchemaRegistryTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     {"unknown_field", "enum", "size"},
-                    {invalid["category"] for invalid in case["invalid"]},
+                    {invalid["category"] for invalid in case["invalid_mutations"]},
                 )
-                for invalid in case["invalid"]:
+                for invalid in case["invalid_mutations"]:
                     with self.subTest(category=invalid["category"]), self.assertRaises(
                         SchemaValidationError
                     ):
-                        registry.validate(case["schema_id"], invalid["instance"])
+                        registry.validate(
+                            case["schema_id"], _mutated(case["valid"], invalid)
+                        )
 
     def test_registry_rejects_schema_file_drift(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-schema-drift-") as tmp_dir:

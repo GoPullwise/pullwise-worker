@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "requirement-entry/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "requirement_id",
+    "source_kind",
+    "source_id",
+    "statement",
+    "mandatory",
+    "necessity",
+    "parent_requirement_ids",
+    "introduced_by",
+    "introduced_at",
+    "ledger_version",
+    "rationale",
+    "supersedes"
+  ],
+  "properties": {
+    "schema_id": {"const": "requirement-entry/v1"},
+    "requirement_id": {
+      "type": "string",
+      "pattern": "^req_(?:user_objective|user_acceptance|user_constraint|delivery|policy|interaction|derived)_[0-9a-f]{64}$"
+    },
+    "source_kind": {
+      "enum": [
+        "user_objective",
+        "user_acceptance",
+        "user_constraint",
+        "delivery",
+        "policy",
+        "interaction",
+        "derived"
+      ]
+    },
+    "source_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "statement": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 16384},
+    "mandatory": {"type": "boolean"},
+    "necessity": {
+      "enum": ["explicit", "mechanically_necessary", "safety_necessary", "advisory"]
+    },
+    "parent_requirement_ids": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "pattern": "^req_[a-z_]+_[0-9a-f]{64}$"}
+    },
+    "introduced_by": {"$ref": "actor/v1"},
+    "introduced_at": {"type": "string", "format": "utc-rfc3339-ms"},
+    "ledger_version": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "rationale": {"type": "string", "x-pullwise-max-utf8-bytes": 16384},
+    "supersedes": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "x-pullwise-sorted-unique": true,
+      "items": {"type": "string", "pattern": "^req_derived_[0-9a-f]{64}$"}
+    }
+  }
+}

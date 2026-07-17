@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "budget-entry/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "task_id",
+    "budget_seq",
+    "attempt_id",
+    "session_id",
+    "operation",
+    "dimension",
+    "amount",
+    "reason",
+    "monotonic_ms",
+    "previous_watermark"
+  ],
+  "properties": {
+    "schema_id": {"const": "budget-entry/v1"},
+    "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{32}$"},
+    "budget_seq": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "attempt_id": {
+      "type": ["string", "null"],
+      "pattern": "^attempt_[0-9a-f]{32}$"
+    },
+    "session_id": {
+      "type": ["string", "null"],
+      "pattern": "^sess_[0-9a-f]{32}$"
+    },
+    "operation": {"enum": ["RESERVE", "CONSUME", "RELEASE", "CORRECT"]},
+    "dimension": {
+      "enum": [
+        "wall_ms",
+        "token_input",
+        "token_output",
+        "cost_micros",
+        "tool_calls",
+        "agent_sessions",
+        "attempts",
+        "output_bytes"
+      ]
+    },
+    "amount": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "reason": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 4096},
+    "monotonic_ms": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "previous_watermark": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+  }
+}

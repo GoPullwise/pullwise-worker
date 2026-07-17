@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "legacy-v1-task-mapping/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_id", "scan_id", "task_id", "transport_epoch"],
+  "properties": {
+    "schema_id": {"const": "legacy-v1-task-mapping/v1"},
+    "scan_id": {"type": "string", "minLength": 1, "x-pullwise-max-utf8-bytes": 16384},
+    "task_id": {"type": "string", "pattern": "^task_[0-9a-f]{32}$"},
+    "transport_epoch": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+  }
+}

@@ -12,9 +12,29 @@
       "sha256": "a60fc470546f287e9402e9b1ae7670ba48f69367730261a2466ca308758493a2"
     },
     {
+      "schema_id": "budget-entry/v1",
+      "path": "budget-entry.schema.json",
+      "sha256": "f744fe827c194b6c5526472322dd283838ce2cb1c702aa395f50932debc27fa8"
+    },
+    {
       "schema_id": "content-ref/v1",
       "path": "content-ref.schema.json",
       "sha256": "df30625941befb97b88e3c36ac1d45046ae360f7d1b549e8d05b0c5b02ae5eb5"
+    },
+    {
+      "schema_id": "legacy-v1-task-mapping/v1",
+      "path": "legacy-v1-task-mapping.schema.json",
+      "sha256": "0f1258cd6efa24aab864c84109438b8c3957436665e381cf8674de21e1f6b216"
+    },
+    {
+      "schema_id": "requirement-entry/v1",
+      "path": "requirement-entry.schema.json",
+      "sha256": "e70fe1bdff820d9e89fe3233d4c854e1ace4a93ad842942485b48a99fc8f5a10"
+    },
+    {
+      "schema_id": "task-record/v1",
+      "path": "task-record.schema.json",
+      "sha256": "685e6d6fbda0571eb2f7f3e2ba90960fd4ea0c90ba1aa0ebea23db61449de71e"
     }
   ]
 }

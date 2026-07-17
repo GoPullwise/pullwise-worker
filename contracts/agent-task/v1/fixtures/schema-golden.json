@@ -10,35 +10,10 @@
         "session_id": "sess_22222222222222222222222222222222"
       },
       "canonical_sha256": "40b74a75cc78451ab993cc392776593232e54e1a12d6590a0ce9fda6501db0dd",
-      "invalid": [
-        {
-          "category": "unknown_field",
-          "instance": {
-            "schema_id": "actor/v1",
-            "kind": "worker_control",
-            "id": "worker-1",
-            "session_id": null,
-            "extra": true
-          }
-        },
-        {
-          "category": "enum",
-          "instance": {
-            "schema_id": "actor/v1",
-            "kind": "administrator",
-            "id": "worker-1",
-            "session_id": null
-          }
-        },
-        {
-          "category": "size",
-          "instance": {
-            "schema_id": "actor/v1",
-            "kind": "worker_control",
-            "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            "session_id": null
-          }
-        }
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/extra", "value": true},
+        {"category": "enum", "operation": "replace", "path": "/kind", "value": "administrator"},
+        {"category": "size", "operation": "replace", "path": "/id", "repeat": {"text": "x", "count": 161}}
       ]
     },
     {
@@ -56,81 +31,152 @@
         }
       },
       "canonical_sha256": "7008491a0d50c234055ae3fc51a8497a84eb63261e4016762ba7ba114c5a4b23",
-      "invalid": [
-        {
-          "category": "unknown_field",
-          "instance": {
-            "availability": "unavailable",
-            "reason_code": "MISSING",
-            "extra": true
-          }
-        },
-        {
-          "category": "enum",
-          "instance": {
-            "availability": "unknown",
-            "reason_code": "MISSING"
-          }
-        },
-        {
-          "category": "size",
-          "instance": {
-            "availability": "unavailable",
-            "reason_code": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-          }
-        }
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/extra", "value": true},
+        {"category": "enum", "operation": "replace", "path": "/availability", "value": "unknown"},
+        {"category": "size", "operation": "replace", "path": "/ref/media_type", "repeat": {"text": "x", "count": 121}}
+      ]
+    },
+    {
+      "schema_id": "budget-entry/v1",
+      "valid": {
+        "schema_id": "budget-entry/v1",
+        "task_id": "task_55555555555555555555555555555555",
+        "budget_seq": 1,
+        "attempt_id": null,
+        "session_id": null,
+        "operation": "RESERVE",
+        "dimension": "wall_ms",
+        "amount": 60000,
+        "reason": "initial execution reservation",
+        "monotonic_ms": 0,
+        "previous_watermark": 0
+      },
+      "canonical_sha256": "a4930e837210016d7ff1b9f1a6f655f2d543dc67ce4bab1f9f248a193027cd77",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/extra", "value": true},
+        {"category": "enum", "operation": "replace", "path": "/dimension", "value": "cpu_seconds"},
+        {"category": "size", "operation": "replace", "path": "/reason", "repeat": {"text": "x", "count": 4097}}
       ]
     },
     {
       "schema_id": "content-ref/v1",
       "valid": {
         "schema_id": "content-ref/v1",
-        "artifact_id": "art_55555555555555555555555555555555",
-        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "artifact_id": "art_66666666666666666666666666666666",
+        "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
         "size_bytes": 12,
         "media_type": "application/json",
         "content_schema_id": "task-request/v1",
         "encoding": "utf-8"
       },
-      "canonical_sha256": "7c677075fe4eeeb9f1fdaeaa26c1b4837db0e964f1862957f3ddab81bb77773a",
-      "invalid": [
-        {
-          "category": "unknown_field",
-          "instance": {
-            "schema_id": "content-ref/v1",
-            "artifact_id": "art_55555555555555555555555555555555",
-            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
-            "size_bytes": 12,
-            "media_type": "application/json",
-            "content_schema_id": "task-request/v1",
-            "encoding": "utf-8",
-            "url": "https://replaceable.invalid"
-          }
+      "canonical_sha256": "aa852a8a1c0041ec9748b12ce28e8cb11bdda0ec6cb9e778cc9072cba7cda038",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/url", "value": "https://replaceable.invalid"},
+        {"category": "enum", "operation": "replace", "path": "/encoding", "value": "base64"},
+        {"category": "size", "operation": "replace", "path": "/media_type", "repeat": {"text": "x", "count": 121}}
+      ]
+    },
+    {
+      "schema_id": "legacy-v1-task-mapping/v1",
+      "valid": {
+        "schema_id": "legacy-v1-task-mapping/v1",
+        "scan_id": "扫描-α",
+        "task_id": "task_6101dbd3b5a7cc902d90e40185c6e158",
+        "transport_epoch": 3
+      },
+      "canonical_sha256": "c541a8b9907b54bf82a6590997e260d56256fe8170887a882e9e66de5dcfdd9f",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/job_id", "value": "job-1"},
+        {"category": "enum", "operation": "replace", "path": "/schema_id", "value": "legacy-v1-task-mapping/v2"},
+        {"category": "size", "operation": "replace", "path": "/scan_id", "repeat": {"text": "x", "count": 16385}}
+      ]
+    },
+    {
+      "schema_id": "requirement-entry/v1",
+      "valid": {
+        "schema_id": "requirement-entry/v1",
+        "requirement_id": "req_user_objective_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_kind": "user_objective",
+        "source_id": "objective",
+        "statement": "Review the repository completely.",
+        "mandatory": true,
+        "necessity": "explicit",
+        "parent_requirement_ids": [],
+        "introduced_by": {
+          "schema_id": "actor/v1",
+          "kind": "worker_control",
+          "id": "worker-1",
+          "session_id": null
         },
-        {
-          "category": "enum",
-          "instance": {
-            "schema_id": "content-ref/v1",
-            "artifact_id": "art_55555555555555555555555555555555",
-            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
-            "size_bytes": 12,
-            "media_type": "application/json",
-            "content_schema_id": "task-request/v1",
-            "encoding": "base64"
-          }
+        "introduced_at": "2026-07-17T12:00:00.000Z",
+        "ledger_version": 1,
+        "rationale": "",
+        "supersedes": []
+      },
+      "canonical_sha256": "5cc73b5d43520c1e1d300c239d1eb4c7c464343e39458c8e710f70161a65e96f",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/active", "value": true},
+        {"category": "enum", "operation": "replace", "path": "/necessity", "value": "optional"},
+        {"category": "size", "operation": "replace", "path": "/statement", "repeat": {"text": "x", "count": 16385}}
+      ]
+    },
+    {
+      "schema_id": "task-record/v1",
+      "valid": {
+        "schema_id": "task-record/v1",
+        "task_id": "task_88888888888888888888888888888888",
+        "task_type": "repo_review.full_scan/v1",
+        "request_ref": {
+          "schema_id": "content-ref/v1", "artifact_id": "art_99999999999999999999999999999999",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 512, "media_type": "application/json", "content_schema_id": "task-request/v1", "encoding": "utf-8"
         },
-        {
-          "category": "size",
-          "instance": {
-            "schema_id": "content-ref/v1",
-            "artifact_id": "art_55555555555555555555555555555555",
-            "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
-            "size_bytes": 12,
-            "media_type": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            "content_schema_id": "task-request/v1",
-            "encoding": "utf-8"
-          }
-        }
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "policy_ref": {
+          "schema_id": "content-ref/v1", "artifact_id": "art_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "size_bytes": 256, "media_type": "application/json", "content_schema_id": "effective-execution-policy/v1", "encoding": "utf-8"
+        },
+        "policy_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "policy_version": 1,
+        "protocol_mode": "legacy_v1",
+        "lifecycle": "QUEUED",
+        "desired_state": "RUN",
+        "task_version": 1,
+        "deletion_version": 0,
+        "outer_job_id": "job-1",
+        "run_id": "run-1",
+        "lease_id": "lease-1",
+        "transport_epoch": 1,
+        "native_epoch": 0,
+        "current_attempt_id": null,
+        "owner_id": "owner_dddddddddddddddddddddddddddddddd",
+        "owner_epoch": 0,
+        "ledger_version": 1,
+        "ledger_head_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "charter_version": 0,
+        "charter_ref": null,
+        "current_checkpoint_generation": 0,
+        "current_checkpoint_hash": null,
+        "quality_risk": "Q1",
+        "absolute_deadline_at": "2026-07-17T13:00:00.000Z",
+        "terminalization_reserve_ms": 60000,
+        "completion_proposal_ref": null,
+        "final_observation_manifest_ref": null,
+        "terminal_kind": null,
+        "result_ref": null,
+        "result_digest": null,
+        "outcome": null,
+        "created_at": "2026-07-17T12:00:00.000Z",
+        "updated_at": "2026-07-17T12:00:00.000Z",
+        "terminal_at": null
+      },
+      "canonical_sha256": "960a2c37ef1f6b250511bc5eaed7505a98ab0efd2eecbf1f6f7e90fd9b0687eb",
+      "invalid_mutations": [
+        {"category": "unknown_field", "operation": "add", "path": "/queue_position", "value": 1},
+        {"category": "enum", "operation": "replace", "path": "/lifecycle", "value": "RECONCILING"},
+        {"category": "size", "operation": "replace", "path": "/terminalization_reserve_ms", "unsafe_integer": "9007199254740992"}
       ]
     }
   ]
