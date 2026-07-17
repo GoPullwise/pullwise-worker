@@ -87,6 +87,19 @@ class AgentFirstDecisionRegisterHistoryTest(unittest.TestCase):
                 {item["code"] for item in schema_report["failures"]},
             )
 
+            path = _write_manifest(root, prior)
+            path.write_text("[]\n", encoding="utf-8", newline="\n")
+            _git(root, "add", ".")
+            _git(root, "commit", "-qm", "non-object manifest")
+            _write_manifest(root, prior)
+            non_object_report = verify_register(
+                prior, root, check_document=False
+            )
+            self.assertIn(
+                "historical_manifest_invalid",
+                {item["code"] for item in non_object_report["failures"]},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ from __future__ import annotations
 SCHEMA_ID = "pullwise-agent-first-spec-decision-register/v1"
 REPORT_SCHEMA_ID = "pullwise-agent-first-spec-decision-register-report/v1"
 REQUIRED_DEFINITION_SHA256 = (
-    "a6bebff5dc556b67868872d3b96fc0ac66eccb782d5149846447daada40f9d16"
+    "0a88b10e921e4d7b800c65e7a46c0d28eeb129bae58cb3276d9bba594aaa43d3"
 )
 RESOLUTION_DOMAIN = b"pullwise-agent-first-decision-resolution/v1\0"
 SLICES = ("S2", "S3", "S4", "S5", "S6", "S7", "S8")

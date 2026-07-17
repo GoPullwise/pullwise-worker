@@ -21,7 +21,7 @@ from scripts.agent_first_decision_core import (
     decision_applicability,
     validate_register,
 )
-from scripts.agent_first_decision_render import render_document
+from scripts.agent_first_decision_render import render_generated_file
 
 
 REFERENCE_RE = re.compile(r"D[1-9][0-9]*@sha256:[0-9a-f]{64}")
@@ -70,16 +70,7 @@ def _canonical_regular_text(repo_root: Path, relative: str) -> str:
 def _generated_document_matches(register: dict[str, Any], repo_root: Path) -> bool:
     document = register["document"]
     text = _canonical_regular_text(repo_root, document["path"])
-    start, end = document["start_marker"], document["end_marker"]
-    start_token, end_token = f"{start}\n", f"\n{end}"
-    if text.count(start) != 1 or text.count(end) != 1:
-        return False
-    start_index = text.find(start_token)
-    if start_index < 0:
-        return False
-    body_start = start_index + len(start_token)
-    end_index = text.find(end_token, body_start)
-    return end_index >= body_start and text[body_start:end_index] == render_document(register)
+    return text == render_generated_file(register)
 
 
 def _reference_token(decision: dict[str, Any]) -> str:
@@ -97,10 +88,9 @@ def _expected_unit_body(
         decision = by_id[decision_id]
         if applicability == "inactive":
             continue
-        if applicability != "active" or decision["status"] != "resolved":
-            return None
-        tokens.append(f"<!-- {_reference_token(decision)} -->")
-    return "\n".join(tokens)
+        if applicability == "active" and decision["status"] == "resolved":
+            tokens.append(f"<!-- {_reference_token(decision)} -->")
+    return "\n".join(tokens) if tokens else None
 
 
 def _unit_span(text: str, unit: dict[str, str]) -> tuple[int, int] | None:
@@ -237,6 +227,13 @@ def _history(
                 "code": "historical_manifest_invalid",
                 "commit": commit,
                 "detail": str(exc),
+            })
+            continue
+        if not isinstance(value, dict):
+            failures.append({
+                "code": "historical_manifest_invalid",
+                "commit": commit,
+                "detail": "top_level_not_object",
             })
             continue
         if value.get("schema_id") != SCHEMA_ID:

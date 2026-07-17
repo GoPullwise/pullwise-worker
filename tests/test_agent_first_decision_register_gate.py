@@ -90,11 +90,10 @@ def _unit_body(
         if applicability == "inactive":
             continue
         decision = decisions[decision_id]
-        if applicability != "active" or decision["status"] != "resolved":
-            return None
-        digest = decision["resolution"]["resolution_sha256"]
-        tokens.append(f"<!-- {decision_id}@sha256:{digest} -->")
-    return "\n".join(tokens)
+        if applicability == "active" and decision["status"] == "resolved":
+            digest = decision["resolution"]["resolution_sha256"]
+            tokens.append(f"<!-- {decision_id}@sha256:{digest} -->")
+    return "\n".join(tokens) if tokens else None
 
 
 def _write_normative_docs(
@@ -131,10 +130,11 @@ def _append_decision(
     register: dict[str, object],
     *,
     decision_id: str = "D27",
-    question_index: int = 2,
+    question_index: int = 1,
 ) -> dict[str, object]:
     changed = copy.deepcopy(register)
     template = copy.deepcopy(changed["decisions"][-1])
+    affected_units = list(changed["decisions"][0]["affected_units"])
     template.update(
         {
             "id": decision_id,
@@ -148,17 +148,15 @@ def _append_decision(
             "required_by_slice": "S8",
             "effects": ["authority"],
             "source_refs": ["test:synthetic"],
-            "affected_units": ["post-closure"],
+            "affected_units": affected_units,
             "resolution": None,
             "supersedes": [],
         }
     )
     changed["decisions"].append(template)
-    next(
-        item
-        for item in changed["normative_units"]
-        if item["id"] == "post-closure"
-    )["decision_ids"].append(decision_id)
+    for unit in changed["normative_units"]:
+        if unit["id"] in affected_units:
+            unit["decision_ids"].append(decision_id)
     changed["question_order"].insert(question_index, decision_id)
     return changed
 
@@ -336,10 +334,36 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
             pending["decisions"][-1]["options"][0]["id"],
             supersedes=("D1",),
         )
-        current["active_decision_id"] = "D3"
+        current["active_decision_id"] = "D2"
         validate_register(current)
         self.assertEqual([], resolved_history_failures(current, [prior]))
         self.assertIn("**Supersedes:** D1", render_document(current))
+
+        target_pending = _append_decision(load_register(REGISTER_PATH))
+        target_pending = _resolve(
+            target_pending,
+            "D27",
+            target_pending["decisions"][-1]["options"][0]["id"],
+            supersedes=("D1",),
+        )
+        with self.assertRaisesRegex(
+            DecisionRegisterFormatError, "target_not_resolved"
+        ):
+            validate_register(target_pending)
+
+        duplicate = _append_decision(
+            current, decision_id="D28", question_index=2
+        )
+        duplicate = _resolve(
+            duplicate,
+            "D28",
+            duplicate["decisions"][-1]["options"][0]["id"],
+            supersedes=("D1",),
+        )
+        with self.assertRaisesRegex(
+            DecisionRegisterFormatError, "duplicate_target"
+        ):
+            validate_register(duplicate)
 
     def test_resolved_decisions_cannot_skip_the_question_order(self) -> None:
         register = load_register(REGISTER_PATH)

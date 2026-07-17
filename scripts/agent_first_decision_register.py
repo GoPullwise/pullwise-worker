@@ -87,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
         report = verify_register(
             register, repo_root, require_slice=args.require_slice
         )
-    except (DecisionRegisterFormatError, DecisionRegisterObservationError) as exc:
+    except (
+        DecisionRegisterFormatError,
+        DecisionRegisterObservationError,
+        ValueError,
+    ) as exc:
         report = {
             "schema_id": REPORT_SCHEMA_ID,
             "status": "invalid",

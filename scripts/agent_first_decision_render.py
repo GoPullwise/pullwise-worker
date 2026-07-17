@@ -16,6 +16,13 @@ def _markdown(value: object) -> str:
 
 
 def render_document(register: dict[str, Any]) -> str:
+    decisions_by_id = {
+        decision["id"]: decision for decision in register["decisions"]
+    }
+    ordered_decisions = [
+        decisions_by_id[decision_id]
+        for decision_id in register["question_order"]
+    ]
     lines = [
         f"> Generated from `{register['register_id']}`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.",
         "",
@@ -24,12 +31,12 @@ def render_document(register: dict[str, Any]) -> str:
         "| ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    for decision in register["decisions"]:
+    for decision in ordered_decisions:
         dependencies = ", ".join(decision["depends_on"]) or "—"
         lines.append(
             f"| `{decision['id']}` | `{_markdown(decision['scope'])}` | {_markdown(decision['title'])} | `{decision['status']}` | `{decision_applicability(register, decision['id'])}` | `{decision['required_by_slice']}` | {_markdown(dependencies)} | `{decision['recommended_option_id']}` |"
         )
-    for decision in register["decisions"]:
+    for decision in ordered_decisions:
         lines.extend(
             [
                 "",

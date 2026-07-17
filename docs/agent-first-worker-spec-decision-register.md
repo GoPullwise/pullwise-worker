@@ -32,11 +32,11 @@ Active question: `D1`. Questions are asked one at a time. User silence, existing
 | `D19` | `P0.10` | reviewer fanout 期间 Owner liveness | `pending` | `active` | `S5` | D4, D18 | `owner_remains_live` |
 | `D20` | `P0.10` | 旧 QA 与新 Gate 权威切换 | `pending` | `active` | `S5` | D10, D17, D18 | `shadow_floor_then_gate_cutover` |
 | `D21` | `P0.11` | outer job 执行模式配置权威 | `pending` | `active` | `S6` | D9, D20 | `server_claim_bound_mode` |
-| `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `pending` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
 | `D23` | `P1.2` | C0 contract package 真源归属 | `pending` | `active` | `S7` | D1, D2 | `server_owned_package` |
 | `D24` | `P1.2` | Server TaskRecord v2 bootstrap 策略 | `pending` | `active` | `S7` | D8, D23 | `lazy_eligible_claim_migration` |
 | `D25` | `P1.5` | TaskResult/receipt digest DAG | `pending` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
 | `D26` | `P1.6` | 远期版本规范深度与完成口径 | `pending` | `active` | `S7` | D1 | `roadmap_separate_designs` |
+| `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `pending` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -445,25 +445,6 @@ Active question: `D1`. Questions are asked one at a time. User silence, existing
 
 **Sources:** `handoff:P0.11`
 
-### D22 — Release/Operations 数值门与签发 owner
-
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S6`.
-
-**Question:** Release DoD 使用绝对数值门叠加 baseline，还是只使用重新冻结的 baseline-relative thresholds？
-
-**Options:**
-
-- `absolute_plus_baseline` — non-normative recommendation, not selected: 采用安全绝对门，并叠加版本化 baseline-relative regression 门。 绝对底线防止坏 baseline 被继承，相对门捕获回归。 Consequences: operator 必须签发数据集、分母、窗口和阈值
-- `baseline_relative_only`: 仅使用重新冻结的 baseline-relative thresholds。 更适应环境差异，但没有独立安全下限。 Consequences: baseline 质量与刷新审批成为唯一保护
-
-**Resolution:** No option has been selected.
-
-**Supersedes:** none
-
-**Effects:** `release_ownership`, `external_behavior`
-
-**Sources:** `handoff:P0.11`
-
 ### D23 — C0 contract package 真源归属
 
 **Stored status:** `pending`; **applicability:** `active`; **required before:** `S7`.
@@ -542,4 +523,23 @@ Active question: `D1`. Questions are asked one at a time. User silence, existing
 **Effects:** `authority`, `release_ownership`
 
 **Sources:** `handoff:P1.6`
+
+### D22 — Release/Operations 数值门与签发 owner
+
+**Stored status:** `pending`; **applicability:** `active`; **required before:** `S6`.
+
+**Question:** Release DoD 使用绝对数值门叠加 baseline，还是只使用重新冻结的 baseline-relative thresholds？
+
+**Options:**
+
+- `absolute_plus_baseline` — non-normative recommendation, not selected: 采用安全绝对门，并叠加版本化 baseline-relative regression 门。 绝对底线防止坏 baseline 被继承，相对门捕获回归。 Consequences: operator 必须签发数据集、分母、窗口和阈值
+- `baseline_relative_only`: 仅使用重新冻结的 baseline-relative thresholds。 更适应环境差异，但没有独立安全下限。 Consequences: baseline 质量与刷新审批成为唯一保护
+
+**Resolution:** No option has been selected.
+
+**Supersedes:** none
+
+**Effects:** `release_ownership`, `external_behavior`
+
+**Sources:** `handoff:P0.11`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->

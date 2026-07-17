@@ -4,10 +4,18 @@ import copy
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from scripts.agent_first_decision_catalog import QUESTION_ORDER, REQUIRED_CATALOG
+from scripts.agent_first_decision_catalog import (
+    NORMATIVE_UNIT_CATALOG,
+    QUESTION_ORDER,
+    REQUIRED_CATALOG,
+)
+import scripts.agent_first_decision_definition as decision_definition
+from scripts.agent_first_decision_gate import _generated_document_matches
 from scripts.agent_first_decision_register import (
     DecisionRegisterFormatError,
     canonical_resolution_sha256,
@@ -15,6 +23,10 @@ from scripts.agent_first_decision_register import (
     load_repo_register,
     validate_register,
     verify_register,
+)
+from scripts.agent_first_decision_render import (
+    render_generated_file,
+    sync_generated_file,
 )
 
 
@@ -138,6 +150,16 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
                 ):
                     validate_register(changed)
 
+        catalog = copy.deepcopy(NORMATIVE_UNIT_CATALOG)
+        catalog[0]["path"] = "docs/retargeted.md"
+        with mock.patch.object(
+            decision_definition, "NORMATIVE_UNIT_CATALOG", tuple(catalog)
+        ):
+            with self.assertRaisesRegex(
+                DecisionRegisterFormatError, "register:required_definition"
+            ):
+                validate_register(register)
+
     def test_resolution_date_must_be_a_real_canonical_date(self) -> None:
         register = _resolve(
             load_register(REGISTER_PATH), "D1", "pullwise_full_scan"
@@ -164,6 +186,28 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         changed["decisions"][0]["resolution"]["decision_text"] = "Tampered."
         with self.assertRaisesRegex(DecisionRegisterFormatError, "resolution_sha256"):
             validate_register(changed)
+
+    def test_resolution_rejects_blank_or_control_only_evidence(self) -> None:
+        register = _resolve(
+            load_register(REGISTER_PATH), "D1", "pullwise_full_scan"
+        )
+        register["active_decision_id"] = "D3"
+        resolution = register["decisions"][0]["resolution"]
+        for field, value in (
+            ("decision_text", " "),
+            ("evidence_refs", ["\t"]),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(register)
+                changed_resolution = changed["decisions"][0]["resolution"]
+                changed_resolution[field] = value
+                changed_resolution["resolution_sha256"] = (
+                    canonical_resolution_sha256("D1", changed_resolution)
+                )
+                with self.assertRaisesRegex(
+                    DecisionRegisterFormatError, field
+                ):
+                    validate_register(changed)
 
     def test_resolved_decision_requires_resolved_or_inactive_dependencies(self) -> None:
         register = load_register(REGISTER_PATH)
@@ -241,6 +285,40 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             DecisionRegisterFormatError, "manifest:canonical_path"
         ):
             load_repo_register(REPO_ROOT, "alternate.json")
+
+    def test_generated_file_sync_is_bounded_and_deterministic(self) -> None:
+        register = load_register(REGISTER_PATH)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "docs").mkdir()
+            target = sync_generated_file(register, root)
+            expected = render_generated_file(register)
+            self.assertEqual(expected, target.read_text(encoding="utf-8"))
+            target.write_text(
+                expected.replace(
+                    "Pending recommendations are non-normative",
+                    "All recommendations are approved implementation authority",
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            self.assertFalse(_generated_document_matches(register, root))
+            target.write_text("drift", encoding="utf-8")
+            sync_generated_file(register, root)
+            self.assertEqual(expected, target.read_text(encoding="utf-8"))
+
+    def test_missing_tracked_documents_are_deterministic_invalidity(self) -> None:
+        register = load_register(REGISTER_PATH)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = verify_register(
+                register, Path(temp_dir), check_history=False
+            )
+        self.assertEqual("invalid", report["status"])
+        self.assertIn(
+            "tracked_file_missing",
+            {item["code"] for item in report["failures"]},
+        )
+        self.assertEqual([], report["indeterminate_reasons"])
 
 
 if __name__ == "__main__":

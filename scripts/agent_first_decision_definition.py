@@ -6,7 +6,11 @@ import hashlib
 import json
 from typing import Any
 
-from scripts.agent_first_decision_catalog import CATALOG_BY_ID, REQUIRED_CATALOG
+from scripts.agent_first_decision_catalog import (
+    CATALOG_BY_ID,
+    NORMATIVE_UNIT_CATALOG,
+    REQUIRED_CATALOG,
+)
 
 
 def required_definition_sha256(root: dict[str, Any]) -> str:
@@ -14,6 +18,7 @@ def required_definition_sha256(root: dict[str, Any]) -> str:
     projection = {
         "register_id": root["register_id"],
         "document": root["document"],
+        "normative_unit_catalog": list(NORMATIVE_UNIT_CATALOG),
         "normative_units": [
             {
                 "id": unit["id"],

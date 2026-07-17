@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from datetime import date
 from pathlib import PurePosixPath
 from typing import Any
@@ -52,7 +53,15 @@ def _exact_keys(value: object, expected: set[str], label: str) -> dict[str, Any]
 
 
 def _text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.strip() != value
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+            for character in value
+        )
+    ):
         raise DecisionRegisterFormatError(f"{label}:text")
     return value
 
@@ -120,6 +129,11 @@ def decision_applicability(
     source = decisions[activation["decision_id"]]
     if source["status"] != "resolved":
         return "unknown"
+    if any(
+        source["id"] in item["supersedes"] and item["status"] == "resolved"
+        for item in register["decisions"]
+    ):
+        return "active"
     if source["resolution"]["kind"] == "custom":
         return "active"
     return (
@@ -315,6 +329,10 @@ def validate_register(register: object) -> dict[str, Any]:
             if target["status"] != "resolved":
                 raise DecisionRegisterFormatError(
                     f"decisions[{index}].supersedes:target_not_resolved"
+                )
+            if not set(target["affected_units"]) <= set(item["affected_units"]):
+                raise DecisionRegisterFormatError(
+                    f"decisions[{index}].supersedes:affected_units"
                 )
             if target_id in superseded_targets:
                 raise DecisionRegisterFormatError(
