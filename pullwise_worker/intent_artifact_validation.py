@@ -113,13 +113,10 @@ def repair_plan_target_contract(
 def repair_source_record_contract(
     record: dict[str, Any],
     supporting_record: dict[str, Any],
-    fallback_target_id: str,
 ) -> None:
     if _target_ids(record):
         return
     target_ids = _target_ids(supporting_record)
-    if not target_ids and isinstance(fallback_target_id, str) and fallback_target_id.strip():
-        target_ids = [fallback_target_id.strip()]
     if target_ids:
         record["target_test_ids"] = target_ids
 
@@ -157,18 +154,35 @@ def intent_plan_target_contract_errors(payload: dict[str, Any]) -> list[str]:
     return errors
 
 
-def intent_source_record_contract_errors(payload: dict[str, Any]) -> list[str]:
+def intent_source_record_contract_errors(
+    payload: dict[str, Any],
+    plan_payload: object | None = None,
+) -> list[str]:
     generated = payload.get("generated_tests")
     if not isinstance(generated, list):
         return []
+    raw_plan_targets = plan_payload.get("test_targets") if isinstance(plan_payload, dict) else []
+    plan_targets = raw_plan_targets if isinstance(raw_plan_targets, list) else []
+    known_target_ids = {
+        target_id
+        for target in plan_targets if isinstance(target, dict)
+        if (target_id := _text(target.get("test_id")))
+    }
     errors: list[str] = []
     top_level_skip = _skip_reason(payload)
     for index, record in enumerate(generated):
         if not isinstance(record, dict):
             continue
         field = f"intent-test-source.json generated_tests[{index}]"
-        if not _target_ids(record):
+        target_ids = _target_ids(record)
+        if not target_ids:
             errors.append(f"{field}.target_test_ids is missing or empty")
+        elif plan_payload is not None:
+            errors.extend(
+                f"{field}.target_test_ids references unknown plan target {target_id}"
+                for target_id in target_ids
+                if target_id not in known_target_ids
+            )
         if not (top_level_skip or _skip_reason(record)) and not _record_command(record, SOURCE_COMMAND_KEYS):
             errors.append(f"{field}.command is missing or empty")
     return errors

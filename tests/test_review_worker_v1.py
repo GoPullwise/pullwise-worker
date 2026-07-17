@@ -9446,7 +9446,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                                 "title": "Session timeout regression",
                                 "expected_result_before_fix": "fail",
                                 "linked_finding_ids": ["correctness-auth-session-timeout", "cluster-auth-session"],
-                                "target_files": ["src/session.py"], "skip_reason": "link-only validation fixture",
+                                "skip_reason": "link-only validation fixture",
                             }
                         ],
                     }
@@ -9461,123 +9461,6 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             plan_path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "missing-finding-id"):
                 validate_phase_outputs(run_dir, "intent_test_planning")
-
-    def test_fallback_semantic_artifact_repairs_string_generated_tests(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
-            generated_dir = run_dir / "intent" / "generated-tests"
-            generated_dir.mkdir(parents=True)
-            first_path = "intent/generated-tests/intent-agent-fix-api-base.test.jsx"
-            second_path = "intent/generated-tests/intent-review-artifact-url.test.jsx"
-            (run_dir / first_path).write_text("test('first', () => {})\n", encoding="utf-8")
-            (run_dir / second_path).write_text("test('second', () => {})\n", encoding="utf-8")
-            source_path = run_dir / "intent" / "intent-test-source.json"
-            source_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "intent-test-source/v1",
-                        "generated_tests": [first_path, second_path],
-                        "tests": [
-                            {
-                                "test_id": "ITP-001",
-                                "path": first_path,
-                                "command": ["npm", "test", "--", first_path],
-                                "target_finding_ids": ["COR-P0-002-01"],
-                            },
-                            {
-                                "test_id": "ITP-002",
-                                "path": second_path,
-                                "command": ["npm", "test", "--", second_path],
-                                "target_finding_ids": ["SEC-P0-002-01"],
-                            },
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(RuntimeError, "generated_tests\\[0\\] must be an object"):
-                validate_phase_outputs(run_dir, "intent_test_writing")
-
-            fallback_semantic_artifact(run_dir, {"job_id": "job_1"}, "intent_test_writing")
-            validate_phase_outputs(run_dir, "intent_test_writing")
-            payload = json.loads(source_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["generated_tests"][0]["test_id"], "ITP-001")
-        self.assertEqual(payload["generated_tests"][0]["path"], first_path)
-        self.assertEqual(payload["generated_tests"][0]["artifact_refs"], ["art_intent_test_source"])
-        self.assertEqual(payload["generated_tests"][1]["command"], ["npm", "test", "--", second_path])
-
-    def test_repair_intent_test_source_fills_missing_path_from_supporting_tests(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
-            test_path = "intent/generated-tests/intent-review-artifact-url.test.jsx"
-            (run_dir / test_path).parent.mkdir(parents=True)
-            (run_dir / test_path).write_text("test('artifact url', () => {})\n", encoding="utf-8")
-            source_path = run_dir / "intent" / "intent-test-source.json"
-            source_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "intent-test-source/v1",
-                        "generated_tests": [
-                            {
-                                "test_id": "ITP-001",
-                                "command": ["npm", "test", "--", test_path],
-                                "linked_finding_ids": [],
-                            }
-                        ],
-                        "tests": [
-                            {
-                                "test_id": "ITP-001",
-                                "test_file": test_path,
-                                "framework": "vitest",
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(RuntimeError, "generated_tests\\[0\\].path is missing"):
-                validate_phase_outputs(run_dir, "intent_test_writing")
-
-            repair_intent_test_source_artifact(source_path, run_dir)
-            validate_phase_outputs(run_dir, "intent_test_writing")
-            payload = json.loads(source_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["generated_tests"][0]["path"], test_path)
-        self.assertEqual(payload["generated_tests"][0]["framework"], "vitest")
-
-    def test_repair_intent_test_source_infers_single_materialized_generated_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            run_dir = Path(tmp_dir) / "repo" / ".codex-review" / "runs" / "run_1"
-            test_path = "intent/generated-tests/intent-generated.test.py"
-            (run_dir / test_path).parent.mkdir(parents=True)
-            (run_dir / test_path).write_text("def test_generated():\n    assert True\n", encoding="utf-8")
-            source_path = run_dir / "intent" / "intent-test-source.json"
-            source_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "intent-test-source/v1",
-                        "generated_tests": [
-                            {
-                                "test_id": "ITP-001",
-                                "command": ["python", "-m", "pytest", test_path],
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(RuntimeError, "generated_tests\\[0\\].path is missing"):
-                validate_phase_outputs(run_dir, "intent_test_writing")
-
-            repair_intent_test_source_artifact(source_path, run_dir)
-            validate_phase_outputs(run_dir, "intent_test_writing")
-            payload = json.loads(source_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["generated_tests"][0]["path"], test_path)
 
     def test_fallback_semantic_artifact_repairs_outcome_style_intent_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

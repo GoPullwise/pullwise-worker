@@ -13152,7 +13152,7 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
             matching_plan_ids = plan_ids_by_ordinal.get(ordinal, []) if ordinal is not None else []
             if len(matching_plan_ids) == 1:
                 entry["target_test_ids"] = matching_plan_ids
-        intent_artifact_validation.repair_source_record_contract(entry, supporting, test_id)
+        intent_artifact_validation.repair_source_record_contract(entry, supporting)
         has_explicit_command = any(
             _intent_command(entry.get(key))
             for key in ("command", "test_command", "testCommand", "run_command", "runCommand")
@@ -13842,7 +13842,7 @@ def intent_test_source_errors(run_dir: Path, payload: Any) -> list[str]:
         elif not _intent_generated_test_exists(run_dir, test_path):
             errors.append(f"intent-test-source.json generated_tests[{index}].path does not exist: {test_path}")
     errors.extend(_linked_finding_errors(run_dir, "intent-test-source.json", "generated_tests", generated, required=False))
-    return errors + intent_artifact_validation.intent_source_record_contract_errors(payload)
+    return errors + intent_artifact_validation.intent_source_record_contract_errors(payload, read_json(run_dir / "intent" / "intent-test-plan.json", {}))
 
 
 def intent_test_raw_run_errors(run_dir: Path, payload: Any) -> list[str]:

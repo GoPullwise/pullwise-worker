@@ -161,6 +161,38 @@ class IntentArtifactValidationTest(unittest.TestCase):
             errors,
         )
 
+    def test_generated_source_rejects_target_when_plan_is_missing_or_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = _run_dir(Path(tmp_dir))
+            path = _write_generated_test(run_dir)
+            plan_path = run_dir / "intent" / "intent-test-plan.json"
+            payload = {
+                "schema_version": "intent-test-source/v1",
+                "generated_tests": [
+                    {
+                        "test_id": "ITV-001",
+                        "path": path,
+                        "command": ["python3", "-m", "unittest", path],
+                        "target_test_ids": ["ITP-001"],
+                    }
+                ],
+            }
+            cases = (
+                None,
+                {"schema_version": "intent-test-plan/v1", "test_targets": None},
+            )
+            for plan_payload in cases:
+                with self.subTest(plan_payload=plan_payload):
+                    if plan_payload is None:
+                        plan_path.unlink(missing_ok=True)
+                    else:
+                        write_json(plan_path, plan_payload)
+                    errors = intent_test_source_errors(run_dir, payload)
+                    self.assertIn(
+                        "intent-test-source.json generated_tests[0].target_test_ids references unknown plan target ITP-001",
+                        errors,
+                    )
+
     def test_source_repair_does_not_invent_target_link_without_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = _run_dir(Path(tmp_dir))
