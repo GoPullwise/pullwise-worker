@@ -21,10 +21,9 @@ REGISTER_PATH = REPO_ROOT / "contracts" / "agent-first" / "spec-decision-registe
 def _resolution(
     decision_id: str,
     *,
-    selected_option_id: str | None,
+    selected_option_id: str,
     custom_text: str | None = None,
     authority: str = "user",
-    supersedes: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "kind": "custom" if custom_text is not None else "option",
@@ -34,7 +33,6 @@ def _resolution(
         "authority": authority,
         "decided_at": "2026-07-17",
         "evidence_refs": ["conversation:synthetic-test"],
-        "supersedes_resolution_sha256": supersedes,
     }
     payload["resolution_sha256"] = canonical_resolution_sha256(decision_id, payload)
     return payload
@@ -64,6 +62,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertEqual("D1", report["active_decision_id"])
         self.assertEqual(26, report["pending_decision_count"])
         self.assertEqual(0, report["resolved_decision_count"])
+        self.assertEqual(0, report["inactive_decision_count"])
         self.assertTrue(report["document_matches"])
         self.assertEqual(list(QUESTION_ORDER), register["question_order"])
         self.assertEqual(
@@ -83,21 +82,12 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         with self.assertRaisesRegex(DecisionRegisterFormatError, "required_catalog"):
             validate_register(changed)
 
-    def test_pending_decision_cannot_carry_resolution_or_history(self) -> None:
+    def test_pending_decision_cannot_carry_resolution(self) -> None:
         register = load_register(REGISTER_PATH)
         changed = copy.deepcopy(register)
         changed["decisions"][0]["resolution"] = _resolution(
             "D1", selected_option_id="pullwise_full_scan"
         )
-        with self.assertRaisesRegex(
-            DecisionRegisterFormatError, r"decisions\[0\]\.resolution:pending"
-        ):
-            validate_register(changed)
-
-        changed = copy.deepcopy(register)
-        changed["decisions"][0]["superseded_resolutions"] = [
-            _resolution("D1", selected_option_id="pullwise_full_scan")
-        ]
         with self.assertRaisesRegex(
             DecisionRegisterFormatError, r"decisions\[0\]\.resolution:pending"
         ):
@@ -112,7 +102,9 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         custom = copy.deepcopy(register)
         custom["decisions"][0]["status"] = "resolved"
         custom["decisions"][0]["resolution"] = _resolution(
-            "D1", selected_option_id=None, custom_text="Use a bounded hybrid scope."
+            "D1",
+            selected_option_id="pullwise_full_scan",
+            custom_text="Use a bounded hybrid scope.",
         )
         custom["active_decision_id"] = "D3"
         validate_register(custom)
