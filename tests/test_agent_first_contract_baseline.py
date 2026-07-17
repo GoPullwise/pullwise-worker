@@ -220,6 +220,29 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
         self.assertEqual("indeterminate", report["status"])
         self.assertEqual("probe_not_run", report["indeterminate_reasons"][0]["code"])
 
+    def test_probe_input_mutation_is_indeterminate_even_when_the_probe_passes(self) -> None:
+        fixture = self.server / "tests" / "test_contract.py"
+        fixture.write_text(
+            "from pathlib import Path\n"
+            "import unittest\n\n"
+            "PROTOCOL = 'review-worker-protocol/v1'\n\n"
+            "class ContractTest(unittest.TestCase):\n"
+            "    def test_contract(self):\n"
+            "        Path('contract.txt').write_text('strict-v1-contract changed\\n')\n",
+            encoding="utf-8",
+        )
+        self.manifest["surfaces"][0]["sha256"] = canonical_sha256(fixture)
+        self._write_matching_appendix()
+
+        report = self._verify()
+
+        self.assertEqual("passed", report["tests"][0]["status"])
+        self.assertEqual("indeterminate", report["status"])
+        self.assertIn(
+            "inputs_changed_during_probe",
+            {item["code"] for item in report["indeterminate_reasons"]},
+        )
+
     def test_appendix_drift_is_incompatible(self) -> None:
         appendix_path = self.worker / self.manifest["appendix"]["path"]
         appendix_path.write_text("stale appendix\n", encoding="utf-8")
