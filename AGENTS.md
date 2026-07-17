@@ -70,6 +70,10 @@ implementation.
   indeterminate.
 - Do not hand-edit the generated Appendix A block between its markers. Render
   it from the manifest and keep it byte-for-byte synchronized.
+- Worker-only CI must check out the Server repository as a sibling at the exact
+  frozen baseline commit before collecting the cross-repository wire fixture
+  tests. Install that sibling's declared Python dependencies; never skip the
+  tests merely because a clean Worker checkout lacks `pullwise_server`.
 - `candidate` is a read-only proposal command. It requires every fixed probe to
   pass against the same stable input snapshot and binds that snapshot digest to
   the candidate. Never apply or write a refreshed baseline automatically;

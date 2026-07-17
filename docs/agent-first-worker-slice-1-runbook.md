@@ -121,6 +121,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `pullwise_worker/agent_kernel_schema_registry.py` | 187 | digest-bound schema loading |
 | `pullwise_worker/agent_kernel_schema_validation.py` | 331 | 受控 schema 子集 |
 | `pullwise_worker/agent_kernel_shadow_store.py` | 126 | validation/CAS composition |
+| `tests/test_agent_first_contract_wire_fixture.py` | 201 | pinned cross-repo CI contract |
 | `tests/test_agent_kernel_canonical.py` | 128 | canonical contract/property |
 | `tests/test_agent_kernel_contract_semantics.py` | 187 | semantic invariants |
 | `tests/test_agent_kernel_legacy_mapping.py` | 67 | identity/collision |
@@ -145,8 +146,9 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `contracts/agent-task/v1/fixtures/schema-golden-control.json` | 110 | frozen fixture |
 | `contracts/agent-task/v1/fixtures/schema-golden.json` | 261 | frozen fixture |
 | `pyproject.toml` | 28 | wheel package data |
-| `AGENTS.md` | 931 | 持久工程规则（非代码阈值） |
-| `docs/agent-first-worker-slice-1-runbook.md` | 153 | 本证据 |
+| `.github/workflows/ci.yml` | 47 | pinned Server contract-test checkout |
+| `AGENTS.md` | 935 | 持久工程规则（非代码阈值） |
+| `docs/agent-first-worker-slice-1-runbook.md` | 155 | 本证据 |
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行说明项，没有超过 600 行
 的新增文件，也没有生成/第三方/原子 registry 例外需要登记。S1 未触及任何超过

@@ -8,10 +8,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: pullwise-worker
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          path: pullwise-worker
+      - name: Check out frozen Server contract producer
+        uses: actions/checkout@v4
+        with:
+          repository: GoPullwise/pullwise-server
+          ref: d68487a283bbc28e526ffac623cb3dd1f06cd4e9
+          path: pullwise-server
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -19,6 +29,7 @@ jobs:
         run: |
           python -m pip install --upgrade "pip>=25.3,<27" setuptools wheel
           python -m pip install -e .
+          python -m pip install -e ../pullwise-server
           python -m pip install "pip-audit>=2.10.1,<2.11"
       - name: Audit Python dependencies
         run: pip-audit .
