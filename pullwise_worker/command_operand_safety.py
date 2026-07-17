@@ -92,20 +92,15 @@ def command_path_operands(command: Iterable[object], *, cwd: Path) -> tuple[str,
     return tuple(operand for operand in operands if operand)
 
 
-def command_argument_path_containment(
+def command_path_operand_containment(
     value: object,
     *,
     cwd: Path,
     validation_root: Path,
 ) -> bool | None:
-    """Return containment for a recognizable path operand, otherwise ``None``."""
+    """Return containment for an extracted path operand, otherwise ``None``."""
 
     argument = str(value or "").strip()
-    if argument.startswith("-"):
-        _option, separator, argument = argument.partition("=")
-        if not separator:
-            return None
-        argument = argument.strip()
     if not argument:
         return None
     if not _looks_like_path_operand(argument, cwd=cwd):
@@ -118,3 +113,24 @@ def command_argument_path_containment(
     except (OSError, RuntimeError, ValueError):
         return False
     return True
+
+
+def command_argument_path_containment(
+    value: object,
+    *,
+    cwd: Path,
+    validation_root: Path,
+) -> bool | None:
+    """Return containment for a recognizable raw argument, otherwise ``None``."""
+
+    argument = str(value or "").strip()
+    if argument.startswith("-"):
+        _option, separator, argument = argument.partition("=")
+        if not separator:
+            return None
+        argument = argument.strip()
+    return command_path_operand_containment(
+        argument,
+        cwd=cwd,
+        validation_root=validation_root,
+    )

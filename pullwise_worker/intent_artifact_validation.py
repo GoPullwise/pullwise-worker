@@ -93,6 +93,37 @@ def _candidate_cwd(candidate: object) -> str:
     return ""
 
 
+def repair_plan_target_contract(
+    target: dict[str, Any],
+    supporting_target: dict[str, Any],
+) -> bool:
+    if _skip_reason(target) or _candidate_values(target):
+        return False
+    command = _record_command(target, COMMAND_KEYS) or _record_command(
+        supporting_target,
+        COMMAND_KEYS,
+    )
+    if not command:
+        return False
+    cwd = _candidate_cwd(target) or _candidate_cwd(supporting_target) or "."
+    target["execution_candidates"] = [{"command": command, "cwd": cwd}]
+    return True
+
+
+def repair_source_record_contract(
+    record: dict[str, Any],
+    supporting_record: dict[str, Any],
+    fallback_target_id: str,
+) -> None:
+    if _target_ids(record):
+        return
+    target_ids = _target_ids(supporting_record)
+    if not target_ids and isinstance(fallback_target_id, str) and fallback_target_id.strip():
+        target_ids = [fallback_target_id.strip()]
+    if target_ids:
+        record["target_test_ids"] = target_ids
+
+
 def _target_ids(record: dict[str, Any]) -> list[str]:
     target_ids: list[str] = []
     for key in SOURCE_TARGET_ID_KEYS:

@@ -24,6 +24,7 @@ class IntentCommandOperandContainmentTest(unittest.TestCase):
                 ["pytest", "--basetemp=../outside/pytest"],
                 ["pytest", "-c", "../outside/pytest.ini"],
                 ["make", "-C../outside", "test"],
+                ["make", "-C-/../../outside", "test"],
                 ["make", "-C", "../outside", "test"],
                 ["make", "--directory=../outside", "test"],
                 ["make", "--directory", "../outside", "test"],
@@ -141,6 +142,11 @@ class IntentCommandOperandContainmentTest(unittest.TestCase):
                 validation_repo,
                 validation_repo,
             )
+            escaped_hyphen, _reason = intent_test_command_policy(
+                ["pytest", "--", "-/../../outside/test_behavior.py"],
+                validation_repo,
+                validation_repo,
+            )
             contained, contained_reason = intent_test_command_policy(
                 ["pytest", "--", "tests/test_behavior.py"],
                 validation_repo,
@@ -148,6 +154,7 @@ class IntentCommandOperandContainmentTest(unittest.TestCase):
             )
 
         self.assertFalse(escaped)
+        self.assertFalse(escaped_hyphen)
         self.assertTrue(contained, contained_reason)
 
     def test_preflight_rejects_embedded_path_escape_before_runtime_probe(self) -> None:

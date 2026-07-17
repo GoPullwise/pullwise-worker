@@ -44,6 +44,16 @@ The default is one preflight repair and one runtime repair. Canonical policy
 may set max_preflight_repair_attempts and max_runtime_repair_attempts from 0
 through 3.
 
+## Phase Artifact Contracts
+
+Phase outputs fail closed before preflight. Every non-skipped plan target must
+contain at least one execution candidate whose command normalizes to a
+non-empty argv and whose cwd is non-empty. Every generated source record must
+link to one or more non-empty target test IDs and, unless explicitly skipped,
+carry a command that normalizes to a non-empty argv. Canonical fields and the
+known repair aliases are accepted. Explicitly skipped records and empty target
+or generated-test collections remain valid degradation states.
+
 ## Generic Command Contract
 
 An Agent proposal is eligible when all of the following hold:
@@ -69,16 +79,20 @@ cannot silently claim an existing application or test file.
 
 ## Source Integrity
 
-inventory.json is the immutable baseline for repository files. Before and
-after every test process, and after every repair turn, the Worker re-hashes all
-inventoried files in the validation repository.
+The Worker-owned `.pullwise-integrity/inventory.json`, stored outside the
+repository and run artifact tree, is the immutable baseline for repository
+files. A run-local `inventory.json` is evidence, not integrity authority.
+Before and after every test process, and after every repair turn, the Worker
+re-hashes all inventoried files in the validation repository.
 
 - A pre-existing mutation blocks execution and is not Agent-repairable.
 - A test that changes repository source is invalidated even when it exits 0.
 - A repair turn that changes repository source is rejected; the prior result
   remains authoritative.
-- Added generated files and runtime caches are allowed because they are not
-  inventoried source.
+- A generated source file is allowed only when its path is declared by the
+  source artifact and its bytes match the worker-authorized generated file.
+- Undeclared source-like additions are rejected. Contained non-source runtime
+  caches may remain outside the immutable source inventory.
 
 The latest check is written to intent/validation-workspace-integrity.json.
 

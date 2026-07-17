@@ -29,14 +29,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from . import __version__, intent_artifact_validation
+from . import __version__, command_operand_safety, intent_artifact_validation
 from ._main_part_01_bootstrap import (
     PullwiseRequestError,
     REPOSITORY_MIRROR_CACHE_DIR_NAME,
     worker_machine_metrics_payload,
     worker_memory_payload,
 )
-from .agentic_execution import build_execution_capabilities, command_argument_path_containment, command_path_operands
+from .agentic_execution import build_execution_capabilities
 from .codex_sdk_runtime import (
     append_text_no_follow,
     CodexRuntimeResources,
@@ -2496,8 +2496,8 @@ def intent_test_command_policy(command: list[str], cwd: Path, validation_repo: P
         argument = str(raw_argument).strip()
         if re.search(r"[a-z][a-z0-9+.-]*://", argument, flags=re.IGNORECASE):
             return False, "test commands may not contain network URLs"
-    for argument in command_path_operands(argv, cwd=cwd):
-        containment = command_argument_path_containment(
+    for argument in command_operand_safety.command_path_operands(argv, cwd=cwd):
+        containment = command_operand_safety.command_path_operand_containment(
             argument,
             cwd=cwd,
             validation_root=validation_repo,
@@ -13152,6 +13152,7 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
             matching_plan_ids = plan_ids_by_ordinal.get(ordinal, []) if ordinal is not None else []
             if len(matching_plan_ids) == 1:
                 entry["target_test_ids"] = matching_plan_ids
+        intent_artifact_validation.repair_source_record_contract(entry, supporting, test_id)
         has_explicit_command = any(
             _intent_command(entry.get(key))
             for key in ("command", "test_command", "testCommand", "run_command", "runCommand")
@@ -13183,8 +13184,7 @@ def repair_intent_test_source_artifact(path: Path, run_dir: Path) -> None:
         if not _string_items(entry.get("artifact_refs") or entry.get("artifactRefs")):
             entry["artifact_refs"] = ["art_intent_test_source"]
         repaired.append(entry)
-    payload["schema_version"] = "intent-test-source/v1"
-    payload["generated_tests"] = repaired
+    payload.update({"schema_version": "intent-test-source/v1", "generated_tests": repaired})
     write_json(path, payload)
 
 
@@ -13753,7 +13753,7 @@ def repair_intent_test_plan_artifact(path: Path, run_dir: Path) -> None:
             )
             if command:
                 target["command"] = command
-        if target != raw_target:
+        if intent_artifact_validation.repair_plan_target_contract(target, supporting_test) or target != raw_target:
             changed = True
         repaired_targets.append(target)
     if repaired_targets != targets:
@@ -13766,7 +13766,7 @@ def repair_intent_test_plan_artifact(path: Path, run_dir: Path) -> None:
 def intent_test_plan_errors(run_dir: Path, payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["intent-test-plan.json must be a JSON object"]
-    errors = intent_artifact_validation.intent_plan_target_contract_errors(payload)
+    errors = []
     if payload.get("schema_version") != "intent-test-plan/v1":
         errors.append("intent-test-plan.json schema_version must be intent-test-plan/v1")
     targets = payload.get("test_targets")
@@ -13784,7 +13784,7 @@ def intent_test_plan_errors(run_dir: Path, payload: Any) -> list[str]:
         if target_files is not None and not isinstance(target_files, list):
             errors.append(f"intent-test-plan.json test_targets[{index}].target_files must be a list")
     errors.extend(_linked_finding_errors(run_dir, "intent-test-plan.json", "test_targets", targets, required=True))
-    return errors
+    return errors + intent_artifact_validation.intent_plan_target_contract_errors(payload)
 
 
 def _candidate_paths_for_recorded_path(run_dir: Path, raw_path: str, validation_root: str = "") -> list[Path]:
@@ -13826,7 +13826,7 @@ def _intent_generated_test_exists(run_dir: Path, raw_path: str) -> bool:
 def intent_test_source_errors(run_dir: Path, payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["intent-test-source.json must be a JSON object"]
-    errors = intent_artifact_validation.intent_source_record_contract_errors(payload)
+    errors = []
     if payload.get("schema_version") != "intent-test-source/v1":
         errors.append("intent-test-source.json schema_version must be intent-test-source/v1")
     generated = payload.get("generated_tests")
@@ -13842,7 +13842,7 @@ def intent_test_source_errors(run_dir: Path, payload: Any) -> list[str]:
         elif not _intent_generated_test_exists(run_dir, test_path):
             errors.append(f"intent-test-source.json generated_tests[{index}].path does not exist: {test_path}")
     errors.extend(_linked_finding_errors(run_dir, "intent-test-source.json", "generated_tests", generated, required=False))
-    return errors
+    return errors + intent_artifact_validation.intent_source_record_contract_errors(payload)
 
 
 def intent_test_raw_run_errors(run_dir: Path, payload: Any) -> list[str]:

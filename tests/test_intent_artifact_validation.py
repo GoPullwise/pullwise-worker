@@ -7,6 +7,8 @@ from pathlib import Path
 from pullwise_worker.review_worker_v1 import (
     intent_test_plan_errors,
     intent_test_source_errors,
+    read_json,
+    repair_intent_test_source_artifact,
     write_json,
 )
 
@@ -18,6 +20,13 @@ def _run_dir(root: Path) -> Path:
         {
             "schema_version": "cluster-output/v1",
             "clusters": [{"cluster_id": "CL-001"}],
+        },
+    )
+    write_json(
+        run_dir / "intent" / "intent-test-plan.json",
+        {
+            "schema_version": "intent-test-plan/v1",
+            "test_targets": [{"test_id": "ITP-001"}],
         },
     )
     return run_dir
@@ -123,6 +132,60 @@ class IntentArtifactValidationTest(unittest.TestCase):
 
             errors = intent_test_source_errors(run_dir, payload)
 
+        self.assertIn(
+            "intent-test-source.json generated_tests[0].target_test_ids is missing or empty",
+            errors,
+        )
+
+    def test_generated_source_rejects_unknown_target_test_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = _run_dir(Path(tmp_dir))
+            path = _write_generated_test(run_dir)
+            errors = intent_test_source_errors(
+                run_dir,
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": path,
+                            "command": ["python3", "-m", "unittest", path],
+                            "target_test_ids": ["ITP-999"],
+                        }
+                    ],
+                },
+            )
+
+        self.assertIn(
+            "intent-test-source.json generated_tests[0].target_test_ids references unknown plan target ITP-999",
+            errors,
+        )
+
+    def test_source_repair_does_not_invent_target_link_without_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = _run_dir(Path(tmp_dir))
+            (run_dir / "intent" / "intent-test-plan.json").unlink()
+            path = _write_generated_test(run_dir)
+            source_path = run_dir / "intent" / "intent-test-source.json"
+            write_json(
+                source_path,
+                {
+                    "schema_version": "intent-test-source/v1",
+                    "generated_tests": [
+                        {
+                            "test_id": "ITV-001",
+                            "path": path,
+                            "command": ["python3", "-m", "unittest", path],
+                        }
+                    ],
+                },
+            )
+
+            repair_intent_test_source_artifact(source_path, run_dir)
+            repaired = read_json(source_path, {})
+            errors = intent_test_source_errors(run_dir, repaired)
+
+        self.assertNotIn("target_test_ids", repaired["generated_tests"][0])
         self.assertIn(
             "intent-test-source.json generated_tests[0].target_test_ids is missing or empty",
             errors,

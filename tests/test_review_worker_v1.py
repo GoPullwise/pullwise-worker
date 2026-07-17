@@ -9446,7 +9446,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
                                 "title": "Session timeout regression",
                                 "expected_result_before_fix": "fail",
                                 "linked_finding_ids": ["correctness-auth-session-timeout", "cluster-auth-session"],
-                                "target_files": ["src/session.py"],
+                                "target_files": ["src/session.py"], "skip_reason": "link-only validation fixture",
                             }
                         ],
                     }

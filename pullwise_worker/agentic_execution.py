@@ -6,8 +6,6 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .command_operand_safety import command_argument_path_containment, command_path_operands
-
 
 EXECUTION_DESCRIPTOR_NAMES = {
     "Cargo.toml",
