@@ -71,6 +71,20 @@ implementation.
   the candidate. Never apply or write a refreshed baseline automatically;
   accepting one requires both the Worker compatibility owner and the affected
   Server or Web owner.
+- `contracts/agent-first/fixtures/review-worker-protocol-v1.json` is a frozen
+  canonical-fixture exception at 449 physical lines, owned by the Worker
+  compatibility owner. It stays atomic because one blocking digest and one
+  Server bridge verify the coordinated register/lease/heartbeat/event/artifact/
+  terminal-result pack. The considered split is control-plane versus terminal
+  result cases; split only when a contract-package generator can produce and
+  verify both without partial refresh. Remove the pack when strict v1 retires.
+- `contracts/agent-first/legacy-v1-contract-baseline.json` is an atomic
+  machine-registry exception at 915 physical lines, owned by the Worker
+  compatibility owner and validated by the small manifest module. The
+  considered split is repositories/registries/surfaces/tests; retain one file
+  until a contract-package generator can assemble deterministic includes while
+  preserving one schema validation and Appendix render. Replace this exception
+  when that generator becomes the contract source.
 
 ## Worker Host Platform
 

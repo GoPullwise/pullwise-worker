@@ -151,6 +151,17 @@ def _execute_probe(
         result["output_sha256"] = output_sha256
         return result
     output = process["output"]
+    if process["returncode"] != 0:
+        observed, skipped = _parse_counts(spec, output)
+        return {
+            "id": runner_id,
+            "runner_id": runner_id,
+            "status": "failed",
+            "returncode": process["returncode"],
+            "output_sha256": output_sha256,
+            "observed_tests": observed,
+            "observed_skips": skipped,
+        }
     observed, skipped = _parse_counts(spec, output)
     if observed is None or skipped is None:
         result = _indeterminate_result(runner_id, "test_count_unparseable")
@@ -174,7 +185,7 @@ def _execute_probe(
             observed_skips=skipped,
         )
         return result
-    if process["returncode"] != 0 or _node_report_declares_failure(spec, output):
+    if _node_report_declares_failure(spec, output):
         return {
             "id": runner_id,
             "runner_id": runner_id,

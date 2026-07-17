@@ -2,7 +2,6 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { registerHooks } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -16,15 +15,9 @@ const FIXTURE_PATH = resolve(
   "fixtures",
   "public-scan-v1.json"
 );
-const WEB_MODULE_PATH = resolve(
-  WORKSPACE_ROOT,
-  "pullwise-web",
-  "src",
-  "lib",
-  "pullwise-data.js"
-);
-const WEB_ENV_MODULE_URL = pathToFileURL(
-  resolve(WORKSPACE_ROOT, "pullwise-web", "src", "config", "env.js")
+const WEB_ROOT = resolve(WORKSPACE_ROOT, "pullwise-web");
+const VITE_MODULE_URL = pathToFileURL(
+  resolve(WEB_ROOT, "node_modules", "vite", "dist", "node", "index.js")
 ).href;
 const SCHEMA_ID = "pullwise-public-scan-fixture-pack/v1";
 const CASE_IDS = [
@@ -89,31 +82,30 @@ function validatePack(pack) {
   }
 }
 
-function installWebEnvironmentHook() {
-  registerHooks({
-    load(url, context, nextLoad) {
-      const loaded = nextLoad(url, context);
-      if (url !== WEB_ENV_MODULE_URL) return loaded;
-      const source =
-        typeof loaded.source === "string"
-          ? loaded.source
-          : Buffer.from(loaded.source).toString("utf8");
-      const viteExpression = "parseEnv(import.meta.env,";
-      assert.ok(source.includes(viteExpression), "unexpected Web environment bootstrap");
-      return {
-        ...loaded,
-        source: source.replace(viteExpression, "parseEnv({},"),
-      };
-    },
+async function loadWebModule() {
+  const { createServer } = await import(VITE_MODULE_URL);
+  const scratchRoot =
+    process.env.TEMP || process.env.TMP || process.env.TMPDIR || WORKER_ROOT;
+  const server = await createServer({
+    root: WEB_ROOT,
+    appType: "custom",
+    cacheDir: resolve(scratchRoot, "pullwise-contract-vite"),
+    logLevel: "silent",
+    optimizeDeps: { noDiscovery: true, include: [] },
+    server: { middlewareMode: true, hmr: false },
   });
+  try {
+    return await server.ssrLoadModule("/src/lib/pullwise-data.js");
+  } finally {
+    await server.close();
+  }
 }
 
 async function main() {
   const pack = JSON.parse(await readFile(FIXTURE_PATH, "utf8"));
   validatePack(pack);
 
-  installWebEnvironmentHook();
-  const web = await import(pathToFileURL(WEB_MODULE_PATH).href);
+  const web = await loadWebModule();
   for (const exportName of [
     "normalizeScan",
     "isTerminalScan",
