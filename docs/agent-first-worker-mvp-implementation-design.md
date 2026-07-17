@@ -1387,6 +1387,8 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 
 完成证据：代码地图、超大文件baseline与抽离地图、contract fixture hashes、当前baseline test结果；零生产行为变化。
 
+当前事实基线的机器源是 `contracts/agent-first/worker-slice-0-baseline.json`，生成视图是[当前代码地图](agent-first-worker-current-code-map.md)。从 Worker 仓库运行 `python scripts/agent_first_slice0_baseline.py check --repo-root .`；该证据只描述现行模块、阶段与文件规模，不分配未来 Agent Kernel 组件，也不授权生产实现。
+
 ### Slice 1：schema、canonical JSON、CAS、SQLite
 
 - 实现第2/4/5节schema registry、golden fixtures、migration、CAS。

@@ -61,23 +61,46 @@ class AgentFirstSlice0BaselineTest(unittest.TestCase):
             "pipeline": {
                 "path": "pipeline.py",
                 "symbol": "PIPELINE_PHASES",
-                "values": [],
+                "values": [["only_phase", 100]],
             },
-            "code_map": [],
-            "file_baselines": [],
+            "code_map": [
+                {
+                    "id": "pipeline",
+                    "paths": [{"path": "pipeline.py", "anchors": ["PIPELINE_PHASES"]}],
+                    "current_responsibilities": "Synthetic pipeline.",
+                    "boundary": "Synthetic boundary.",
+                    "candidate_extraction_seam": "Synthetic seam.",
+                }
+            ],
+            "file_baselines": [
+                {
+                    "path": "known.py",
+                    "kind": "production",
+                    "classification": "review_trigger_existing",
+                    "physical_lines": 401,
+                    "anchors": ["pass"],
+                    "current_responsibilities": "Synthetic known file.",
+                    "candidate_extraction_seam": "Synthetic seam.",
+                }
+            ],
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             candidate = root / "new_module.py"
             candidate.write_text("pass\n" * 401, encoding="utf-8", newline="\n")
+            (root / "known.py").write_text(
+                "pass\n" * 401, encoding="utf-8", newline="\n"
+            )
             (root / "pipeline.py").write_text(
-                "PIPELINE_PHASES = ()\n", encoding="utf-8", newline="\n"
+                "PIPELINE_PHASES = (('only_phase', 100),)\n",
+                encoding="utf-8",
+                newline="\n",
             )
 
             report = verify_baseline(
                 baseline,
                 root,
-                tracked_paths=("new_module.py", "pipeline.py"),
+                tracked_paths=("known.py", "new_module.py", "pipeline.py"),
                 check_document=False,
             )
 
@@ -92,6 +115,18 @@ class AgentFirstSlice0BaselineTest(unittest.TestCase):
         self.assertEqual(1, physical_line_count(b"one"))
         self.assertEqual(1, physical_line_count(b"one\n"))
         self.assertEqual(2, physical_line_count(b"one\ntwo"))
+
+    def test_slice0_machine_entrypoint_is_documented(self) -> None:
+        command = "python scripts/agent_first_slice0_baseline.py check --repo-root ."
+        manifest = "contracts/agent-first/worker-slice-0-baseline.json"
+        for relative in (
+            "AGENTS.md",
+            "docs/agent-first-worker-mvp-implementation-design.md",
+        ):
+            text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(path=relative):
+                self.assertIn(command, text)
+                self.assertIn(manifest, text)
 
 
 if __name__ == "__main__":

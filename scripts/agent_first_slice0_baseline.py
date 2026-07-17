@@ -14,6 +14,11 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
+try:
+    from scripts.agent_first_slice0_render import render_document
+except ModuleNotFoundError:
+    from agent_first_slice0_render import render_document  # type: ignore[no-redef]
+
 
 SCHEMA_ID = "pullwise-agent-first-slice-0-baseline/v1"
 REPORT_SCHEMA_ID = "pullwise-agent-first-slice-0-baseline-report/v1"
@@ -21,28 +26,12 @@ LINE_COUNT_PROFILE = "physical-lf/v1"
 REVIEW_TRIGGER = 400
 OVERSIZED_LIMIT = 600
 HANDWRITTEN_SUFFIXES = {
-    ".bash",
-    ".cjs",
-    ".js",
-    ".jsx",
-    ".mjs",
-    ".ps1",
-    ".py",
-    ".pyi",
-    ".sh",
-    ".ts",
-    ".tsx",
-    ".zsh",
+    ".bash", ".cjs", ".js", ".jsx", ".mjs", ".ps1",
+    ".py", ".pyi", ".sh", ".ts", ".tsx", ".zsh",
 }
 TOP_LEVEL_KEYS = {
-    "schema_id",
-    "baseline_id",
-    "captured_head",
-    "line_count_profile",
-    "document",
-    "pipeline",
-    "code_map",
-    "file_baselines",
+    "schema_id", "baseline_id", "captured_head", "line_count_profile",
+    "document", "pipeline", "code_map", "file_baselines",
 }
 
 
@@ -243,48 +232,6 @@ def _pipeline_values(text: str, symbol: str) -> list[list[Any]] | None:
             except (TypeError, ValueError, SyntaxError):
                 return None
     return None
-
-
-def _markdown(value: object) -> str:
-    return str(value).replace("|", "\\|").replace("\n", " ")
-
-
-def render_document(baseline: dict[str, Any]) -> str:
-    validate_baseline(baseline)
-    lines = [
-        f"> Generated from `{baseline['baseline_id']}` with `{LINE_COUNT_PROFILE}`. Do not edit this block by hand.",
-        "",
-        f"Captured Worker HEAD `{baseline['captured_head']}` is informational only. This is current-implementation evidence; it does not assign future Agent Kernel ownership or authorize production implementation.",
-        "",
-        "### Current implementation map",
-        "",
-        "| Current scope | Paths | Current responsibilities | Ownership/call boundary | Candidate extraction seam |",
-        "|---|---|---|---|---|",
-    ]
-    for entry in baseline["code_map"]:
-        paths = ", ".join(f"`{source['path']}`" for source in entry["paths"])
-        lines.append(
-            f"| `{entry['id']}` | {paths} | {_markdown(entry['current_responsibilities'])} | {_markdown(entry['boundary'])} | {_markdown(entry['candidate_extraction_seam'])} |"
-        )
-    lines.extend(["", "### Current fixed pipeline", "", "| Order | Phase | Progress ceiling |", "|---:|---|---:|"])
-    for index, (phase, progress) in enumerate(baseline["pipeline"]["values"], start=1):
-        lines.append(f"| {index} | `{phase}` | {progress} |")
-    lines.extend(
-        [
-            "",
-            "### Handwritten file-size ratchet",
-            "",
-            "The inventory covers every Git-tracked handwritten code/script suffix above 400 physical lines. `oversized_legacy` is the >600 grandfathered baseline; `review_trigger_existing` is the existing 401–600 review-trigger range. Any count drift or unregistered trigger file fails verification.",
-            "",
-            "| Path | Kind | Classification | Physical lines | Current responsibilities | Candidate extraction seam |",
-            "|---|---|---|---:|---|---|",
-        ]
-    )
-    for entry in baseline["file_baselines"]:
-        lines.append(
-            f"| `{entry['path']}` | `{entry['kind']}` | `{entry['classification']}` | {entry['physical_lines']} | {_markdown(entry['current_responsibilities'])} | {_markdown(entry['candidate_extraction_seam'])} |"
-        )
-    return "\n".join(lines)
 
 
 def _document_matches(baseline: dict[str, Any], repo_root: Path) -> bool:
