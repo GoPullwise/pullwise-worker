@@ -28,6 +28,8 @@ legacy 行为；`agent-kernel/` 可保留为只读诊断数据，不要求数据
   SQLite 后置引用、artifact rebinding 拒绝、verified read 和 idle+TTL orphan GC。
 - Shadow Store：schema validation -> canonical bytes -> CAS 的窄接口；读取时重新
   校验 digest、canonical bytes、声明 schema 和 semantic invariant。
+- Wheel 交付链：无依赖构建后安装到隔离 venv，从源码树外加载默认 registry，核对
+  schema/fixture inventory，并执行 SQLite/CAS round-trip。
 
 已注册 schema：
 
@@ -100,19 +102,21 @@ python3 scripts/agent_first_slice0_baseline.py check --repo-root .
 python3 scripts/verify_agent_first_contract_baseline.py check --workspace-root ..
 python3 scripts/agent_first_decision_register.py check --repo-root .
 python3 scripts/agent_first_decision_register.py check --repo-root . --require-slice S2
-python3 -m pip wheel --no-deps --no-build-isolation --wheel-dir /tmp/pullwise-wheel .
+python3 scripts/check_agent_kernel_wheel.py
 ```
 
-最后一条只验证 wheel 可构建且包含 schema/fixture package data，不安装或发布它。
+最后一条会构建 wheel、无依赖安装到临时隔离 venv，并从源码树外验证默认 schema
+发现和 CAS round-trip；它不安装到生产环境或发布制品。
 decision check 的 pending/blocked 是规范状态证据，不应伪装成测试故障。
 
 ## 最近验证结果
 
-- Python 3.10/3.12 Slice 1 聚焦测试：47/47 通过。
-- Python 3.12 Worker 全量：700 tests 通过，4 个既有条件性 skip。
+- Python 3.10/3.12 Slice 1 聚焦测试：48/48 通过。
+- Python 3.12 Worker 全量：702 tests 通过，4 个既有条件性 skip。
 - output contracts 4/4、Slice 0 baseline `compatible`、cross-repo baseline
   `compatible`（14 个 fixed runner 全部通过）。
-- wheel 构建成功并包含 9 个 Agent Kernel 模块、13 个 schema 和 3 个 fixture pack。
+- wheel 隔离安装成功，默认 registry 包含 13 个 schema 和 3 个 fixture pack，
+  SQLite/CAS round-trip 通过。
 - GitHub Actions CI run 792（Python 3.10、dependency audit、全量测试）通过。
 
 ## 文件规模与模块化报告
@@ -126,17 +130,18 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `pullwise_worker/agent_kernel_database.py` | 239 | SQLite 生命周期与 migration |
 | `pullwise_worker/agent_kernel_identity.py` | 64 | legacy identity mapping |
 | `pullwise_worker/agent_kernel_migrations.py` | 263 | 原子 migration registry |
-| `pullwise_worker/agent_kernel_object_store.py` | 379 | CAS side effects |
+| `pullwise_worker/agent_kernel_object_store.py` | 383 | CAS side effects |
 | `pullwise_worker/agent_kernel_schema_registry.py` | 187 | digest-bound schema loading |
 | `pullwise_worker/agent_kernel_schema_validation.py` | 331 | 受控 schema 子集 |
 | `pullwise_worker/agent_kernel_shadow_store.py` | 126 | validation/CAS composition |
-| `tests/test_ci_cross_repo_contract.py` | 31 | pinned sibling CI contract |
+| `tests/test_ci_cross_repo_contract.py` | 38 | pinned sibling/package CI contract |
 | `tests/test_agent_kernel_canonical.py` | 128 | canonical contract/property |
 | `tests/test_agent_kernel_contract_semantics.py` | 187 | semantic invariants |
 | `tests/test_agent_kernel_legacy_mapping.py` | 67 | identity/collision |
 | `tests/test_agent_kernel_schema_registry.py` | 212 | schema/golden/fail-closed |
 | `tests/test_agent_kernel_shadow_store.py` | 164 | shadow boundary/metrics |
-| `tests/test_agent_kernel_storage.py` | 358 | migration/CAS/crash/concurrency |
+| `tests/test_agent_kernel_storage.py` | 376 | migration/CAS/crash/concurrency |
+| `scripts/check_agent_kernel_wheel.py` | 134 | isolated installed-wheel smoke |
 | `contracts/agent-task/v1/actor.schema.json` | 56 | schema |
 | `contracts/agent-task/v1/availability-ref.schema.json` | 24 | schema |
 | `contracts/agent-task/v1/budget-entry.schema.json` | 53 | schema |
@@ -155,9 +160,9 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `contracts/agent-task/v1/fixtures/schema-golden-control.json` | 110 | frozen fixture |
 | `contracts/agent-task/v1/fixtures/schema-golden.json` | 261 | frozen fixture |
 | `pyproject.toml` | 28 | wheel package data |
-| `.github/workflows/ci.yml` | 47 | pinned Server contract-test checkout |
-| `AGENTS.md` | 935 | 持久工程规则（非代码阈值） |
-| `docs/agent-first-worker-slice-1-runbook.md` | 164 | 本证据 |
+| `.github/workflows/ci.yml` | 49 | pinned Server checkout/package smoke |
+| `AGENTS.md` | 940 | 持久工程规则（非代码阈值） |
+| `docs/agent-first-worker-slice-1-runbook.md` | 169 | 本证据 |
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行说明项，没有超过 600 行
 的新增文件，也没有生成/第三方/原子 registry 例外需要登记。S1 未触及任何超过

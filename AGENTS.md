@@ -187,6 +187,11 @@ non-regular files, unsupported schema keywords, and unresolved references.
   `transport-abandonment-record/v1` without defining their field contracts.
   Record this as `SPEC_GAP`; do not invent or register either schema until its
   normative shape, identity, and idempotency rules are explicitly resolved.
+- Verify Agent Kernel package data by building a wheel without dependencies,
+  installing it into an isolated virtual environment, and loading the default
+  registry from outside the source tree. The smoke check must also validate the
+  installed schema/fixture inventory and a SQLite/CAS round trip; inspecting a
+  wheel archive alone is not sufficient evidence that runtime discovery works.
 
 ## Worker Host Platform
 
