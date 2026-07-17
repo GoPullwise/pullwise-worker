@@ -8,6 +8,43 @@ current code and available evidence, then fix that root cause. Add diagnostics
 only when they directly support root-cause isolation or make a verified fix
 safer to operate.
 
+## Module And File Size Discipline
+
+Keep handwritten production source, tests, and maintained scripts small enough
+for an agent or reviewer to understand without loading an unrelated subsystem.
+
+- A new handwritten file should contain at most 400 physical lines. A file in
+  the 401-600 range requires a written cohesion reason in the change evidence;
+  a new handwritten file must not exceed 600 physical lines. Count ordinary
+  newline-delimited lines, including comments and blank lines. Do not game the
+  limits by minifying code, combining unrelated statements, or deleting useful
+  tests and documentation.
+- Split by cohesive domain responsibility, state/data ownership, protocol or
+  side-effect boundary, and independently testable behavior. Modules must expose
+  narrow interfaces and have one-way dependencies where practical. Tests should
+  split by contract, behavior, or failure mode rather than arbitrary line ranges.
+- Do not create arbitrary numbered fragments, wildcard-import aggregators, thin
+  pass-through modules, shared mutable-global seams, or circular imports merely
+  to satisfy the line limit. In particular, existing `_main_part_XX` and
+  `import *` compatibility structure is not a template for new modules.
+- Existing files above 600 lines are grandfathered only for narrow maintenance.
+  Freeze their line-count baseline before implementation. A small cohesive fix
+  may remain in place, but the file must not gain a new responsibility; any
+  growth above its baseline must be explicitly justified with an extraction
+  plan. A change adding a new capability or more than 100 net physical lines
+  must extract the work into focused modules, leaving only composition or a
+  compatibility seam in the oversized file. A reduced baseline never rises.
+- Exceptions are limited to generated files that have a small checked-in
+  generator, vendored third-party code, frozen canonical fixtures/snapshots/
+  benchmark data, and framework-mandated atomic migrations or registries whose
+  business logic has already been extracted. “Temporary”, “tests are repetitive”,
+  and “refactoring is difficult” are not exceptions.
+- Completion evidence for every implementation slice must include line counts
+  for all added or modified files, the frozen baseline and responsibility impact
+  for each oversized legacy file touched, and any exception with its reason,
+  considered split seam, owner, and removal condition. An undocumented exception
+  fails completion.
+
 ## Worker Host Platform
 
 Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,

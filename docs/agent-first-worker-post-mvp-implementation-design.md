@@ -39,6 +39,7 @@
 10. Debug不是Audit，不包含source/secret/完整prompt；没有真实bundle绝不生成fallback URL。
 11. 旧客户端兼容只能发生在新lease的协商点；一个已固定`agent_task_v1`的lease不得运行中降为legacy。
 12. 所有跨端新字段先有schema、valid/invalid fixture、error code和兼容矩阵，再写业务实现。
+13. MVP第3.2节的模块与文件规模约束对Worker、Server、Web和contract package持续生效；每端都必须使用同一400行审查触发线、600行强制门禁、超大遗留文件baseline ratchet和显式例外机制。
 
 ## 2. 开始 Post-MVP 前必须具备的证据
 
@@ -1103,6 +1104,7 @@ delete/tombstone的`deletion_version`参与grant、heartbeat/event/artifact/resu
 - R4默认deny；任何启用profile通过独立security/recovery审批。
 - V3 candidate指标带原始分母、stable并发对照和rollback，生产策略不在线无门自改。
 - 文档、runbook、schema registry与实现同步；没有用TODO或feature flag代替必需安全路径。
+- 每个版本都有跨项目的新增/修改文件行数报告和超大文件baseline报告；没有新增未豁免的600行以上手写文件，没有向超大遗留文件加入未抽离的新职责，所有例外均可审计。
 
 ## 17. 每个版本的Agent执行模板
 
@@ -1110,10 +1112,10 @@ delete/tombstone的`deletion_version`参与grant、heartbeat/event/artifact/resu
 
 1. 读取涉及项目的`AGENTS.md`和本版本章节。
 2. 重新盘点当前HEAD/dirty worktree/contract hashes，保护用户改动。
-3. 把版本拆成tracer-bullet vertical slices；每slice跨必要端但保持可rollback。
+3. 把版本拆成tracer-bullet vertical slices；每slice跨必要端但保持可rollback，同时先给出模块所有权、文件行数预算，以及触及超大遗留文件时的职责抽离方案。
 4. 先提交schema、fixtures和失败测试，再实现。
 5. 运行unit/contract/property/crash/security/old-new matrix。
-6. 记录ControlPlaneDigest、migration/rollback证据和指标门。
+6. 记录ControlPlaneDigest、migration/rollback证据、指标门，以及MVP第3.2节要求的新增/修改文件行数、baseline变化和模块化例外。
 7. 只在第3节依赖表列出的全部硬依赖完成门通过后启用本版能力；未列为硬依赖的编号中间版可以跳过。具体地，V1.2可在V1.0稳定后独立于V1.1交付，但不得使用任何未selected动态角色。
 8. 若发现本文未闭合且会改变权限、外部行为、数据或兼容性的选择，停止该slice并请求新决策；局部模块命名等可逆选择由Agent记录ADR后继续。
 
