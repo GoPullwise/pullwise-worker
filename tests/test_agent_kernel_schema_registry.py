@@ -13,6 +13,10 @@ from pullwise_worker.agent_kernel_schema_registry import (
     SchemaRegistryError,
     SchemaValidationError,
 )
+from pullwise_worker.agent_kernel_schema_validation import (
+    validate_instance,
+    validate_schema_definition,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +47,40 @@ def _mutated(instance: object, mutation: dict[str, object]) -> object:
 
 
 class AgentKernelSchemaRegistryTest(unittest.TestCase):
+    def test_schema_definition_subset_rejects_malformed_keyword_values(self) -> None:
+        cases = (
+            ({"type": "number"}, "schema_type_invalid"),
+            ({"type": "string", "format": "uri"}, "schema_format_unsupported"),
+            ({"type": "string", "pattern": "["}, "schema_pattern_invalid"),
+            (
+                {"type": "array", "minItems": 2, "maxItems": 1},
+                "schema_range_invalid",
+            ),
+            (
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": ["missing"],
+                    "additionalProperties": False,
+                },
+                "schema_required_unknown",
+            ),
+            (
+                {"type": "object", "additionalProperties": "false"},
+                "schema_additional_properties_invalid",
+            ),
+        )
+        for schema, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(SchemaValidationError, code):
+                    validate_schema_definition(schema)
+
+    def test_const_and_enum_use_json_identity_not_python_bool_integer_aliases(self) -> None:
+        for schema in ({"const": 1}, {"enum": [1]}):
+            with self.subTest(schema=schema):
+                with self.assertRaisesRegex(SchemaValidationError, "mismatch"):
+                    validate_instance(True, schema, resolve=lambda _: {})
+
     def test_registry_verifies_schema_identity_digest_and_golden_fixtures(self) -> None:
         registry = SchemaRegistry(CONTRACT_ROOT)
         cases = []

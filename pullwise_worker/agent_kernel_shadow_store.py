@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 import threading
 
-from .agent_kernel_canonical import canonical_bytes, load_strict_json
+from .agent_kernel_canonical import (
+    CanonicalizationError,
+    canonical_bytes,
+    load_strict_json,
+)
 from .agent_kernel_database import AgentKernelDatabase
 from .agent_kernel_object_store import (
     CasCorruptError,
@@ -111,6 +115,9 @@ class AgentKernelShadowStore:
         except SchemaValidationError:
             self.metrics.add("agent_kernel_shadow_contract_validation_failures_total")
             raise
+        except CanonicalizationError as exc:
+            self.metrics.add("agent_kernel_shadow_contract_validation_failures_total")
+            raise SchemaValidationError(exc.code, detail=exc.detail) from exc
         except CasCorruptError:
             self.metrics.add("agent_kernel_shadow_cas_corruption_total")
             raise

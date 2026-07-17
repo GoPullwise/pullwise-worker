@@ -18,6 +18,7 @@ from .agent_kernel_database import AgentKernelDatabase, AgentKernelStorageError
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TASK_ID_PATTERN = re.compile(r"^task_[0-9a-f]{32}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^art_[0-9a-f]{32}$")
+TEMPORARY_PATTERN = re.compile(r"^object-[a-z0-9_]+\.tmp$")
 MAX_SAFE_INTEGER = 2**53 - 1
 
 
@@ -39,7 +40,10 @@ def _private_directory(path: Path) -> None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        path.mkdir(parents=True, mode=0o700)
+        try:
+            path.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            pass
         metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise AgentKernelStorageError(f"storage_directory_invalid: {path}")
@@ -139,11 +143,11 @@ class ObjectStore:
             try:
                 os.link(temporary, final, follow_symlinks=False)
             except FileExistsError:
-                self._verify_path(final, sha256, size)
+                self._verify_concurrent_publish(final, sha256, size)
             else:
                 os.chmod(final, 0o600, follow_symlinks=False)
-            temporary.unlink(missing_ok=True)
             self._fsync_directory(final.parent)
+            self._remove_temporary(temporary)
             self._stage("after_object_publish")
             ref = {
                 "schema_id": "content-ref/v1",
@@ -158,7 +162,7 @@ class ObjectStore:
             self._stage("after_database_commit")
             return ref
         finally:
-            temporary.unlink(missing_ok=True)
+            self._remove_temporary(temporary)
 
     def read_verified(self, ref: dict[str, object]) -> bytes:
         digest = str(ref.get("sha256") or "")
@@ -175,12 +179,14 @@ class ObjectStore:
         if not idle:
             return []
         cutoff = (time.time() if now is None else now) - max(0, older_than_seconds)
+        removed = self._collect_staging_orphans(cutoff)
         with self.database.connect() as connection:
             referenced = {
                 row[0]
                 for row in connection.execute("SELECT DISTINCT sha256 FROM content_bindings")
             }
-        removed: list[str] = []
+        object_digests: list[str] = []
+        changed_parents: set[Path] = set()
         for prefix in sorted(self.objects_root.iterdir()):
             if prefix.is_symlink() or not prefix.is_dir():
                 continue
@@ -198,16 +204,40 @@ class ObjectStore:
                 ):
                     continue
                 candidate.unlink()
-                removed.append(digest)
-        if removed:
+                object_digests.append(digest)
+                changed_parents.add(prefix)
+        for parent in changed_parents:
+            self._fsync_directory(parent)
+        if object_digests:
             with self.database.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.executemany(
                     "DELETE FROM content_objects WHERE sha256=? "
                     "AND NOT EXISTS (SELECT 1 FROM content_bindings WHERE sha256=?)",
-                    ((digest, digest) for digest in removed),
+                    ((digest, digest) for digest in object_digests),
                 )
                 connection.commit()
+        return removed + object_digests
+
+    def _collect_staging_orphans(self, cutoff: float) -> list[str]:
+        removed: list[str] = []
+        for candidate in sorted(self.tmp_root.iterdir()):
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or not TEMPORARY_PATTERN.fullmatch(candidate.name)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_mtime > cutoff
+            ):
+                continue
+            candidate.unlink()
+            removed.append(f"tmp:{candidate.name}")
+        if removed:
+            self._fsync_directory(self.tmp_root)
         return removed
 
     @staticmethod
@@ -308,6 +338,33 @@ class ObjectStore:
                 observed.update(chunk)
         if observed.hexdigest() != digest:
             raise CasCorruptError("CAS_CORRUPT: object digest mismatch")
+
+    @classmethod
+    def _verify_concurrent_publish(cls, path: Path, digest: str, size: int) -> None:
+        for _ in range(100):
+            try:
+                cls._verify_path(path, digest, size)
+                return
+            except CasCorruptError as exc:
+                try:
+                    metadata = path.lstat()
+                except FileNotFoundError:
+                    raise exc
+                if (
+                    "unexpected hardlinks" not in str(exc)
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 2
+                ):
+                    raise
+                time.sleep(0.001)
+        cls._verify_path(path, digest, size)
+
+    def _remove_temporary(self, path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        self._fsync_directory(self.tmp_root)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:

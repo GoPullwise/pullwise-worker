@@ -85,6 +85,26 @@ class AgentKernelStorageTest(unittest.TestCase):
         with self.assertRaisesRegex(AgentKernelStorageError, "schema_version_unsupported"):
             database.initialize()
 
+    def test_database_rejects_link_and_nonregular_database_paths(self) -> None:
+        for case in ("hardlink", "symlink", "directory"):
+            with self.subTest(case=case):
+                database = AgentKernelDatabase(self.worker_root / case)
+                database.root.mkdir(parents=True, mode=0o700)
+                if case == "directory":
+                    database.path.mkdir()
+                else:
+                    outside = self.worker_root / f"outside-{case}.sqlite3"
+                    outside.write_bytes(b"not a worker database")
+                    if case == "hardlink":
+                        os.link(outside, database.path)
+                    else:
+                        database.path.symlink_to(outside)
+
+                with self.assertRaisesRegex(
+                    AgentKernelStorageError, "database_path_invalid"
+                ):
+                    database.initialize()
+
     def test_migration_crash_rolls_back_and_clean_restart_applies_once(self) -> None:
         def crash(stage: str) -> None:
             if stage == "before_migration_commit":
@@ -174,8 +194,8 @@ class AgentKernelStorageTest(unittest.TestCase):
                 encoding="binary",
             )
 
-    def test_existing_hardlink_or_overbroad_permissions_are_corruption(self) -> None:
-        cases = ("hardlink", "permissions")
+    def test_existing_link_or_overbroad_permissions_are_corruption(self) -> None:
+        cases = ("hardlink", "symlink", "permissions")
         for case in cases:
             with self.subTest(case=case):
                 database = AgentKernelDatabase(self.worker_root / case)
@@ -190,6 +210,11 @@ class AgentKernelStorageTest(unittest.TestCase):
                     outside.parent.mkdir(parents=True, exist_ok=True)
                     outside.write_bytes(payload)
                     os.link(outside, path)
+                elif case == "symlink":
+                    outside = self.worker_root / f"{case}.bin"
+                    outside.parent.mkdir(parents=True, exist_ok=True)
+                    outside.write_bytes(payload)
+                    path.symlink_to(outside)
                 else:
                     path.write_bytes(payload)
                     path.chmod(0o644)
@@ -261,6 +286,29 @@ class AgentKernelStorageTest(unittest.TestCase):
 
         self.assertEqual([orphan_digest], removed)
         self.assertTrue(store.path_for_digest(referenced["sha256"]).exists())
+
+    def test_idle_gc_removes_only_expired_private_staging_files(self) -> None:
+        store = ObjectStore(self._database())
+        old = store.tmp_root / "object-abandoned.tmp"
+        young = store.tmp_root / "object-young.tmp"
+        unrelated = store.tmp_root / "operator-note.txt"
+        linked = store.tmp_root / "object-linked.tmp"
+        for path in (old, young, unrelated):
+            path.write_bytes(path.name.encode())
+            path.chmod(0o600)
+        linked.symlink_to(old)
+        timestamp = time.time() - 7200
+        for path in (old, unrelated):
+            os.utime(path, (timestamp, timestamp))
+
+        self.assertEqual([], store.collect_orphans(idle=False, older_than_seconds=1))
+        removed = store.collect_orphans(idle=True, older_than_seconds=3600)
+
+        self.assertEqual(["tmp:object-abandoned.tmp"], removed)
+        self.assertFalse(old.exists())
+        self.assertTrue(young.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(linked.is_symlink())
 
     def test_random_binary_objects_round_trip_with_matching_content_refs(self) -> None:
         store = ObjectStore(self._database())

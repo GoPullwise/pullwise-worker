@@ -130,6 +130,25 @@ class AgentKernelShadowStoreTest(unittest.TestCase):
         with self.assertRaises(SchemaValidationError):
             self.store.read_contract(wrong)
 
+    def test_read_rejects_strict_json_failure_as_contract_validation(self) -> None:
+        ref = self.store.objects.put_bytes(
+            b'{"schema_id":"actor/v1","kind":"worker","kind":"owner"}',
+            task_id="task_" + "d" * 32,
+            artifact_id="art_" + "e" * 32,
+            media_type="application/json",
+            content_schema_id="actor/v1",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(SchemaValidationError, "duplicate_object_key"):
+            self.store.read_contract(ref)
+        self.assertEqual(
+            1,
+            self.store.metrics.snapshot()[
+                "agent_kernel_shadow_contract_validation_failures_total"
+            ],
+        )
+
     def test_open_is_idempotent_and_uses_instance_scoped_directory(self) -> None:
         reopened = AgentKernelShadowStore.open(
             self.worker_root, contract_root=CONTRACT_ROOT
