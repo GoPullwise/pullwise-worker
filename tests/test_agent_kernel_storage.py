@@ -163,6 +163,24 @@ class AgentKernelStorageTest(unittest.TestCase):
             encoding="utf-8",
         ))
 
+    def test_put_rejects_non_integer_or_out_of_range_size_limits(self) -> None:
+        store = ObjectStore(self._database())
+        common = {
+            "task_id": "task_" + "0" * 32,
+            "artifact_id": "art_" + "1" * 32,
+            "media_type": "application/octet-stream",
+            "content_schema_id": "opaque-bytes/v1",
+            "encoding": "binary",
+        }
+
+        for max_bytes in (True, "1", None, 1.0, -1, 2**53):
+            with self.subTest(max_bytes=max_bytes), self.assertRaisesRegex(
+                AgentKernelStorageError, "content_size_limit_invalid"
+            ):
+                store.put_bytes(b"x", max_bytes=max_bytes, **common)  # type: ignore[arg-type]
+
+        self.assertEqual([], list(store.tmp_root.iterdir()))
+
     def test_artifact_identity_cannot_be_rebound_to_different_bytes(self) -> None:
         store = ObjectStore(self._database())
         common = {
