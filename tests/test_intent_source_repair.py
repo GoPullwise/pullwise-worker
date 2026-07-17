@@ -135,6 +135,7 @@ class IntentSourceRepairTest(unittest.TestCase):
                     "schema_version": "intent-test-source/v1",
                     "generated_tests": [
                         {
+                            "test_id": "ITP-001",
                             "target_test_ids": ["ITP-001"],
                             "command": ["python", "-m", "pytest", test_path],
                         }

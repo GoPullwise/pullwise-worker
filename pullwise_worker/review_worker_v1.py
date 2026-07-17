@@ -13780,8 +13780,7 @@ def intent_test_plan_errors(run_dir: Path, payload: Any) -> list[str]:
             errors.append(f"intent-test-plan.json test_targets[{index}].title is missing")
         if str(target.get("expected_result_before_fix") or "").strip() not in {"fail", "pass", "unknown"}:
             errors.append(f"intent-test-plan.json test_targets[{index}].expected_result_before_fix is invalid")
-        target_files = target.get("target_files")
-        if target_files is not None and not isinstance(target_files, list):
+        if (target_files := target.get("target_files")) is not None and not isinstance(target_files, list):
             errors.append(f"intent-test-plan.json test_targets[{index}].target_files must be a list")
     errors.extend(_linked_finding_errors(run_dir, "intent-test-plan.json", "test_targets", targets, required=True))
     return errors + intent_artifact_validation.intent_plan_target_contract_errors(payload)
@@ -13842,7 +13841,8 @@ def intent_test_source_errors(run_dir: Path, payload: Any) -> list[str]:
         elif not _intent_generated_test_exists(run_dir, test_path):
             errors.append(f"intent-test-source.json generated_tests[{index}].path does not exist: {test_path}")
     errors.extend(_linked_finding_errors(run_dir, "intent-test-source.json", "generated_tests", generated, required=False))
-    return errors + intent_artifact_validation.intent_source_record_contract_errors(payload, read_json(run_dir / "intent" / "intent-test-plan.json", {}))
+    plan_payload = read_json(run_dir / "intent" / "intent-test-plan.json", {})
+    return errors + intent_artifact_validation.intent_source_record_contract_errors(payload, plan_payload)
 
 
 def intent_test_raw_run_errors(run_dir: Path, payload: Any) -> list[str]:

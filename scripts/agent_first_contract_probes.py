@@ -151,8 +151,17 @@ def _execute_probe(
         result["output_sha256"] = output_sha256
         return result
     output = process["output"]
+    observed, skipped = _parse_counts(spec, output)
     if process["returncode"] != 0:
-        observed, skipped = _parse_counts(spec, output)
+        if observed == 0 and skipped == 0:
+            result = _indeterminate_result(runner_id, "insufficient_tests")
+            result.update(
+                returncode=process["returncode"],
+                output_sha256=output_sha256,
+                observed_tests=observed,
+                observed_skips=skipped,
+            )
+            return result
         return {
             "id": runner_id,
             "runner_id": runner_id,
@@ -162,7 +171,6 @@ def _execute_probe(
             "observed_tests": observed,
             "observed_skips": skipped,
         }
-    observed, skipped = _parse_counts(spec, output)
     if observed is None or skipped is None:
         result = _indeterminate_result(runner_id, "test_count_unparseable")
         result.update(returncode=process["returncode"], output_sha256=output_sha256)

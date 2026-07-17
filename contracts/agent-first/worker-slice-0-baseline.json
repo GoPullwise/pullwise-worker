@@ -137,7 +137,7 @@
       "path": "tests/test_review_worker_v1.py",
       "kind": "test",
       "classification": "oversized_legacy",
-      "physical_lines": 13075,
+      "physical_lines": 12958,
       "anchors": ["class ReviewWorkerV1ContractsTest"],
       "current_responsibilities": "Legacy broad contract and behavior coverage for review_worker_v1.py.",
       "candidate_extraction_seam": "Move cases by contract or failure mode into focused active-slot, pipeline, intent, artifact, terminal-publication, and checkout suites."
