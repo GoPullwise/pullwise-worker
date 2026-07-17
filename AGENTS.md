@@ -90,20 +90,24 @@ implementation.
 
 `contracts/agent-first/worker-slice-0-baseline.json` is the machine source for
 the current Worker module, 30-entry phase/progress registry, and file-size
-evidence. It
-describes the current implementation only; it neither assigns future Agent
-Kernel ownership nor authorizes production implementation.
+evidence. This baseline describes the current implementation only; it neither
+assigns future Agent Kernel ownership nor authorizes production implementation.
 
 - Run `python scripts/agent_first_slice0_baseline.py check --repo-root .` from
   the Worker repository. Exit `0` is compatible, `1` is deterministic drift,
   and `2` is indeterminate.
 - Keep the generated `docs/agent-first-worker-current-code-map.md` block
   synchronized with the machine source after canonical LF normalization.
-- Git HEAD and dirty state are informational. Exact pipeline phases, anchors,
-  and every tracked handwritten code, test, or maintenance script over 400
-  physical lines are blocking evidence.
-- Any line-count drift or new unregistered file over 400 lines fails. A lower
-  count must refresh the baseline downward so the ratchet cannot rise.
+- Exact HEAD identity and the dirty bit are informational. Reachability of the
+  fixed ratchet genesis `904165f3bed784faaa209ca80e33214c7b07f909`, the exact
+  phase registry, anchors, and every Git-tracked regular file over 400 physical
+  lines that matches the fixed handwritten code/test/maintenance suffix, name,
+  or extensionless-executable catalog are blocking evidence. CI must retain
+  full Git history.
+- Any current line-count drift or unregistered file over 400 lines fails. A
+  lower count must refresh the baseline downward. The genesis path set is
+  closed: no new trigger path may be grandfathered, and removing a path after
+  it reaches 400 or fewer lines retires it from later re-entry.
 
 ## Worker Host Platform
 

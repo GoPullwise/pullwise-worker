@@ -66,6 +66,12 @@ def _write_common(root: Path, *, known_lines: int = 401, pipeline: str | None = 
 
 
 class AgentFirstSlice0GateAdversarialTest(unittest.TestCase):
+    def test_ci_fetches_history_required_by_ratchet_anchor(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("uses: actions/checkout@v4\n        with:\n          fetch-depth: 0", workflow)
+
     def test_windows_and_drive_qualified_manifest_paths_are_rejected(self) -> None:
         for unsafe in ("..\\outside.py", "C:/outside.py", "nested\\file.py"):
             changed = copy.deepcopy(_baseline())
@@ -179,6 +185,28 @@ class AgentFirstSlice0GateAdversarialTest(unittest.TestCase):
             )
         self.assertIn(
             {"code": "ratchet_new_trigger_path", "path": "new.py"},
+            report["failures"],
+        )
+
+    def test_path_retired_below_trigger_cannot_be_reintroduced(self) -> None:
+        known = _file_entry("known.py", 401)
+        other = _file_entry("other.py", 401)
+        anchor = _baseline(known, other)
+        retired = _baseline(other)
+        current = _baseline(known, other)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_common(root)
+            (root / "other.py").write_text("pass\n" * 401, encoding="utf-8", newline="\n")
+            report = verify_baseline(
+                current,
+                root,
+                tracked_paths=("known.py", "other.py", "pipeline.py"),
+                ratchet_baselines=(anchor, retired),
+                check_document=False,
+            )
+        self.assertIn(
+            {"code": "ratchet_reintroduced_trigger_path", "path": "known.py"},
             report["failures"],
         )
 

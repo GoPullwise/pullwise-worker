@@ -67,9 +67,12 @@ def tracked_handwritten_files(repo_root: Path) -> tuple[tuple[str, bool], ...]:
             continue
         try:
             metadata, raw_path = record.split("\t", 1)
-            mode = metadata.split(" ", 1)[0]
+            fields = metadata.split()
         except ValueError as exc:
             raise GateObservationError("git_stage_record_invalid") from exc
+        if len(fields) != 3 or fields[2] != "0":
+            raise GateObservationError("git_stage_record_invalid")
+        mode = fields[0]
         if mode not in {"100644", "100755"}:
             continue
         path = raw_path.replace(chr(92), "/")
@@ -141,6 +144,8 @@ def historical_ratchet_baselines(
             "log",
             "--format=%H",
             "--reverse",
+            "--full-history",
+            "--ancestry-path",
             f"{anchor}..{head}",
             "--",
             manifest_path,
@@ -171,33 +176,24 @@ def ratchet_failures(
         return []
     anchor_entries = {entry["path"]: entry for entry in snapshots[0]["file_baselines"]}
     floors = {path: int(entry["physical_lines"]) for path, entry in anchor_entries.items()}
+    retired: set[str] = set()
     failures: list[dict[str, Any]] = []
-    for snapshot_index, snapshot in enumerate(snapshots[1:], start=1):
+    for snapshot in snapshots[1:]:
+        present = {entry["path"] for entry in snapshot["file_baselines"]}
+        retired.update(set(anchor_entries) - present)
         for entry in snapshot["file_baselines"]:
             path = entry["path"]
-            lines = int(entry["physical_lines"])
             if path not in anchor_entries:
-                failures.append(
-                    {"code": "ratchet_historical_new_trigger_path", "path": path, "snapshot": snapshot_index}
-                )
                 continue
-            if lines > floors[path]:
-                failures.append(
-                    {
-                        "code": "ratchet_historical_line_increase",
-                        "path": path,
-                        "historical_minimum": floors[path],
-                        "observed": lines,
-                        "snapshot": snapshot_index,
-                    }
-                )
-            floors[path] = min(floors[path], lines)
+            floors[path] = min(floors[path], int(entry["physical_lines"]))
     for entry in current["file_baselines"]:
         path = entry["path"]
         lines = int(entry["physical_lines"])
         if path not in anchor_entries:
             failures.append({"code": "ratchet_new_trigger_path", "path": path})
             continue
+        if path in retired:
+            failures.append({"code": "ratchet_reintroduced_trigger_path", "path": path})
         if entry["kind"] != anchor_entries[path]["kind"]:
             failures.append(
                 {

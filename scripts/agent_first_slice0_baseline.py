@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import stat
-import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 

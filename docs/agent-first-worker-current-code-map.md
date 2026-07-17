@@ -1,6 +1,6 @@
 # Agent-First Worker Slice 0 当前实现证据
 
-状态：只读事实基线，不是 Agent Kernel 设计决策  
+状态：只读事实基线，不是 Agent Kernel 设计决策
 机器源：`contracts/agent-first/worker-slice-0-baseline.json`
 
 本文件记录当前 Worker 模块、30 项 phase/progress registry 和手写文件规模 ratchet。它不把当前模块命名为未来 Task Owner、Gate、SourceState 或其他尚待确认的 Agent Kernel 组件，也不授权生产实现。
@@ -10,6 +10,8 @@
 ```text
 python scripts/agent_first_slice0_baseline.py check --repo-root .
 ```
+
+文件规模 ratchet 以 Git commit `904165f3bed784faaa209ca80e33214c7b07f909` 为固定 genesis；检查需要可达的完整历史，允许 baseline 只向下更新，并把降到 400 行及以下后删除的路径视为不可重新登记。
 
 <!-- BEGIN GENERATED WORKER SLICE 0 BASELINE -->
 > Generated from `worker-current-implementation-2026-07-17` with `physical-lf/v1`. Do not edit this block by hand.
@@ -69,7 +71,7 @@ Captured Worker HEAD `c707003960b853ec87fd4dfc7323b0d3d1d63528` is informational
 
 ### Handwritten file-size ratchet
 
-The inventory covers every Git-tracked handwritten code/script suffix above 400 physical lines. `oversized_legacy` is the >600 grandfathered baseline; `review_trigger_existing` is the existing 401-600 review-trigger range. Any count drift or unregistered trigger file fails verification.
+The inventory covers every Git-tracked regular file above 400 physical lines that matches the fixed handwritten code/test/maintenance suffix, name, or extensionless-executable catalog. `oversized_legacy` is the >600 grandfathered baseline; `review_trigger_existing` is the existing 401-600 review-trigger range. Any count drift or unregistered trigger file fails verification.
 
 | Path | Kind | Classification | Physical lines | Current responsibilities | Candidate extraction seam |
 |---|---|---|---:|---|---|

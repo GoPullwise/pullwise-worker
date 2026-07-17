@@ -33,7 +33,7 @@ def render_document(baseline: dict[str, Any]) -> str:
             "",
             "### Handwritten file-size ratchet",
             "",
-            "The inventory covers every Git-tracked handwritten code/script suffix above 400 physical lines. `oversized_legacy` is the >600 grandfathered baseline; `review_trigger_existing` is the existing 401-600 review-trigger range. Any count drift or unregistered trigger file fails verification.",
+            "The inventory covers every Git-tracked regular file above 400 physical lines that matches the fixed handwritten code/test/maintenance suffix, name, or extensionless-executable catalog. `oversized_legacy` is the >600 grandfathered baseline; `review_trigger_existing` is the existing 401-600 review-trigger range. Any count drift or unregistered trigger file fails verification.",
             "",
             "| Path | Kind | Classification | Physical lines | Current responsibilities | Candidate extraction seam |",
             "|---|---|---|---:|---|---|",
