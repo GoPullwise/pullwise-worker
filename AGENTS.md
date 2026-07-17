@@ -107,7 +107,9 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
 - Any current line-count drift or unregistered file over 400 lines fails. A
   lower count must refresh the baseline downward. The genesis path set is
   closed: no new trigger path may be grandfathered, and removing a path after
-  it reaches 400 or fewer lines retires it from later re-entry.
+  it reaches 400 or fewer lines retires it from later re-entry. The gate reads
+  every committed blob revision for each genesis path, so a source-only
+  historical reduction also lowers the floor or retires the path.
 
 ## Worker Host Platform
 

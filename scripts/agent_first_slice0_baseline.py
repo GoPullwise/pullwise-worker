@@ -15,8 +15,9 @@ try:
     from scripts.agent_first_slice0_gate import (
         GateObservationError,
         git_bytes,
-        historical_ratchet_baselines,
+        historical_ratchet_evidence,
         is_handwritten,
+        physical_line_count,
         pipeline_values,
         ratchet_failures,
         tracked_handwritten_files,
@@ -26,8 +27,9 @@ except ModuleNotFoundError:
     from agent_first_slice0_gate import (  # type: ignore[no-redef]
         GateObservationError,
         git_bytes,
-        historical_ratchet_baselines,
+        historical_ratchet_evidence,
         is_handwritten,
+        physical_line_count,
         pipeline_values,
         ratchet_failures,
         tracked_handwritten_files,
@@ -52,13 +54,6 @@ class BaselineFormatError(ValueError):
 
 class BaselineObservationError(RuntimeError):
     pass
-
-
-def physical_line_count(data: bytes) -> int:
-    normalized = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    if not normalized:
-        return 0
-    return normalized.count(b"\n") + int(not normalized.endswith(b"\n"))
 
 
 def _exact_keys(value: object, expected: set[str], label: str) -> dict[str, Any]:
@@ -242,6 +237,7 @@ def verify_baseline(
     tracked_paths: Iterable[str] | None = None,
     tracked_executable_paths: Iterable[str] = (),
     ratchet_baselines: Iterable[dict[str, Any]] | None = None,
+    ratchet_source_counts: dict[str, Iterable[int | None]] | None = None,
     check_document: bool = True,
 ) -> dict[str, Any]:
     validate_baseline(baseline)
@@ -254,12 +250,13 @@ def verify_baseline(
             executable_paths = {path for path, executable in inventory if executable}
             current_head = git_bytes(root, "rev-parse", "HEAD").decode("ascii").strip()
             current_dirty = bool(git_bytes(root, "status", "--porcelain=v1", "--untracked-files=all"))
-            history = historical_ratchet_baselines(root, baseline["baseline_id"], current_head)
+            history, source_history = historical_ratchet_evidence(root, baseline["baseline_id"], current_head)
         else:
             tracked = tuple(tracked_paths)
             executable_paths = set(tracked_executable_paths)
             current_head = current_dirty = None
             history = tuple(ratchet_baselines or ())
+            source_history = dict(ratchet_source_counts or {})
         history = tuple(validate_baseline(snapshot) for snapshot in history)
     except (BaselineFormatError, BaselineObservationError, GateObservationError, UnicodeError) as exc:
         return {
@@ -295,7 +292,7 @@ def verify_baseline(
 
     actual_trigger: dict[str, int] = {}
     for path in tracked:
-        normalized = path.replace("\\", "/")
+        normalized = path
         if not is_handwritten(normalized, executable=normalized in executable_paths):
             continue
         try:
@@ -306,7 +303,7 @@ def verify_baseline(
         if count > REVIEW_TRIGGER:
             actual_trigger[normalized] = count
 
-    failures.extend(ratchet_failures(baseline, history))
+    failures.extend(ratchet_failures(baseline, history, source_history))
 
     expected = {entry["path"]: entry for entry in baseline["file_baselines"]}
     for path in sorted(set(actual_trigger) - set(expected)):

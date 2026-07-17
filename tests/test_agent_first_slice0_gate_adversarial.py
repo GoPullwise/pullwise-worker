@@ -10,6 +10,10 @@ from scripts.agent_first_slice0_baseline import (
     validate_baseline,
     verify_baseline,
 )
+from scripts.agent_first_slice0_gate import (
+    GateObservationError,
+    parse_tracked_handwritten_files,
+)
 from scripts.agent_first_slice0_render import render_document
 
 
@@ -113,6 +117,34 @@ class AgentFirstSlice0GateAdversarialTest(unittest.TestCase):
             )
         self.assertIn("pipeline_registry_drift", {item["code"] for item in report["failures"]})
 
+    def test_pipeline_registry_rejects_noncanonical_rebinding(self) -> None:
+        suffixes = (
+            "del PIPELINE_PHASES\n",
+            "if True:\n    PIPELINE_PHASES = (('changed_phase', 99),)\n",
+            "(PIPELINE_PHASES := (('changed_phase', 99),))\n",
+            "for PIPELINE_PHASES in ():\n    pass\n",
+            "def PIPELINE_PHASES():\n    pass\n",
+        )
+        for suffix in suffixes:
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _write_common(
+                    root,
+                    pipeline="PIPELINE_PHASES = (('only_phase', 100),)\n" + suffix,
+                )
+                report = verify_baseline(
+                    _baseline(),
+                    root,
+                    tracked_paths=("known.py", "pipeline.py"),
+                    check_document=False,
+                )
+                self.assertIn("pipeline_registry_drift", {item["code"] for item in report["failures"]})
+
+    def test_git_index_backslash_path_fails_closed(self) -> None:
+        record = f"100644 {'0' * 40} 0\tliteral\\name.py\0".encode("utf-8")
+        with self.assertRaises(GateObservationError):
+            parse_tracked_handwritten_files(record)
+
     def test_broad_code_suffixes_and_extensionless_executable_are_gated(self) -> None:
         candidate_paths = (
             "new.go",
@@ -203,6 +235,49 @@ class AgentFirstSlice0GateAdversarialTest(unittest.TestCase):
                 root,
                 tracked_paths=("known.py", "other.py", "pipeline.py"),
                 ratchet_baselines=(anchor, retired),
+                check_document=False,
+            )
+        self.assertIn(
+            {"code": "ratchet_reintroduced_trigger_path", "path": "known.py"},
+            report["failures"],
+        )
+
+    def test_source_only_historical_reduction_lowers_ratchet_floor(self) -> None:
+        anchor = _baseline(_file_entry("known.py", 500))
+        current = copy.deepcopy(anchor)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_common(root, known_lines=500)
+            report = verify_baseline(
+                current,
+                root,
+                tracked_paths=("known.py", "pipeline.py"),
+                ratchet_baselines=(anchor,),
+                ratchet_source_counts={"known.py": (500, 450, 500)},
+                check_document=False,
+            )
+        self.assertIn(
+            {
+                "code": "ratchet_physical_line_increase",
+                "path": "known.py",
+                "historical_minimum": 450,
+                "current": 500,
+            },
+            report["failures"],
+        )
+
+    def test_source_history_at_or_below_trigger_retires_path(self) -> None:
+        anchor = _baseline(_file_entry("known.py", 401))
+        current = copy.deepcopy(anchor)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _write_common(root)
+            report = verify_baseline(
+                current,
+                root,
+                tracked_paths=("known.py", "pipeline.py"),
+                ratchet_baselines=(anchor,),
+                ratchet_source_counts={"known.py": (401, 400, 401)},
                 check_document=False,
             )
         self.assertIn(

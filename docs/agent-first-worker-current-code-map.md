@@ -11,7 +11,7 @@
 python scripts/agent_first_slice0_baseline.py check --repo-root .
 ```
 
-文件规模 ratchet 以 Git commit `904165f3bed784faaa209ca80e33214c7b07f909` 为固定 genesis；检查需要可达的完整历史，允许 baseline 只向下更新，并把降到 400 行及以下后删除的路径视为不可重新登记。
+文件规模 ratchet 以 Git commit `904165f3bed784faaa209ca80e33214c7b07f909` 为固定 genesis；检查需要可达的完整历史，并读取每个 genesis 路径的全部已提交 blob revision。baseline 只能向下更新；任何已提交的 source-only 降低也会降低 floor，降到 400 行及以下会永久退休该路径。
 
 <!-- BEGIN GENERATED WORKER SLICE 0 BASELINE -->
 > Generated from `worker-current-implementation-2026-07-17` with `physical-lf/v1`. Do not edit this block by hand.

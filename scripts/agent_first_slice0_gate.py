@@ -41,6 +41,13 @@ class GateObservationError(RuntimeError):
     pass
 
 
+def physical_line_count(data: bytes) -> int:
+    normalized = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if not normalized:
+        return 0
+    return normalized.count(b"\n") + int(not normalized.endswith(b"\n"))
+
+
 def git_bytes(repo_root: Path, *args: str) -> bytes:
     try:
         result = subprocess.run(
@@ -56,9 +63,32 @@ def git_bytes(repo_root: Path, *args: str) -> bytes:
     return result.stdout
 
 
-def tracked_handwritten_files(repo_root: Path) -> tuple[tuple[str, bool], ...]:
+def _git_blob_or_none(repo_root: Path, revision: str, path: str) -> bytes | None:
     try:
-        records = git_bytes(repo_root, "ls-files", "--stage", "-z").decode("utf-8").split("\0")
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "cat-file", "blob", f"{revision}:{path}"],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GateObservationError(f"git_blob_unavailable:{revision}:{path}") from exc
+    if result.returncode == 0:
+        return result.stdout
+    if result.returncode in {1, 128}:
+        return None
+    raise GateObservationError(f"git_blob_failed:{revision}:{path}:{result.returncode}")
+
+
+def tracked_handwritten_files(repo_root: Path) -> tuple[tuple[str, bool], ...]:
+    return parse_tracked_handwritten_files(
+        git_bytes(repo_root, "ls-files", "--stage", "-z")
+    )
+
+
+def parse_tracked_handwritten_files(data: bytes) -> tuple[tuple[str, bool], ...]:
+    try:
+        records = data.decode("utf-8").split("\0")
     except UnicodeError as exc:
         raise GateObservationError("git_paths_not_utf8") from exc
     result: list[tuple[str, bool]] = []
@@ -75,7 +105,9 @@ def tracked_handwritten_files(repo_root: Path) -> tuple[tuple[str, bool], ...]:
         mode = fields[0]
         if mode not in {"100644", "100755"}:
             continue
-        path = raw_path.replace(chr(92), "/")
+        if chr(92) in raw_path:
+            raise GateObservationError("git_path_not_canonical")
+        path = raw_path
         if is_handwritten(path, executable=mode == "100755"):
             result.append((path, mode == "100755"))
     return tuple(sorted(result))
@@ -95,6 +127,23 @@ def pipeline_values(text: str, symbol: str) -> list[list[Any]] | None:
         tree = ast.parse(text)
     except SyntaxError:
         return None
+    bindings = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == symbol and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bindings += 1
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == symbol:
+            bindings += 1
+        elif isinstance(node, ast.arg) and node.arg == symbol:
+            bindings += 1
+        elif isinstance(node, ast.alias):
+            bound_name = node.asname or node.name.split(".", 1)[0]
+            bindings += int(bound_name == symbol)
+        elif isinstance(node, ast.ExceptHandler) and node.name == symbol:
+            bindings += 1
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == symbol:
+            bindings += 1
+        elif isinstance(node, ast.MatchMapping) and node.rest == symbol:
+            bindings += 1
     assignments: list[ast.expr] = []
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -103,11 +152,7 @@ def pipeline_values(text: str, symbol: str) -> list[list[Any]] | None:
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.target.id == symbol and node.value is not None:
                 assignments.append(node.value)
-        elif isinstance(node, (ast.AugAssign, ast.Delete)):
-            target = node.target if isinstance(node, ast.AugAssign) else None
-            if isinstance(target, ast.Name) and target.id == symbol:
-                return None
-    if len(assignments) != 1:
+    if len(assignments) != 1 or bindings != 1:
         return None
     try:
         raw = ast.literal_eval(assignments[0])
@@ -128,16 +173,7 @@ def pipeline_values(text: str, symbol: str) -> list[list[Any]] | None:
     return result or None
 
 
-def historical_ratchet_baselines(
-    repo_root: Path,
-    baseline_id: str,
-    head: str,
-) -> tuple[dict[str, Any], ...]:
-    try:
-        anchor, manifest_path = RATCHET_ANCHORS[baseline_id]
-    except KeyError as exc:
-        raise GateObservationError(f"ratchet_anchor_unknown:{baseline_id}") from exc
-    git_bytes(repo_root, "merge-base", "--is-ancestor", anchor, head)
+def _history_revisions(repo_root: Path, anchor: str, head: str, path: str) -> tuple[str, ...]:
     try:
         changed = git_bytes(
             repo_root,
@@ -148,11 +184,24 @@ def historical_ratchet_baselines(
             "--ancestry-path",
             f"{anchor}..{head}",
             "--",
-            manifest_path,
+            path,
         ).decode("ascii").splitlines()
     except UnicodeError as exc:
         raise GateObservationError("ratchet_history_not_ascii") from exc
-    revisions = [anchor, *(revision for revision in changed if revision != anchor)]
+    return tuple(dict.fromkeys((anchor, *changed)))
+
+
+def historical_ratchet_evidence(
+    repo_root: Path,
+    baseline_id: str,
+    head: str,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, tuple[int | None, ...]]]:
+    try:
+        anchor, manifest_path = RATCHET_ANCHORS[baseline_id]
+    except KeyError as exc:
+        raise GateObservationError(f"ratchet_anchor_unknown:{baseline_id}") from exc
+    git_bytes(repo_root, "merge-base", "--is-ancestor", anchor, head)
+    revisions = _history_revisions(repo_root, anchor, head, manifest_path)
     baselines: list[dict[str, Any]] = []
     for revision in revisions:
         try:
@@ -164,12 +213,26 @@ def historical_ratchet_baselines(
         if not isinstance(value, dict):
             raise GateObservationError(f"ratchet_manifest_invalid:{revision}")
         baselines.append(value)
-    return tuple(baselines)
+    entries = baselines[0].get("file_baselines")
+    if not isinstance(entries, list):
+        raise GateObservationError("ratchet_anchor_manifest_invalid")
+    source_counts: dict[str, tuple[int | None, ...]] = {}
+    for entry in entries:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str):
+            raise GateObservationError("ratchet_anchor_manifest_invalid")
+        observations: list[int | None] = []
+        for revision in _history_revisions(repo_root, anchor, head, path):
+            blob = _git_blob_or_none(repo_root, revision, path)
+            observations.append(None if blob is None else physical_line_count(blob))
+        source_counts[path] = tuple(observations)
+    return tuple(baselines), source_counts
 
 
 def ratchet_failures(
     current: dict[str, Any],
     historical: Iterable[dict[str, Any]],
+    source_counts: dict[str, Iterable[int | None]] | None = None,
 ) -> list[dict[str, Any]]:
     snapshots = tuple(historical)
     if not snapshots:
@@ -186,6 +249,14 @@ def ratchet_failures(
             if path not in anchor_entries:
                 continue
             floors[path] = min(floors[path], int(entry["physical_lines"]))
+    for path, observations in (source_counts or {}).items():
+        if path not in anchor_entries:
+            continue
+        for count in observations:
+            if count is None or count <= 400:
+                retired.add(path)
+            else:
+                floors[path] = min(floors[path], count)
     for entry in current["file_baselines"]:
         path = entry["path"]
         lines = int(entry["physical_lines"])
