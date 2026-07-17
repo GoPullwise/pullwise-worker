@@ -1,0 +1,15 @@
+{
+  "schema_id": "pullwise-jcs-profile-1-fixtures/v1",
+  "cases": [
+    {
+      "id": "unicode-nested-and-escaped",
+      "input": {
+        "z": [3, true, null],
+        "m": "line\n\"quoted\"",
+        "a": "é"
+      },
+      "canonical_utf8": "{\"a\":\"é\",\"m\":\"line\\n\\\"quoted\\\"\",\"z\":[3,true,null]}",
+      "sha256": "0ba465d64864b048e7562edf4ae4bc18ff18b93205d2a460647a09db51272510"
+    }
+  ]
+}
