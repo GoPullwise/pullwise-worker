@@ -265,7 +265,11 @@ class ObjectStore:
                 raise AgentKernelStorageError(f"{name}_invalid") from exc
         if encoding not in {"utf-8", "binary"}:
             raise AgentKernelStorageError("content_encoding_invalid")
-        if isinstance(max_bytes, bool) or not 0 <= max_bytes <= MAX_SAFE_INTEGER:
+        if (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or not 0 <= max_bytes <= MAX_SAFE_INTEGER
+        ):
             raise AgentKernelStorageError("content_size_limit_invalid")
 
     def _record_reference(self, task_id: str, ref: dict[str, object]) -> None:

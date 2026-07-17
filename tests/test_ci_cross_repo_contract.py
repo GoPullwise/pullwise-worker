@@ -10,6 +10,7 @@ BASELINE_PATH = (
     REPO_ROOT / "contracts" / "agent-first" / "legacy-v1-contract-baseline.json"
 )
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+WHEEL_CHECK_PATH = REPO_ROOT / "scripts" / "check_agent_kernel_wheel.py"
 
 
 class CrossRepositoryCiContractTest(unittest.TestCase):
@@ -25,6 +26,12 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
         self.assertIn(f"ref: {server['frozen_head']}", workflow)
         self.assertIn("path: pullwise-server", workflow)
         self.assertIn("python -m pip install -e ../pullwise-server", workflow)
+
+    def test_ci_runs_the_isolated_agent_kernel_wheel_check(self) -> None:
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertTrue(WHEEL_CHECK_PATH.is_file())
+        self.assertIn("python scripts/check_agent_kernel_wheel.py", workflow)
 
 
 if __name__ == "__main__":
