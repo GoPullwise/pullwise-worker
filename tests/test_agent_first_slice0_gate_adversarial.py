@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +14,10 @@ from scripts.agent_first_slice0_baseline import (
 )
 from scripts.agent_first_slice0_gate import (
     GateObservationError,
+    RATCHET_ANCHORS,
+    historical_ratchet_evidence,
     parse_tracked_handwritten_files,
+    ratchet_failures,
 )
 from scripts.agent_first_slice0_render import render_document
 
@@ -70,6 +75,59 @@ def _write_common(root: Path, *, known_lines: int = 401, pipeline: str | None = 
 
 
 class AgentFirstSlice0GateAdversarialTest(unittest.TestCase):
+    def test_real_git_source_history_closes_multi_commit_reduction_bypass(self) -> None:
+        baseline_id = "source-history-integration-test"
+        baseline = _baseline(
+            _file_entry("known.py", 500),
+            _file_entry("retired.py", 401),
+        )
+        baseline["baseline_id"] = baseline_id
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", "-C", str(root), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "slice0@example.invalid")
+            git("config", "user.name", "Slice 0 Test")
+            git("config", "core.autocrlf", "false")
+            (root / "baseline.json").write_text(json.dumps(baseline), encoding="utf-8", newline="\n")
+            (root / "known.py").write_text("pass\n" * 500, encoding="utf-8", newline="\n")
+            (root / "retired.py").write_text("pass\n" * 401, encoding="utf-8", newline="\n")
+            git("add", ".")
+            git("commit", "-qm", "anchor")
+            anchor = git("rev-parse", "HEAD")
+            RATCHET_ANCHORS[baseline_id] = (anchor, "baseline.json")
+            try:
+                (root / "known.py").write_text("pass\n" * 450, encoding="utf-8", newline="\n")
+                (root / "retired.py").write_text("pass\n" * 400, encoding="utf-8", newline="\n")
+                git("add", ".")
+                git("commit", "-qm", "source-only reduction")
+                (root / "known.py").write_text("pass\n" * 500, encoding="utf-8", newline="\n")
+                (root / "retired.py").write_text("pass\n" * 401, encoding="utf-8", newline="\n")
+                git("add", ".")
+                git("commit", "-qm", "restore counts")
+                history, source_counts = historical_ratchet_evidence(
+                    root, baseline_id, git("rev-parse", "HEAD")
+                )
+            finally:
+                RATCHET_ANCHORS.pop(baseline_id, None)
+        failures = ratchet_failures(baseline, history, source_counts)
+        self.assertIn(
+            {"code": "ratchet_physical_line_increase", "path": "known.py", "historical_minimum": 450, "current": 500},
+            failures,
+        )
+        self.assertIn(
+            {"code": "ratchet_reintroduced_trigger_path", "path": "retired.py"},
+            failures,
+        )
+
     def test_ci_fetches_history_required_by_ratchet_anchor(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
@@ -124,6 +182,10 @@ class AgentFirstSlice0GateAdversarialTest(unittest.TestCase):
             "(PIPELINE_PHASES := (('changed_phase', 99),))\n",
             "for PIPELINE_PHASES in ():\n    pass\n",
             "def PIPELINE_PHASES():\n    pass\n",
+            "from override_module import *\n",
+            "globals()['PIPELINE_PHASES'] = (('changed_phase', 99),)\n",
+            "exec('PIPELINE_PHASES = changed')\n",
+            "sys.modules[__name__].PIPELINE_PHASES = (('changed_phase', 99),)\n",
         )
         for suffix in suffixes:
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp_dir:

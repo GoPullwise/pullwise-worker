@@ -131,11 +131,22 @@ def pipeline_values(text: str, symbol: str) -> list[list[Any]] | None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id == symbol and isinstance(node.ctx, (ast.Store, ast.Del)):
             bindings += 1
+        elif isinstance(node, ast.Attribute) and node.attr == symbol and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bindings += 1
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == symbol
+        ):
+            bindings += 1
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == symbol:
             bindings += 1
         elif isinstance(node, ast.arg) and node.arg == symbol:
             bindings += 1
         elif isinstance(node, ast.alias):
+            if node.name == "*":
+                return None
             bound_name = node.asname or node.name.split(".", 1)[0]
             bindings += int(bound_name == symbol)
         elif isinstance(node, ast.ExceptHandler) and node.name == symbol:
@@ -144,6 +155,19 @@ def pipeline_values(text: str, symbol: str) -> list[list[Any]] | None:
             bindings += 1
         elif isinstance(node, ast.MatchMapping) and node.rest == symbol:
             bindings += 1
+        elif isinstance(node, ast.Call):
+            function_name = (
+                node.func.id if isinstance(node.func, ast.Name)
+                else node.func.attr if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if function_name in {"exec", "eval", "globals", "locals"}:
+                return None
+            if function_name == "vars" and not node.args and not node.keywords:
+                return None
+            if function_name in {"setattr", "delattr", "update", "setdefault", "pop", "__setitem__", "__delitem__"}:
+                if any(isinstance(value, ast.Constant) and value.value == symbol for value in ast.walk(node)):
+                    return None
     assignments: list[ast.expr] = []
     for node in tree.body:
         if isinstance(node, ast.Assign):
