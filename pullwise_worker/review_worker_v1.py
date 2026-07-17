@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from . import __version__
+from . import __version__, intent_artifact_validation
 from ._main_part_01_bootstrap import (
     PullwiseRequestError,
     REPOSITORY_MIRROR_CACHE_DIR_NAME,
@@ -13766,7 +13766,7 @@ def repair_intent_test_plan_artifact(path: Path, run_dir: Path) -> None:
 def intent_test_plan_errors(run_dir: Path, payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["intent-test-plan.json must be a JSON object"]
-    errors = []
+    errors = intent_artifact_validation.intent_plan_target_contract_errors(payload)
     if payload.get("schema_version") != "intent-test-plan/v1":
         errors.append("intent-test-plan.json schema_version must be intent-test-plan/v1")
     targets = payload.get("test_targets")
@@ -13826,7 +13826,7 @@ def _intent_generated_test_exists(run_dir: Path, raw_path: str) -> bool:
 def intent_test_source_errors(run_dir: Path, payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["intent-test-source.json must be a JSON object"]
-    errors = []
+    errors = intent_artifact_validation.intent_source_record_contract_errors(payload)
     if payload.get("schema_version") != "intent-test-source/v1":
         errors.append("intent-test-source.json schema_version must be intent-test-source/v1")
     generated = payload.get("generated_tests")
