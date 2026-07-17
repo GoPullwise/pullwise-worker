@@ -365,7 +365,7 @@ class ObjectStore:
                 if (
                     "unexpected hardlinks" not in str(exc)
                     or not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_nlink != 2
+                    or metadata.st_nlink not in {1, 2}
                 ):
                     raise
                 time.sleep(0.001)

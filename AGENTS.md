@@ -176,7 +176,10 @@ non-regular files, unsupported schema keywords, and unresolved references.
   size verification, no-clobber atomic publish, parent-directory `fsync`, then
   the SQLite object/binding transaction. Stored objects are private `0600`,
   regular, single-link files. Corruption or artifact rebinding fails closed;
-  never repair either silently.
+  never repair either silently. A verified read must open with `O_NOFOLLOW` and
+  return bytes from the same descriptor whose `fstat`, size, and digest passed.
+  During a no-clobber race, an observed two-link staging transition may already
+  have converged to one link; retry full verification, but never accept more.
 - Slice 1 persistence is shadow-only. It must not publish a terminal result,
   replace the legacy v1 authority, or expose an Agent Kernel task runner before
   the applicable decision and later-slice gates pass.

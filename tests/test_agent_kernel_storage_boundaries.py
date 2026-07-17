@@ -4,12 +4,13 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from pullwise_worker.agent_kernel_database import (
     AgentKernelDatabase,
     AgentKernelStorageError,
 )
-from pullwise_worker.agent_kernel_object_store import ObjectStore
+from pullwise_worker.agent_kernel_object_store import CasCorruptError, ObjectStore
 
 
 class AgentKernelStorageBoundaryTest(unittest.TestCase):
@@ -64,6 +65,31 @@ class AgentKernelStorageBoundaryTest(unittest.TestCase):
         self.store._verify_path = replace_after_verification  # type: ignore[method-assign]
 
         self.assertEqual(payload, self.store.read_verified(content_ref))
+
+    def test_concurrent_publish_retries_when_two_links_already_converged_to_one(
+        self,
+    ) -> None:
+        payload = b"converged"
+        content_ref = self.store.put_bytes(payload, **self._metadata())
+        path = self.store.path_for_digest(str(content_ref["sha256"]))
+        verify = self.store._verify_path
+        attempts = 0
+
+        def transient_link_count(target: Path, digest: str, size: int) -> bytes | None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise CasCorruptError(
+                    "CAS_CORRUPT: object has unexpected hardlinks"
+                )
+            return verify(target, digest, size)
+
+        with mock.patch.object(ObjectStore, "_verify_path", transient_link_count):
+            self.store._verify_concurrent_publish(
+                path, str(content_ref["sha256"]), len(payload)
+            )
+
+        self.assertEqual(2, attempts)
 
 
 if __name__ == "__main__":

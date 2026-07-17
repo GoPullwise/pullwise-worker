@@ -25,7 +25,8 @@ legacy 行为；`agent-kernel/` 可保留为只读诊断数据，不要求数据
 - SQLite：每 Worker 独立目录、WAL/foreign key/FULL/busy timeout、digest-bound
   migration history、未知高版本拒绝，以及第 4.4 节最小表集合。
 - CAS：流式限额、独立 hash/size 校验、no-clobber publish、file/directory fsync、
-  SQLite 后置引用、artifact rebinding 拒绝、verified read 和 idle+TTL orphan GC。
+  SQLite 后置引用、artifact rebinding 拒绝、单一 `O_NOFOLLOW` descriptor 的
+  verified read，以及 idle+TTL orphan GC。
 - Shadow Store：schema validation -> canonical bytes -> CAS 的窄接口；读取时重新
   校验 digest、canonical bytes、声明 schema 和 semantic invariant。
 - Wheel 交付链：无依赖构建后安装到隔离 venv，从源码树外加载默认 registry，核对
@@ -83,6 +84,8 @@ terminal 成功，也不得让新 Gate 放宽 legacy QA。
 - CAS 顺序保持：durable temp bytes -> durable digest path -> durable temp unlink ->
   SQLite object/binding transaction。任何注入点都不会产生“DB 有 ref、bytes 不在”的
   状态。
+- 并发发布校验允许已观察到的双链接在复查时收敛为单链接并重新完整验证；不会接受
+  多于两个链接，也不会跳过内容、权限或 digest 校验。
 
 ## 验证命令
 
@@ -95,6 +98,7 @@ python3 -m unittest \
   tests.test_agent_kernel_contract_semantics \
   tests.test_agent_kernel_legacy_mapping \
   tests.test_agent_kernel_storage \
+  tests.test_agent_kernel_storage_boundaries \
   tests.test_agent_kernel_shadow_store
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 scripts/check_output_contracts.py
@@ -111,8 +115,8 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 
 ## 最近验证结果
 
-- Python 3.10/3.12 Slice 1 聚焦测试：48/48 通过。
-- Python 3.12 Worker 全量：702 tests 通过，4 个既有条件性 skip。
+- Python 3.10/3.12 Slice 1 聚焦测试：50/50 通过。
+- Python 3.12 Worker 全量：704 tests 通过，4 个既有条件性 skip。
 - output contracts 4/4、Slice 0 baseline `compatible`、cross-repo baseline
   `compatible`（14 个 fixed runner 全部通过）。
 - wheel 隔离安装成功，默认 registry 包含 13 个 schema 和 3 个 fixture pack，
@@ -130,7 +134,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `pullwise_worker/agent_kernel_database.py` | 239 | SQLite 生命周期与 migration |
 | `pullwise_worker/agent_kernel_identity.py` | 64 | legacy identity mapping |
 | `pullwise_worker/agent_kernel_migrations.py` | 263 | 原子 migration registry |
-| `pullwise_worker/agent_kernel_object_store.py` | 383 | CAS side effects |
+| `pullwise_worker/agent_kernel_object_store.py` | 391 | CAS side effects |
 | `pullwise_worker/agent_kernel_schema_registry.py` | 187 | digest-bound schema loading |
 | `pullwise_worker/agent_kernel_schema_validation.py` | 331 | 受控 schema 子集 |
 | `pullwise_worker/agent_kernel_shadow_store.py` | 126 | validation/CAS composition |
@@ -140,7 +144,8 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `tests/test_agent_kernel_legacy_mapping.py` | 67 | identity/collision |
 | `tests/test_agent_kernel_schema_registry.py` | 212 | schema/golden/fail-closed |
 | `tests/test_agent_kernel_shadow_store.py` | 164 | shadow boundary/metrics |
-| `tests/test_agent_kernel_storage.py` | 376 | migration/CAS/crash/concurrency |
+| `tests/test_agent_kernel_storage.py` | 358 | migration/CAS/crash/concurrency |
+| `tests/test_agent_kernel_storage_boundaries.py` | 96 | limits/read/publish boundaries |
 | `scripts/check_agent_kernel_wheel.py` | 134 | isolated installed-wheel smoke |
 | `contracts/agent-task/v1/actor.schema.json` | 56 | schema |
 | `contracts/agent-task/v1/availability-ref.schema.json` | 24 | schema |
@@ -161,8 +166,8 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `contracts/agent-task/v1/fixtures/schema-golden.json` | 261 | frozen fixture |
 | `pyproject.toml` | 28 | wheel package data |
 | `.github/workflows/ci.yml` | 49 | pinned Server checkout/package smoke |
-| `AGENTS.md` | 940 | 持久工程规则（非代码阈值） |
-| `docs/agent-first-worker-slice-1-runbook.md` | 169 | 本证据 |
+| `AGENTS.md` | 943 | 持久工程规则（非代码阈值） |
+| `docs/agent-first-worker-slice-1-runbook.md` | 174 | 本证据 |
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行说明项，没有超过 600 行
 的新增文件，也没有生成/第三方/原子 registry 例外需要登记。S1 未触及任何超过
