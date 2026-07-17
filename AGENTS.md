@@ -157,6 +157,33 @@ summary versus per-decision detail; remove the exception when a deterministic
 include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
+## Agent Kernel Slice 1 Storage Contracts
+
+`contracts/agent-task/v1/schema-registry.json`, the digest-bound schemas it
+lists, and their golden valid/invalid fixtures are one contract surface. Update
+them atomically. Registry loading must reject digest drift, symlinks,
+non-regular files, unsupported schema keywords, and unresolved references.
+
+- Validate a document against its registered schema and semantic invariants
+  before canonicalization or CAS persistence. Pullwise JCS Profile 1 rejects
+  floats, non-safe integers, invalid UTF-8, non-NFC strings, non-ASCII object
+  keys, and duplicate JSON keys; never silently normalize an invalid value.
+- CAS publication order is staged bytes, file `fsync`, independent digest and
+  size verification, no-clobber atomic publish, parent-directory `fsync`, then
+  the SQLite object/binding transaction. Stored objects are private `0600`,
+  regular, single-link files. Corruption or artifact rebinding fails closed;
+  never repair either silently.
+- Slice 1 persistence is shadow-only. It must not publish a terminal result,
+  replace the legacy v1 authority, or expose an Agent Kernel task runner before
+  the applicable decision and later-slice gates pass.
+- Run CAS orphan collection only while the Worker is idle and only after the
+  configured age threshold. A database row without durable bytes remains an
+  error; a durable unbound object may be collected after the threshold.
+- The design names `transport-receipt/v1` and
+  `transport-abandonment-record/v1` without defining their field contracts.
+  Record this as `SPEC_GAP`; do not invent or register either schema until its
+  normative shape, identity, and idempotency rules are explicitly resolved.
+
 ## Worker Host Platform
 
 Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,
