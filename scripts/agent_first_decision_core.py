@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import date
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -161,6 +162,11 @@ def _validate_resolution(decision: dict[str, Any], label: str) -> None:
     decided_at = _text(item["decided_at"], f"{label}.resolution.decided_at")
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", decided_at) is None:
         raise DecisionRegisterFormatError(f"{label}.resolution.decided_at")
+    try:
+        if date.fromisoformat(decided_at).isoformat() != decided_at:
+            raise ValueError
+    except ValueError:
+        raise DecisionRegisterFormatError(f"{label}.resolution.decided_at")
     _text_list(item["evidence_refs"], f"{label}.resolution.evidence_refs")
     digest = _text(item["resolution_sha256"], f"{label}.resolution.resolution_sha256")
     if digest != canonical_resolution_sha256(decision["id"], item):
@@ -285,11 +291,27 @@ def validate_register(register: object) -> dict[str, Any]:
         if actual["activation"] != expected_activation or expected["source_ref"] not in actual["source_refs"]:
             raise DecisionRegisterFormatError("decisions:required_catalog")
     id_set = set(ids)
+    superseded_targets: set[str] = set()
     for index, item in enumerate(root["decisions"]):
         if not set(item["depends_on"]) <= id_set or not set(item["supersedes"]) <= set(ids[:index]):
             raise DecisionRegisterFormatError(f"decisions[{index}]:reference")
+        for target_id in item["supersedes"]:
+            target = root["decisions"][ids.index(target_id)]
+            if target["status"] != "resolved":
+                raise DecisionRegisterFormatError(
+                    f"decisions[{index}].supersedes:target_not_resolved"
+                )
+            if target_id in superseded_targets:
+                raise DecisionRegisterFormatError(
+                    f"decisions[{index}].supersedes:duplicate_target"
+                )
+            superseded_targets.add(target_id)
         activation = item["activation"]
         if activation is not None:
+            if activation["decision_id"] not in set(ids[:index]):
+                raise DecisionRegisterFormatError(
+                    f"decisions[{index}].activation:source_order"
+                )
             source = next(entry for entry in root["decisions"] if entry["id"] == activation["decision_id"])
             if activation["selected_option_id"] not in {option["id"] for option in source["options"]}:
                 raise DecisionRegisterFormatError(f"decisions[{index}].activation:selected_option")
