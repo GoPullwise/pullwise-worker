@@ -7,25 +7,22 @@ import importlib.util
 import io
 import json
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "verify_agent_first_contract_baseline.py"
-SPEC = importlib.util.spec_from_file_location(
-    "verify_agent_first_contract_baseline",
-    SCRIPT_PATH,
-)
+SPEC = importlib.util.spec_from_file_location("contract_baseline_verifier", SCRIPT_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load contract baseline verifier: {SCRIPT_PATH}")
 baseline = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(baseline)
 
 
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def canonical_sha256(path: Path) -> str:
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class AgentFirstContractBaselineTest(unittest.TestCase):
@@ -43,7 +40,8 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
         tests_dir = self.server / "tests"
         tests_dir.mkdir()
         (tests_dir / "__init__.py").write_text("", encoding="utf-8")
-        (tests_dir / "test_contract.py").write_text(
+        fixture_path = tests_dir / "test_contract.py"
+        fixture_path.write_text(
             "import unittest\n\n"
             "class ContractTest(unittest.TestCase):\n"
             "    def test_contract(self):\n"
@@ -51,12 +49,20 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
             "'review-worker-protocol/v1')\n",
             encoding="utf-8",
         )
-
+        self.runners = {
+            "server.strict-v1-probe": {
+                "repo": "server",
+                "runner": "python_unittest",
+                "nodes": ("tests.test_contract",),
+                "timeout_seconds": 30,
+                "minimum_tests": 1,
+            }
+        }
         self.manifest = {
             "schema_id": "pullwise-contract-baseline/v1",
             "baseline_id": "strict-v1-test-baseline",
             "protocol_version": "review-worker-protocol/v1",
-            "hash_profile": "sha256-raw-bytes/v1",
+            "hash_profile": "sha256-utf8-lf/v1",
             "baseline_owner": "Pullwise Worker compatibility owner",
             "appendix": {
                 "repo": "worker",
@@ -67,49 +73,40 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
             "compatibility_policy": {
                 "head_drift": "informational",
                 "unlisted_path_drift": "ignored",
-                "surface_hash_drift": "incompatible_pending_review",
-                "test_failure": "incompatible",
+                "blocking_surface_drift": "incompatible",
+                "watched_surface_drift": "warning_if_fixed_probes_pass",
+                "probe_failure": "incompatible",
+                "probe_indeterminate": "indeterminate",
                 "required_review": "baseline_owner_and_affected_repo_owner",
             },
             "repositories": [
-                {
-                    "id": "server",
-                    "path": "pullwise-server",
-                    "owner": "Pullwise Server protocol owner",
-                    "frozen_head": "1" * 40,
-                },
-                {
-                    "id": "web",
-                    "path": "pullwise-web",
-                    "owner": "Pullwise Web projection owner",
-                    "frozen_head": "2" * 40,
-                },
-                {
-                    "id": "worker",
-                    "path": "pullwise-worker",
-                    "owner": "Pullwise Worker compatibility owner",
-                    "frozen_head": "3" * 40,
-                },
+                {"id": "server", "owner": "Pullwise Server protocol owner", "frozen_head": "1" * 40},
+                {"id": "web", "owner": "Pullwise Web projection owner", "frozen_head": "2" * 40},
+                {"id": "worker", "owner": "Pullwise Worker compatibility owner", "frozen_head": "3" * 40},
             ],
             "surfaces": [
+                {
+                    "id": "server.strict-v1-fixture",
+                    "repo": "server",
+                    "path": "tests/test_contract.py",
+                    "roles": ["fixture"],
+                    "anchors": ["review-worker-protocol/v1"],
+                    "enforcement": "blocking",
+                    "probe_ids": ["server.strict-v1-probe"],
+                    "sha256": canonical_sha256(fixture_path),
+                },
                 {
                     "id": "server.strict-v1-validator",
                     "repo": "server",
                     "path": "contract.txt",
                     "roles": ["validator"],
                     "anchors": ["strict-v1-contract"],
-                    "sha256": file_sha256(contract_path),
-                }
+                    "enforcement": "watched",
+                    "probe_ids": ["server.strict-v1-probe"],
+                    "sha256": canonical_sha256(contract_path),
+                },
             ],
-            "tests": [
-                {
-                    "id": "server.strict-v1-fixtures",
-                    "repo": "server",
-                    "runner": "python_unittest",
-                    "nodes": ["tests.test_contract"],
-                    "timeout_seconds": 30,
-                }
-            ],
+            "tests": [{"id": "server.strict-v1-probe", "runner_id": "server.strict-v1-probe"}],
         }
         self.manifest_path = self.worker / "contracts" / "baseline.json"
         self.manifest_path.parent.mkdir()
@@ -132,99 +129,129 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
         path.write_text(
             "# MVP\n\n"
             f"{appendix['start_marker']}\n"
-            f"{baseline.render_appendix(self.manifest)}\n"
+            f"{baseline.render_appendix(self.manifest, runner_catalog=self.runners)}\n"
             f"{appendix['end_marker']}\n",
             encoding="utf-8",
         )
 
-    def test_matching_surfaces_passing_tests_and_synced_appendix_are_compatible(self) -> None:
-        report = baseline.verify_baseline(self.manifest, self.workspace, run_tests=True)
+    def _verify(self, *, run_tests: bool = True) -> dict[str, object]:
+        return baseline.verify_baseline(
+            self.manifest,
+            self.workspace,
+            run_tests=run_tests,
+            runner_catalog=self.runners,
+        )
 
+    def test_matching_baseline_is_compatible_and_report_is_sanitized(self) -> None:
+        report = self._verify()
+
+        self.assertEqual("compatible", report["status"])
         self.assertTrue(report["compatible"])
         self.assertTrue(report["hashes_match"])
         self.assertTrue(report["appendix_matches"])
         self.assertEqual([], report["failures"])
+        self.assertEqual([], report["indeterminate_reasons"])
         self.assertEqual("passed", report["tests"][0]["status"])
-        self.assertIsNone(report["repositories"][0]["current_head"])
+        self.assertEqual(1, report["tests"][0]["observed_tests"])
+        serialized = json.dumps(report, sort_keys=True)
+        self.assertNotIn(str(self.workspace), serialized)
+        self.assertNotIn("output_tail", serialized)
+        self.assertNotIn("argv", serialized)
 
-    def test_unlisted_file_and_unavailable_git_head_do_not_block(self) -> None:
+    def test_lf_and_crlf_have_the_same_canonical_digest(self) -> None:
+        path = self.server / "contract.txt"
+        lf_digest = baseline.text_sha256(path)
+        path.write_bytes(b"strict-v1-contract\r\n")
+
+        self.assertEqual(lf_digest, baseline.text_sha256(path))
+        self.assertEqual("compatible", self._verify()["status"])
+
+    def test_unlisted_file_and_head_drift_do_not_block(self) -> None:
         (self.server / "unlisted.txt").write_text("changed\n", encoding="utf-8")
 
-        report = baseline.verify_baseline(self.manifest, self.workspace, run_tests=True)
+        report = self._verify()
 
-        self.assertTrue(report["compatible"])
+        self.assertEqual("compatible", report["status"])
         self.assertEqual("informational", report["repositories"][0]["head_status"])
 
-    def test_surface_drift_and_missing_anchor_are_located(self) -> None:
-        (self.server / "contract.txt").write_text("changed\n", encoding="utf-8")
+    def test_watched_source_drift_warns_when_its_fixed_probe_passes(self) -> None:
+        (self.server / "contract.txt").write_text("strict-v1-contract changed\n", encoding="utf-8")
 
-        report = baseline.verify_baseline(self.manifest, self.workspace, run_tests=False)
+        report = self._verify()
 
-        self.assertFalse(report["compatible"])
+        self.assertEqual("compatible", report["status"])
         self.assertFalse(report["hashes_match"])
-        self.assertEqual(
-            {"anchor_missing", "surface_hash_mismatch"},
-            {failure["code"] for failure in report["failures"]},
-        )
-        self.assertTrue(
-            all(
-                failure["surface_id"] == "server.strict-v1-validator"
-                for failure in report["failures"]
-            )
-        )
+        self.assertEqual("watched_surface_drift", report["warnings"][0]["code"])
+        self.assertEqual("server.strict-v1-validator", report["warnings"][0]["surface_id"])
 
-    def test_missing_surface_fails_closed_but_is_not_a_manifest_parse_error(self) -> None:
-        (self.server / "contract.txt").unlink()
+    def test_blocking_fixture_drift_is_incompatible(self) -> None:
+        fixture = self.server / "tests" / "test_contract.py"
+        fixture.write_text(fixture.read_text(encoding="utf-8") + "# drift\n", encoding="utf-8")
 
-        report = baseline.verify_baseline(self.manifest, self.workspace, run_tests=False)
+        report = self._verify()
 
+        self.assertEqual("incompatible", report["status"])
         self.assertFalse(report["compatible"])
-        self.assertEqual("surface_missing", report["failures"][0]["code"])
+        self.assertEqual("blocking_surface_drift", report["failures"][0]["code"])
 
-    def test_test_failure_is_incompatible(self) -> None:
-        (self.server / "tests" / "test_contract.py").write_text(
-            "import unittest\n\n"
-            "class ContractTest(unittest.TestCase):\n"
-            "    def test_contract(self):\n"
-            "        self.fail('fixture drift')\n",
-            encoding="utf-8",
+    def test_failed_probe_is_incompatible_without_raw_output(self) -> None:
+        fixture = self.server / "tests" / "test_contract.py"
+        failing = fixture.read_text(encoding="utf-8").replace(
+            "self.assertEqual('review-worker-protocol/v1', 'review-worker-protocol/v1')",
+            "self.fail('secret fixture drift')",
         )
+        fixture.write_text(failing, encoding="utf-8")
+        self.manifest["surfaces"][0]["sha256"] = canonical_sha256(fixture)
+        self._write_matching_appendix()
 
-        report = baseline.verify_baseline(self.manifest, self.workspace, run_tests=True)
+        report = self._verify()
 
-        self.assertFalse(report["compatible"])
+        self.assertEqual("incompatible", report["status"])
         self.assertEqual("failed", report["tests"][0]["status"])
-        self.assertIn("fixture drift", report["tests"][0]["output_tail"])
-        self.assertEqual("test_failed", report["failures"][-1]["code"])
+        self.assertRegex(report["tests"][0]["output_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("secret fixture drift", json.dumps(report))
+        self.assertEqual("probe_failed", report["failures"][-1]["code"])
+
+    def test_not_running_a_required_probe_makes_watched_drift_indeterminate(self) -> None:
+        (self.server / "contract.txt").write_text("strict-v1-contract changed\n", encoding="utf-8")
+
+        report = self._verify(run_tests=False)
+
+        self.assertEqual("indeterminate", report["status"])
+        self.assertEqual("probe_not_run", report["indeterminate_reasons"][0]["code"])
 
     def test_appendix_drift_is_incompatible(self) -> None:
         appendix_path = self.worker / self.manifest["appendix"]["path"]
         appendix_path.write_text("stale appendix\n", encoding="utf-8")
 
-        report = baseline.verify_baseline(self.manifest, self.workspace, run_tests=False)
+        report = self._verify(run_tests=False)
 
-        self.assertFalse(report["compatible"])
+        self.assertEqual("incompatible", report["status"])
         self.assertFalse(report["appendix_matches"])
         self.assertEqual("appendix_drift", report["failures"][-1]["code"])
 
-    def test_candidate_refreshes_heads_and_hashes_without_mutating_input(self) -> None:
+    def test_candidate_is_read_only_and_uses_canonical_hashes(self) -> None:
         original = copy.deepcopy(self.manifest)
-        (self.server / "contract.txt").write_text("strict-v1-contract-v2\n", encoding="utf-8")
+        path = self.server / "contract.txt"
+        path.write_bytes(b"strict-v1-contract-v2\r\n")
 
-        candidate = baseline.create_candidate(self.manifest, self.workspace)
+        candidate = baseline.create_candidate(
+            self.manifest, self.workspace, runner_catalog=self.runners
+        )
 
         self.assertEqual(original, self.manifest)
-        self.assertEqual(
-            file_sha256(self.server / "contract.txt"),
-            candidate["surfaces"][0]["sha256"],
-        )
+        surface = next(item for item in candidate["surfaces"] if item["path"] == "contract.txt")
+        self.assertEqual(baseline.text_sha256(path), surface["sha256"])
         self.assertEqual("1" * 40, candidate["repositories"][0]["frozen_head"])
 
-    def test_manifest_validation_rejects_unsafe_or_ambiguous_input(self) -> None:
+    def test_manifest_rejects_paths_collisions_unknown_fields_and_unknown_runners(self) -> None:
         cases = []
         escaped = copy.deepcopy(self.manifest)
         escaped["surfaces"][0]["path"] = "../outside"
         cases.append(escaped)
+        reserved = copy.deepcopy(self.manifest)
+        reserved["surfaces"][0]["path"] = "tests/CON.txt"
+        cases.append(reserved)
         duplicate = copy.deepcopy(self.manifest)
         duplicate["surfaces"].append(copy.deepcopy(duplicate["surfaces"][0]))
         cases.append(duplicate)
@@ -234,73 +261,62 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
         unknown = copy.deepcopy(self.manifest)
         unknown["surfaces"][0]["surprise"] = True
         cases.append(unknown)
-        unsafe_node = copy.deepcopy(self.manifest)
-        unsafe_node["tests"][0]["nodes"] = ["tests.test_contract && whoami"]
-        cases.append(unsafe_node)
+        unknown_runner = copy.deepcopy(self.manifest)
+        unknown_runner["tests"][0]["runner_id"] = "server.user-controlled-command"
+        cases.append(unknown_runner)
 
         for payload in cases:
             with self.subTest(payload=payload), self.assertRaises(baseline.ManifestError):
-                baseline.validate_manifest(payload)
+                baseline.validate_manifest(payload, runner_catalog=self.runners)
 
-    def test_test_argv_is_exact_and_never_uses_a_shell_string(self) -> None:
+    def test_runner_command_comes_only_from_the_fixed_catalog(self) -> None:
         python_argv = baseline.build_test_argv(
-            self.manifest["tests"][0],
+            "server.strict-v1-probe",
+            runner_catalog=self.runners,
             python_executable="/python",
             npm_executable="/npm",
         )
-        npm_test = {
-            "id": "web.projection-fixtures",
-            "repo": "web",
-            "runner": "npm_test",
-            "nodes": ["src/lib/pullwise-data.test.js"],
-            "timeout_seconds": 30,
-        }
 
         self.assertEqual(
             ["/python", "-B", "-m", "unittest", "tests.test_contract"],
             python_argv,
         )
         self.assertEqual(
-            ["/npm", "test", "--", "src/lib/pullwise-data.test.js"],
-            baseline.build_test_argv(
-                npm_test,
-                python_executable="/python",
-                npm_executable="/npm",
-            ),
+            {"id": "server.strict-v1-probe", "runner_id": "server.strict-v1-probe"},
+            self.manifest["tests"][0],
         )
-        self.assertTrue(all(isinstance(part, str) for part in python_argv))
 
-    def test_cli_emits_one_json_report_and_uses_stable_exit_codes(self) -> None:
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exit_code = baseline.main(
-                [
-                    "check",
-                    "--manifest",
-                    str(self.manifest_path),
-                    "--workspace-root",
-                    str(self.workspace),
-                ]
-            )
-        report = json.loads(output.getvalue())
+    def test_cli_emits_one_json_report_with_three_stable_exit_codes(self) -> None:
+        def invoke() -> tuple[int, dict[str, object]]:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = baseline.main(
+                    [
+                        "check",
+                        "--manifest",
+                        str(self.manifest_path),
+                        "--workspace-root",
+                        str(self.workspace),
+                    ],
+                    runner_catalog=self.runners,
+                )
+            return exit_code, json.loads(output.getvalue())
+
+        exit_code, report = invoke()
         self.assertEqual(0, exit_code)
-        self.assertTrue(report["compatible"])
+        self.assertEqual("compatible", report["status"])
+
+        appendix_path = self.worker / self.manifest["appendix"]["path"]
+        appendix_path.write_text("stale\n", encoding="utf-8")
+        exit_code, report = invoke()
+        self.assertEqual(1, exit_code)
+        self.assertEqual("incompatible", report["status"])
 
         self.manifest["schema_id"] = "unknown/v1"
         self._write_manifest()
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exit_code = baseline.main(
-                [
-                    "check",
-                    "--manifest",
-                    str(self.manifest_path),
-                    "--workspace-root",
-                    str(self.workspace),
-                ]
-            )
-        report = json.loads(output.getvalue())
+        exit_code, report = invoke()
         self.assertEqual(2, exit_code)
+        self.assertEqual("indeterminate", report["status"])
         self.assertEqual("manifest_invalid", report["error_kind"])
 
 
