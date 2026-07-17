@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from scripts import agent_first_contract_probes as probes
+from scripts import agent_first_contract_process as process_runtime
 from scripts.agent_first_contract_manifest import ManifestError, load_manifest
 from scripts.agent_first_contract_probes import run_probe
 
@@ -97,6 +99,71 @@ class AgentFirstContractProbeSafetyTest(unittest.TestCase):
             manifest.write_text(raw, encoding="utf-8")
             with self.subTest(raw=raw), self.assertRaises(ManifestError):
                 load_manifest(manifest, runner_catalog=catalog)
+
+    def test_missing_fixed_node_entry_is_environment_indeterminate(self) -> None:
+        catalog = {
+            "web.safety-probe": {
+                "repo": "web",
+                "runner": "node_vitest",
+                "nodes": ("src/missing.test.js",),
+                "timeout_seconds": 30,
+                "minimum_tests": 1,
+                "allowed_skips": 0,
+            }
+        }
+        with patch.object(probes.shutil, "which", return_value="/node"):
+            result = run_probe(
+                "web.safety-probe", self.repo, runner_catalog=catalog
+            )
+
+        self.assertEqual(("indeterminate", "fixed_entry_unavailable"), (result["status"], result["reason"]))
+
+    def test_probe_output_is_bounded(self) -> None:
+        path = self.repo / "tests" / "test_noisy.py"
+        path.write_text(
+            "import unittest\n\n"
+            "class NoisyTest(unittest.TestCase):\n"
+            "    def test_noisy(self):\n"
+            "        print('x' * 4096)\n",
+            encoding="utf-8",
+        )
+        catalog = self._catalog("tests.test_noisy")
+        catalog["server.safety-probe"]["max_output_bytes"] = 1024
+
+        result = run_probe(
+            "server.safety-probe", self.repo, runner_catalog=catalog
+        )
+
+        self.assertEqual(("indeterminate", "output_too_large"), (result["status"], result["reason"]))
+
+    def test_windows_taskkill_timeout_is_contained(self) -> None:
+        class FakeProcess:
+            pid = 123
+
+            def __init__(self) -> None:
+                self.killed = False
+
+            def poll(self) -> None:
+                return None
+
+            def kill(self) -> None:
+                self.killed = True
+
+            def wait(self, timeout: int) -> int:
+                return 1
+
+        process = FakeProcess()
+        with patch.object(
+            process_runtime.subprocess,
+            "run",
+            side_effect=process_runtime.subprocess.TimeoutExpired(["taskkill"], 10),
+        ):
+            cleaned = process_runtime._windows_kill_process_tree(
+                process, taskkill=Path("taskkill.exe")
+            )
+
+        self.assertFalse(cleaned)
+        self.assertTrue(process.killed)
 
 
 if __name__ == "__main__":

@@ -8,19 +8,18 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-import subprocess
 from typing import Any
 
 try:
     from scripts.agent_first_contract_files import (
         BaselineEnvironmentError,
         canonical_text,
+        python_collection_values,
         repository_roots,
         surface_path,
         text_sha256,
     )
     from scripts.agent_first_contract_manifest import (
-        GIT_SHA_PATTERN,
         ManifestError,
         RunnerCatalog,
         load_manifest,
@@ -32,16 +31,17 @@ try:
         build_test_argv,
         run_probe,
     )
+    from scripts.agent_first_contract_observation import git_head, input_snapshot
 except ModuleNotFoundError:
     from agent_first_contract_files import (  # type: ignore[no-redef]
         BaselineEnvironmentError,
         canonical_text,
+        python_collection_values,
         repository_roots,
         surface_path,
         text_sha256,
     )
     from agent_first_contract_manifest import (  # type: ignore[no-redef]
-        GIT_SHA_PATTERN,
         ManifestError,
         RunnerCatalog,
         load_manifest,
@@ -53,69 +53,21 @@ except ModuleNotFoundError:
         build_test_argv,
         run_probe,
     )
+    from agent_first_contract_observation import (  # type: ignore[no-redef]
+        git_head,
+        input_snapshot,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "contracts" / "agent-first" / "legacy-v1-contract-baseline.json"
 REPORT_SCHEMA_ID = "pullwise-contract-baseline-report/v1"
+CANDIDATE_SCHEMA_ID = "pullwise-contract-baseline-candidate/v1"
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise ManifestError("invalid_cli_arguments")
-
-
-def _git_output(repo_root: Path, arguments: list[str], timeout: int = 15) -> bytes | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), *arguments],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout,
-            check=False,
-            shell=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout if result.returncode == 0 else None
-
-
-def _git_head(repo_root: Path) -> str | None:
-    output = _git_output(repo_root, ["rev-parse", "HEAD"], timeout=5)
-    if output is None:
-        return None
-    head = output.decode("ascii", errors="ignore").strip().lower()
-    return head if GIT_SHA_PATTERN.fullmatch(head) else None
-
-
-def _git_worktree_digest(repo_root: Path) -> str | None:
-    status = _git_output(
-        repo_root,
-        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )
-    diff = _git_output(
-        repo_root,
-        ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"],
-    )
-    if status is None or diff is None:
-        return None
-    return hashlib.sha256(status + b"\0" + diff).hexdigest()
-
-
-def _input_snapshot(
-    manifest: dict[str, Any], roots: dict[str, Path]
-) -> dict[str, str | None]:
-    snapshot: dict[str, str | None] = {}
-    for surface in manifest["surfaces"]:
-        path = surface_path(roots[surface["repo"]], surface["path"])
-        snapshot[f"surface:{surface['id']}"] = text_sha256(path) if path else None
-    appendix = manifest["appendix"]
-    appendix_path = surface_path(roots[appendix["repo"]], appendix["path"])
-    snapshot["appendix"] = text_sha256(appendix_path) if appendix_path else None
-    for repo_id in sorted(roots):
-        snapshot[f"head:{repo_id}"] = _git_head(roots[repo_id])
-        snapshot[f"worktree:{repo_id}"] = _git_worktree_digest(roots[repo_id])
-    return snapshot
 
 
 def _appendix_matches(
@@ -151,13 +103,14 @@ def verify_baseline(
 ) -> dict[str, Any]:
     validate_manifest(manifest, runner_catalog=runner_catalog)
     roots = repository_roots(workspace_root)
+    initial_inputs = input_snapshot(manifest, roots)
     failures: list[dict[str, Any]] = []
     indeterminate: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
     repositories = []
     for repo in manifest["repositories"]:
-        current = _git_head(roots[repo["id"]])
+        current = git_head(roots[repo["id"]])
         repositories.append(
             {
                 "id": repo["id"],
@@ -198,12 +151,35 @@ def verify_baseline(
             }
         )
 
+    registry_reports: list[dict[str, Any]] = []
+    for registry in manifest["registries"]:
+        path = surface_path(roots[registry["repo"]], registry["path"])
+        actual_values = (
+            python_collection_values(
+                path, registry["symbol"], ordered=registry["ordered"]
+            )
+            if path
+            else None
+        )
+        matches = actual_values == registry["values"]
+        if not matches:
+            failures.append(_issue("registry_mismatch", registry_id=registry["id"]))
+        registry_reports.append(
+            {
+                "id": registry["id"],
+                "status": "match" if matches else "drift",
+                "actual_values": actual_values,
+            }
+        )
+
     appendix_matches = _appendix_matches(manifest, roots, runner_catalog)
     if not appendix_matches:
         failures.append(_issue("appendix_drift", repo="worker"))
 
     test_reports: list[dict[str, Any]] = []
-    before_inputs = _input_snapshot(manifest, roots)
+    before_inputs = input_snapshot(manifest, roots)
+    if initial_inputs != before_inputs:
+        indeterminate.append(_issue("inputs_changed_during_inspection"))
     test_statuses: dict[str, str] = {}
     for test in manifest["tests"]:
         if not run_tests:
@@ -238,7 +214,7 @@ def verify_baseline(
         test_reports.append(result)
         test_statuses[test["id"]] = result["status"]
 
-    after_inputs = _input_snapshot(manifest, roots)
+    after_inputs = input_snapshot(manifest, roots)
     if run_tests and before_inputs != after_inputs:
         indeterminate.append(_issue("inputs_changed_during_probe"))
 
@@ -275,6 +251,7 @@ def verify_baseline(
         "tests_run": run_tests,
         "repositories": repositories,
         "surfaces": surface_reports,
+        "registries": registry_reports,
         "tests": test_reports,
         "warnings": warnings,
         "failures": failures,
@@ -287,12 +264,25 @@ def create_candidate(
     workspace_root: Path,
     *,
     runner_catalog: RunnerCatalog = RUNNER_CATALOG,
+    evidence_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     validate_manifest(manifest, runner_catalog=runner_catalog)
+    evidence = evidence_report or verify_baseline(
+        manifest,
+        workspace_root,
+        run_tests=True,
+        runner_catalog=runner_catalog,
+    )
+    if any(test["status"] != "passed" for test in evidence["tests"]):
+        raise BaselineEnvironmentError("candidate_probe_evidence_incomplete")
+    unsafe_codes = {"inputs_changed_during_inspection", "inputs_changed_during_probe"}
+    if unsafe_codes & {item["code"] for item in evidence["indeterminate_reasons"]}:
+        raise BaselineEnvironmentError("candidate_inputs_unstable")
     candidate = copy.deepcopy(manifest)
     roots = repository_roots(workspace_root)
+    before_inputs = input_snapshot(manifest, roots)
     for repo in candidate["repositories"]:
-        current = _git_head(roots[repo["id"]])
+        current = git_head(roots[repo["id"]])
         if current:
             repo["frozen_head"] = current
     for surface in candidate["surfaces"]:
@@ -303,7 +293,33 @@ def create_candidate(
         if any(anchor not in text for anchor in surface["anchors"]):
             raise BaselineEnvironmentError(f"candidate_anchor_missing:{surface['id']}")
         surface["sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    for registry in candidate["registries"]:
+        path = surface_path(roots[registry["repo"]], registry["path"])
+        if path is None:
+            raise BaselineEnvironmentError(f"candidate_registry_missing:{registry['id']}")
+        registry["values"] = python_collection_values(
+            path, registry["symbol"], ordered=registry["ordered"]
+        )
+    if before_inputs != input_snapshot(manifest, roots):
+        raise BaselineEnvironmentError("candidate_inputs_changed")
     return candidate
+
+
+def _candidate_payload(
+    candidate: dict[str, Any], evidence: dict[str, Any]
+) -> dict[str, Any]:
+    report_bytes = json.dumps(
+        evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return {
+        "schema_id": CANDIDATE_SCHEMA_ID,
+        "candidate_manifest": candidate,
+        "probe_evidence": {
+            "source_status": evidence["status"],
+            "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            "tests": evidence["tests"],
+        },
+    }
 
 
 def _error_report(kind: str) -> dict[str, Any]:
@@ -343,10 +359,26 @@ def main(
                 report["status"]
             ]
         if args.command == "candidate":
-            candidate = create_candidate(
-                manifest, args.workspace_root, runner_catalog=runner_catalog
+            evidence = verify_baseline(
+                manifest,
+                args.workspace_root,
+                run_tests=True,
+                runner_catalog=runner_catalog,
             )
-            print(json.dumps(candidate, ensure_ascii=False, indent=2))
+            candidate = create_candidate(
+                manifest,
+                args.workspace_root,
+                runner_catalog=runner_catalog,
+                evidence_report=evidence,
+            )
+            print(
+                json.dumps(
+                    _candidate_payload(candidate, evidence),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0
         print(render_appendix(manifest, runner_catalog=runner_catalog))
         return 0

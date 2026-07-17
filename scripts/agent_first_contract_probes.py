@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
-import signal
-import subprocess
 import sys
 import tempfile
 from typing import Any, Mapping
+
+try:
+    from scripts.agent_first_contract_process import (
+        _windows_kill_process_tree,
+        run_bounded_process,
+    )
+except ModuleNotFoundError:
+    from agent_first_contract_process import (  # type: ignore[no-redef]
+        _windows_kill_process_tree,
+        run_bounded_process,
+    )
 
 
 RUNNER_CATALOG: dict[str, dict[str, Any]] = {
@@ -92,6 +99,22 @@ RUNNER_CATALOG: dict[str, dict[str, Any]] = {
         "minimum_tests": 75,
         "allowed_skips": 0,
     },
+    "web.progress-fixtures": {
+        "repo": "web",
+        "runner": "node_vitest",
+        "nodes": ("src/components/scan-progress.test.jsx",),
+        "timeout_seconds": 300,
+        "minimum_tests": 1,
+        "allowed_skips": 0,
+    },
+    "web.timing-fixtures": {
+        "repo": "web",
+        "runner": "node_vitest",
+        "nodes": ("src/components/scan-timing.test.jsx",),
+        "timeout_seconds": 300,
+        "minimum_tests": 6,
+        "allowed_skips": 0,
+    },
 }
 RunnerCatalog = Mapping[str, Mapping[str, Any]]
 UNITTEST_COUNT = re.compile(rb"Ran ([0-9]+) tests? in")
@@ -117,71 +140,6 @@ def build_test_argv(
             *spec["nodes"],
         ]
     raise ValueError("unsupported_fixed_runner")
-
-
-def _probe_environment(scratch_root: Path) -> dict[str, str]:
-    allowed = {
-        "CI",
-        "COMSPEC",
-        "LANG",
-        "LC_ALL",
-        "PATH",
-        "PATHEXT",
-        "SYSTEMDRIVE",
-        "SYSTEMROOT",
-        "WINDIR",
-    }
-    env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
-    scratch = str(scratch_root)
-    for key in (
-        "APPDATA",
-        "HOME",
-        "LOCALAPPDATA",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "USERPROFILE",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-    ):
-        env[key] = scratch
-    env["CI"] = "1"
-    env["NPM_CONFIG_CACHE"] = scratch
-    env["NPM_CONFIG_USERCONFIG"] = str(scratch_root / "npmrc")
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONHASHSEED"] = "0"
-    env["PYTHONNOUSERSITE"] = "1"
-    return env
-
-
-def _kill_process_tree(process: subprocess.Popen[bytes]) -> bool:
-    if process.poll() is not None:
-        return True
-    if os.name == "nt":
-        system_root = os.environ.get("SystemRoot", r"C:\Windows")
-        taskkill = Path(system_root) / "System32" / "taskkill.exe"
-        if not taskkill.is_file():
-            return False
-        result = subprocess.run(
-            [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-            check=False,
-            shell=False,
-        )
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            return False
-        return result.returncode == 0 and process.poll() is not None
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=5)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return process.poll() is not None
 
 
 def _parse_counts(spec: Mapping[str, Any], output: bytes) -> tuple[int | None, int | None]:
@@ -228,57 +186,39 @@ def _execute_probe(
     argv: list[str],
     scratch_root: Path,
 ) -> dict[str, Any]:
-    popen_options: dict[str, Any] = {
-        "cwd": repo_root,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.STDOUT,
-        "env": _probe_environment(scratch_root),
-        "shell": False,
-    }
-    if os.name == "nt":
-        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_options["start_new_session"] = True
-    try:
-        process = subprocess.Popen(argv, **popen_options)
-    except OSError:
+    process = run_bounded_process(
+        argv,
+        cwd=repo_root,
+        scratch_root=scratch_root,
+        timeout_seconds=int(spec["timeout_seconds"]),
+        max_output_bytes=int(spec.get("max_output_bytes", 8 * 1024 * 1024)),
+    )
+    if process["status"] == "start_failed":
         return _indeterminate_result(runner_id, "process_start_failed")
-    try:
-        output, _ = process.communicate(timeout=int(spec["timeout_seconds"]))
-    except subprocess.TimeoutExpired:
-        cleanup_confirmed = _kill_process_tree(process)
-        try:
-            output, _ = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            output = b""
-            cleanup_confirmed = False
+    if process["status"] in {"timeout", "cleanup_unconfirmed"}:
         result = _indeterminate_result(
             runner_id,
-            "probe_timeout" if cleanup_confirmed else "process_tree_cleanup_unconfirmed",
+            "probe_timeout"
+            if process["status"] == "timeout"
+            else "process_tree_cleanup_unconfirmed",
         )
-        result["output_sha256"] = hashlib.sha256(output).hexdigest()
+        result["output_sha256"] = process["output_sha256"]
         return result
-
-    output_sha256 = hashlib.sha256(output).hexdigest()
+    output = process["output"]
+    output_sha256 = process["output_sha256"]
+    if process["output_too_large"]:
+        result = _indeterminate_result(runner_id, "output_too_large")
+        result.update(returncode=process["returncode"], output_sha256=output_sha256)
+        return result
     observed, skipped = _parse_counts(spec, output)
-    if process.returncode != 0:
-        return {
-            "id": runner_id,
-            "runner_id": runner_id,
-            "status": "failed",
-            "returncode": process.returncode,
-            "output_sha256": output_sha256,
-            "observed_tests": observed,
-            "observed_skips": skipped,
-        }
     if observed is None or skipped is None:
         result = _indeterminate_result(runner_id, "test_count_unparseable")
-        result.update(returncode=0, output_sha256=output_sha256)
+        result.update(returncode=process["returncode"], output_sha256=output_sha256)
         return result
     if observed < int(spec["minimum_tests"]):
         result = _indeterminate_result(runner_id, "insufficient_tests")
         result.update(
-            returncode=0,
+            returncode=process["returncode"],
             output_sha256=output_sha256,
             observed_tests=observed,
             observed_skips=skipped,
@@ -287,12 +227,22 @@ def _execute_probe(
     if skipped > int(spec.get("allowed_skips", 0)):
         result = _indeterminate_result(runner_id, "unexpected_skips")
         result.update(
-            returncode=0,
+            returncode=process["returncode"],
             output_sha256=output_sha256,
             observed_tests=observed,
             observed_skips=skipped,
         )
         return result
+    if process["returncode"] != 0:
+        return {
+            "id": runner_id,
+            "runner_id": runner_id,
+            "status": "failed",
+            "returncode": process["returncode"],
+            "output_sha256": output_sha256,
+            "observed_tests": observed,
+            "observed_skips": skipped,
+        }
     return {
         "id": runner_id,
         "runner_id": runner_id,
@@ -302,6 +252,53 @@ def _execute_probe(
         "observed_tests": observed,
         "observed_skips": skipped,
     }
+
+
+def _python_module_for_node(repo_root: Path, node: str) -> str | None:
+    parts = node.split(".")
+    for length in range(len(parts), 1, -1):
+        path = repo_root.joinpath(*parts[:length]).with_suffix(".py")
+        if path.is_file() and not path.is_symlink():
+            return ".".join(parts[:length])
+    return None
+
+
+def _fixed_entries_available(spec: Mapping[str, Any], repo_root: Path) -> bool:
+    if spec["runner"] == "node_vitest":
+        vitest = repo_root / "node_modules" / "vitest" / "vitest.mjs"
+        return vitest.is_file() and not vitest.is_symlink() and all(
+            (repo_root / node).is_file() and not (repo_root / node).is_symlink()
+            for node in spec["nodes"]
+        )
+    return all(_python_module_for_node(repo_root, node) for node in spec["nodes"])
+
+
+def _python_imports_available(
+    spec: Mapping[str, Any], repo_root: Path, scratch_root: Path
+) -> bool:
+    modules = sorted(
+        {
+            module
+            for node in spec["nodes"]
+            if (module := _python_module_for_node(repo_root, node)) is not None
+        }
+    )
+    for module in modules:
+        result = run_bounded_process(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                f"import importlib; importlib.import_module({module!r})",
+            ],
+            cwd=repo_root,
+            scratch_root=scratch_root,
+            timeout_seconds=30,
+            max_output_bytes=1024 * 1024,
+        )
+        if result["status"] != "completed" or result["returncode"] != 0:
+            return False
+    return True
 
 
 def run_probe(
@@ -314,6 +311,8 @@ def run_probe(
     node = shutil.which("node")
     if spec["runner"] == "node_vitest" and not node:
         return _indeterminate_result(runner_id, "tool_unavailable")
+    if not _fixed_entries_available(spec, repo_root):
+        return _indeterminate_result(runner_id, "fixed_entry_unavailable")
     executable = sys.executable if spec["runner"] == "python_unittest" else node
     assert executable is not None
     argv = build_test_argv(
@@ -323,10 +322,15 @@ def run_probe(
         npm_executable=executable,
     )
     with tempfile.TemporaryDirectory(prefix="pullwise-contract-probe-") as scratch:
+        scratch_root = Path(scratch)
+        if spec["runner"] == "python_unittest" and not _python_imports_available(
+            spec, repo_root, scratch_root
+        ):
+            return _indeterminate_result(runner_id, "fixed_entry_unavailable")
         return _execute_probe(
             runner_id,
             repo_root,
             spec=spec,
             argv=argv,
-            scratch_root=Path(scratch),
+            scratch_root=scratch_root,
         )

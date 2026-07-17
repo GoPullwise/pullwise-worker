@@ -300,15 +300,65 @@ class AgentFirstContractBaselineTest(unittest.TestCase):
         original = copy.deepcopy(self.manifest)
         path = self.server / "contract.txt"
         path.write_bytes(b"strict-v1-contract-v2\r\n")
+        before = {
+            item.relative_to(self.workspace).as_posix(): item.read_bytes()
+            for item in self.workspace.rglob("*")
+            if item.is_file()
+        }
 
         candidate = baseline.create_candidate(
             self.manifest, self.workspace, runner_catalog=self.runners
         )
+        after = {
+            item.relative_to(self.workspace).as_posix(): item.read_bytes()
+            for item in self.workspace.rglob("*")
+            if item.is_file()
+        }
 
         self.assertEqual(original, self.manifest)
+        self.assertEqual(before, after)
         surface = next(item for item in candidate["surfaces"] if item["path"] == "contract.txt")
         self.assertEqual(baseline.text_sha256(path), surface["sha256"])
         self.assertEqual("1" * 40, candidate["repositories"][0]["frozen_head"])
+
+    def test_candidate_cli_includes_passing_probe_evidence(self) -> None:
+        output = io.StringIO()
+        before = self.manifest_path.read_bytes()
+        with redirect_stdout(output):
+            exit_code = baseline.main(
+                [
+                    "candidate",
+                    "--manifest",
+                    str(self.manifest_path),
+                    "--workspace-root",
+                    str(self.workspace),
+                ],
+                runner_catalog=self.runners,
+            )
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("pullwise-contract-baseline-candidate/v1", payload["schema_id"])
+        self.assertEqual("passed", payload["probe_evidence"]["tests"][0]["status"])
+        self.assertIn("candidate_manifest", payload)
+        self.assertEqual(before, self.manifest_path.read_bytes())
+
+    def test_candidate_refuses_failed_probe_evidence(self) -> None:
+        fixture = self.server / "tests" / "test_contract.py"
+        fixture.write_text(
+            fixture.read_text(encoding="utf-8").replace(
+                "self.assertEqual('review-worker-protocol/v1', 'review-worker-protocol/v1')",
+                "self.fail('contract failed: review-worker-protocol/v1')",
+            ),
+            encoding="utf-8",
+        )
+        self.manifest["surfaces"][1]["sha256"] = canonical_sha256(fixture)
+        self._write_matching_appendix()
+
+        with self.assertRaises(baseline.BaselineEnvironmentError):
+            baseline.create_candidate(
+                self.manifest, self.workspace, runner_catalog=self.runners
+            )
 
     def test_manifest_rejects_paths_collisions_unknown_fields_and_unknown_runners(self) -> None:
         cases = []
