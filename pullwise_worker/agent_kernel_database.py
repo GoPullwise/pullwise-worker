@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
-import os
 from pathlib import Path
 import sqlite3
 import stat
@@ -57,7 +56,10 @@ def _ensure_private_directory(path: Path) -> None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        path.mkdir(parents=True, mode=0o700)
+        try:
+            path.mkdir(parents=True, mode=0o700)
+        except FileExistsError:
+            pass
         metadata = path.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         raise AgentKernelStorageError(f"storage_directory_invalid: {path}")
@@ -65,6 +67,25 @@ def _ensure_private_directory(path: Path) -> None:
         path.chmod(0o700)
     except OSError as exc:
         raise AgentKernelStorageError(f"storage_directory_permissions: {path}") from exc
+
+
+def _ensure_private_database_file(path: Path, *, allow_missing: bool) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        if allow_missing:
+            return
+        raise AgentKernelStorageError("database_path_invalid: missing") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+    ):
+        raise AgentKernelStorageError("database_path_invalid: not private regular file")
+    try:
+        path.chmod(0o600)
+    except OSError as exc:
+        raise AgentKernelStorageError("database_permissions_failed") from exc
 
 
 class AgentKernelDatabase:
@@ -82,8 +103,7 @@ class AgentKernelDatabase:
     def initialize(self) -> None:
         _ensure_private_directory(self.worker_root)
         _ensure_private_directory(self.root)
-        if self.path.is_symlink():
-            raise AgentKernelStorageError("database_path_is_symlink")
+        _ensure_private_database_file(self.path, allow_missing=True)
         connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         try:
             self._configure(connection)
@@ -91,13 +111,11 @@ class AgentKernelDatabase:
             self._validate_schema(connection)
         finally:
             connection.close()
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError as exc:
-            raise AgentKernelStorageError("database_permissions_failed") from exc
+        _ensure_private_database_file(self.path, allow_missing=False)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        _ensure_private_database_file(self.path, allow_missing=False)
         connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         connection.row_factory = sqlite3.Row
         try:
