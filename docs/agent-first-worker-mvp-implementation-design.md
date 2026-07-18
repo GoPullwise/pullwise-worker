@@ -5,6 +5,10 @@
 日期：2026-07-16  
 目标读者：负责实现、评审、测试和发布 Pullwise Worker MVP 的工程 Agent
 
+<!-- BEGIN AGENT-FIRST DECISION REFS: MVP_AUTHORITY_SCOPE -->
+<!-- D1@sha256:ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a -->
+<!-- END AGENT-FIRST DECISION REFS: MVP_AUTHORITY_SCOPE -->
+
 ## 0. 文档用途与权威顺序
 
 本文把 [Agent-First 目标设计](agent-first-worker-design.md) 收敛成可以直接实施和验收的 MVP 规格。本文中的“必须”“不得”“仅当”是硬约束；“建议”才允许实现者在不改变外部行为的前提下调整。

@@ -7,12 +7,12 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D1`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D3`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
-| `D1` | `P0.1` | MVP/Post-MVP 产品范围 | `pending` | `active` | `S2` | — | `pullwise_full_scan` |
-| `D2` | `P0.1` | 通用工程任务控制面归属 | `pending` | `unknown` | `S2` | D1 | `independent_generic_ingress` |
+| `D1` | `P0.1` | MVP/Post-MVP 产品范围 | `resolved` | `active` | `S2` | — | `pullwise_full_scan` |
+| `D2` | `P0.1` | 通用工程任务控制面归属 | `pending` | `inactive` | `S2` | D1 | `independent_generic_ingress` |
 | `D3` | `P0.5` | MVP R2 能力边界 | `pending` | `active` | `S3` | D1 | `mvp_r0_r1_reject_r2` |
 | `D4` | `P0.4` | legacy claim 缺失 policy 字段来源 | `pending` | `active` | `S3` | D1, D3 | `field_by_field_ownership` |
 | `D5` | `P0.6` | task_version 递增单位 | `pending` | `active` | `S4` | D4 | `per_control_transaction` |
@@ -40,16 +40,18 @@ Active question: `D1`. Questions are asked one at a time. User silence, existing
 
 ### D1 — MVP/Post-MVP 产品范围
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S2`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S2`.
 
 **Question:** 本次规范以通用工程 Agent Worker 为完成范围，还是仅以 Pullwise repo_review.full_scan 为完成范围？
 
 **Options:**
 
-- `pullwise_full_scan` — non-normative recommendation, not selected: 本次 MVP/Post-MVP 规范仅以 Pullwise repo_review.full_scan 为产品范围；通用工程 Worker 仅保留为长期方向。 当前 claim、lease、result 和产品入口只形成 full_scan 的可执行闭环。 Consequences: 在独立版本化通用契约完成前不得广告或选择通用工程任务
+- `pullwise_full_scan` — selected by resolution: 本次 MVP/Post-MVP 规范仅以 Pullwise repo_review.full_scan 为产品范围；通用工程 Worker 仅保留为长期方向。 当前 claim、lease、result 和产品入口只形成 full_scan 的可执行闭环。 Consequences: 在独立版本化通用契约完成前不得广告或选择通用工程任务
 - `generic_agent_worker`: 把通用工程 Agent Worker 纳入本次完成范围。 与目标设计的长期愿景一致，但必须先补齐通用 submission、workspace、interaction、approval 和写型 task 契约。 Consequences: 扩大 S2、S3 和 S7 的跨端设计与验收范围
 
-**Resolution:** No option has been selected.
+**Resolution:** `pullwise_full_scan` (`option`). 确认选择 pullwise_full_scan：本次 MVP/Post-MVP 规范仅以 Pullwise repo_review.full_scan 为产品范围；通用工程 Worker 仅保留为长期方向。
+
+**Authority/evidence:** `user` on `2026-07-18`; `conversation:user-selection:2026-07-18:pullwise_full_scan`; digest `ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a`.
 
 **Supersedes:** none
 
@@ -59,7 +61,7 @@ Active question: `D1`. Questions are asked one at a time. User silence, existing
 
 ### D2 — 通用工程任务控制面归属
 
-**Stored status:** `pending`; **applicability:** `unknown`; **required before:** `S2`.
+**Stored status:** `pending`; **applicability:** `inactive`; **required before:** `S2`.
 
 **Question:** 若 D1 选择通用 Worker，通用 submission/workspace/interaction/write-task 应扩展 Pullwise Server，还是使用独立 generic ingress/control plane？
 

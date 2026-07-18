@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D1",
+  "active_decision_id": "D3",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -22,7 +22,7 @@
     {
       "id": "D1", "key": "product-scope", "scope": "P0.1", "title": "MVP/Post-MVP 产品范围",
       "question": "本次规范以通用工程 Agent Worker 为完成范围，还是仅以 Pullwise repo_review.full_scan 为完成范围？",
-      "status": "pending", "depends_on": [], "activation": null, "required_by_slice": "S2",
+      "status": "resolved", "depends_on": [], "activation": null, "required_by_slice": "S2",
       "effects": ["authority", "external_behavior", "compatibility"],
       "source_refs": ["handoff:P0.1", "docs/agent-first-worker-design.md:5", "docs/agent-first-worker-mvp-implementation-design.md:34", "pullwise_worker/review_worker_v1.py:7118"],
       "affected_units": ["target-authority-scope", "mvp-authority-scope", "post-authority-scope"],
@@ -30,7 +30,15 @@
         {"id": "pullwise_full_scan", "summary": "本次 MVP/Post-MVP 规范仅以 Pullwise repo_review.full_scan 为产品范围；通用工程 Worker 仅保留为长期方向。", "rationale": "当前 claim、lease、result 和产品入口只形成 full_scan 的可执行闭环。", "consequences": ["在独立版本化通用契约完成前不得广告或选择通用工程任务"]},
         {"id": "generic_agent_worker", "summary": "把通用工程 Agent Worker 纳入本次完成范围。", "rationale": "与目标设计的长期愿景一致，但必须先补齐通用 submission、workspace、interaction、approval 和写型 task 契约。", "consequences": ["扩大 S2、S3 和 S7 的跨端设计与验收范围"]}
       ],
-      "recommended_option_id": "pullwise_full_scan", "resolution": null, "supersedes": []
+      "recommended_option_id": "pullwise_full_scan",
+      "resolution": {
+        "kind": "option", "selected_option_id": "pullwise_full_scan", "custom_text": null,
+        "decision_text": "确认选择 pullwise_full_scan：本次 MVP/Post-MVP 规范仅以 Pullwise repo_review.full_scan 为产品范围；通用工程 Worker 仅保留为长期方向。",
+        "authority": "user", "decided_at": "2026-07-18",
+        "evidence_refs": ["conversation:user-selection:2026-07-18:pullwise_full_scan"],
+        "resolution_sha256": "ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a"
+      },
+      "supersedes": []
     },
     {
       "id": "D2", "key": "generic-surface", "scope": "P0.1", "title": "通用工程任务控制面归属",

@@ -4,6 +4,10 @@
 > 日期：2026-07-16  
 > 范围：面向任意软件工程任务的 Worker；本文不以当前 Worker 实现为设计起点。为避免牵连产品层，另定义与现有 Pullwise Server/Web 契约的增量兼容边界。
 
+<!-- BEGIN AGENT-FIRST DECISION REFS: TARGET_AUTHORITY_SCOPE -->
+<!-- D1@sha256:ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a -->
+<!-- END AGENT-FIRST DECISION REFS: TARGET_AUTHORITY_SCOPE -->
+
 ## 0. 结论先行
 
 推荐把 Worker 设计成一个包裹 Codex 的“确定性执行微内核”，而不是一个理解 Python、C++、前端、后端的工作流引擎。

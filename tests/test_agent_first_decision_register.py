@@ -66,8 +66,17 @@ def _resolve(
     return changed
 
 
+def _pending_d1_register() -> dict[str, object]:
+    changed = copy.deepcopy(load_register(REGISTER_PATH))
+    decision = changed["decisions"][0]
+    decision["status"] = "pending"
+    decision["resolution"] = None
+    changed["active_decision_id"] = "D1"
+    return validate_register(changed)
+
+
 class AgentFirstDecisionRegisterTest(unittest.TestCase):
-    def test_current_register_is_complete_valid_pending_and_documented(self) -> None:
+    def test_current_register_has_the_user_resolved_pullwise_scope(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
@@ -75,11 +84,19 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D1", report["active_decision_id"])
-        self.assertEqual(26, report["pending_decision_count"])
-        self.assertEqual(0, report["resolved_decision_count"])
-        self.assertEqual(0, report["inactive_decision_count"])
+        self.assertEqual("D3", report["active_decision_id"])
+        self.assertEqual(24, report["pending_decision_count"])
+        self.assertEqual(1, report["resolved_decision_count"])
+        self.assertEqual(1, report["inactive_decision_count"])
+        self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
+        resolution = register["decisions"][0]["resolution"]
+        self.assertEqual("pullwise_full_scan", resolution["selected_option_id"])
+        self.assertEqual("user", resolution["authority"])
+        self.assertEqual(
+            "ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a",
+            resolution["resolution_sha256"],
+        )
         self.assertEqual(list(QUESTION_ORDER), register["question_order"])
         self.assertEqual(
             [item["id"] for item in REQUIRED_CATALOG],
@@ -99,7 +116,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             validate_register(changed)
 
     def test_pending_decision_cannot_carry_resolution(self) -> None:
-        register = load_register(REGISTER_PATH)
+        register = _pending_d1_register()
         changed = copy.deepcopy(register)
         changed["decisions"][0]["resolution"] = _resolution(
             "D1", selected_option_id="pullwise_full_scan"
@@ -110,7 +127,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             validate_register(changed)
 
     def test_resolution_supports_option_or_explicit_custom_text(self) -> None:
-        register = load_register(REGISTER_PATH)
+        register = _pending_d1_register()
         option = _resolve(register, "D1", "pullwise_full_scan")
         option["active_decision_id"] = "D3"
         validate_register(option)
@@ -162,7 +179,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
 
     def test_resolution_date_must_be_a_real_canonical_date(self) -> None:
         register = _resolve(
-            load_register(REGISTER_PATH), "D1", "pullwise_full_scan"
+            _pending_d1_register(), "D1", "pullwise_full_scan"
         )
         register["active_decision_id"] = "D3"
         resolution = register["decisions"][0]["resolution"]
@@ -174,7 +191,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             validate_register(register)
 
     def test_resolution_rejects_untrusted_authority_and_digest_tampering(self) -> None:
-        register = load_register(REGISTER_PATH)
+        register = _pending_d1_register()
         changed = _resolve(register, "D1", "pullwise_full_scan")
         changed["active_decision_id"] = "D3"
         changed["decisions"][0]["resolution"]["authority"] = "agent"
@@ -189,7 +206,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
 
     def test_resolution_rejects_blank_or_control_only_evidence(self) -> None:
         register = _resolve(
-            load_register(REGISTER_PATH), "D1", "pullwise_full_scan"
+            _pending_d1_register(), "D1", "pullwise_full_scan"
         )
         register["active_decision_id"] = "D3"
         resolution = register["decisions"][0]["resolution"]
@@ -210,13 +227,13 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
                     validate_register(changed)
 
     def test_resolved_decision_requires_resolved_or_inactive_dependencies(self) -> None:
-        register = load_register(REGISTER_PATH)
+        register = _pending_d1_register()
         changed = _resolve(register, "D3", "mvp_r0_r1_reject_r2")
         with self.assertRaisesRegex(DecisionRegisterFormatError, "depends_on:unresolved"):
             validate_register(changed)
 
     def test_d2_activation_is_derived_from_d1_resolution(self) -> None:
-        register = load_register(REGISTER_PATH)
+        register = _pending_d1_register()
         pullwise = _resolve(register, "D1", "pullwise_full_scan")
         pullwise["active_decision_id"] = "D3"
         validate_register(pullwise)
@@ -230,7 +247,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertEqual("D2", report["active_decision_id"])
 
     def test_active_decision_uses_question_order_not_numeric_readiness(self) -> None:
-        register = load_register(REGISTER_PATH)
+        register = _pending_d1_register()
         changed = copy.deepcopy(register)
         changed["active_decision_id"] = "D7"
         with self.assertRaisesRegex(
@@ -238,20 +255,18 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         ):
             validate_register(changed)
 
-    def test_required_slice_block_does_not_make_register_invalid(self) -> None:
+    def test_pullwise_scope_resolution_unblocks_slice_two(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(
             register, REPO_ROOT, require_slice="S2", check_document=False
         )
 
-        self.assertEqual("blocked", report["status"])
+        self.assertEqual("valid_pending", report["status"])
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
-        blocker = next(
-            item for item in report["failures"]
-            if item["code"] == "slice_blocked_by_pending_decisions"
-        )
-        self.assertEqual(["D1"], blocker["decision_ids"])
+        self.assertEqual([], report["failures"])
+        self.assertEqual("D3", report["active_decision_id"])
+        self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_machine_entrypoint_is_documented(self) -> None:
         command = "python scripts/agent_first_decision_register.py check --repo-root ."

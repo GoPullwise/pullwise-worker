@@ -6,6 +6,10 @@
 前置文档：[MVP 实现设计](agent-first-worker-mvp-implementation-design.md)  
 目标文档：[Agent-First Worker 目标设计](agent-first-worker-design.md)
 
+<!-- BEGIN AGENT-FIRST DECISION REFS: POST_AUTHORITY_SCOPE -->
+<!-- D1@sha256:ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a -->
+<!-- END AGENT-FIRST DECISION REFS: POST_AUTHORITY_SCOPE -->
+
 ## 0. 目的与“完全实现”的定义
 
 本文用于 MVP 完成之后继续实施，不是愿景清单。每个版本都给出前置条件、跨端契约、数据迁移、实施顺序、回滚边界和可执行验收。执行 Agent 不得从 V2/V3 挑一个孤立功能直接落地，也不得用 feature flag 代替缺失的底层契约。

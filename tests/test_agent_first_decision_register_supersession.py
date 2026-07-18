@@ -14,6 +14,7 @@ from tests.test_agent_first_decision_register_gate import (
     REGISTER_PATH,
     _append_decision,
     _append_followup,
+    _pending_d1,
     _resolve,
     _resolved_d1,
 )
@@ -88,7 +89,7 @@ class AgentFirstDecisionRegisterSupersessionTest(unittest.TestCase):
 
     def test_target_and_duplicate_supersession_are_rejected(self) -> None:
         target_pending = _append_followup(
-            _append_decision(load_register(REGISTER_PATH))
+            _append_decision(_pending_d1())
         )
         target_pending = _resolve(
             target_pending,

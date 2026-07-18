@@ -77,6 +77,14 @@ def _resolved_d1(option_id: str = "pullwise_full_scan") -> dict[str, object]:
     return validate_register(changed)
 
 
+def _pending_d1() -> dict[str, object]:
+    changed = copy.deepcopy(load_register(REGISTER_PATH))
+    changed["decisions"][0]["status"] = "pending"
+    changed["decisions"][0]["resolution"] = None
+    changed["active_decision_id"] = "D1"
+    return validate_register(changed)
+
+
 def _unit_body(
     register: dict[str, object], unit_id: str
 ) -> str | None:
@@ -233,7 +241,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         self.assertEqual([], complete)
 
     def test_pending_empty_marker_is_allowed_but_pending_token_is_not(self) -> None:
-        register = load_register(REGISTER_PATH)
+        register = _pending_d1()
         unit_id = "target-authority-scope"
         pending_token = f"<!-- D1@sha256:{'0' * 64} -->"
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -316,7 +324,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
             if item["code"] == "slice_blocked_by_pending_decisions"
         )
         self.assertEqual(
-            ["D1", "D3", "D4", "D11", "D15", "D16", "D17"],
+            ["D3", "D4", "D11", "D15", "D16", "D17"],
             blocker["decision_ids"],
         )
         self.assertTrue(report["valid"])
@@ -326,6 +334,13 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         register = _resolved_d1()
         rendered = render_document(register)
         resolution = register["decisions"][0]["resolution"]
+        self.assertIn(
+            "- `pullwise_full_scan` — selected by resolution:", rendered
+        )
+        self.assertNotIn(
+            "`pullwise_full_scan` — non-normative recommendation, not selected",
+            rendered,
+        )
         self.assertIn(resolution["decision_text"], rendered)
         self.assertIn("conversation:synthetic-test", rendered)
         self.assertIn(resolution["resolution_sha256"], rendered)

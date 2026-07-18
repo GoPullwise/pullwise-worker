@@ -50,16 +50,20 @@ def render_document(register: dict[str, Any]) -> str:
                 "",
             ]
         )
+        resolution = decision["resolution"]
+        selected_option_id = (
+            None if resolution is None else resolution["selected_option_id"]
+        )
         for option in decision["options"]:
-            suffix = (
-                " — non-normative recommendation, not selected"
-                if option["id"] == decision["recommended_option_id"]
-                else ""
-            )
+            if option["id"] == selected_option_id:
+                suffix = " — selected by resolution"
+            elif option["id"] == decision["recommended_option_id"]:
+                suffix = " — non-normative recommendation, not selected"
+            else:
+                suffix = ""
             lines.append(
                 f"- `{option['id']}`{suffix}: {option['summary']} {option['rationale']} Consequences: {'; '.join(option['consequences'])}"
             )
-        resolution = decision["resolution"]
         if resolution is None:
             lines.extend(["", "**Resolution:** No option has been selected."])
         else:
