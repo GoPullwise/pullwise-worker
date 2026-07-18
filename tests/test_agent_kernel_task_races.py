@@ -10,6 +10,7 @@ import unittest
 
 from pullwise_worker.agent_kernel_database import AgentKernelDatabase
 from pullwise_worker.agent_kernel_state import (
+    AttemptState,
     TaskEvent,
     TaskEventKind,
     TerminalPublication,
@@ -61,6 +62,19 @@ class AgentKernelTaskRaceTest(unittest.TestCase):
             ),
             facts=TransitionFacts.permissive(),
         )
+        for expected, target in (
+            (1, AttemptState.PREPARING),
+            (2, AttemptState.RUNNING),
+            (3, AttemptState.VERIFYING),
+            (4, AttemptState.PUBLISHING),
+        ):
+            self.store.advance_attempt(
+                task_id,
+                "attempt_" + suffix * 32,
+                expected_state_version=expected,
+                target_state=target,
+                occurred_at=NOW,
+            )
         finalizing = self.store.apply_event(
             task_id,
             expected_task_version=claimed.task.task_version,
