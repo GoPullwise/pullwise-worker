@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from ._main_part_01_bootstrap import PullwiseClient, WorkerConfig
+from .agent_kernel_review_worker import build_review_worker
 from .review_worker_v1 import ReviewWorkerV1
 
 
@@ -107,7 +108,9 @@ def main() -> None:
             cleanup_worker_resources(config)
             raise SystemExit(0)
 
-        worker = ReviewWorkerV1(config, client=PullwiseClient(config))
+        worker = build_review_worker(
+            config, client=PullwiseClient(config), legacy_class=ReviewWorkerV1
+        )
         worker.run(once=args.once)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

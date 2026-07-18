@@ -73,7 +73,7 @@ class AgentKernelStorageTest(unittest.TestCase):
         database.initialize()
         with database.connect() as connection:
             self.assertEqual(
-                1,
+                2,
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
             )
 
@@ -118,7 +118,7 @@ class AgentKernelStorageTest(unittest.TestCase):
         recovered.initialize()
         with recovered.connect() as connection:
             self.assertEqual(
-                1,
+                2,
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
             )
             self.assertEqual(
