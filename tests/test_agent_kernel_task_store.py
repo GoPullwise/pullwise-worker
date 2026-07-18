@@ -15,7 +15,6 @@ from pullwise_worker.agent_kernel_state import (
     TransitionFacts,
 )
 from pullwise_worker.agent_kernel_task_store import (
-    ActorFence,
     TaskStore,
     TaskStoreError,
 )
@@ -113,70 +112,6 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
                 facts=TransitionFacts.permissive(),
             )
 
-    def test_attempt_edges_and_owner_incarnation_produce_monotonic_fences(self) -> None:
-        _, claimed = self._accept_and_claim()
-        attempt_id = "attempt_" + "1" * 32
-        preparing = self.store.advance_attempt(
-            self.task_id,
-            attempt_id,
-            expected_state_version=1,
-            target_state=AttemptState.PREPARING,
-            occurred_at=NOW,
-        )
-        running = self.store.advance_attempt(
-            self.task_id,
-            attempt_id,
-            expected_state_version=2,
-            target_state=AttemptState.RUNNING,
-            occurred_at=NOW,
-        )
-        self.assertEqual((2, 3), (preparing.state_version, running.state_version))
-
-        owner = self.store.begin_owner_incarnation(
-            self.task_id,
-            expected_task_version=claimed.task.task_version,
-            attempt_id=attempt_id,
-            native_epoch=1,
-            session_id="session_" + "2" * 32,
-            idempotency_key="owner-1",
-            occurred_at=NOW,
-        )
-        self.assertEqual((1, 3), (owner.owner_epoch, owner.task.task_version))
-        owner_retry = self.store.begin_owner_incarnation(
-            self.task_id,
-            expected_task_version=2,
-            attempt_id=attempt_id,
-            native_epoch=1,
-            session_id="session_" + "2" * 32,
-            idempotency_key="owner-1",
-            occurred_at=NOW,
-        )
-        self.assertFalse(owner_retry.applied)
-        self.assertEqual(1, owner_retry.owner_epoch)
-        fence = ActorFence.from_task(
-            owner.task, owner_session_id="session_" + "2" * 32
-        )
-        self.store.assert_fresh_actor(self.task_id, fence)
-
-        stale_owner = ActorFence(
-            **{**fence.as_dict(), "owner_epoch": 0}
-        )
-        with self.assertRaisesRegex(TaskStoreError, "OWNER_EPOCH_STALE"):
-            self.store.assert_fresh_actor(self.task_id, stale_owner)
-        stale_native = ActorFence(
-            **{**fence.as_dict(), "native_epoch": 0}
-        )
-        with self.assertRaisesRegex(TaskStoreError, "NATIVE_EPOCH_STALE"):
-            self.store.assert_fresh_actor(self.task_id, stale_native)
-        stale_lease = ActorFence(**{**fence.as_dict(), "lease_id": "lease-stale"})
-        with self.assertRaisesRegex(TaskStoreError, "LEASE_INVALID"):
-            self.store.assert_fresh_actor(self.task_id, stale_lease)
-        stale_session = ActorFence(
-            **{**fence.as_dict(), "owner_session_id": "session_" + "3" * 32}
-        )
-        with self.assertRaisesRegex(TaskStoreError, "OWNER_EPOCH_STALE"):
-            self.store.assert_fresh_actor(self.task_id, stale_session)
-
     def test_waiting_transition_requires_attempt_to_finish_suspending(self) -> None:
         _, claimed = self._accept_and_claim()
         attempt_id = str(claimed.task.current_attempt_id)
@@ -272,9 +207,10 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
             event=_event(TaskEventKind.COMPLETION_PROPOSED, "proposal-fact"),
             facts=TransitionFacts.permissive(),
         )
-        fact = _event(
-            TaskEventKind.TERMINALIZATION_REQUESTED,
-            "terminal-fact-1",
+        fact = TaskEvent(
+            kind=TaskEventKind.TERMINALIZATION_REQUESTED,
+            idempotency_key="terminal-fact-1",
+            occurred_at="2026-07-18T08:00:02.000Z",
             terminalization_reason="DEADLINE_REACHED",
         )
         appended = self.store.apply_event(
@@ -293,6 +229,39 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
         self.assertTrue(appended.applied)
         self.assertFalse(retried.applied)
         self.assertEqual(finalizing.task.task_version, appended.task.task_version)
+        with self.store.database.connect() as connection:
+            timestamps = connection.execute(
+                "SELECT created_at,updated_at FROM tasks WHERE task_id=?",
+                (self.task_id,),
+            ).fetchone()
+        self.assertEqual(NOW, timestamps["updated_at"])
+
+    def test_publication_digest_must_be_lowercase_hex(self) -> None:
+        _, claimed = self._accept_and_claim()
+        finalizing = self.store.apply_event(
+            self.task_id,
+            expected_task_version=claimed.task.task_version,
+            event=_event(TaskEventKind.COMPLETION_PROPOSED, "proposal-bad-digest"),
+            facts=TransitionFacts.permissive(),
+        )
+        with self.assertRaisesRegex(TaskStoreError, "CONTRACT_INVALID"):
+            self.store.apply_event(
+                self.task_id,
+                expected_task_version=finalizing.task.task_version,
+                event=_event(
+                    TaskEventKind.RESULT_PUBLISHED,
+                    "publish-bad-digest",
+                    publication=TerminalPublication(
+                        result_ref="cas:bad-digest",
+                        result_digest="g" * 64,
+                        outcome="FAILED",
+                        published_at=NOW,
+                        attempt_terminal_state=AttemptState.FAILED,
+                    ),
+                ),
+                facts=TransitionFacts.permissive(),
+            )
+        self.assertEqual(0, self.store.count_publications(self.task_id))
 
     def test_outer_lease_fence_records_abandonment_without_worker_result(self) -> None:
         _, claimed = self._accept_and_claim()

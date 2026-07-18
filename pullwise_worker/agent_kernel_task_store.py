@@ -15,15 +15,9 @@ from .agent_kernel_database import AgentKernelDatabase
 from .agent_kernel_event_log import append_task_event, idempotent_event_version
 from .agent_kernel_fencing import assert_actor_fence
 from .agent_kernel_state import (
-    ATTEMPT_TERMINAL_STATES,
-    AttemptState,
-    StateTransitionError,
     TaskEvent,
     TaskEventKind,
-    TaskState,
-    TaskTransition,
     TransitionFacts,
-    reduce_attempt,
     reduce_task,
 )
 from .agent_kernel_task_records import (
@@ -36,6 +30,11 @@ from .agent_kernel_task_records import (
     TASK_COLUMNS,
     task_from_row,
     task_insert_values,
+)
+from .agent_kernel_task_validation import (
+    reduce_task_snapshot,
+    validate_task_genesis,
+    validate_terminal_publication,
 )
 
 
@@ -80,7 +79,7 @@ class TaskStore:
                     ),
                     TransitionFacts(request_policy_ledger_durable=True),
                 )
-                self._validate_genesis(record, accepted)
+                validate_task_genesis(record, accepted)
                 connection.execute(
                     f"INSERT INTO tasks({','.join(TASK_COLUMNS)}) VALUES({','.join('?' for _ in TASK_COLUMNS)})",
                     task_insert_values(record, scan_id),
@@ -128,10 +127,29 @@ class TaskStore:
                     raise TaskStoreError("TASK_VERSION_STALE")
                 if fence is not None:
                     assert_actor_fence(connection, current, fence)
-                transition = self._reduce(current, event, facts)
+                transition = reduce_task_snapshot(current, event, facts)
+                if transition.task_version == current.task_version:
+                    if (
+                        transition.lifecycle != current.lifecycle
+                        or transition.desired_state != current.desired_state
+                        or transition.native_epoch != current.native_epoch
+                        or transition.current_attempt_id != current.current_attempt_id
+                        or transition.attempt_action != "NONE"
+                        or transition.terminal_kind is not None
+                    ):
+                        raise TaskStoreError(
+                            "STATE_TRANSITION_INVALID", "unversioned task mutation"
+                        )
+                    append_task_event(
+                        connection, task_id, event.kind, event.idempotency_key,
+                        digest, current.task_version, event.occurred_at,
+                    )
+                    receipt = TransitionReceipt(current, current.task_version, True)
+                    connection.commit()
+                    return receipt
                 publication = event.publication if transition.terminal_kind == "task_result" else None
                 if publication is not None:
-                    self._validate_publication(event, publication.attempt_terminal_state)
+                    validate_terminal_publication(event)
                 apply_task_attempt_action(connection, current, transition, event)
                 terminal_at = (
                     publication.published_at if publication is not None
@@ -269,6 +287,15 @@ class TaskStore:
                     raise TaskStoreError("NATIVE_EPOCH_STALE")
                 owner_epoch = task.owner_epoch + 1
                 next_version = task.task_version + 1
+                fenced = connection.execute(
+                    """UPDATE owner_incarnations SET state='FENCED',terminal_at=?
+                       WHERE task_id=? AND state='ACTIVE'""",
+                    (occurred_at, task_id),
+                )
+                if fenced.rowcount > 1:
+                    raise TaskStoreError(
+                        "STATE_TRANSITION_INVALID", "multiple live owners"
+                    )
                 connection.execute(
                     """INSERT INTO owner_incarnations(
                        session_id,task_id,owner_id,owner_epoch,state,started_at,terminal_at)
@@ -331,50 +358,6 @@ class TaskStore:
             return int(connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE task_id=?", (task_id,)
             ).fetchone()[0])
-
-    @staticmethod
-    def _validate_genesis(record: Mapping[str, object], transition: TaskTransition) -> None:
-        expected = (
-            transition.lifecycle, transition.desired_state, transition.task_version,
-            transition.native_epoch, transition.current_attempt_id,
-        )
-        observed = tuple(record.get(key) for key in (
-            "lifecycle", "desired_state", "task_version", "native_epoch",
-            "current_attempt_id",
-        ))
-        if observed != expected:
-            raise TaskStoreError("CONTRACT_INVALID", "task genesis state")
-
-    @staticmethod
-    def _reduce(
-        current: TaskSnapshot, event: TaskEvent, facts: TransitionFacts
-    ) -> TaskTransition:
-        try:
-            return reduce_task(
-                TaskState(
-                    current.lifecycle, current.desired_state, current.task_version,
-                    current.native_epoch, current.current_attempt_id,
-                    current.terminalization_reason,
-                ),
-                event,
-                facts,
-            )
-        except StateTransitionError as exc:
-            raise TaskStoreError(exc.code, exc.detail) from exc
-
-    @staticmethod
-    def _validate_publication(event: TaskEvent, target: str) -> None:
-        publication = event.publication
-        if publication is None or (
-            len(publication.result_digest) != 64
-            or publication.result_digest.lower() != publication.result_digest
-            or not publication.result_ref
-            or not publication.outcome
-            or target not in ATTEMPT_TERMINAL_STATES
-        ):
-            raise TaskStoreError("CONTRACT_INVALID", "terminal publication")
-        if event.kind == TaskEventKind.CANCEL_FINALIZED and target != AttemptState.CANCELLED:
-            raise TaskStoreError("CONTRACT_INVALID", "cancel attempt outcome")
 
     @staticmethod
     def _task_required(connection: sqlite3.Connection, task_id: str) -> TaskSnapshot:
