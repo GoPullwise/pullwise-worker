@@ -45,6 +45,15 @@ class AgentKernelShadowReviewWorker(ReviewWorkerV1):
         try:
             marker = self.read_active_run_marker()
             if not marker:
+                previous_run_id = self._agent_kernel_slot.snapshot().run_id
+                if previous_run_id:
+                    outbox, error = self._load_persisted_terminal_outbox(
+                        previous_run_id
+                    )
+                    if error:
+                        raise RuntimeError(error)
+                    if outbox:
+                        self._agent_kernel_slot.observe(None, outbox)
                 self._agent_kernel_slot.observe(None, None)
                 return
             run_id = str(marker.get("run_id") or "").strip()

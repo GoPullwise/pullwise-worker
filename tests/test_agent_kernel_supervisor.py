@@ -38,6 +38,7 @@ def _outbox(**changes: object) -> dict[str, object]:
         "lease_id": "lease-1",
         "attempt_id": "attempt-1",
         "state": "ready",
+        "result_status": "done",
     }
     outbox.update(changes)
     return outbox
@@ -79,6 +80,12 @@ class AgentKernelSupervisorProjectionTest(unittest.TestCase):
         self.assertEqual("FINALIZING", publishing.task_lifecycle)
         self.assertEqual("ready", publishing.terminal_outbox_state)
         self.assertEqual("legacy_v1", publishing.terminal_authority)
+
+        cancelled = project_legacy_slot(
+            _marker(state="finishing", terminal_result_prepared=True),
+            _outbox(result_status="cancelled"),
+        )
+        self.assertEqual("CANCEL", cancelled.desired_state)
 
     def test_outbox_identity_or_second_active_binding_fails_closed(self) -> None:
         with self.assertRaisesRegex(
@@ -159,6 +166,14 @@ class AgentKernelSupervisorProjectionTest(unittest.TestCase):
                 projected.task_lifecycle,
                 projected.terminal_outbox_state,
                 worker.agent_kernel_shadow_error,
+            ))
+
+            worker.clear_active_run_marker(active)
+            self.assertEqual(
+                "FINALIZING", worker.agent_kernel_slot_snapshot().task_lifecycle
+            )
+            self.assertIn("TRANSPORT_IDENTITY_MISMATCH", str(
+                worker.agent_kernel_shadow_error
             ))
 
             worker.terminal_result_outbox_path(active.run_id).unlink()

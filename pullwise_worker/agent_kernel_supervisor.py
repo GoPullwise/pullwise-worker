@@ -69,6 +69,7 @@ def project_legacy_slot(
             "STATE_TRANSITION_INVALID", f"legacy active state {state!r}"
         )
     outbox_state = None
+    outbox_result_status = None
     if terminal_outbox:
         if terminal_outbox.get("schema_version") != "terminal-result-outbox/v1":
             raise SupervisorProjectionError(
@@ -84,11 +85,22 @@ def project_legacy_slot(
             raise SupervisorProjectionError(
                 "STATE_TRANSITION_INVALID", f"legacy outbox state {outbox_state!r}"
             )
+        outbox_result_status = str(
+            terminal_outbox.get("result_status") or ""
+        ).strip().lower()
+        if outbox_result_status not in {
+            "done", "failed", "cancelled", "partial_completed"
+        }:
+            raise SupervisorProjectionError(
+                "STATE_TRANSITION_INVALID", "legacy outbox result status"
+            )
 
     prepared = active_marker.get("terminal_result_prepared") is True
     if prepared or outbox_state is not None or state in {"failure_handling", "finishing"}:
         lifecycle, desired = "FINALIZING", (
-            "CANCEL" if state == "cancelling" else "RUN"
+            "CANCEL"
+            if state == "cancelling" or outbox_result_status == "cancelled"
+            else "RUN"
         )
     elif state == "cancelling":
         lifecycle, desired = "ACTIVE", "CANCEL"

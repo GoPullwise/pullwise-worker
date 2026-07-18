@@ -24,6 +24,12 @@ PROBE = textwrap.dedent(
     from pullwise_worker.agent_kernel_database import AgentKernelDatabase
     from pullwise_worker.agent_kernel_object_store import ObjectStore
     from pullwise_worker.agent_kernel_schema_registry import SchemaRegistry
+    from pullwise_worker.agent_kernel_state import (
+        TaskEvent,
+        TaskEventKind,
+        TransitionFacts,
+    )
+    from pullwise_worker.agent_kernel_task_store import TaskStore
 
     expected_schema_ids = {
         "actor/v1",
@@ -63,8 +69,8 @@ PROBE = textwrap.dedent(
     with tempfile.TemporaryDirectory(prefix="agent-kernel-wheel-store-") as scratch:
         database = AgentKernelDatabase(Path(scratch) / "worker")
         database.initialize()
-        store = ObjectStore(database)
-        content_ref = store.put_bytes(
+        object_store = ObjectStore(database)
+        content_ref = object_store.put_bytes(
             b"installed-wheel",
             task_id="task_" + "1" * 32,
             artifact_id="art_" + "2" * 32,
@@ -73,7 +79,36 @@ PROBE = textwrap.dedent(
             encoding="utf-8",
         )
         registry.validate("content-ref/v1", content_ref)
-        assert store.read_verified(content_ref) == b"installed-wheel"
+        assert object_store.read_verified(content_ref) == b"installed-wheel"
+
+        task_record = None
+        for fixture_name in ("schema-golden-control.json", "schema-golden.json"):
+            fixture = json.loads(
+                (registry.root / "fixtures" / fixture_name).read_text(encoding="utf-8")
+            )
+            for case in fixture["cases"]:
+                if case["schema_id"] == "task-record/v1":
+                    task_record = case["valid"]
+        assert task_record is not None
+        task_store = TaskStore(database)
+        accepted = task_store.accept_task(
+            task_record, idempotency_key="wheel-task-accepted"
+        )
+        claimed = task_store.apply_event(
+            task_record["task_id"],
+            expected_task_version=accepted.task.task_version,
+            event=TaskEvent(
+                kind=TaskEventKind.ATTEMPT_CLAIMED,
+                idempotency_key="wheel-attempt-claimed",
+                occurred_at="2026-07-18T08:00:00.000Z",
+                attempt_id="attempt_" + "3" * 32,
+                budget_reservation_id="wheel-budget-1",
+            ),
+            facts=TransitionFacts.permissive(),
+        )
+        assert claimed.task.lifecycle == "ACTIVE"
+        assert claimed.task.task_version == 2
+        assert task_store.count_attempts(task_record["task_id"]) == 1
 
     print(
         json.dumps(
@@ -82,6 +117,7 @@ PROBE = textwrap.dedent(
                 "fixture_count": len(fixture_names),
                 "schema_count": len(registry.schema_ids),
                 "schema_root": str(registry.root),
+                "task_transition": "QUEUED->ACTIVE",
             },
             sort_keys=True,
         )

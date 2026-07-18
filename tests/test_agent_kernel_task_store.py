@@ -294,6 +294,61 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
         self.assertFalse(retried.applied)
         self.assertEqual(finalizing.task.task_version, appended.task.task_version)
 
+    def test_outer_lease_fence_records_abandonment_without_worker_result(self) -> None:
+        _, claimed = self._accept_and_claim()
+        terminal = self.store.apply_event(
+            self.task_id,
+            expected_task_version=claimed.task.task_version,
+            event=_event(TaskEventKind.OUTER_LEASE_FENCED, "lease-fenced-1"),
+            facts=TransitionFacts(outer_lease_invalid=True),
+        )
+
+        self.assertEqual(("TERMINAL", "transport_abandoned"), (
+            terminal.task.lifecycle,
+            terminal.task.terminal_kind,
+        ))
+        self.assertIsNone(terminal.task.result_digest)
+        self.assertEqual(0, self.store.count_publications(self.task_id))
+        self.assertEqual(
+            AttemptState.FENCED,
+            self.store.get_attempt(str(claimed.task.current_attempt_id)).state,
+        )
+
+    def test_cancel_finalization_can_terminalize_before_any_attempt(self) -> None:
+        accepted = self.store.accept_task(
+            self.record, idempotency_key="accept-cancel", scan_id="scan-original"
+        )
+        requested = self.store.apply_event(
+            self.task_id,
+            expected_task_version=accepted.task.task_version,
+            event=_event(TaskEventKind.CANCEL_REQUESTED, "cancel-requested-1"),
+            facts=TransitionFacts.permissive(),
+        )
+        terminal = self.store.apply_event(
+            self.task_id,
+            expected_task_version=requested.task.task_version,
+            event=_event(
+                TaskEventKind.CANCEL_FINALIZED,
+                "cancel-finalized-1",
+                publication=TerminalPublication(
+                    result_ref="cas:cancelled",
+                    result_digest="d" * 64,
+                    outcome="CANCELLED",
+                    published_at=NOW,
+                    attempt_terminal_state=AttemptState.CANCELLED,
+                ),
+            ),
+            facts=TransitionFacts.permissive(),
+        )
+
+        self.assertEqual(("TERMINAL", "CANCEL", "task_result"), (
+            terminal.task.lifecycle,
+            terminal.task.desired_state,
+            terminal.task.terminal_kind,
+        ))
+        self.assertEqual(0, self.store.count_attempts(self.task_id))
+        self.assertEqual(1, self.store.count_publications(self.task_id))
+
 
 if __name__ == "__main__":
     unittest.main()
