@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -176,9 +177,21 @@ class AgentKernelSupervisorProjectionTest(unittest.TestCase):
                 worker.agent_kernel_shadow_error
             ))
 
-            worker.terminal_result_outbox_path(active.run_id).unlink()
+            (artifact_dir / "result-submit-succeeded.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": active.run_id,
+                        "job_id": active.job_id,
+                        "lease_id": active.lease_id,
+                        "attempt_id": active.attempt_id,
+                        "status": "result_submit_succeeded",
+                    }
+                ),
+                encoding="utf-8",
+            )
             worker.clear_active_run_marker(active)
             self.assertEqual("IDLE", worker.agent_kernel_slot_snapshot().slot_state)
+            self.assertIsNone(worker.agent_kernel_shadow_error)
 
 
 if __name__ == "__main__":

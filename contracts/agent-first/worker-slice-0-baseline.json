@@ -47,8 +47,8 @@
   "code_map": [
     {
       "id": "cli-composition",
-      "paths": [{"path": "pullwise_worker/main.py", "anchors": ["def build_parser", "ReviewWorkerV1(config, client=PullwiseClient(config))"]}, {"path": "pullwise_worker/__main__.py", "anchors": ["from .main import main"]}],
-      "current_responsibilities": "Dispatch CLI commands and compose WorkerConfig, PullwiseClient, and the single ReviewWorkerV1 instance.",
+      "paths": [{"path": "pullwise_worker/main.py", "anchors": ["def build_parser", "build_review_worker("]}, {"path": "pullwise_worker/__main__.py", "anchors": ["from .main import main"]}],
+      "current_responsibilities": "Dispatch CLI commands and compose WorkerConfig, PullwiseClient, and exactly one legacy or shadow-observing ReviewWorker instance.",
       "boundary": "Lifecycle and readiness commands are imported lazily; the run path owns only composition.",
       "candidate_extraction_seam": "Keep this as the narrow composition root while legacy command implementations remain in their current modules."
     },

@@ -153,6 +153,9 @@ inference never select an option or authorize production implementation.
 - Controlled normative units use exact decision-id and resolution-digest
   markers. A resolved applicable unit must be referenced on every check;
   unknown, pending, malformed, stale, or unscoped references fail.
+- In the generated decision view, the option selected by a resolution must be
+  labelled as selected. The non-normative recommendation/not-selected label
+  applies only to a recommended option that the resolution did not select.
 
 The generated Markdown view is a generated-file size exception owned by the
 Worker specification owner. It stays atomic because it is one ordered decision
@@ -195,6 +198,39 @@ non-regular files, unsupported schema keywords, and unresolved references.
   registry from outside the source tree. The smoke check must also validate the
   installed schema/fixture inventory and a SQLite/CAS round trip; inspecting a
   wheel archive alone is not sufficient evidence that runtime discovery works.
+
+## Agent Kernel Slice 2 Control State
+
+The typed Task/Attempt reducers are the sole lifecycle edge registry. Keep the
+Cartesian state/event and state/state tests synchronized with that registry;
+every unlisted edge fails with `STATE_TRANSITION_INVALID`, and terminal Tasks
+fail with `TASK_ALREADY_TERMINAL`.
+
+- Task control events use one `BEGIN IMMEDIATE` transaction for version CAS,
+  Attempt action, terminal publication row, and append-only event. Exact
+  idempotency retries return the original event version; a reused key with any
+  other task/type/payload fails `IDEMPOTENCY_CONFLICT`. A FINALIZING
+  terminalization fact may append at the current version; it advances the
+  version only when its authoritative outcome selection changes.
+- `D5` remains unresolved until its declared Slice gate. Slice 2 exposes one
+  reducer transition as one provisional control transaction; later composite
+  mutation work must not generalize that behavior into a normative
+  per-field/per-event policy before D5 is resolved.
+- An actor fence binds task/deletion version, lease/transport epoch, current
+  Attempt/native epoch, stable owner ID, owner epoch, and the exact live owner
+  session. A mismatch fails closed with the stable fence code; do not infer
+  freshness from only one epoch or from an Agent-provided identity.
+- The legacy active-run marker, terminal outbox, and success receipt remain the
+  production terminal authority. The Agent Kernel bridge is a read-only
+  one-slot shadow projection enabled by
+  `PULLWISE_AGENT_KERNEL_SHADOW_ENABLED`; disabling it constructs the unchanged
+  legacy worker. It must never create a local queue/prefetch slot, publish a
+  second result, or treat a stale outbox as pending after an exact bound success
+  receipt has won.
+- SQLite migration 2 upgrades a Slice 1 database in place and transactionally
+  adds event digest, terminalization reason, and complete Attempt control
+  fields. Preserve migration 1 bytes/digest; crash before migration commit must
+  leave a valid v1 database that cleanly upgrades once on restart.
 
 ## Worker Host Platform
 

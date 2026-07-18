@@ -5,7 +5,11 @@ from __future__ import annotations
 import os
 from typing import Any, TypeVar
 
-from .agent_kernel_supervisor import LegacySlotMirror, SupervisorSlotProjection
+from .agent_kernel_supervisor import (
+    LegacySlotMirror,
+    SupervisorProjectionError,
+    SupervisorSlotProjection,
+)
 from .review_worker_v1 import ActiveJob, ReviewWorkerV1
 
 
@@ -45,8 +49,29 @@ class AgentKernelShadowReviewWorker(ReviewWorkerV1):
         try:
             marker = self.read_active_run_marker()
             if not marker:
-                previous_run_id = self._agent_kernel_slot.snapshot().run_id
+                previous = self._agent_kernel_slot.snapshot()
+                previous_run_id = previous.run_id
                 if previous_run_id:
+                    receipt = self._persisted_submit_marker(
+                        previous_run_id, "result-submit-succeeded.json"
+                    )
+                    if receipt:
+                        expected = {
+                            "job_id": previous.job_id,
+                            "run_id": previous.run_id,
+                            "lease_id": previous.lease_id,
+                            "attempt_id": previous.attempt_id,
+                        }
+                        if (
+                            receipt.get("status") != "result_submit_succeeded"
+                            or any(receipt.get(key) != value for key, value in expected.items())
+                        ):
+                            raise SupervisorProjectionError(
+                                "TRANSPORT_IDENTITY_MISMATCH",
+                                "terminal success receipt binding",
+                            )
+                        self._agent_kernel_slot.observe(None, None)
+                        return
                     outbox, error = self._load_persisted_terminal_outbox(
                         previous_run_id
                     )
