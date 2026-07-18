@@ -83,9 +83,12 @@ class ActorFence:
     native_epoch: int
     owner_id: str
     owner_epoch: int
+    owner_session_id: str
 
     @classmethod
-    def from_task(cls, task: TaskSnapshot) -> "ActorFence":
+    def from_task(
+        cls, task: TaskSnapshot, *, owner_session_id: str
+    ) -> "ActorFence":
         return cls(
             task_version=task.task_version,
             deletion_version=task.deletion_version,
@@ -95,6 +98,7 @@ class ActorFence:
             native_epoch=task.native_epoch,
             owner_id=task.owner_id,
             owner_epoch=task.owner_epoch,
+            owner_session_id=owner_session_id,
         )
 
     def as_dict(self) -> dict[str, object]:
@@ -107,6 +111,7 @@ class ActorFence:
             "native_epoch": self.native_epoch,
             "owner_id": self.owner_id,
             "owner_epoch": self.owner_epoch,
+            "owner_session_id": self.owner_session_id,
         }
 
 

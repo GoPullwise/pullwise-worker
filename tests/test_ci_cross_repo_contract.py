@@ -29,9 +29,12 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
 
     def test_ci_runs_the_isolated_agent_kernel_wheel_check(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        wheel_check = WHEEL_CHECK_PATH.read_text(encoding="utf-8")
 
         self.assertTrue(WHEEL_CHECK_PATH.is_file())
         self.assertIn("python scripts/check_agent_kernel_wheel.py", workflow)
+        self.assertIn("TaskStore", wheel_check)
+        self.assertIn("TaskEventKind.ATTEMPT_CLAIMED", wheel_check)
 
 
 if __name__ == "__main__":

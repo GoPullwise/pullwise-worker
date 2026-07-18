@@ -13,6 +13,7 @@ from .agent_kernel_attempt_store import (
 from .agent_kernel_canonical import canonical_sha256
 from .agent_kernel_database import AgentKernelDatabase
 from .agent_kernel_event_log import append_task_event, idempotent_event_version
+from .agent_kernel_fencing import assert_actor_fence
 from .agent_kernel_state import (
     ATTEMPT_TERMINAL_STATES,
     AttemptState,
@@ -126,12 +127,12 @@ class TaskStore:
                 if current.task_version != expected_task_version:
                     raise TaskStoreError("TASK_VERSION_STALE")
                 if fence is not None:
-                    self._assert_fence(current, fence)
+                    assert_actor_fence(connection, current, fence)
                 transition = self._reduce(current, event, facts)
-                apply_task_attempt_action(connection, current, transition, event)
                 publication = event.publication if transition.terminal_kind == "task_result" else None
                 if publication is not None:
                     self._validate_publication(event, publication.attempt_terminal_state)
+                apply_task_attempt_action(connection, current, transition, event)
                 terminal_at = (
                     publication.published_at if publication is not None
                     else event.occurred_at if transition.terminal_kind else None
@@ -200,8 +201,16 @@ class TaskStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 task = self._task_required(connection, task_id)
+                if task.lifecycle == "TERMINAL":
+                    raise TaskStoreError("TASK_ALREADY_TERMINAL")
                 if fence is not None:
-                    self._assert_fence(task, fence)
+                    assert_actor_fence(connection, task, fence)
+                current_attempt = attempt_required(connection, attempt_id)
+                if (
+                    task.current_attempt_id != attempt_id
+                    or task.native_epoch != current_attempt.native_epoch
+                ):
+                    raise TaskStoreError("NATIVE_EPOCH_STALE")
                 result = advance_attempt_tx(
                     connection, attempt_id, expected_state_version, target_state,
                     occurred_at, termination_reason,
@@ -238,8 +247,15 @@ class TaskStore:
                 )
                 if retry is not None:
                     task = self._task_required(connection, task_id)
+                    owner = connection.execute(
+                        """SELECT owner_epoch FROM owner_incarnations
+                           WHERE session_id=? AND task_id=?""",
+                        (session_id, task_id),
+                    ).fetchone()
+                    if owner is None:
+                        raise TaskStoreError("OWNER_EPOCH_STALE")
                     connection.commit()
-                    return OwnerReceipt(task, task.owner_epoch, session_id, False)
+                    return OwnerReceipt(task, int(owner["owner_epoch"]), session_id, False)
                 task = self._task_required(connection, task_id)
                 if task.lifecycle == "TERMINAL":
                     raise TaskStoreError("TASK_ALREADY_TERMINAL")
@@ -265,11 +281,13 @@ class TaskStore:
                 )
                 if changed.rowcount != 1:
                     raise TaskStoreError("NATIVE_EPOCH_STALE")
-                connection.execute(
+                task_changed = connection.execute(
                     """UPDATE tasks SET owner_epoch=?,task_version=?,updated_at=?
                        WHERE task_id=? AND task_version=?""",
                     (owner_epoch, next_version, occurred_at, task_id, expected_task_version),
                 )
+                if task_changed.rowcount != 1:
+                    raise TaskStoreError("TASK_VERSION_STALE")
                 append_task_event(
                     connection, task_id, OWNER_EVENT, idempotency_key, digest,
                     next_version, occurred_at,
@@ -289,7 +307,7 @@ class TaskStore:
     def assert_fresh_actor(self, task_id: str, fence: ActorFence) -> TaskSnapshot:
         with self.database.connect() as connection:
             task = self._task_required(connection, task_id)
-            self._assert_fence(task, fence)
+            assert_actor_fence(connection, task, fence)
             return task
 
     def get_task(self, task_id: str) -> TaskSnapshot:
@@ -357,25 +375,6 @@ class TaskStore:
             raise TaskStoreError("CONTRACT_INVALID", "terminal publication")
         if event.kind == TaskEventKind.CANCEL_FINALIZED and target != AttemptState.CANCELLED:
             raise TaskStoreError("CONTRACT_INVALID", "cancel attempt outcome")
-
-    @staticmethod
-    def _assert_fence(task: TaskSnapshot, fence: ActorFence) -> None:
-        if task.lifecycle == "TERMINAL":
-            raise TaskStoreError("TASK_ALREADY_TERMINAL")
-        if (
-            task.task_version != fence.task_version
-            or task.deletion_version != fence.deletion_version
-        ):
-            raise TaskStoreError("TASK_VERSION_STALE")
-        if task.lease_id != fence.lease_id or task.transport_epoch != fence.transport_epoch:
-            raise TaskStoreError("LEASE_INVALID")
-        if (
-            task.native_epoch != fence.native_epoch
-            or task.current_attempt_id != fence.attempt_id
-        ):
-            raise TaskStoreError("NATIVE_EPOCH_STALE")
-        if task.owner_id != fence.owner_id or task.owner_epoch != fence.owner_epoch:
-            raise TaskStoreError("OWNER_EPOCH_STALE")
 
     @staticmethod
     def _task_required(connection: sqlite3.Connection, task_id: str) -> TaskSnapshot:

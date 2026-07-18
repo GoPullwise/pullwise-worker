@@ -113,6 +113,45 @@ class AgentKernelTaskRaceTest(unittest.TestCase):
             )
         self.assertEqual(0, self.store.count_publications(task_id))
 
+    def test_concurrent_attempt_claims_leave_exactly_one_current_attempt(self) -> None:
+        task_id = "task_" + "6" * 32
+        self.store.accept_task(_record(task_id), idempotency_key="accept-6")
+        barrier = threading.Barrier(8)
+
+        def claim(index: int) -> tuple[str, str]:
+            attempt_id = f"attempt_{index:032x}"
+            barrier.wait()
+            try:
+                self.store.apply_event(
+                    task_id,
+                    expected_task_version=1,
+                    event=self._event(
+                        TaskEventKind.ATTEMPT_CLAIMED,
+                        f"claim-concurrent-{index}",
+                        attempt_id=attempt_id,
+                        budget_reservation_id=f"budget-{index}",
+                    ),
+                    facts=TransitionFacts.permissive(),
+                )
+                return "won", attempt_id
+            except TaskStoreError as exc:
+                return exc.code, attempt_id
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            outcomes = list(executor.map(claim, range(8)))
+
+        winners = [attempt_id for outcome, attempt_id in outcomes if outcome == "won"]
+        self.assertEqual(1, len(winners))
+        self.assertTrue(all(
+            outcome in {"won", "TASK_VERSION_STALE"} for outcome, _ in outcomes
+        ))
+        task = self.store.get_task(task_id)
+        self.assertEqual((winners[0], 1, 2), (
+            task.current_attempt_id,
+            self.store.count_attempts(task_id),
+            task.task_version,
+        ))
+
     def test_concurrent_publishers_have_one_cas_winner_and_one_publication(self) -> None:
         task_id, version = self._finalizing_task("5")
         barrier = threading.Barrier(8)

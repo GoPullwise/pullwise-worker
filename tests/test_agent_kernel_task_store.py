@@ -142,7 +142,20 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
             occurred_at=NOW,
         )
         self.assertEqual((1, 3), (owner.owner_epoch, owner.task.task_version))
-        fence = ActorFence.from_task(owner.task)
+        owner_retry = self.store.begin_owner_incarnation(
+            self.task_id,
+            expected_task_version=2,
+            attempt_id=attempt_id,
+            native_epoch=1,
+            session_id="session_" + "2" * 32,
+            idempotency_key="owner-1",
+            occurred_at=NOW,
+        )
+        self.assertFalse(owner_retry.applied)
+        self.assertEqual(1, owner_retry.owner_epoch)
+        fence = ActorFence.from_task(
+            owner.task, owner_session_id="session_" + "2" * 32
+        )
         self.store.assert_fresh_actor(self.task_id, fence)
 
         stale_owner = ActorFence(
@@ -158,6 +171,11 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
         stale_lease = ActorFence(**{**fence.as_dict(), "lease_id": "lease-stale"})
         with self.assertRaisesRegex(TaskStoreError, "LEASE_INVALID"):
             self.store.assert_fresh_actor(self.task_id, stale_lease)
+        stale_session = ActorFence(
+            **{**fence.as_dict(), "owner_session_id": "session_" + "3" * 32}
+        )
+        with self.assertRaisesRegex(TaskStoreError, "OWNER_EPOCH_STALE"):
+            self.store.assert_fresh_actor(self.task_id, stale_session)
 
     def test_waiting_transition_requires_attempt_to_finish_suspending(self) -> None:
         _, claimed = self._accept_and_claim()
@@ -245,6 +263,36 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
                 event=_event(TaskEventKind.CANCEL_REQUESTED, "cancel-late"),
                 facts=TransitionFacts.permissive(),
             )
+
+    def test_finalizing_terminalization_fact_append_does_not_invent_version_change(self) -> None:
+        _, claimed = self._accept_and_claim()
+        finalizing = self.store.apply_event(
+            self.task_id,
+            expected_task_version=claimed.task.task_version,
+            event=_event(TaskEventKind.COMPLETION_PROPOSED, "proposal-fact"),
+            facts=TransitionFacts.permissive(),
+        )
+        fact = _event(
+            TaskEventKind.TERMINALIZATION_REQUESTED,
+            "terminal-fact-1",
+            terminalization_reason="DEADLINE_REACHED",
+        )
+        appended = self.store.apply_event(
+            self.task_id,
+            expected_task_version=finalizing.task.task_version,
+            event=fact,
+            facts=TransitionFacts(authoritative_terminalization=True),
+        )
+        retried = self.store.apply_event(
+            self.task_id,
+            expected_task_version=finalizing.task.task_version,
+            event=fact,
+            facts=TransitionFacts(authoritative_terminalization=True),
+        )
+
+        self.assertTrue(appended.applied)
+        self.assertFalse(retried.applied)
+        self.assertEqual(finalizing.task.task_version, appended.task.task_version)
 
 
 if __name__ == "__main__":

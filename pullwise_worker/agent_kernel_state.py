@@ -218,6 +218,7 @@ class TransitionFacts:
     proposal_fresh: bool = False
     source_frozen: bool = False
     authoritative_terminalization: bool = False
+    terminal_outcome_changed: bool = False
     tools_stopped_or_fenced: bool = False
     repair_budget_available: bool = False
     deadline_available: bool = False
@@ -317,11 +318,23 @@ def reduce_task(
         action = "KEEP_CURRENT"
     elif event.kind == TaskEventKind.TERMINALIZATION_REQUESTED:
         _require(
-            lifecycle in {"QUEUED", "ACTIVE", "WAITING_INPUT", "WAITING_APPROVAL"},
+            lifecycle in {
+                "QUEUED", "ACTIVE", "WAITING_INPUT", "WAITING_APPROVAL", "FINALIZING"
+            },
             "terminalization source",
         )
         _require(event.terminalization_reason in TERMINALIZATION_REASONS, "terminalization reason")
         _require(facts.authoritative_terminalization, "terminalization authority")
+        if lifecycle == "FINALIZING" and not facts.terminal_outcome_changed:
+            return TaskTransition(
+                lifecycle=lifecycle,
+                desired_state=desired,
+                task_version=state.task_version,
+                native_epoch=native_epoch,
+                current_attempt_id=attempt_id,
+                attempt_action="NONE",
+                terminalization_reason=reason,
+            )
         if lifecycle == "ACTIVE":
             _require(facts.tools_stopped_or_fenced, "active tools not stopped")
             action = "KEEP_CURRENT"

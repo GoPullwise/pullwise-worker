@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -12,6 +14,7 @@ from pullwise_worker.agent_kernel_supervisor import (
     SupervisorProjectionError,
     project_legacy_slot,
 )
+from pullwise_worker.review_worker_v1 import ActiveJob
 
 
 def _marker(**changes: object) -> dict[str, object]:
@@ -119,6 +122,48 @@ class AgentKernelSupervisorProjectionTest(unittest.TestCase):
             projection.local_queue_depth,
             projection.maintains_local_queue,
         ))
+
+    def test_enabled_runtime_mirrors_the_existing_marker_and_outbox_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-kernel-supervisor-") as tmp:
+            root = Path(tmp) / "worker"
+            worker = AgentKernelShadowReviewWorker(
+                SimpleNamespace(
+                    worker_id="wk-test",
+                    worker_root=root,
+                    service_home=str(Path(tmp)),
+                ),
+                client=object(),
+            )
+            active = ActiveJob(
+                job_id="job-1",
+                run_id="run-1",
+                lease_id="lease-1",
+                attempt_id="attempt-1",
+            )
+            worker.persist_active_run_marker(active)
+            self.assertEqual("ACTIVE", worker.agent_kernel_slot_snapshot().task_lifecycle)
+
+            artifact_dir = worker.isolation.artifacts / active.run_id
+            artifact_dir.mkdir(parents=True)
+            worker.prepare_terminal_result_outbox(
+                active,
+                {"status": "done"},
+                artifact_dir,
+                {"execution": {"status": "completed"}},
+            )
+            active.state = "finishing"
+            active.terminal_result_prepared = True
+            worker.persist_active_run_marker(active)
+            projected = worker.agent_kernel_slot_snapshot()
+            self.assertEqual(("FINALIZING", "ready", None), (
+                projected.task_lifecycle,
+                projected.terminal_outbox_state,
+                worker.agent_kernel_shadow_error,
+            ))
+
+            worker.terminal_result_outbox_path(active.run_id).unlink()
+            worker.clear_active_run_marker(active)
+            self.assertEqual("IDLE", worker.agent_kernel_slot_snapshot().slot_state)
 
 
 if __name__ == "__main__":
