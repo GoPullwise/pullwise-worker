@@ -66,7 +66,7 @@ class AgentKernelStorageTest(unittest.TestCase):
         self.assertEqual(5000, pragmas["busy_timeout"])
         self.assertTrue(REQUIRED_TABLES <= tables)
         self.assertEqual(LATEST_SCHEMA_VERSION, user_version)
-        self.assertEqual(1, len(migrations))
+        self.assertEqual(2, len(migrations))
         self.assertRegex(migrations[0][2], r"^[0-9a-f]{64}$")
         self.assertEqual(database.path, self.worker_root / "agent-kernel" / "state.sqlite3")
 

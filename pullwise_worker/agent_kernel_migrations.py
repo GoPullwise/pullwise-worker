@@ -260,4 +260,59 @@ INITIAL_STATEMENTS = (
 )
 
 
-MIGRATIONS = (Migration(1, "initial-shadow-store", INITIAL_STATEMENTS),)
+SLICE_2_CONTROL_STATE_STATEMENTS = (
+    """
+    ALTER TABLE task_events ADD COLUMN event_digest TEXT NOT NULL
+        DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+        CHECK (length(event_digest) = 64 AND event_digest = lower(event_digest))
+    """,
+    """
+    ALTER TABLE tasks ADD COLUMN terminalization_reason TEXT CHECK (
+        terminalization_reason IS NULL OR terminalization_reason IN (
+            'DEADLINE_REACHED',
+            'BUDGET_EXHAUSTED',
+            'INTERACTION_UNAVAILABLE',
+            'CAPABILITY_UNAVAILABLE',
+            'RUNTIME_FAILURE',
+            'STORAGE_FAILURE',
+            'PROTOCOL_FAILURE',
+            'POLICY_INVARIANT_BROKEN'
+        )
+    )
+    """,
+    """
+    ALTER TABLE attempts ADD COLUMN transport_binding TEXT NOT NULL DEFAULT '{}'
+    """,
+    """
+    ALTER TABLE attempts ADD COLUMN state_version INTEGER NOT NULL DEFAULT 1
+        CHECK (state_version >= 1)
+    """,
+    """
+    ALTER TABLE attempts ADD COLUMN predecessor_checkpoint_generation INTEGER
+        CHECK (
+            predecessor_checkpoint_generation IS NULL OR
+            predecessor_checkpoint_generation >= 0
+        )
+    """,
+    """
+    ALTER TABLE attempts ADD COLUMN owner_session_id TEXT
+    """,
+    """
+    ALTER TABLE attempts ADD COLUMN lease_acquired_at TEXT
+    """,
+    """
+    ALTER TABLE attempts ADD COLUMN budget_reservation_id TEXT
+    """,
+    """
+    CREATE INDEX task_events_version_idx ON task_events(task_id, task_version)
+    """,
+    """
+    CREATE INDEX attempts_current_lookup_idx ON attempts(task_id, state)
+    """,
+)
+
+
+MIGRATIONS = (
+    Migration(1, "initial-shadow-store", INITIAL_STATEMENTS),
+    Migration(2, "slice-2-control-state", SLICE_2_CONTROL_STATE_STATEMENTS),
+)
