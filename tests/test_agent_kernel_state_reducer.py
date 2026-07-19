@@ -194,7 +194,7 @@ class AgentKernelStateReducerTest(unittest.TestCase):
                 _state("ACTIVE"), invalid_reason, TransitionFacts.permissive()
             )
 
-    def test_finalizing_terminalization_fact_only_advances_version_if_outcome_changes(self) -> None:
+    def test_finalizing_terminalization_transactions_each_advance_one_version(self) -> None:
         event = _event(TaskEventKind.TERMINALIZATION_REQUESTED)
         fact_only = reduce_task(
             _state("FINALIZING"),
@@ -210,9 +210,10 @@ class AgentKernelStateReducerTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(7, fact_only.task_version)
+        self.assertEqual(8, fact_only.task_version)
         self.assertEqual(8, changed.task_version)
         self.assertEqual("FINALIZING", fact_only.lifecycle)
+        self.assertIsNone(fact_only.terminalization_reason)
 
     def test_cartesian_attempt_matrix_matches_the_frozen_edge_set(self) -> None:
         for source, target in itertools.product(ATTEMPT_STATES, repeat=2):

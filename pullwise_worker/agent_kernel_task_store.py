@@ -128,25 +128,11 @@ class TaskStore:
                 if fence is not None:
                     assert_actor_fence(connection, current, fence)
                 transition = reduce_task_snapshot(current, event, facts)
-                if transition.task_version == current.task_version:
-                    if (
-                        transition.lifecycle != current.lifecycle
-                        or transition.desired_state != current.desired_state
-                        or transition.native_epoch != current.native_epoch
-                        or transition.current_attempt_id != current.current_attempt_id
-                        or transition.attempt_action != "NONE"
-                        or transition.terminal_kind is not None
-                    ):
-                        raise TaskStoreError(
-                            "STATE_TRANSITION_INVALID", "unversioned task mutation"
-                        )
-                    append_task_event(
-                        connection, task_id, event.kind, event.idempotency_key,
-                        digest, current.task_version, event.occurred_at,
+                if transition.task_version != current.task_version + 1:
+                    raise TaskStoreError(
+                        "STATE_TRANSITION_INVALID",
+                        "control transaction must advance task_version exactly once",
                     )
-                    receipt = TransitionReceipt(current, current.task_version, True)
-                    connection.commit()
-                    return receipt
                 publication = event.publication if transition.terminal_kind == "task_result" else None
                 if publication is not None:
                     validate_terminal_publication(event)

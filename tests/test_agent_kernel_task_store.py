@@ -5,12 +5,15 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
+from pullwise_worker import agent_kernel_task_store as task_store_module
 from pullwise_worker.agent_kernel_database import AgentKernelDatabase
 from pullwise_worker.agent_kernel_state import (
     AttemptState,
     TaskEvent,
     TaskEventKind,
+    TaskTransition,
     TerminalPublication,
     TransitionFacts,
 )
@@ -199,7 +202,7 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
                 facts=TransitionFacts.permissive(),
             )
 
-    def test_finalizing_terminalization_fact_append_does_not_invent_version_change(self) -> None:
+    def test_finalizing_terminalization_fact_transaction_advances_once(self) -> None:
         _, claimed = self._accept_and_claim()
         finalizing = self.store.apply_event(
             self.task_id,
@@ -228,13 +231,46 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
 
         self.assertTrue(appended.applied)
         self.assertFalse(retried.applied)
-        self.assertEqual(finalizing.task.task_version, appended.task.task_version)
+        self.assertEqual(finalizing.task.task_version + 1, appended.task.task_version)
+        self.assertEqual(appended.task.task_version, retried.task.task_version)
+        self.assertEqual(appended.event_task_version, retried.event_task_version)
         with self.store.database.connect() as connection:
             timestamps = connection.execute(
                 "SELECT created_at,updated_at FROM tasks WHERE task_id=?",
                 (self.task_id,),
             ).fetchone()
-        self.assertEqual(NOW, timestamps["updated_at"])
+        self.assertEqual(fact.occurred_at, timestamps["updated_at"])
+
+    def test_control_transaction_rejects_any_version_delta_other_than_one(self) -> None:
+        _, claimed = self._accept_and_claim()
+        event = _event(TaskEventKind.COMPLETION_PROPOSED, "bad-version-delta")
+        for version in (
+            claimed.task.task_version,
+            claimed.task.task_version + 2,
+        ):
+            transition = TaskTransition(
+                lifecycle=claimed.task.lifecycle,
+                desired_state=claimed.task.desired_state,
+                task_version=version,
+                native_epoch=claimed.task.native_epoch,
+                current_attempt_id=claimed.task.current_attempt_id,
+                attempt_action="NONE",
+            )
+            with self.subTest(version=version), mock.patch.object(
+                task_store_module,
+                "reduce_task_snapshot",
+                return_value=transition,
+            ), self.assertRaisesRegex(TaskStoreError, "STATE_TRANSITION_INVALID"):
+                self.store.apply_event(
+                    self.task_id,
+                    expected_task_version=claimed.task.task_version,
+                    event=event,
+                    facts=TransitionFacts.permissive(),
+                )
+            self.assertEqual(
+                claimed.task.task_version,
+                self.store.get_task(self.task_id).task_version,
+            )
 
     def test_publication_digest_must_be_lowercase_hex(self) -> None:
         _, claimed = self._accept_and_claim()

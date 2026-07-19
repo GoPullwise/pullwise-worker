@@ -325,21 +325,12 @@ def reduce_task(
         )
         _require(event.terminalization_reason in TERMINALIZATION_REASONS, "terminalization reason")
         _require(facts.authoritative_terminalization, "terminalization authority")
-        if lifecycle == "FINALIZING" and not facts.terminal_outcome_changed:
-            return TaskTransition(
-                lifecycle=lifecycle,
-                desired_state=desired,
-                task_version=state.task_version,
-                native_epoch=native_epoch,
-                current_attempt_id=attempt_id,
-                attempt_action="NONE",
-                terminalization_reason=reason,
-            )
-        if lifecycle == "ACTIVE":
-            _require(facts.tools_stopped_or_fenced, "active tools not stopped")
-            action = "KEEP_CURRENT"
-        lifecycle = "FINALIZING"
-        reason = event.terminalization_reason
+        if lifecycle != "FINALIZING" or facts.terminal_outcome_changed:
+            if lifecycle == "ACTIVE":
+                _require(facts.tools_stopped_or_fenced, "active tools not stopped")
+                action = "KEEP_CURRENT"
+            lifecycle = "FINALIZING"
+            reason = event.terminalization_reason
     elif event.kind == TaskEventKind.GATE_REPAIRABLE:
         _require(lifecycle == "FINALIZING" and desired == "RUN", "repair source")
         _require(facts.repair_budget_available and facts.deadline_available, "repair guards")

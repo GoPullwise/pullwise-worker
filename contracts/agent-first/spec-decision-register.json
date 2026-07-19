@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D5",
+  "active_decision_id": "D6",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -100,14 +100,25 @@
     {
       "id": "D5", "key": "version-unit", "scope": "P0.6", "title": "task_version 递增单位",
       "question": "task_version 应按每个成功控制事件事务 +1，还是按每个字段 mutation +1？",
-      "status": "pending", "depends_on": ["D4"], "activation": null, "required_by_slice": "S4",
+      "status": "resolved", "depends_on": ["D4"], "activation": null, "required_by_slice": "S4",
       "effects": ["data_model", "state_semantics"], "source_refs": ["handoff:P0.6"],
       "affected_units": ["mvp-state-semantics"],
       "options": [
         {"id": "per_control_transaction", "summary": "每个成功控制事件事务整体 +1。", "rationale": "为 guard、event、write set 和 replay 提供单一线性化单位。", "consequences": ["同事务多个字段变化共享一个新版本"]},
         {"id": "per_field_mutation", "summary": "每个字段 mutation 分别 +1。", "rationale": "字段变化可逐项计数，但一个业务事件会产生多次版本跳跃。", "consequences": ["CAS、事件重放和 fixture 更复杂"]}
       ],
-      "recommended_option_id": "per_control_transaction", "resolution": null, "supersedes": []
+      "recommended_option_id": "per_control_transaction",
+      "resolution": {
+        "kind": "option",
+        "selected_option_id": "per_control_transaction",
+        "custom_text": null,
+        "decision_text": "确认选择 per_control_transaction：task_version 按每个成功控制事件事务整体 +1；同一事务内所有字段变化、guard、事件、write set 与 replay 共享一个新版本，不按字段 mutation 分别递增。",
+        "authority": "user",
+        "decided_at": "2026-07-19",
+        "evidence_refs": ["conversation:user-selection:2026-07-19:per_control_transaction"],
+        "resolution_sha256": "859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a"
+      },
+      "supersedes": []
     },
     {
       "id": "D6", "key": "claim-owner-transaction", "scope": "P0.6", "title": "Attempt claim 与 Owner 创建事务",
