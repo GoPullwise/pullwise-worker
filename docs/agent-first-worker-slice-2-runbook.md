@@ -15,8 +15,10 @@ D2 失活，`--require-slice S2` 通过。D3 已由用户选择
 `mvp_r0_r1_reject_r2`，resolution digest 为
 `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`；D4 已由用户
 选择 `field_by_field_ownership`，resolution digest 为
-`b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`。当前 active
-decision 是 D5。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把
+`b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`。D5 已由用户
+选择 `per_control_transaction`，resolution digest 为
+`859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`。当前 active
+decision 是 D6。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把
 推荐项或当前实现当成这些决策。
 
 ## 已实现范围
@@ -85,12 +87,13 @@ history 和 columns 仍为 v1；干净重启只应用一次 v2。
 - shadow 异常可通过 `agent_kernel_shadow_error` 观察，但不会让 legacy authority
   停机；bridge 没有网络写入、TaskResult publisher 或 Task runner。
 
-## D5 与后续 Slice 边界
+## D5 决议与后续 Slice 边界
 
-S2 的一个 reducer transition 当前对应一个 provisional control transaction；这是
-实现第 10.1 节状态 CAS 所需的局部单位，不把 D5 的“每 control transaction”选项
-冻结为后续规范。S4 composite mutation 开始前必须解决 D5，再决定 checkpoint、
-ledger、owner 等多个 pointer 的最终 version 单位。
+D5 已冻结为 `per_control_transaction`：每个新应用的 Task 控制事件事务令
+`task_version` 恰好 `+1`，checkpoint、ledger、owner 等多个 pointer 即使在同一
+事务一起变化也只共享一个新版本。精确幂等重试复用原版本，拒绝/回滚不增版；
+新 FINALIZING terminalization fact 即使不改变已选 outcome 仍是一次控制事务并
+增版。TaskStore 会拒绝 0 或大于 1 的版本跳跃。
 
 S3 尚未开始。Policy Gateway、Source/ExecutionState、Observation、工具 dispatch 和
 Agent 权限仍没有接线；不得把本 Slice 的 actor fence helper 宣称为已完成 Gateway。
@@ -125,11 +128,11 @@ python3 scripts/check_agent_kernel_wheel.py
 
 ## 最近验证结果
 
-- Python 3.10/3.12 Agent Kernel S1+S2 聚焦测试：76/76 通过。
-- Python 3.12 Worker 全量：728 tests 通过，4 个既有条件性 skip。
+- Python 3.10/3.12 Agent Kernel S1+S2 聚焦测试：77/77 通过。
+- Python 3.12 Worker 全量：729 tests 通过，4 个既有条件性 skip。
 - output contracts 4/4；Slice 0 baseline `compatible`；cross-repo legacy baseline
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
-- decision register 为 `valid_pending`，S2 无 blocker；D3/D4 已解决，active decision D5。
+- decision register 为 `valid_pending`，S2 无 blocker；D3/D4/D5 已解决，active decision D6。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions CI
@@ -142,8 +145,8 @@ python3 scripts/check_agent_kernel_wheel.py
 
 | 文件 | 行数 | 职责 |
 |---|---:|---|
-| `pullwise_worker/agent_kernel_state.py` | 386 | 纯 Task/Attempt reducer |
-| `pullwise_worker/agent_kernel_task_store.py` | 374 | Task/version/owner 事务 |
+| `pullwise_worker/agent_kernel_state.py` | 377 | 纯 Task/Attempt reducer |
+| `pullwise_worker/agent_kernel_task_store.py` | 360 | Task/version/owner 事务 |
 | `pullwise_worker/agent_kernel_task_validation.py` | 81 | reducer adapter 与 contract 校验 |
 | `pullwise_worker/agent_kernel_attempt_store.py` | 147 | Attempt 持久化与边应用 |
 | `pullwise_worker/agent_kernel_event_log.py` | 61 | append-only idempotency journal |
@@ -154,19 +157,23 @@ python3 scripts/check_agent_kernel_wheel.py
 | `pullwise_worker/agent_kernel_migrations.py` | 318 | atomic migration registry |
 | `pullwise_worker/main.py` | 124 | 单 Worker composition root |
 | `scripts/check_agent_kernel_wheel.py` | 170 | installed S1+S2 smoke |
-| `tests/test_agent_kernel_state_reducer.py` | 239 | Cartesian reducer contract |
-| `tests/test_agent_kernel_task_store.py` | 323 | persistence/idempotency/publication |
+| `tests/test_agent_kernel_state_reducer.py` | 240 | Cartesian reducer contract |
+| `tests/test_agent_kernel_task_store.py` | 359 | persistence/idempotency/publication |
 | `tests/test_agent_kernel_owner_fencing.py` | 147 | owner replacement 与 exact-session fence |
 | `tests/test_agent_kernel_task_races.py` | 193 | claim/cancel/publish schedules |
 | `tests/test_agent_kernel_supervisor.py` | 198 | slot/outbox/runtime projection |
 | `tests/test_agent_kernel_slice2_migration.py` | 102 | v1 upgrade/crash recovery |
 | `tests/test_agent_kernel_storage.py` | 358 | migration count regression |
 | `tests/test_ci_cross_repo_contract.py` | 41 | CI installed-wheel requirement |
+| `tests/test_agent_first_decision_register.py` | 368 | D5 resolution/digest gate |
+| `contracts/agent-first/spec-decision-register.json` | 386 | machine decision source |
 | `contracts/agent-first/worker-slice-0-baseline.json` | 290 | composition anchor evidence |
 | `docs/agent-first-worker-current-code-map.md` | 96 | generated code-map view |
-| `docs/agent-first-worker-slice-1-runbook.md` | 181 | D1-D4 gate 状态同步 |
-| `docs/agent-first-worker-slice-2-runbook.md` | 174 | 本完成证据 |
-| `AGENTS.md` | 1002 | durable Agent-First rules（非代码阈值） |
+| `docs/agent-first-worker-mvp-implementation-design.md` | 1741 | D5 normative state semantics |
+| `docs/agent-first-worker-spec-decision-register.md` | 553 | generated decision view |
+| `docs/agent-first-worker-slice-1-runbook.md` | 183 | D1-D5 gate 状态同步 |
+| `docs/agent-first-worker-slice-2-runbook.md` | 181 | 本完成证据 |
+| `AGENTS.md` | 1007 | durable Agent-First rules（非代码阈值） |
 
 全部新增手写生产、测试和维护脚本不超过 400 行；没有 401–600 行说明项或超过
 600 行例外。S2 未修改 18,531 行的 `review_worker_v1.py`，因此 oversized legacy

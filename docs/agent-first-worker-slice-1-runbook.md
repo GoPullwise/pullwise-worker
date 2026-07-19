@@ -57,7 +57,9 @@ D1 已由用户显式选择 `pullwise_full_scan` 并以 resolution digest
 digest 为 `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`；
 D4 已由用户选择 `field_by_field_ownership`，resolution digest 为
 `b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`；
-当前 active decision 为 D5。S2 gate 已通过，后续仍须按各 Slice 的 decision gate
+D5 已由用户选择 `per_control_transaction`，resolution digest 为
+`859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`；
+当前 active decision 为 D6。S2 gate 已通过，后续仍须按各 Slice 的 decision gate
 执行，不得以当前代码或推荐项代替尚未作出的选择。
 
 ## 指标
@@ -121,7 +123,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 ## 最近验证结果
 
 - Python 3.10/3.12 Slice 1 聚焦测试：50/50 通过。
-- Python 3.12 Worker 全量：728 tests 通过，4 个既有条件性 skip。
+- Python 3.12 Worker 全量：729 tests 通过，4 个既有条件性 skip。
 - output contracts 4/4、Slice 0 baseline `compatible`、cross-repo baseline
   `compatible`（14 个 fixed runner 全部通过）。
 - wheel 隔离安装成功，默认 registry 包含 13 个 schema 和 3 个 fixture pack，
@@ -173,8 +175,8 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `contracts/agent-task/v1/fixtures/schema-golden.json` | 261 | frozen fixture |
 | `pyproject.toml` | 28 | wheel package data |
 | `.github/workflows/ci.yml` | 49 | pinned Server checkout/package smoke |
-| `AGENTS.md` | 1002 | 持久工程规则（非代码阈值） |
-| `docs/agent-first-worker-slice-1-runbook.md` | 181 | 本证据 |
+| `AGENTS.md` | 1007 | 持久工程规则（非代码阈值） |
+| `docs/agent-first-worker-slice-1-runbook.md` | 183 | 本证据 |
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行说明项，没有超过 600 行
 的新增文件，也没有生成/第三方/原子 registry 例外需要登记。S1 未触及任何超过

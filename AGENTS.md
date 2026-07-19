@@ -212,10 +212,15 @@ fail with `TASK_ALREADY_TERMINAL`.
   other task/type/payload fails `IDEMPOTENCY_CONFLICT`. A FINALIZING
   terminalization fact may append at the current version; it advances the
   version only when its authoritative outcome selection changes.
-- `D5` remains unresolved until its declared Slice gate. Slice 2 exposes one
-  reducer transition as one provisional control transaction; later composite
-  mutation work must not generalize that behavior into a normative
-  per-field/per-event policy before D5 is resolved.
+- D5 resolves `task_version` to one increment per newly applied Task control
+  event transaction. Every such transaction must advance exactly once even
+  when it changes several fields or records a new FINALIZING terminalization
+  fact without changing the selected outcome; exact idempotency retries reuse
+  the original version, while rejected or rolled-back transactions do not
+  advance. Attempt-only transitions, ordinary Observation appends, and logs do
+  not change Task version unless a Task control transaction freezes their
+  pointer. Keep the `mvp-state-semantics` unit bound to D5 digest
+  `859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`.
 - An actor fence binds task/deletion version, lease/transport epoch, current
   Attempt/native epoch, stable owner ID, owner epoch, and the exact live owner
   session. A mismatch fails closed with the stable fence code; do not infer

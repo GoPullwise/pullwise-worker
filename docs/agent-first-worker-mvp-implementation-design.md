@@ -16,6 +16,7 @@
 
 <!-- BEGIN AGENT-FIRST DECISION REFS: MVP_STATE_SEMANTICS -->
 <!-- D3@sha256:0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a -->
+<!-- D5@sha256:859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a -->
 <!-- END AGENT-FIRST DECISION REFS: MVP_STATE_SEMANTICS -->
 
 <!-- BEGIN AGENT-FIRST DECISION REFS: MVP_LEGACY_MAPPING -->
@@ -31,7 +32,7 @@
 | S0 | 完成 | `worker-slice-0-baseline.json`、当前代码地图、legacy fixture baseline 均可复算且 compatible |
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | 完成 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2、legacy one-slot shadow bridge |
-| S3-S8 | 未开始 | 机器 decision register 当前为 `valid_pending`；只能询问 `active_decision_id=D5`，S3 gate 仍由 D11/D15/D16/D17 阻断 |
+| S3-S8 | 未开始 | 机器 decision register 当前为 `valid_pending`；只能询问 `active_decision_id=D6`，S3 gate 仍由 D11/D15/D16/D17 阻断 |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
 
@@ -125,7 +126,7 @@ MVP 明确不包含：
 | M-08 | CapabilityRisk 使用 R0–R4；QualityRisk 使用 Q0–Q3，不再使用 `low/medium/high` 混合词汇驱动 Gate。 |
 | M-09 | Verifier 必须是新 session、不得先读取实现者的结论叙事，并必须产生至少一个属于自己的 Observation。仅重新解释旧 evidence 不构成独立验证。 |
 | M-10 | `COMPLETED` 要求全部 active mandatory requirement 为 PASS；waiver 不得伪装为完整成功。只读交付可 `change_set_ref=null`。`NO_CHANGE_NEEDED` 只用于本来意图改变状态但证明已满足的任务。 |
-| M-11 | `task_version` 在每个控制状态突变时增加。TaskResult 同时记录 `published_from_version=N` 和 `terminal_task_version=N+1`。 |
+| M-11 | 每个新应用的 Task 控制事件事务令 `task_version` 恰好 `+1`，同事务所有字段变化共享该版本。TaskResult 同时记录 `published_from_version=N` 和 `terminal_task_version=N+1`。 |
 | M-12 | `FINALIZING` 冻结 SourceState 并撤销写 grant；回到 `ACTIVE` 时旧 proposal、Verifier work 和 attestations 全部失效。 |
 | M-13 | Checkpoint generation 是 Task-global 单调序列；恢复不得回滚 cancel、budget consumption、ledger、policy、epoch 等单调安全事实。 |
 | M-14 | 验证顺序固定为：冻结 verifier input → verifier 产生自己的 Observations/work report → 冻结 final ObservationManifest → verifier 提交绑定该 manifest 的 attestation。 |
@@ -352,7 +353,15 @@ schema migration 使用单独 `schema_migrations` 表和 `BEGIN IMMEDIATE`。未
 | `result_ref/result_digest/outcome` | null |
 | `created_at/updated_at/terminal_at` | terminal_at 初值 null |
 
-`task_version` 在以下 mutation 成功时恰好 `+1`：lifecycle、desired_state、current Attempt/epoch、owner incarnation、policy head、ledger head、charter head、interaction state、checkpoint pointer、proposal pointer、verifier plan/final evidence pointer、terminal result。普通 Observation append 或日志写入不逐条加版本；冻结它们的 manifest pointer 时加一次。
+每个新应用的 Task 控制事件事务令 `task_version` 恰好 `+1`；同一事务内对
+lifecycle、desired_state、current Attempt/epoch、owner incarnation、policy head、
+ledger head、charter head、interaction state、checkpoint pointer、proposal pointer、
+verifier plan/final evidence pointer 或 terminal result 的任意数量字段变化共享同一
+新版本，绝不按字段分别递增。精确幂等重试返回原事务版本；guard 拒绝或事务回滚
+不增版。普通 Observation append、Attempt-only transition 或日志写入不是 Task 控制
+事件事务，不逐条加 Task 版本；冻结它们的 manifest pointer 时，该控制事务整体
+只加一次。一个使用新 idempotency key 接受的 FINALIZING terminalization fact 也是
+控制事件事务，即使不改变已选 outcome，也必须 `+1`。
 
 ### 4.6 TaskResult 的版本时点
 
@@ -937,7 +946,7 @@ Task state 只有：`QUEUED|ACTIVE|WAITING_INPUT|WAITING_APPROVAL|FINALIZING|TER
 
 未列出的 transition 一律 `STATE_TRANSITION_INVALID`。同一 event retry 使用 idempotency key；版本 CAS 先赢者决定取消/成功竞态。
 
-`supervisor.terminalization_requested` 的 reason enum恰为 `DEADLINE_REACHED|BUDGET_EXHAUSTED|INTERACTION_UNAVAILABLE|CAPABILITY_UNAVAILABLE|RUNTIME_FAILURE|STORAGE_FAILURE|PROTOCOL_FAILURE|POLICY_INVARIANT_BROKEN`。已在 FINALIZING 时同一 reason/idempotency key是 no-op；不同权威事实只 append terminalization fact，只有会改变 outcome选择时 task_version +1。
+`supervisor.terminalization_requested` 的 reason enum恰为 `DEADLINE_REACHED|BUDGET_EXHAUSTED|INTERACTION_UNAVAILABLE|CAPABILITY_UNAVAILABLE|RUNTIME_FAILURE|STORAGE_FAILURE|PROTOCOL_FAILURE|POLICY_INVARIANT_BROKEN`。已在 FINALIZING 时，同一 event 的精确 idempotency retry 返回原版本且不新增事实；使用新 idempotency key 接受的不同权威事实会 append terminalization fact，并作为一个控制事件事务令 `task_version +1`。只有权威 fact matrix 判定 `terminal_outcome_changed` 时，才改写已选 terminalization reason/outcome；版本单位不随字段数量变化。
 
 ### 10.2 AttemptRecord 与完整转移
 

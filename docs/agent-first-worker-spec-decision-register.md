@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D5`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D6`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -15,7 +15,7 @@ Active question: `D5`. Questions are asked one at a time. User silence, existing
 | `D2` | `P0.1` | 通用工程任务控制面归属 | `pending` | `inactive` | `S2` | D1 | `independent_generic_ingress` |
 | `D3` | `P0.5` | MVP R2 能力边界 | `resolved` | `active` | `S3` | D1 | `mvp_r0_r1_reject_r2` |
 | `D4` | `P0.4` | legacy claim 缺失 policy 字段来源 | `resolved` | `active` | `S3` | D1, D3 | `field_by_field_ownership` |
-| `D5` | `P0.6` | task_version 递增单位 | `pending` | `active` | `S4` | D4 | `per_control_transaction` |
+| `D5` | `P0.6` | task_version 递增单位 | `resolved` | `active` | `S4` | D4 | `per_control_transaction` |
 | `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `pending` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
 | `D7` | `P0.6` | monotonic 时间持久化形式 | `pending` | `active` | `S4` | — | `persist_elapsed_consumption` |
 | `D8` | `P0.6/P0.7` | lease loss 与 same-run resume 状态边界 | `pending` | `active` | `S4` | D5 | `task_active_attempt_fenced` |
@@ -123,16 +123,18 @@ Active question: `D5`. Questions are asked one at a time. User silence, existing
 
 ### D5 — task_version 递增单位
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** task_version 应按每个成功控制事件事务 +1，还是按每个字段 mutation +1？
 
 **Options:**
 
-- `per_control_transaction` — non-normative recommendation, not selected: 每个成功控制事件事务整体 +1。 为 guard、event、write set 和 replay 提供单一线性化单位。 Consequences: 同事务多个字段变化共享一个新版本
+- `per_control_transaction` — selected by resolution: 每个成功控制事件事务整体 +1。 为 guard、event、write set 和 replay 提供单一线性化单位。 Consequences: 同事务多个字段变化共享一个新版本
 - `per_field_mutation`: 每个字段 mutation 分别 +1。 字段变化可逐项计数，但一个业务事件会产生多次版本跳跃。 Consequences: CAS、事件重放和 fixture 更复杂
 
-**Resolution:** No option has been selected.
+**Resolution:** `per_control_transaction` (`option`). 确认选择 per_control_transaction：task_version 按每个成功控制事件事务整体 +1；同一事务内所有字段变化、guard、事件、write set 与 replay 共享一个新版本，不按字段 mutation 分别递增。
+
+**Authority/evidence:** `user` on `2026-07-19`; `conversation:user-selection:2026-07-19:per_control_transaction`; digest `859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`.
 
 **Supersedes:** none
 
