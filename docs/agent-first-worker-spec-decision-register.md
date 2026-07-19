@@ -7,13 +7,13 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D3`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D4`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
 | `D1` | `P0.1` | MVP/Post-MVP 产品范围 | `resolved` | `active` | `S2` | — | `pullwise_full_scan` |
 | `D2` | `P0.1` | 通用工程任务控制面归属 | `pending` | `inactive` | `S2` | D1 | `independent_generic_ingress` |
-| `D3` | `P0.5` | MVP R2 能力边界 | `pending` | `active` | `S3` | D1 | `mvp_r0_r1_reject_r2` |
+| `D3` | `P0.5` | MVP R2 能力边界 | `resolved` | `active` | `S3` | D1 | `mvp_r0_r1_reject_r2` |
 | `D4` | `P0.4` | legacy claim 缺失 policy 字段来源 | `pending` | `active` | `S3` | D1, D3 | `field_by_field_ownership` |
 | `D5` | `P0.6` | task_version 递增单位 | `pending` | `active` | `S4` | D4 | `per_control_transaction` |
 | `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `pending` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
@@ -80,16 +80,18 @@ Active question: `D3`. Questions are asked one at a time. User silence, existing
 
 ### D3 — MVP R2 能力边界
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** MVP 是否仅支持 R0/R1 并对全部 R2 请求无副作用拒绝？
 
 **Options:**
 
-- `mvp_r0_r1_reject_r2` — non-normative recommendation, not selected: MVP 仅实现 R0/R1；R2 在所有 profile 显式无副作用拒绝。 local/eval 尚无完整 interaction、approval、cancel、resume 和 effect transport。 Consequences: R2 正向路径移至明确 Post-MVP 版本
+- `mvp_r0_r1_reject_r2` — selected by resolution: MVP 仅实现 R0/R1；R2 在所有 profile 显式无副作用拒绝。 local/eval 尚无完整 interaction、approval、cancel、resume 和 effect transport。 Consequences: R2 正向路径移至明确 Post-MVP 版本
 - `mvp_full_r2`: MVP 补齐并支持 R2 正向路径。 可更早提供外部 mutation，但必须同时闭合完整授权与恢复协议。 Consequences: 显著扩大 MVP schema、security、fixture 和 DoD
 
-**Resolution:** No option has been selected.
+**Resolution:** `mvp_r0_r1_reject_r2` (`option`). 确认选择 mvp_r0_r1_reject_r2：MVP 仅实现 R0/R1；R2 在所有 profile 显式无副作用拒绝，R2 正向路径移至明确 Post-MVP 版本。
+
+**Authority/evidence:** `user` on `2026-07-19`; `conversation:user-selection:2026-07-19:mvp_r0_r1_reject_r2`; digest `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`.
 
 **Supersedes:** none
 

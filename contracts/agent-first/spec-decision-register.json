@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D3",
+  "active_decision_id": "D4",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -56,14 +56,22 @@
     {
       "id": "D3", "key": "mvp-r2", "scope": "P0.5", "title": "MVP R2 能力边界",
       "question": "MVP 是否仅支持 R0/R1 并对全部 R2 请求无副作用拒绝？",
-      "status": "pending", "depends_on": ["D1"], "activation": null, "required_by_slice": "S3",
+      "status": "resolved", "depends_on": ["D1"], "activation": null, "required_by_slice": "S3",
       "effects": ["permission", "external_behavior"], "source_refs": ["handoff:P0.5"],
       "affected_units": ["mvp-contract-pack", "mvp-state-semantics"],
       "options": [
         {"id": "mvp_r0_r1_reject_r2", "summary": "MVP 仅实现 R0/R1；R2 在所有 profile 显式无副作用拒绝。", "rationale": "local/eval 尚无完整 interaction、approval、cancel、resume 和 effect transport。", "consequences": ["R2 正向路径移至明确 Post-MVP 版本"]},
         {"id": "mvp_full_r2", "summary": "MVP 补齐并支持 R2 正向路径。", "rationale": "可更早提供外部 mutation，但必须同时闭合完整授权与恢复协议。", "consequences": ["显著扩大 MVP schema、security、fixture 和 DoD"]}
       ],
-      "recommended_option_id": "mvp_r0_r1_reject_r2", "resolution": null, "supersedes": []
+      "recommended_option_id": "mvp_r0_r1_reject_r2",
+      "resolution": {
+        "kind": "option", "selected_option_id": "mvp_r0_r1_reject_r2", "custom_text": null,
+        "decision_text": "确认选择 mvp_r0_r1_reject_r2：MVP 仅实现 R0/R1；R2 在所有 profile 显式无副作用拒绝，R2 正向路径移至明确 Post-MVP 版本。",
+        "authority": "user", "decided_at": "2026-07-19",
+        "evidence_refs": ["conversation:user-selection:2026-07-19:mvp_r0_r1_reject_r2"],
+        "resolution_sha256": "0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a"
+      },
+      "supersedes": []
     },
     {
       "id": "D4", "key": "policy-source", "scope": "P0.4", "title": "legacy claim 缺失 policy 字段来源",
