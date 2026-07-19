@@ -162,9 +162,9 @@ python3 scripts/check_agent_kernel_wheel.py
 | `tests/test_ci_cross_repo_contract.py` | 41 | CI installed-wheel requirement |
 | `contracts/agent-first/worker-slice-0-baseline.json` | 290 | composition anchor evidence |
 | `docs/agent-first-worker-current-code-map.md` | 96 | generated code-map view |
-| `docs/agent-first-worker-slice-1-runbook.md` | 175 | D1/S2 gate 状态同步 |
-| `docs/agent-first-worker-slice-2-runbook.md` | 169 | 本完成证据 |
-| `AGENTS.md` | 979 | durable S2 rules（非代码阈值） |
+| `docs/agent-first-worker-slice-1-runbook.md` | 177 | D1/S2 gate 状态同步 |
+| `docs/agent-first-worker-slice-2-runbook.md` | 172 | 本完成证据 |
+| `AGENTS.md` | 989 | durable S2 rules（非代码阈值） |
 
 全部新增手写生产、测试和维护脚本不超过 400 行；没有 401–600 行说明项或超过
 600 行例外。S2 未修改 18,531 行的 `review_worker_v1.py`，因此 oversized legacy
