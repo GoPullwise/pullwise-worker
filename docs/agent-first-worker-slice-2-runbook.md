@@ -136,8 +136,8 @@ python3 scripts/check_agent_kernel_wheel.py
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions CI
-  [#808](https://github.com/GoPullwise/pullwise-worker/actions/runs/29639124148)
-  对 S2 实现提交 `f6a4fc61d949b1b5e4e10f92d1a346451fb0c647` 通过。
+  [#820](https://github.com/GoPullwise/pullwise-worker/actions/runs/29692290148)
+  对 D5 决议及状态语义提交 `cf4fb35f8e34d014d6ac759ab9c11eb8f2387dad` 通过。
 
 ## 文件规模与模块化报告
 
