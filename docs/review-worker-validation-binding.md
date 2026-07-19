@@ -1,4 +1,6 @@
-# Review Worker Validation Binding Plan
+# Review Worker Validation Binding Contract
+
+Status: implemented and verified on 2026-07-19.
 
 ## Goal
 
@@ -12,23 +14,20 @@ Final contract:
 validation output may appear only in appendix data. QA must fail any non-empty
 main finding list that contains an unbacked finding.
 
-## Current Gap
+## Implementation Status
 
 The worker already has strong artifact reliability checks: phase outputs,
 schemas, artifact manifest shape, SHA-256, size, storage URL, source file
 immutability, pending result submit handling, and terminal envelope structure.
 
-Finding precision is improved by reviewer, clusterer, intent test, validator,
-and reporter stages, but those are mostly prompt-driven semantic controls. The
-validator disproof prompt is the most important semantic filter, yet the final
-QA gate currently validates only the final report's structure and evidence
-shape: required fields, locations, confidence, and intent/validator-status
-shape. It does not prove semantic truth, and it does not mechanically require
-each main finding to come from `validated-findings.json`.
-
-This means a reporter turn can accidentally place weak, disproven, or unrelated
-content in `report.agent.json.findings` if the fields and locations are
-otherwise valid.
+The former mechanical gap is closed in `repair_agent_report_artifact(...)`,
+`validation_binding_entries(...)`, `matching_validation_entry(...)`, and
+`qa_gate_payload(...)`. Prompt-driven reviewer and validator judgments remain
+semantic evidence rather than proof of truth, but an accepted
+`validated-findings.json` entry is now required before a finding can remain in
+the main report. Unbacked, weak, disproven, rejected, false-positive, unrelated,
+or ambiguously matched content is demoted or rejected even when its report
+shape and location are otherwise valid.
 
 ## Scope
 
@@ -174,7 +173,7 @@ it must not allow unvalidated findings into the main report:
 
 ## Tests
 
-Add focused tests in `tests/test_review_worker_v1.py`:
+The focused tests in `tests/test_review_worker_v1.py` are:
 
 - `test_repair_agent_report_demotes_unvalidated_main_findings`
 - `test_qa_gate_rejects_main_finding_not_in_validated_findings`
@@ -202,9 +201,7 @@ Run:
 python -m unittest tests.test_review_worker_v1
 ```
 
-At the time this plan was written, the current worker test file contains 169
-tests and has an unrelated existing failure in repository limit stats:
-`test_prepare_workspace_reports_full_repository_stats_when_limit_exceeded`
-expects `totalBytes == 9` but currently observes `12`. Fix that baseline issue
-as part of bringing this work to green verification.
-
+Verification on 2026-07-19 ran 330 tests from
+`tests.test_review_worker_v1`: 329 passed and one environment-conditional test
+was skipped. The historical repository-limit failure recorded by the original
+plan is no longer present.

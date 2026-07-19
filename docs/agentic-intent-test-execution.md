@@ -1,5 +1,7 @@
 # Agentic Intent-Test Execution
 
+Status: implemented and verified on 2026-07-19.
+
 ## Goal
 
 Intent validation must work across repositories whose languages, workspace
@@ -129,3 +131,13 @@ Real subprocess tests exercise Python unittest, Node's built-in runner, Go,
 .NET through a generic Agent proposal, and Rust where the host/CI toolchain is
 available. The .NET and Go cases also verify isolated runtime cache and
 environment behavior rather than inheriting user package state.
+
+## Verification Evidence
+
+The focused intent modules
+`test_evidence_validation_regressions`, `test_intent_artifact_validation`,
+`test_intent_command_operand_containment`,
+`test_intent_execution_resource_regressions`, and `test_intent_source_repair`
+ran 43/43 tests successfully on Python 3.12 on 2026-07-19. The encompassing
+`tests.test_review_worker_v1` run executed 330 tests: 329 passed and one
+environment-conditional test was skipped.
