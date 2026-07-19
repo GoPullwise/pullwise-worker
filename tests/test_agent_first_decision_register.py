@@ -84,9 +84,9 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D4", report["active_decision_id"])
-        self.assertEqual(23, report["pending_decision_count"])
-        self.assertEqual(2, report["resolved_decision_count"])
+        self.assertEqual("D5", report["active_decision_id"])
+        self.assertEqual(22, report["pending_decision_count"])
+        self.assertEqual(3, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -102,6 +102,15 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertEqual(
             "0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a",
             d3_resolution["resolution_sha256"],
+        )
+        d4_resolution = register["decisions"][3]["resolution"]
+        self.assertEqual(
+            "field_by_field_ownership", d4_resolution["selected_option_id"]
+        )
+        self.assertEqual("user", d4_resolution["authority"])
+        self.assertEqual(
+            "b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654",
+            d4_resolution["resolution_sha256"],
         )
         self.assertEqual(list(QUESTION_ORDER), register["question_order"])
         self.assertEqual(
@@ -271,7 +280,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D4", report["active_decision_id"])
+        self.assertEqual("D5", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_machine_entrypoint_is_documented(self) -> None:

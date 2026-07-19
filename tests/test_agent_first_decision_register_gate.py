@@ -329,7 +329,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
             if item["code"] == "slice_blocked_by_pending_decisions"
         )
         self.assertEqual(
-            ["D4", "D11", "D15", "D16", "D17"],
+            ["D11", "D15", "D16", "D17"],
             blocker["decision_ids"],
         )
         self.assertTrue(report["valid"])

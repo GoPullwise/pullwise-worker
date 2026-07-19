@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D4",
+  "active_decision_id": "D5",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -76,7 +76,7 @@
     {
       "id": "D4", "key": "policy-source", "scope": "P0.4", "title": "legacy claim 缺失 policy 字段来源",
       "question": "legacy claim 未提供的 policy 字段应由 Adapter 常量/公式提供、全部 fail closed，还是逐字段冻结 ownership？",
-      "status": "pending", "depends_on": ["D1", "D3"], "activation": null, "required_by_slice": "S3",
+      "status": "resolved", "depends_on": ["D1", "D3"], "activation": null, "required_by_slice": "S3",
       "effects": ["authority", "permission", "compatibility"], "source_refs": ["handoff:P0.4"],
       "affected_units": ["mvp-contract-pack", "mvp-legacy-mapping"],
       "options": [
@@ -84,7 +84,18 @@
         {"id": "adapter_constants", "summary": "全部缺失字段由 Worker Adapter 的版本化常量或公式提供。", "rationale": "无需修改 Server 即可运行，但可能把授权选择错误地下放给 Worker。", "consequences": ["每个常量都必须有 owner、版本和兼容性依据"]},
         {"id": "fail_closed_expand_server", "summary": "任一缺失字段都拒绝，并先扩展 Server claim。", "rationale": "权限来源最明确，但与 MVP 不改 Server 的当前边界冲突。", "consequences": ["MVP 需要新的跨仓 wire 版本"]}
       ],
-      "recommended_option_id": "field_by_field_ownership", "resolution": null, "supersedes": []
+      "recommended_option_id": "field_by_field_ownership",
+      "resolution": {
+        "kind": "option",
+        "selected_option_id": "field_by_field_ownership",
+        "custom_text": null,
+        "decision_text": "确认选择 field_by_field_ownership：legacy_v1 policy 映射逐字段冻结；可从现行 wire 唯一确定的值仅按版本化 Adapter 常量/公式产生，真正授权字段缺失则以稳定错误 fail closed，Worker 不得补授权默认值。",
+        "authority": "user",
+        "decided_at": "2026-07-19",
+        "evidence_refs": ["conversation:user-selection:2026-07-19:field_by_field_ownership"],
+        "resolution_sha256": "b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654"
+      },
+      "supersedes": []
     },
     {
       "id": "D5", "key": "version-unit", "scope": "P0.6", "title": "task_version 递增单位",
