@@ -164,7 +164,7 @@ python3 scripts/check_agent_kernel_wheel.py
 | `tests/test_ci_cross_repo_contract.py` | 41 | CI installed-wheel requirement |
 | `contracts/agent-first/worker-slice-0-baseline.json` | 290 | composition anchor evidence |
 | `docs/agent-first-worker-current-code-map.md` | 96 | generated code-map view |
-| `docs/agent-first-worker-slice-1-runbook.md` | 179 | D1-D4 gate 状态同步 |
+| `docs/agent-first-worker-slice-1-runbook.md` | 181 | D1-D4 gate 状态同步 |
 | `docs/agent-first-worker-slice-2-runbook.md` | 174 | 本完成证据 |
 | `AGENTS.md` | 1002 | durable Agent-First rules（非代码阈值） |
 

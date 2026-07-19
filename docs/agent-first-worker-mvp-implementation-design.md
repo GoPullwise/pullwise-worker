@@ -1,6 +1,6 @@
 # Agent-First Worker MVP 实现设计
 
-状态：待实现的规范性设计（Normative）  
+状态：分阶段实施中的规范性设计；S0 与 S1/S2 shadow foundation 已实现，S3-S8 尚未开始（Normative）
 版本：`mvp-design/v1`  
 日期：2026-07-16  
 目标读者：负责实现、评审、测试和发布 Pullwise Worker MVP 的工程 Agent
@@ -21,6 +21,23 @@
 <!-- BEGIN AGENT-FIRST DECISION REFS: MVP_LEGACY_MAPPING -->
 <!-- D4@sha256:b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654 -->
 <!-- END AGENT-FIRST DECISION REFS: MVP_LEGACY_MAPPING -->
+
+## 当前实施状态（非规范证据）
+
+本表只指向当前实现证据，不改变本文的规范要求，也不授权跳过 decision gate。
+
+| Slice/专项 | 当前状态 | 权威证据或阻断 |
+|---|---|---|
+| S0 | 完成 | `worker-slice-0-baseline.json`、当前代码地图、legacy fixture baseline 均可复算且 compatible |
+| S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
+| S2 | 完成 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2、legacy one-slot shadow bridge |
+| S3-S8 | 未开始 | 机器 decision register 当前为 `valid_pending`；只能询问 `active_decision_id=D5`，S3 gate 仍由 D11/D15/D16/D17 阻断 |
+| Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
+| Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
+
+因此“当前 legacy Worker 已有的 review 能力”不能冒充 Agent Kernel S3-S8；MVP
+Definition of Done 仍未满足。每完成一个 Slice，必须更新本表、对应 runbook、机器
+决策引用与第 15/16 节规定的测试和发布证据。
 
 ## 0. 文档用途与权威顺序
 
