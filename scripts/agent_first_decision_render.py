@@ -99,7 +99,7 @@ def render_generated_file(register: dict[str, Any]) -> str:
         [
             "# Agent-First Worker Specification Decision Register",
             "",
-            "Status: generated S1 decision packet. Pending recommendations are "
+            "Status: generated Agent-First decision packet. Pending recommendations are "
             "non-normative and grant no implementation authority.",
             "",
             "Machine source: "

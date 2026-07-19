@@ -323,6 +323,10 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             (root / "docs").mkdir()
             target = sync_generated_file(register, root)
             expected = render_generated_file(register)
+            self.assertIn(
+                "Status: generated Agent-First decision packet.", expected
+            )
+            self.assertNotIn("generated S1 decision packet", expected)
             self.assertEqual(expected, target.read_text(encoding="utf-8"))
             target.write_text(
                 expected.replace(
