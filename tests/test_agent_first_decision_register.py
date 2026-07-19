@@ -84,9 +84,9 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D5", report["active_decision_id"])
-        self.assertEqual(22, report["pending_decision_count"])
-        self.assertEqual(3, report["resolved_decision_count"])
+        self.assertEqual("D6", report["active_decision_id"])
+        self.assertEqual(21, report["pending_decision_count"])
+        self.assertEqual(4, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -111,6 +111,15 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertEqual(
             "b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654",
             d4_resolution["resolution_sha256"],
+        )
+        d5_resolution = register["decisions"][4]["resolution"]
+        self.assertEqual(
+            "per_control_transaction", d5_resolution["selected_option_id"]
+        )
+        self.assertEqual("user", d5_resolution["authority"])
+        self.assertEqual(
+            "859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a",
+            d5_resolution["resolution_sha256"],
         )
         self.assertEqual(list(QUESTION_ORDER), register["question_order"])
         self.assertEqual(
