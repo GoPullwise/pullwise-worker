@@ -13,8 +13,10 @@ D1 已由用户选择 `pullwise_full_scan`，resolution digest 为
 `ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a`；
 D2 失活，`--require-slice S2` 通过。D3 已由用户选择
 `mvp_r0_r1_reject_r2`，resolution digest 为
-`0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`；当前
-active decision 是 D4。进入 S3 前仍须解决 D4、D11、D15、D16、D17，本文不把
+`0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`；D4 已由用户
+选择 `field_by_field_ownership`，resolution digest 为
+`b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`。当前 active
+decision 是 D5。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把
 推荐项或当前实现当成这些决策。
 
 ## 已实现范围
@@ -127,7 +129,7 @@ python3 scripts/check_agent_kernel_wheel.py
 - Python 3.12 Worker 全量：728 tests 通过，4 个既有条件性 skip。
 - output contracts 4/4；Slice 0 baseline `compatible`；cross-repo legacy baseline
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
-- decision register 为 `valid_pending`，S2 无 blocker；D3 已解决，active decision D4。
+- decision register 为 `valid_pending`，S2 无 blocker；D3/D4 已解决，active decision D5。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions CI

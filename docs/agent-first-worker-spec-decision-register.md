@@ -7,14 +7,14 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D4`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D5`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
 | `D1` | `P0.1` | MVP/Post-MVP 产品范围 | `resolved` | `active` | `S2` | — | `pullwise_full_scan` |
 | `D2` | `P0.1` | 通用工程任务控制面归属 | `pending` | `inactive` | `S2` | D1 | `independent_generic_ingress` |
 | `D3` | `P0.5` | MVP R2 能力边界 | `resolved` | `active` | `S3` | D1 | `mvp_r0_r1_reject_r2` |
-| `D4` | `P0.4` | legacy claim 缺失 policy 字段来源 | `pending` | `active` | `S3` | D1, D3 | `field_by_field_ownership` |
+| `D4` | `P0.4` | legacy claim 缺失 policy 字段来源 | `resolved` | `active` | `S3` | D1, D3 | `field_by_field_ownership` |
 | `D5` | `P0.6` | task_version 递增单位 | `pending` | `active` | `S4` | D4 | `per_control_transaction` |
 | `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `pending` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
 | `D7` | `P0.6` | monotonic 时间持久化形式 | `pending` | `active` | `S4` | — | `persist_elapsed_consumption` |
@@ -101,17 +101,19 @@ Active question: `D4`. Questions are asked one at a time. User silence, existing
 
 ### D4 — legacy claim 缺失 policy 字段来源
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** legacy claim 未提供的 policy 字段应由 Adapter 常量/公式提供、全部 fail closed，还是逐字段冻结 ownership？
 
 **Options:**
 
-- `field_by_field_ownership` — non-normative recommendation, not selected: 逐字段分类：现行 wire 可确定的值用版本化 Adapter 常量/公式，真正授权字段缺失则 fail closed。 同时避免任意默认值和不必要的 Server wire 扩展。 Consequences: mapping manifest 必须逐字段声明来源和稳定错误
+- `field_by_field_ownership` — selected by resolution: 逐字段分类：现行 wire 可确定的值用版本化 Adapter 常量/公式，真正授权字段缺失则 fail closed。 同时避免任意默认值和不必要的 Server wire 扩展。 Consequences: mapping manifest 必须逐字段声明来源和稳定错误
 - `adapter_constants`: 全部缺失字段由 Worker Adapter 的版本化常量或公式提供。 无需修改 Server 即可运行，但可能把授权选择错误地下放给 Worker。 Consequences: 每个常量都必须有 owner、版本和兼容性依据
 - `fail_closed_expand_server`: 任一缺失字段都拒绝，并先扩展 Server claim。 权限来源最明确，但与 MVP 不改 Server 的当前边界冲突。 Consequences: MVP 需要新的跨仓 wire 版本
 
-**Resolution:** No option has been selected.
+**Resolution:** `field_by_field_ownership` (`option`). 确认选择 field_by_field_ownership：legacy_v1 policy 映射逐字段冻结；可从现行 wire 唯一确定的值仅按版本化 Adapter 常量/公式产生，真正授权字段缺失则以稳定错误 fail closed，Worker 不得补授权默认值。
+
+**Authority/evidence:** `user` on `2026-07-19`; `conversation:user-selection:2026-07-19:field_by_field_ownership`; digest `b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`.
 
 **Supersedes:** none
 

@@ -242,6 +242,19 @@ Worker control transport separate from Agent capability risk; it is not an R2
 grant. The controlled MVP contract/state units must reference D3 resolution
 digest `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`.
 
+## Agent-First Legacy Policy Ownership
+
+D4 resolves legacy policy construction to field-by-field ownership. The S3
+machine manifest must account for every EffectiveExecutionPolicy field and each
+compound child exactly once, with a Server claim pointer, restrictive Adapter
+constant, pinned policy artifact, or versioned pure formula plus stable missing
+and invalid codes. Authority-bearing claim inputs fail closed when absent or
+invalid; Worker time, environment, repository text, Agent output, and incidental
+legacy defaults may not fill them. Adapter constants and formulas may only add
+structure or narrow authority. Keep the contract-pack and legacy-mapping units
+bound to D4 digest
+`b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`.
+
 ## Worker Host Platform
 
 Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,
