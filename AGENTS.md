@@ -232,6 +232,16 @@ fail with `TASK_ALREADY_TERMINAL`.
   fields. Preserve migration 1 bytes/digest; crash before migration commit must
   leave a valid v1 database that cleanly upgrades once on restart.
 
+## Agent-First MVP Capability Boundary
+
+D3 resolves the MVP capability ceiling to R1. Every MVP profile may execute
+only R0/R1; reject R2/R3/R4 before dispatch without creating an approval wait,
+capability grant, tool invocation, or Effect Ledger row. A policy-denied audit
+Observation may record the rejection, but no external effect may begin. Keep
+Worker control transport separate from Agent capability risk; it is not an R2
+grant. The controlled MVP contract/state units must reference D3 resolution
+digest `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`.
+
 ## Worker Host Platform
 
 Pullwise worker installs target Ubuntu 22.04 hosts. Worker runtime, doctor,

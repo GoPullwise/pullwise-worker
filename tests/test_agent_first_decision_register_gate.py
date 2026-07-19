@@ -70,7 +70,7 @@ def _resolve(
 
 
 def _resolved_d1(option_id: str = "pullwise_full_scan") -> dict[str, object]:
-    changed = _resolve(load_register(REGISTER_PATH), "D1", option_id)
+    changed = _resolve(_all_pending_register(), "D1", option_id)
     changed["active_decision_id"] = (
         "D2" if option_id == "generic_agent_worker" else "D3"
     )
@@ -78,11 +78,16 @@ def _resolved_d1(option_id: str = "pullwise_full_scan") -> dict[str, object]:
 
 
 def _pending_d1() -> dict[str, object]:
+    return validate_register(_all_pending_register())
+
+
+def _all_pending_register() -> dict[str, object]:
     changed = copy.deepcopy(load_register(REGISTER_PATH))
-    changed["decisions"][0]["status"] = "pending"
-    changed["decisions"][0]["resolution"] = None
+    for decision in changed["decisions"]:
+        decision["status"] = "pending"
+        decision["resolution"] = None
     changed["active_decision_id"] = "D1"
-    return validate_register(changed)
+    return changed
 
 
 def _unit_body(
@@ -324,7 +329,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
             if item["code"] == "slice_blocked_by_pending_decisions"
         )
         self.assertEqual(
-            ["D3", "D4", "D11", "D15", "D16", "D17"],
+            ["D4", "D11", "D15", "D16", "D17"],
             blocker["decision_ids"],
         )
         self.assertTrue(report["valid"])

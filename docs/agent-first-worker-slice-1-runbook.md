@@ -53,8 +53,10 @@ waiver；通用 signed-waiver acceptance 仍需后续明确 keyring 契约。
 
 D1 已由用户显式选择 `pullwise_full_scan` 并以 resolution digest
 `ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a`
-冻结；D2 因该选择失活，当前 active decision 为 D3。S2 gate 已通过，后续仍须按
-各 Slice 的 decision gate 执行，不得以当前代码或推荐项代替尚未作出的选择。
+冻结；D2 因该选择失活。D3 又由用户选择 `mvp_r0_r1_reject_r2`，resolution
+digest 为 `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`；
+当前 active decision 为 D4。S2 gate 已通过，后续仍须按各 Slice 的 decision gate
+执行，不得以当前代码或推荐项代替尚未作出的选择。
 
 ## 指标
 
