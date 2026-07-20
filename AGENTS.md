@@ -142,26 +142,34 @@ or authorize Agent Kernel production implementation.
 `contracts/agent-first/legacy-removal-inventory.json` is the machine deletion
 inventory bound to resolved D27 option `clean_break_no_legacy` and digest
 `f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e`.
-It records 10 high-signal legacy literals across 81 current Server/Web/Worker
-paths plus 13 audited control/history evidence exclusions. It is a
-monotonically shrinking removal inventory, not a compatibility baseline; do
-not add a new legacy surface to make the ratchet pass.
+It freezes 10 high-signal legacy literals and their per-path occurrence
+ceilings across 81 current Server/Web/Worker paths, binds all 28 semantic
+surfaces from the frozen strict-v1 baseline, and permits exactly 13 audited
+control/history evidence exclusions. Catalog digest
+`a3f4a6b32eb66dd33e0855743bbbcdc024c2ce760f4aaf56683f495a7312be68` is
+the immutable expansion ceiling: observed legacy may shrink, but do not add a
+surface, raise an occurrence ceiling, or broaden an exclusion to make the
+ratchet pass. This remains a deletion inventory, not a compatibility baseline.
 
 - Run `python scripts/verify_agent_first_legacy_absence.py --workspace-root ..`
   for the current CI gate. Exit `0` reports inventoried legacy without blocking
   while no new occurrence exists, exit `1` reports an unregistered legacy
-  occurrence, and exit `2` is indeterminate input or environment evidence.
-- `--require-absent` is the final-cutover mode: every inventoried surface must
-  be absent or it exits `1`. Keep it tested but do not add it to required CI
-  until the coordinated switch is authorized.
+  occurrence or a registered signature above its frozen ceiling, and exit `2`
+  is indeterminate input or environment evidence.
+- `--require-absent` is the final-cutover mode: every high-signal inventory
+  surface and every frozen baseline semantic surface must be absent or it exits
+  `1`. Keep it tested but do not add it to required CI until the coordinated
+  switch is authorized.
 - Current CI checks out both frozen Server and Web siblings and runs only the
   default ratchet. The retired candidate-refresh path remains forbidden.
 - Inventory paths are strict contained POSIX-relative paths. Reads reject
-  symlinks, reparse points, non-regular files, unsafe Git paths, and changed
-  descriptors. Whole-file exclusions are limited to the decision register,
-  its generated immutable view, and the inventory itself; bounded exclusions
-  are limited to the audited D27 sections in AGENTS and the three normative
-  design documents, with unique ordered non-overlapping markers.
+  symlinks, reparse points, non-regular files, unsafe Git paths, changed
+  descriptors, and descriptor targets that differ from the validated lexical
+  path. Whole-file exclusions are limited to the decision register, its
+  generated immutable view, and the inventory itself; bounded exclusions are
+  limited to the exact audited marker tuples for D27 sections in AGENTS and the
+  three normative design documents, with unique ordered non-overlapping
+  markers.
 
 ## Agent-First Slice 0 Evidence
 

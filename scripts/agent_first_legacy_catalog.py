@@ -48,7 +48,7 @@ CATALOG_FIELDS = (
     "evidence_exclusions",
     "surfaces",
 )
-EXPECTED_CATALOG_SHA256 = "0" * 64
+EXPECTED_CATALOG_SHA256 = "a3f4a6b32eb66dd33e0855743bbbcdc024c2ce760f4aaf56683f495a7312be68"
 
 ALLOWED_WHOLE_EXCLUSIONS = {
     (

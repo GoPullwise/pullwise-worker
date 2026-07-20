@@ -81,6 +81,8 @@ def _identifier(value: object, label: str) -> str:
     if ID_PATTERN.fullmatch(text) is None:
         raise InventoryError(f"{label}:identifier")
     return text
+
+
 def _sha256(value: object, label: str) -> str:
     digest = _text(value, label, single_line=True)
     if SHA256_PATTERN.fullmatch(digest) is None:
@@ -140,6 +142,7 @@ def validate_inventory(value: object) -> dict[str, Any]:
     if root["schema_id"] != SCHEMA_ID:
         raise InventoryError("inventory:schema_id")
     _identifier(root["inventory_id"], "inventory_id")
+    declared_catalog_sha256 = _sha256(root["catalog_sha256"], "catalog_sha256")
     binding = _exact(
         root["d27"],
         {"register_path", "decision_id", "selected_option_id", "resolution_sha256"},
@@ -148,6 +151,18 @@ def validate_inventory(value: object) -> dict[str, Any]:
     validate_relative_path(binding["register_path"], "d27.register_path")
     if binding != EXPECTED_D27:
         raise InventoryError("d27:not_canonical")
+
+    frozen_baseline = _exact(
+        root["frozen_baseline"],
+        {"path", "baseline_id", "text_sha256", "surface_ids"},
+        "frozen_baseline",
+    )
+    validate_relative_path(frozen_baseline["path"], "frozen_baseline.path")
+    _identifier(frozen_baseline["baseline_id"], "frozen_baseline.baseline_id")
+    _sha256(frozen_baseline["text_sha256"], "frozen_baseline.text_sha256")
+    _sorted_ids(frozen_baseline["surface_ids"], "frozen_baseline.surface_ids")
+    if frozen_baseline != EXPECTED_FROZEN_BASELINE:
+        raise InventoryError("frozen_baseline:not_canonical")
 
     signatures = root["signatures"]
     if not isinstance(signatures, list) or not signatures:
@@ -198,7 +213,7 @@ def validate_inventory(value: object) -> dict[str, Any]:
                 raise InventoryError(f"{label}.markers")
             bounded_paths.add((repo, path.casefold()))
             exclusion_key = (repo, path, reason, start, end)
-            if exclusion_key[:3] not in ALLOWED_BOUNDED_EXCLUSIONS:
+            if exclusion_key not in ALLOWED_BOUNDED_EXCLUSIONS:
                 raise InventoryError(f"{label}:unapproved")
         if exclusion_key in seen_exclusions:
             raise InventoryError("evidence_exclusions:duplicate")
@@ -220,24 +235,49 @@ def validate_inventory(value: object) -> dict[str, Any]:
     referenced_signatures: set[str] = set()
     for index, value in enumerate(surfaces):
         label = f"surfaces[{index}]"
-        item = _exact(value, {"id", "repo", "path", "signature_ids"}, label)
+        item = _exact(
+            value,
+            {"id", "repo", "path", "signature_occurrence_ceilings"},
+            label,
+        )
         surface_ids.append(_identifier(item["id"], f"{label}.id"))
         repo = _repo(item["repo"], f"{label}.repo")
         path = validate_relative_path(item["path"], f"{label}.path")
-        signature_ids_for_surface = _sorted_ids(
-            item["signature_ids"], f"{label}.signature_ids", known=known_signatures
-        )
+        ceilings = item["signature_occurrence_ceilings"]
+        if not isinstance(ceilings, dict) or not ceilings:
+            raise InventoryError(f"{label}.signature_occurrence_ceilings:object")
+        ceiling_signature_ids = [
+            _identifier(key, f"{label}.signature_occurrence_ceilings.key")
+            for key in ceilings
+        ]
+        if ceiling_signature_ids != sorted(ceiling_signature_ids):
+            raise InventoryError(
+                f"{label}.signature_occurrence_ceilings:not_sorted_unique"
+            )
+        if not set(ceiling_signature_ids) <= known_signatures:
+            raise InventoryError(f"{label}.signature_occurrence_ceilings:unknown")
+        for signature_id, ceiling in ceilings.items():
+            if (
+                isinstance(ceiling, bool)
+                or not isinstance(ceiling, int)
+                or ceiling <= 0
+            ):
+                raise InventoryError(
+                    f"{label}.signature_occurrence_ceilings.{signature_id}:positive_integer"
+                )
         key = (repo, path.casefold())
         if key in surface_paths:
             raise InventoryError("surfaces:casefold_path_collision")
         if key in whole_paths:
             raise InventoryError("surfaces:whole_file_exclusion_collision")
         surface_paths.add(key)
-        referenced_signatures.update(signature_ids_for_surface)
+        referenced_signatures.update(ceiling_signature_ids)
     if surface_ids != sorted(set(surface_ids)):
         raise InventoryError("surfaces:not_sorted_unique")
     if referenced_signatures != known_signatures:
         raise InventoryError("signatures:must_be_referenced")
+    if declared_catalog_sha256 != catalog_sha256(root):
+        raise InventoryError("catalog_sha256:mismatch")
     return root
 
 

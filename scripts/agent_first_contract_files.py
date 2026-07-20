@@ -78,6 +78,42 @@ def surface_path(repo_root: Path, relative_path: str) -> Path | None:
     return resolved
 
 
+def _descriptor_final_path(descriptor: int) -> Path:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        import msvcrt
+
+        get_final_path = ctypes.WinDLL(
+            "kernel32", use_last_error=True
+        ).GetFinalPathNameByHandleW
+        get_final_path.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        get_final_path.restype = wintypes.DWORD
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(descriptor))
+        buffer = ctypes.create_unicode_buffer(32_768)
+        written = get_final_path(handle, buffer, len(buffer), 0)
+        if not written or written >= len(buffer):
+            raise OSError(ctypes.get_last_error(), "descriptor path unavailable")
+        value = buffer.value
+        if value.startswith("\\\\?\\UNC\\"):
+            value = "\\\\" + value[8:]
+        elif value.startswith("\\\\?\\"):
+            value = value[4:]
+        return Path(value)
+
+    descriptor_link = Path("/proc/self/fd") / str(descriptor)
+    return descriptor_link.resolve(strict=True)
+
+
+def _normalized_lexical_path(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
 def read_surface(path: Path) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -85,6 +121,14 @@ def read_surface(path: Path) -> bytes:
     except OSError as exc:
         raise BaselineEnvironmentError("surface_open_failed") from exc
     try:
+        try:
+            descriptor_path = _descriptor_final_path(descriptor)
+        except OSError as exc:
+            raise BaselineEnvironmentError(
+                "surface_descriptor_path_unavailable"
+            ) from exc
+        if _normalized_lexical_path(descriptor_path) != _normalized_lexical_path(path):
+            raise BaselineEnvironmentError("surface_descriptor_path_mismatch")
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SURFACE_BYTES:
             raise BaselineEnvironmentError("surface_size_or_type_invalid")

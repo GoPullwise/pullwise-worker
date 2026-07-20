@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 from typing import Any
 
@@ -28,8 +27,9 @@ from scripts.agent_first_legacy_inventory import (
     load_inventory,
     reject_duplicate_keys,
     validate_inventory,
-    validate_relative_path,
 )
+from scripts.agent_first_legacy_catalog import EXPECTED_CATALOG_SHA256
+from scripts.agent_first_legacy_observation import observe_legacy_surfaces
 from scripts.agent_first_decision_core import (
     DecisionRegisterFormatError,
     selected_option_id,
@@ -42,29 +42,6 @@ DEFAULT_INVENTORY = (
 )
 INVENTORY_RELATIVE_PATH = DEFAULT_INVENTORY.relative_to(ROOT).as_posix()
 REPORT_SCHEMA_ID = "pullwise-agent-first-legacy-absence-report/v1"
-BINARY_SUFFIXES = {
-    ".7z",
-    ".apk",
-    ".avif",
-    ".bmp",
-    ".exe",
-    ".gif",
-    ".gz",
-    ".ico",
-    ".jpeg",
-    ".jpg",
-    ".pdf",
-    ".png",
-    ".tar",
-    ".tgz",
-    ".ttf",
-    ".webp",
-    ".woff",
-    ".woff2",
-    ".zip",
-}
-
-
 
 class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
@@ -109,74 +86,6 @@ def _validate_d27(
     }
 
 
-def _git_paths(repo_root: Path, *options: str) -> set[str]:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", *options, "-z"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise BaselineEnvironmentError("worktree_catalog_unavailable") from exc
-    if result.returncode != 0:
-        raise BaselineEnvironmentError("worktree_catalog_unavailable")
-    try:
-        decoded = result.stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise BaselineEnvironmentError("worktree_path_not_utf8") from exc
-    return set(decoded.split("\0")) - {""}
-
-
-def _worktree_paths(repo_root: Path) -> list[str]:
-    catalog = _git_paths(
-        repo_root, "--cached", "--others", "--exclude-standard"
-    )
-    deleted = _git_paths(repo_root, "--cached", "--deleted")
-    paths = catalog - deleted
-    try:
-        for relative in paths:
-            validate_relative_path(relative, "worktree.path")
-    except InventoryError as exc:
-        raise BaselineEnvironmentError("worktree_path_unsafe") from exc
-    return sorted(paths)
-
-def _without_excluded_sections(
-    text: str, exclusions: list[dict[str, Any]]
-) -> str:
-    spans: list[tuple[int, int]] = []
-    for item in exclusions:
-        start_marker = item["start_marker"]
-        end_marker = item["end_marker"]
-        if (
-            not isinstance(start_marker, str)
-            or not start_marker
-            or not isinstance(end_marker, str)
-            or not end_marker
-            or start_marker == end_marker
-            or text.count(start_marker) != 1
-            or text.count(end_marker) != 1
-        ):
-            raise InventoryError("evidence_exclusion_markers_invalid")
-        start = text.index(start_marker)
-        end_start = text.index(end_marker)
-        if start + len(start_marker) > end_start:
-            raise InventoryError("evidence_exclusion_markers_invalid")
-        end = end_start + len(end_marker)
-        spans.append((start, end))
-    spans.sort()
-    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
-        raise InventoryError("evidence_exclusion_spans_overlap")
-    pieces: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        pieces.append(text[cursor:start])
-        cursor = end
-    pieces.append(text[cursor:])
-    return "".join(pieces)
-
-
 def verify_legacy_absence(
     inventory: dict[str, Any], workspace_root: Path, *, require_absent: bool = False
 ) -> dict[str, Any]:
@@ -184,78 +93,14 @@ def verify_legacy_absence(
     roots = repository_roots(workspace_root)
     d27 = _validate_d27(inventory, roots)
     signatures = {
-        item["id"]: item["literal"] for item in inventory.get("signatures", [])
+        item["id"]: item["literal"] for item in inventory["signatures"]
     }
-    reports: list[dict[str, Any]] = []
-    for surface in inventory.get("surfaces", []):
-        path = surface_path(roots[surface["repo"]], surface["path"])
-        matched: list[str] = []
-        if path is not None:
-            raw = read_surface(path)
-            matched = [
-                signature_id
-                for signature_id in surface["signature_ids"]
-                if signatures[signature_id].encode("utf-8") in raw
-            ]
-        reports.append(
-            {
-                "id": surface["id"],
-                "repo": surface["repo"],
-                "path": surface["path"],
-                "status": "present" if matched else "absent",
-                "matched_signature_ids": matched,
-            }
-        )
-    reports.sort(key=lambda item: item["id"])
-    registered = {
-        (surface["repo"], surface["path"], signature_id)
-        for surface in inventory.get("surfaces", [])
-        for signature_id in surface["signature_ids"]
-    }
-    whole_exclusions = {
-        (item["repo"], item["path"])
-        for item in inventory.get("evidence_exclusions", [])
-        if item["start_marker"] is None and item["end_marker"] is None
-    }
-    unexpected: list[dict[str, str]] = []
-    for repo_id, repo_root in roots.items():
-        for relative in _worktree_paths(repo_root):
-            path = surface_path(repo_root, relative)
-            if path is None:
-                raise BaselineEnvironmentError("worktree_path_disappeared")
-            if (repo_id, relative) in whole_exclusions:
-                read_surface(path)
-                continue
-            if Path(relative).suffix.lower() in BINARY_SUFFIXES:
-                continue
-            section_exclusions = [
-                item
-                for item in inventory.get("evidence_exclusions", [])
-                if (item["repo"], item["path"]) == (repo_id, relative)
-                and (repo_id, relative) not in whole_exclusions
-            ]
-            if section_exclusions:
-                haystack: str | bytes = _without_excluded_sections(
-                    canonical_text(path), section_exclusions
-                )
-                needles: dict[str, str | bytes] = signatures
-            else:
-                haystack = read_surface(path)
-                needles = {
-                    signature_id: literal.encode("utf-8")
-                    for signature_id, literal in signatures.items()
-                }
-            for signature_id, needle in needles.items():
-                key = (repo_id, relative, signature_id)
-                if needle in haystack and key not in registered:
-                    unexpected.append(
-                        {
-                            "repo": repo_id,
-                            "path": relative,
-                            "signature_id": signature_id,
-                        }
-                    )
-    unexpected.sort(key=lambda item: (item["repo"], item["path"], item["signature_id"]))
+    reports, unexpected = observe_legacy_surfaces(
+        inventory,
+        roots,
+        signatures,
+        read_file=read_surface,
+    )
     legacy_absent = not unexpected and all(
         item["status"] == "absent" for item in reports
     )
@@ -265,7 +110,7 @@ def verify_legacy_absence(
         if unexpected
         else "absent" if legacy_absent else "legacy_present"
     )
-    failures: list[dict[str, str]] = [
+    failures: list[dict[str, Any]] = [
         {"code": "unexpected_legacy_surface", **item} for item in unexpected
     ]
     if require_absent:
@@ -274,7 +119,8 @@ def verify_legacy_absence(
                 "code": "legacy_surface_present",
                 "surface_id": item["id"],
             }
-            for item in reports if item["status"] == "present"
+            for item in reports
+            if item["status"] == "present"
         )
     return {
         "schema_id": REPORT_SCHEMA_ID,
@@ -312,6 +158,18 @@ def _canonical_inventory_path(provided: Path, workspace_root: Path) -> Path:
     return expected
 
 
+def _require_catalog_ceiling(
+    inventory: dict[str, Any], inventory_path: Path
+) -> None:
+    provided = os.path.normcase(os.path.abspath(os.fspath(inventory_path)))
+    expected = os.path.normcase(os.path.abspath(os.fspath(DEFAULT_INVENTORY)))
+    if (
+        provided == expected
+        and inventory.get("catalog_sha256") != EXPECTED_CATALOG_SHA256
+    ):
+        raise InventoryError("catalog_sha256:ceiling_mismatch")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = JsonArgumentParser(description=__doc__)
     parser.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
@@ -321,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         inventory_path = _canonical_inventory_path(args.inventory, args.workspace_root)
         inventory = load_inventory(inventory_path)
+        _require_catalog_ceiling(inventory, inventory_path)
         report = verify_legacy_absence(
             inventory,
             args.workspace_root,

@@ -115,6 +115,62 @@ class AgentFirstLegacyAbsenceHardeningTest(LegacyAbsenceTestCase):
         }
         self.assertIn(surface["id"], failures)
 
+    def test_frozen_baseline_digest_is_verified_from_the_safe_snapshot(self) -> None:
+        baseline_path = (
+            self.roots["worker"]
+            / "contracts"
+            / "agent-first"
+            / "legacy-v1-contract-baseline.json"
+        )
+        baseline_path.write_text(
+            baseline_path.read_text(encoding="utf-8") + "\n", encoding="utf-8"
+        )
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_occurrence_ceiling_rejects_a_boolean(self) -> None:
+        payload = self._inventory()
+        payload["surfaces"][0]["signature_occurrence_ceilings"] = {
+            "legacy-protocol": True
+        }
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_overlapping_explicit_and_frozen_surface_path_is_read_once(self) -> None:
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+        frozen = baseline["surfaces"][0]
+        marker = "review-worker-" + "protocol/v1"
+        target = self.roots[frozen["repo"]] / frozen["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{frozen['anchors'][0]}\n{marker}\n", encoding="utf-8")
+        payload = self._inventory()
+        payload["surfaces"][0]["repo"] = frozen["repo"]
+        payload["surfaces"][0]["path"] = frozen["path"]
+        self._write_inventory(payload)
+        original = absence.read_surface
+        observed = 0
+
+        def counting_read(path: Path) -> bytes:
+            nonlocal observed
+            if path == target:
+                observed += 1
+            return original(path)
+
+        with patch.object(absence, "read_surface", side_effect=counting_read):
+            exit_code, report = self._invoke()
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(report["ratchet_clean"])
+        self.assertEqual(1, observed)
+
     def test_default_catalog_ceiling_rejects_a_recomputed_expansion(self) -> None:
         payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
         payload["surfaces"].append(deepcopy(payload["surfaces"][-1]))
