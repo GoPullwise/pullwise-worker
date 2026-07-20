@@ -341,7 +341,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual([f"D{index}" for index in range(8, 18)],
+        self.assertEqual([f"D{index}" for index in range(9, 18)],
                          blocker["decision_ids"])
 
     def test_rendered_resolution_contains_text_evidence_digest_and_relation(self) -> None:

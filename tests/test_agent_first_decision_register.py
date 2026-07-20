@@ -84,61 +84,50 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D8", report["active_decision_id"])
-        self.assertEqual(19, report["pending_decision_count"])
-        self.assertEqual(6, report["resolved_decision_count"])
+        self.assertEqual("D9", report["active_decision_id"])
+        self.assertEqual(18, report["pending_decision_count"])
+        self.assertEqual(7, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
-        resolution = register["decisions"][0]["resolution"]
-        self.assertEqual("pullwise_full_scan", resolution["selected_option_id"])
-        self.assertEqual("user", resolution["authority"])
-        self.assertEqual(
-            "ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a",
-            resolution["resolution_sha256"],
-        )
-        d3_resolution = register["decisions"][2]["resolution"]
-        self.assertEqual("mvp_r0_r1_reject_r2", d3_resolution["selected_option_id"])
-        self.assertEqual(
-            "0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a",
-            d3_resolution["resolution_sha256"],
-        )
-        d4_resolution = register["decisions"][3]["resolution"]
-        self.assertEqual(
-            "field_by_field_ownership", d4_resolution["selected_option_id"]
-        )
-        self.assertEqual("user", d4_resolution["authority"])
-        self.assertEqual(
-            "b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654",
-            d4_resolution["resolution_sha256"],
-        )
-        d5_resolution = register["decisions"][4]["resolution"]
-        self.assertEqual(
-            "per_control_transaction", d5_resolution["selected_option_id"]
-        )
-        self.assertEqual("user", d5_resolution["authority"])
-        self.assertEqual(
-            "859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a",
-            d5_resolution["resolution_sha256"],
-        )
-        d6_resolution = register["decisions"][5]["resolution"]
-        self.assertEqual(
-            "single_claim_owner_transaction", d6_resolution["selected_option_id"]
-        )
-        self.assertEqual("user", d6_resolution["authority"])
-        self.assertEqual(
-            "e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8",
-            d6_resolution["resolution_sha256"],
-        )
-        d7_resolution = register["decisions"][6]["resolution"]
-        self.assertEqual(
-            "persist_elapsed_consumption", d7_resolution["selected_option_id"]
-        )
-        self.assertEqual("user", d7_resolution["authority"])
-        self.assertEqual(
-            "5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea",
-            d7_resolution["resolution_sha256"],
-        )
+        expected_resolutions = {
+            "D1": (
+                "pullwise_full_scan",
+                "ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a",
+            ),
+            "D3": (
+                "mvp_r0_r1_reject_r2",
+                "0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a",
+            ),
+            "D4": (
+                "field_by_field_ownership",
+                "b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654",
+            ),
+            "D5": (
+                "per_control_transaction",
+                "859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a",
+            ),
+            "D6": (
+                "single_claim_owner_transaction",
+                "e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8",
+            ),
+            "D7": (
+                "persist_elapsed_consumption",
+                "5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea",
+            ),
+            "D8": (
+                "task_active_attempt_fenced",
+                "e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a",
+            ),
+        }
+        decisions = {item["id"]: item for item in register["decisions"]}
+        for decision_id, expected in expected_resolutions.items():
+            with self.subTest(decision_id=decision_id):
+                resolution = decisions[decision_id]["resolution"]
+                self.assertIsNotNone(resolution)
+                self.assertEqual(expected[0], resolution["selected_option_id"])
+                self.assertEqual("user", resolution["authority"])
+                self.assertEqual(expected[1], resolution["resolution_sha256"])
         self.assertEqual(list(QUESTION_ORDER), register["question_order"])
         self.assertEqual(
             [item["id"] for item in REQUIRED_CATALOG],
@@ -307,7 +296,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D8", report["active_decision_id"])
+        self.assertEqual("D9", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_machine_entrypoint_is_documented(self) -> None:
