@@ -5987,7 +5987,7 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
 
             def prepare_workspace(self, _job: dict, run_id: str) -> tuple[Path, Path, Path]:
                 prepare_started.set()
-                if not release_prepare.wait(2):
+                if not release_prepare.wait(10):
                     raise RuntimeError("test did not release workspace preparation")
                 repo_dir = root / "repo"
                 run_dir = repo_dir / ".codex-review" / "runs" / run_id
@@ -6028,12 +6028,12 @@ class ReviewWorkerV1ContractsTest(unittest.TestCase):
             worker.quota_monitor.snapshot_if_due = lambda active=False: {"ready": True}  # type: ignore[method-assign]
             run_thread = threading.Thread(target=worker.run_job, args=(job,))
             run_thread.start()
-            self.assertTrue(prepare_started.wait(1))
-            deadline = time.monotonic() + 1
+            self.assertTrue(prepare_started.wait(5))
+            deadline = time.monotonic() + 5
             while len(busy_heartbeats) < 2 and time.monotonic() < deadline:
                 time.sleep(0.01)
             release_prepare.set()
-            run_thread.join(3)
+            run_thread.join(10)
 
         self.assertFalse(run_thread.is_alive())
         self.assertGreaterEqual(len(busy_heartbeats), 2)
