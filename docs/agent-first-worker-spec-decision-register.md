@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D7`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D8`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -17,7 +17,7 @@ Active question: `D7`. Questions are asked one at a time. User silence, existing
 | `D4` | `P0.4` | legacy claim 缺失 policy 字段来源 | `resolved` | `active` | `S3` | D1, D3 | `field_by_field_ownership` |
 | `D5` | `P0.6` | task_version 递增单位 | `resolved` | `active` | `S4` | D4 | `per_control_transaction` |
 | `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `resolved` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
-| `D7` | `P0.6` | monotonic 时间持久化形式 | `pending` | `active` | `S4` | — | `persist_elapsed_consumption` |
+| `D7` | `P0.6` | monotonic 时间持久化形式 | `resolved` | `active` | `S4` | — | `persist_elapsed_consumption` |
 | `D8` | `P0.6/P0.7` | lease loss 与 same-run resume 状态边界 | `pending` | `active` | `S4` | D5 | `task_active_attempt_fenced` |
 | `D9` | `P0.7` | 内部结果与 legacy 发布的终态权威 | `pending` | `active` | `S4` | D8 | `internal_result_cas_authoritative` |
 | `D10` | `P0.7` | 并发终态事实优先级模型 | `pending` | `active` | `S4` | D9 | `global_safety_first_matrix` |
@@ -165,16 +165,18 @@ Active question: `D7`. Questions are asked one at a time. User silence, existing
 
 ### D7 — monotonic 时间持久化形式
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** 恢复所需 monotonic 时间应只持久化 elapsed consumption，还是保存值并绑定 boot/clock epoch？
 
 **Options:**
 
-- `persist_elapsed_consumption` — non-normative recommendation, not selected: 只持久化已消耗时长，重启时从权威 wall deadline 重建 monotonic origin。 避免比较不同进程或 boot 的裸 monotonic 值。 Consequences: 恢复公式必须同时绑定 absolute deadline
+- `persist_elapsed_consumption` — selected by resolution: 只持久化已消耗时长，重启时从权威 wall deadline 重建 monotonic origin。 避免比较不同进程或 boot 的裸 monotonic 值。 Consequences: 恢复公式必须同时绑定 absolute deadline
 - `persist_clock_epoch`: 持久化 monotonic 值并绑定明确 clock/boot epoch。 可保留原始读数，但需要可靠的 epoch identity 和跨重启规则。 Consequences: schema 与平台时钟契约更复杂
 
-**Resolution:** No option has been selected.
+**Resolution:** `persist_elapsed_consumption` (`option`). 确认选择 persist_elapsed_consumption：恢复只持久化已消耗时长；重启时从权威 wall deadline 重建本进程的 monotonic origin，不比较或恢复不同进程或 boot 的裸 monotonic 值；恢复公式必须同时绑定 immutable absolute_deadline_at。
+
+**Authority/evidence:** `user` on `2026-07-20`; `conversation:user-selection:2026-07-20:persist_elapsed_consumption`; digest `5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea`.
 
 **Supersedes:** none
 

@@ -341,7 +341,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual([f"D{index}" for index in range(7, 18)],
+        self.assertEqual([f"D{index}" for index in range(8, 18)],
                          blocker["decision_ids"])
 
     def test_rendered_resolution_contains_text_evidence_digest_and_relation(self) -> None:
@@ -381,8 +381,8 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
 
     def test_resolved_decisions_cannot_skip_the_question_order(self) -> None:
         register = load_register(REGISTER_PATH)
-        option_id = register["decisions"][7]["options"][0]["id"]
-        changed = _resolve(register, "D8", option_id)
+        option_id = register["decisions"][13]["options"][0]["id"]
+        changed = _resolve(register, "D14", option_id)
         with self.assertRaisesRegex(
             DecisionRegisterFormatError, "out_of_question_order"
         ):

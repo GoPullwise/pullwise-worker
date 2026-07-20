@@ -164,6 +164,15 @@ summary versus per-decision detail; remove the exception when a deterministic
 include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
+`contracts/agent-first/spec-decision-register.json` is an atomic
+machine-registry exception at 408 physical lines, owned by the Worker
+specification owner. It stays atomic because one ordered frozen
+question/definition/resolution packet enforces question order behind one
+structural-validation and immutable-history boundary. The considered split is
+definitions versus resolutions; remove the exception when a deterministic
+include/assembler preserves the frozen definition digest, ordering, schema
+validation, and immutable-history checks.
+
 ## Agent Kernel Slice 1 Storage Contracts
 
 `contracts/agent-task/v1/schema-registry.json`, the digest-bound schemas it
@@ -239,6 +248,17 @@ fail with `TASK_ALREADY_TERMINAL`.
   `e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8`.
   The current two-transaction Slice 2 shadow scaffold is not this production
   contract; do not promote or refactor it until the S4 decision gate passes.
+- D7 resolves recovery timing to persisted elapsed consumption only. Raw
+  monotonic values are never recovery authority across process or boot
+  boundaries. On restart, rebase a new process-local monotonic origin from the
+  immutable `absolute_deadline_at` and durably ratchet persisted consumption
+  before restoring execution, so wall-clock jumps or restarts never increase
+  remaining budget or extend the deadline. Keep the `mvp-state-semantics` unit
+  bound to D7 digest
+  `5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea`.
+  The current bare `budget_entries.monotonic_ms` schema and SQLite rows are
+  shadow scaffolding; migrations 1-3 and runtime behavior remain unchanged
+  until the S4 decision gate passes.
 - An actor fence binds task/deletion version, lease/transport epoch, current
   Attempt/native epoch, stable owner ID, owner epoch, and the exact live owner
   session. A mismatch fails closed with the stable fence code; do not infer

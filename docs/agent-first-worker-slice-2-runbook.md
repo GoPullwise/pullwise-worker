@@ -20,8 +20,12 @@ D2 失活，`--require-slice S2` 通过。D3 已由用户选择
 `859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`。D6 已由用户
 选择 `single_claim_owner_transaction`，resolution digest 为
 `e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8`；它冻结 S4 的
-claim write set，但在 S4 gate 通过前不改写当前 S2 shadow seam。当前 active decision
-是 D7。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把推荐项或当前实现当成这些决策。
+claim write set，但在 S4 gate 通过前不改写当前 S2 shadow seam。D7 已由用户选择
+`persist_elapsed_consumption`，resolution digest 为
+`5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea`；它冻结 S4 的
+时钟持久化语义，但在 S4 gate 通过前不改写当前裸 `monotonic_ms` schema/SQLite 或
+legacy/runtime path。当前 active decision 是 D8。进入 S3 前仍须解决 D11、D15、D16、
+D17，本文不把推荐项或当前实现当成这些决策。
 
 ## 已实现范围
 
@@ -77,6 +81,12 @@ Migration 3 在不改变 migration 1/2 statement 或 digest 的前提下增加
 `UNIQUE task_events(idempotency_key)`。测试覆盖真实 v1→latest 升级、v2→v3
 commit 前 crash、干净重启只应用一次，以及含跨 Task 重复 key 的 v2 数据
 fail closed 并完整保留 v2 user version/history/index 状态。
+
+Migration 1 已有的 `budget_entries.monotonic_ms` 没有生产 writer/reader，只是 shadow
+scaffold。D7 禁止跨 process/boot 比较或恢复该裸值；migration 1–3 bytes/digest 与当前
+runtime 保持不变。D7 的 elapsed-consumption ledger、immutable absolute deadline
+恢复和 process-local monotonic origin 重建，等待 S4 gate、版本化 contract 与后续
+migration 落地。
 
 ## Legacy 单槽接入与回滚
 
@@ -143,7 +153,7 @@ python3 scripts/check_agent_kernel_wheel.py
 - Python 3.12 Worker 全量：746 tests 通过，5 个既有条件性 skip。
 - output contracts 4/4；Slice 0 baseline `compatible`；cross-repo legacy baseline
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
-- decision register 为 `valid_pending`，S2 无 blocker；D3-D6 已解决，active decision D7。
+- decision register 为 `valid_pending`，S2 无 blocker；D3-D7 已解决，active decision D8。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions
@@ -177,16 +187,16 @@ python3 scripts/check_agent_kernel_wheel.py
 | `tests/test_agent_kernel_storage.py` | 391 | migration count regression |
 | `tests/test_agent_kernel_cas_concurrency.py` | 71 | CAS publish convergence regression |
 | `tests/test_ci_cross_repo_contract.py` | 76 | CI installed-wheel requirement |
-| `tests/test_agent_first_decision_register.py` | 377 | D5/D6 resolution/digest gate |
+| `tests/test_agent_first_decision_register.py` | 386 | D5-D7 resolution/digest gate |
 | `tests/test_agent_first_decision_register_gate.py` | 392 | slice blocker and normative reference gate |
-| `contracts/agent-first/spec-decision-register.json` | 397 | machine decision source |
+| `contracts/agent-first/spec-decision-register.json` | 408 | machine decision source |
 | `contracts/agent-first/worker-slice-0-baseline.json` | 290 | composition anchor evidence |
 | `docs/agent-first-worker-current-code-map.md` | 96 | generated code-map view |
-| `docs/agent-first-worker-mvp-implementation-design.md` | 1761 | D5/D6 normative state semantics |
-| `docs/agent-first-worker-spec-decision-register.md` | 555 | generated decision view |
-| `docs/agent-first-worker-slice-1-runbook.md` | 203 | D1-D6 gate 状态同步 |
-| `docs/agent-first-worker-slice-2-runbook.md` | 194 | 本完成证据 |
-| `AGENTS.md` | 1029 | durable Agent-First rules（非代码阈值） |
+| `docs/agent-first-worker-mvp-implementation-design.md` | 1784 | D5-D7 normative state semantics |
+| `docs/agent-first-worker-spec-decision-register.md` | 557 | generated decision view |
+| `docs/agent-first-worker-slice-1-runbook.md` | 212 | D1-D7 gate 状态同步 |
+| `docs/agent-first-worker-slice-2-runbook.md` | 204 | 本完成证据 |
+| `AGENTS.md` | 1049 | durable Agent-First rules（非代码阈值） |
 
 全部新增手写生产、测试和维护脚本不超过 400 行；没有 401–600 行说明项或超过
 600 行例外。S2 未修改 18,531 行的 `review_worker_v1.py`，因此 oversized legacy

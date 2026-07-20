@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D7",
+  "active_decision_id": "D8",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -146,14 +146,25 @@
     {
       "id": "D7", "key": "clock-persistence", "scope": "P0.6", "title": "monotonic 时间持久化形式",
       "question": "恢复所需 monotonic 时间应只持久化 elapsed consumption，还是保存值并绑定 boot/clock epoch？",
-      "status": "pending", "depends_on": [], "activation": null, "required_by_slice": "S4",
+      "status": "resolved", "depends_on": [], "activation": null, "required_by_slice": "S4",
       "effects": ["data_model", "state_semantics"], "source_refs": ["handoff:P0.6"],
       "affected_units": ["mvp-state-semantics"],
       "options": [
         {"id": "persist_elapsed_consumption", "summary": "只持久化已消耗时长，重启时从权威 wall deadline 重建 monotonic origin。", "rationale": "避免比较不同进程或 boot 的裸 monotonic 值。", "consequences": ["恢复公式必须同时绑定 absolute deadline"]},
         {"id": "persist_clock_epoch", "summary": "持久化 monotonic 值并绑定明确 clock/boot epoch。", "rationale": "可保留原始读数，但需要可靠的 epoch identity 和跨重启规则。", "consequences": ["schema 与平台时钟契约更复杂"]}
       ],
-      "recommended_option_id": "persist_elapsed_consumption", "resolution": null, "supersedes": []
+      "recommended_option_id": "persist_elapsed_consumption",
+      "resolution": {
+        "kind": "option",
+        "selected_option_id": "persist_elapsed_consumption",
+        "custom_text": null,
+        "decision_text": "确认选择 persist_elapsed_consumption：恢复只持久化已消耗时长；重启时从权威 wall deadline 重建本进程的 monotonic origin，不比较或恢复不同进程或 boot 的裸 monotonic 值；恢复公式必须同时绑定 immutable absolute_deadline_at。",
+        "authority": "user",
+        "decided_at": "2026-07-20",
+        "evidence_refs": ["conversation:user-selection:2026-07-20:persist_elapsed_consumption"],
+        "resolution_sha256": "5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea"
+      },
+      "supersedes": []
     },
     {
       "id": "D8", "key": "lease-resume-boundary", "scope": "P0.6/P0.7", "title": "lease loss 与 same-run resume 状态边界",
