@@ -215,7 +215,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `contracts/agent-task/v1/fixtures/schema-golden.json` | 261 | frozen fixture |
 | `pyproject.toml` | 28 | wheel package data |
 | `.github/workflows/ci.yml` | 49 | pinned Server checkout/package smoke |
-| `AGENTS.md` | 1067 | 持久工程规则（非代码阈值） |
+| `AGENTS.md` | 1108 | 持久工程规则（非代码阈值） |
 | `docs/agent-first-worker-slice-1-runbook.md` | 226 | 本证据 |
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行代码说明项，也没有超过

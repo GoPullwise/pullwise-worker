@@ -8,6 +8,47 @@ current code and available evidence, then fix that root cause. Add diagnostics
 only when they directly support root-cause isolation or make a verified fix
 safer to operate.
 
+## Agent-First Clean-Break Refactor Policy
+
+The user has explicitly chosen a clean-break Agent-First refactor. For any
+Agent-First architecture, schema, protocol, runtime, control-plane, data-model,
+or UI work, do not preserve legacy compatibility.
+This section overrides later rules that describe a legacy surface as a future
+target or require old/new coexistence. Those later sections are current-state
+evidence only until the coordinated cutover removes them.
+
+- Implement one clean current contract across Worker, Server, and Web. Do not
+  add or retain adapters, shims, dual reads/writes, legacy fallbacks, protocol
+  downgrade/negotiation, compatibility modes, shadow fallback paths, or feature
+  flags whose purpose is old/new coexistence.
+- Do not add migrations or backfills solely to preserve pre-refactor data or old
+  wire/storage shapes. During internal development, prefer a clean schema/data
+  reset and coordinated cutover unless the user explicitly authorizes retention
+  in a later instruction.
+- Treat `review-worker-protocol/v1`, legacy worker/result/outbox/DTO surfaces,
+  compatibility baselines and fixtures, and legacy mapping prose as deletion
+  inventory, not target contracts. Do not refresh them or let them constrain the
+  new design. The cutover change must remove or rewrite old tests, CI gates,
+  documentation, and code that enforce compatibility.
+- Current legacy production code may remain only until its replacement is
+  end-to-end verified and the applicable decision gates permit cutover. Do not
+  route new features through it or promote shadow code as a second production
+  path; delete the obsolete surface in the coordinated cutover.
+- Preserve security, authority, durability, idempotency, audit, and user-visible
+  correctness. No compatibility is not permission to weaken those invariants.
+  If a still-active decision's frozen options assume compatibility, obtain an
+  explicit option-anchored custom user resolution and update every controlled
+  unit before implementation; never silently infer the choice.
+- Legacy here means pre-Agent-First product protocol, storage, data, DTO, and
+  runtime surfaces. It does not waive current security fail-closed behavior,
+  deterministic model-output normalization, or safe deployment rollback.
+- Previously resolved legacy-scoped decision records remain immutable history.
+  Record an ordered explicit supersession before implementing a contradictory
+  production scope; do not rewrite or silently ignore the old resolution.
+- Any exception requires later explicit user authorization naming the exact
+  surface, bounded duration, owner, and removal condition. Existing prose, CI,
+  tests, or current code do not authorize an exception.
+
 ## Module And File Size Discipline
 
 Keep handwritten production source, tests, and maintained scripts small enough

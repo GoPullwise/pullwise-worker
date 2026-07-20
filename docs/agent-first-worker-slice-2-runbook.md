@@ -208,7 +208,7 @@ python3 scripts/check_agent_kernel_wheel.py
 | `docs/agent-first-worker-spec-decision-register.md` | 559 | generated decision view |
 | `docs/agent-first-worker-slice-1-runbook.md` | 226 | D1-D8 gate 状态同步 |
 | `docs/agent-first-worker-slice-2-runbook.md` | 216 | 本完成证据 |
-| `AGENTS.md` | 1067 | durable Agent-First rules（非代码阈值） |
+| `AGENTS.md` | 1108 | durable Agent-First rules（非代码阈值） |
 
 全部新增手写生产、测试和维护脚本不超过 400 行；没有 401–600 行说明项或超过
 600 行例外。S2 未修改 18,531 行的 `review_worker_v1.py`，因此 oversized legacy
