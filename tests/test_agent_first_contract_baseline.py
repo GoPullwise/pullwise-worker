@@ -169,6 +169,24 @@ class AgentFirstContractBaselineTest(AgentFirstContractTestCase):
         self.assertEqual("server.event-types", report["failures"][0]["registry_id"])
         self.assertEqual("drift", report["registries"][0]["status"])
 
+    def test_candidate_refresh_command_is_retired(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = baseline.main(
+                [
+                    "candidate",
+                    "--manifest",
+                    str(self.manifest_path),
+                    "--workspace-root",
+                    str(self.workspace),
+                ],
+                runner_catalog=self.runners,
+            )
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("manifest_invalid", json.loads(output.getvalue())["error_kind"])
+        self.assertFalse(hasattr(baseline, "create_candidate"))
+
     def test_candidate_is_read_only_and_uses_canonical_hashes(self) -> None:
         original = copy.deepcopy(self.manifest)
         path = self.server / "contract.txt"
