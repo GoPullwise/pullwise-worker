@@ -361,7 +361,8 @@ class ObjectStore:
 
     @classmethod
     def _verify_concurrent_publish(cls, path: Path, digest: str, size: int) -> None:
-        for _ in range(100):
+        deadline = time.monotonic() + 5.0
+        while True:
             try:
                 cls._verify_path(path, digest, size)
                 return
@@ -374,10 +375,10 @@ class ObjectStore:
                     "unexpected hardlinks" not in str(exc)
                     or not stat.S_ISREG(metadata.st_mode)
                     or metadata.st_nlink not in {1, 2}
+                    or time.monotonic() >= deadline
                 ):
                     raise
                 time.sleep(0.001)
-        cls._verify_path(path, digest, size)
 
     def _remove_temporary(self, path: Path) -> None:
         try:

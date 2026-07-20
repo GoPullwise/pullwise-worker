@@ -67,6 +67,9 @@ Accepted validation status field aliases:
 - `classification`
 - `disposition`
 
+The implementation checks these fields in the listed order, takes the first
+non-empty value, then trims and lowercases it.
+
 Non-backing weak statuses are:
 
 - `weak`
@@ -229,25 +232,41 @@ it must not allow unvalidated findings into the main report:
 
 ## Tests
 
-The focused tests in `tests/test_review_worker_v1.py` are:
+Focused repair and matching coverage in `tests/test_review_worker_v1.py`
+includes:
 
+- `test_report_repair_binds_report_source_ids_to_validator_ids`
 - `test_repair_agent_report_demotes_unvalidated_main_findings`
-- `test_qa_gate_rejects_main_finding_not_in_validated_findings`
-- `test_qa_gate_accepts_main_finding_backed_by_plausible_validation`
-- `test_qa_gate_allows_empty_main_findings_with_empty_validation`
+- `test_repair_agent_report_uses_location_binding_when_model_ids_differ`
+- `test_validation_binding_supports_id_and_status_aliases`
 - `test_validation_binding_supports_cluster_id_alias`
+- `test_validation_binding_fallback_accepts_unique_match_without_report_id`
+- `test_validation_binding_fallback_accepts_unique_match_when_model_ids_differ`
 - `test_validation_binding_fallback_requires_unique_match`
 
-The tests must cover:
+Focused QA coverage in the same file includes:
 
-- confirmed/plausible/validated accepted statuses
-- weak/disproven/rejected/false_positive rejected statuses
-- id aliases on both report and validation entries
-- unique fallback matching only when the report finding has no id
-- ambiguous fallback is rejected
-- demoted findings move to appendix and keep demotion metadata
-- `summary.overall_risk` is recomputed from retained main findings
-- `next_agent_tasks` is rebuilt from retained main findings only
+- `test_qa_gate_rejects_non_empty_main_findings_when_validation_artifact_missing`
+- `test_qa_gate_rejects_main_finding_not_in_validated_findings`
+- `test_qa_gate_rejects_all_non_backing_validation_statuses`
+- `test_qa_gate_accepts_main_finding_backed_by_plausible_validation`
+- `test_qa_gate_accepts_main_finding_backed_by_confirmed_disposition`
+- `test_qa_gate_accepts_location_binding_when_model_ids_differ`
+- `test_qa_gate_allows_empty_main_findings_with_empty_validation`
+- `test_qa_gate_rejects_validated_main_findings_missing_from_report`
+
+`tests/test_result_truthfulness_regressions.py` adds
+`test_one_validator_entry_cannot_back_multiple_main_findings`, which verifies
+that report repair retains one main finding and demotes a second finding trying
+to reuse the same validator entry.
+
+Together these tests exercise representative ID/status aliases on both sides,
+the `disposition` status alias, unique fallback both without an ID and with
+non-intersecting model IDs, ambiguous fallback rejection, reverse coverage,
+demotion metadata, risk recomputation, and rebuilding `next_agent_tasks` from
+retained main findings. `FINDING_ID_ALIAS_FIELDS` and
+`VALIDATION_STATUS_ALIAS_FIELDS` in the implementation remain the authoritative
+complete alias registries.
 
 ## Verification
 
@@ -255,9 +274,10 @@ Run:
 
 ```bash
 python -m unittest tests.test_review_worker_v1
+python -m unittest tests.test_result_truthfulness_regressions
 ```
 
-Verification on 2026-07-19 ran 330 tests from
-`tests.test_review_worker_v1`: 329 passed and one environment-conditional test
-was skipped. The historical repository-limit failure recorded by the original
-plan is no longer present.
+This contract document intentionally does not pin a historical test count or
+pass/skip total. Use the current command output and CI run as the authoritative
+verification evidence; synchronizing this document does not imply that either
+suite was rerun.
