@@ -204,7 +204,7 @@ python3 scripts/check_agent_kernel_wheel.py
 | `contracts/agent-first/spec-decision-register.json` | 419 | machine decision source |
 | `contracts/agent-first/worker-slice-0-baseline.json` | 290 | composition anchor evidence |
 | `docs/agent-first-worker-current-code-map.md` | 96 | generated code-map view |
-| `docs/agent-first-worker-mvp-implementation-design.md` | 1784 | D5-D7 normative state semantics |
+| `docs/agent-first-worker-mvp-implementation-design.md` | 1792 | D5-D8 normative state semantics |
 | `docs/agent-first-worker-spec-decision-register.md` | 559 | generated decision view |
 | `docs/agent-first-worker-slice-1-runbook.md` | 226 | D1-D8 gate 状态同步 |
 | `docs/agent-first-worker-slice-2-runbook.md` | 216 | 本完成证据 |

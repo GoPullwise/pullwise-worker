@@ -361,7 +361,7 @@ idempotency key 的单个控制事件。任何单边 row、空 owner pointer 或
 | `terminalization_reserve_ms` | policy 值 |
 | `completion_proposal_ref` | null |
 | `final_observation_manifest_ref` | null |
-| `terminal_kind` | null；非终态必须保持 null。D8 禁止把 transport abandonment 写入该字段；Task 的最终 terminal kind 及其 authority/precedence 由 D9/D10 闭合 |
+| `terminal_kind` | null；非终态必须保持 null，已授权的 TaskResult 终态使用 `task_result`。D8 禁止把 transport abandonment 写入该字段；无合法 successor 后的其他 terminal kind、authority 与 precedence 由 D9/D10 闭合 |
 | `result_ref/result_digest/outcome` | null |
 | `created_at/updated_at/terminal_at` | terminal_at 初值 null |
 
@@ -404,7 +404,7 @@ WHERE task_id=?
 4. 同事务插入 `result_publications` 与 terminal event，更新 Attempt `PUBLISHING→SUCCEEDED`。
 5. affected row 不是 1 时 publication 失败；候选 CAS object 可由 GC 清理，绝不能改 TaskResult version/digest 后重用。
 
-取消/非成功 terminalization 使用同样的唯一结果 CAS，但允许 `desired_state=CANCEL`，并使用各自正向 guard。外层 lease 已失效时 Worker 不再拥有 result publish 权；它必须停止 transport 写，永久 fence 精确的旧 transport/native Attempt 与 owner incarnation/session，并记录与 Task terminal 字段分离的 transport abandonment 事实。Task 保持原 `ACTIVE` 或 `FINALIZING`，`terminal_kind/result_ref/result_digest/outcome/terminal_at` 全部不变，绝不得向 Server 伪造 TaskResult。`transport-abandonment-record/v1` 的字段、identity 与幂等规则仍是 `SPEC_GAP`，本决策不授权发明 schema；MVP 也不具备跨 lease 创建 successor 的能力。最终无 successor 时由谁、在哪个 linearization point、按何种 precedence 终态化，分别等待 D9/D10。
+取消/非成功 terminalization 使用同样的唯一结果 CAS，但允许 `desired_state=CANCEL`，并使用各自正向 guard。外层 lease 已失效时 Worker 不再拥有 result publish 权；它必须在同一 Task 控制事务中停止 transport 写、永久 fence 精确的旧 transport/native Attempt 与 owner incarnation/session、记录与 Task terminal 字段分离的 transport abandonment 事实，并按 D5 令 `task_version` 恰好 `+1`。精确幂等重试返回原版本且不再增版，任一单边写都回滚。Task 保持原 `ACTIVE` 或 `FINALIZING`，`terminal_kind/result_ref/result_digest/outcome/terminal_at` 全部不变，绝不得向 Server 伪造 TaskResult。`transport-abandonment-record/v1` 的字段、identity 与幂等规则仍是 `SPEC_GAP`，本决策不授权发明 schema；MVP 也不具备跨 lease 创建 successor 的能力。最终无 successor 时由谁、在哪个 linearization point、按何种 precedence 终态化，分别等待 D9/D10。
 
 ## 5. 核心不可变契约
 
@@ -1067,7 +1067,7 @@ CAS bytes/manifest的存在不等于committed checkpoint；恢复只读取SQLite
 7. 优先用 SDK thread ID 恢复。失败则以“request + Charter + Ledger + checkpoint + SourceState + evidence refs + remaining budget”启动新 Owner；恢复包不含 secret或实现者伪造事实。
 8. 120 秒内进入可执行 state，否则按已知安全交付 terminalize。
 
-本地较新 checkpoint 没有跨 outer lease 权力。heartbeat rejected、run terminal、lease/grace expired 时，先停止所有 event/artifact/result/tool 写，永久 fence 精确的旧 transport/native Attempt 与 owner incarnation/session，并记录独立的 transport abandonment 事实；不得更改 Task 的 `ACTIVE|FINALIZING` lifecycle 或任何 terminal/result 字段。当前 legacy Server 可按 run-once 规则收敛外层 run，但这只是兼容 transport 投影，不是 Agent Task terminalization。MVP 没有合法的跨 lease successor 路径；只有 Post-MVP `same_run_resume` 的显式资格谓词全部成立时 successor 才可接管。谓词不成立后的最终 Task 终态 authority/linearization 与 outcome precedence 仍分别由 D9/D10 决定。
+本地较新 checkpoint 没有跨 outer lease 权力。heartbeat rejected、run terminal、lease/grace expired 时，先以一个 Task 控制事件事务停止所有 event/artifact/result/tool 写，永久 fence 精确的旧 transport/native Attempt 与 owner incarnation/session、记录独立 transport abandonment 事实并令 `task_version +1`；精确重试不再增版，任何单边写都必须回滚。该事务不得更改 Task 的 `ACTIVE|FINALIZING` lifecycle 或任何 terminal/result 字段。当前 legacy Server 可按 run-once 规则收敛外层 run，但这只是兼容 transport 投影，不是 Agent Task terminalization。MVP 没有合法的跨 lease successor 路径；只有 Post-MVP `same_run_resume` 的显式资格谓词全部成立时 successor 才可接管。谓词不成立后的最终 Task 终态 authority/linearization 与 outcome precedence 仍分别由 D9/D10 决定。
 
 ## 11. Effect Ledger、TaskResult 与 outcome
 
@@ -1437,7 +1437,7 @@ Result exact payload先durable写入 terminal outbox。Server幂等由job/attemp
 
 Transport retry：register/heartbeat/lease在408/429/5xx/连接失败走有界backoff；failed heartbeat之后不得lease。Artifact和result只重发exact durable bytes。Event遵循12.8 at-most-once。永久4xx不重试。gzip只作为大result/artifact的可选HTTP content encoding，语义bytes不变。
 
-Scan job 的 legacy transport 是 run-once：失败、lease loss 不把外层 scan/run 放回 queued，用户重试创建新 scan，Worker 不得本地重排。该兼容 transport 收敛不改变 Agent Task 语义：lease loss 只记录 abandonment 并 fence 精确的旧 transport/native Attempt 与 owner/session，Task 保持 `ACTIVE|FINALIZING` 且 terminal/result 不变；无 successor 时的 Task 终态仍等待 D9/D10。Active cancel时保持slot占用，发一次`run_cancel_requested`，interrupt，上传终态诊断并提交`cancelled`。Server reaper先收敛外层 run 后，同attempt晚到cancelled receipt可被接受但不得覆盖Server的 transport 终态元数据，也不得据此伪造 Agent TaskResult。
+Scan job 的 legacy transport 是 run-once：失败、lease loss 不把外层 scan/run 放回 queued，用户重试创建新 scan，Worker 不得本地重排。该兼容 transport 收敛不改变 Agent Task 语义：lease loss 在同一控制事务记录 abandonment、fence 精确的旧 transport/native Attempt 与 owner/session并令 Task version `+1`，Task 保持 `ACTIVE|FINALIZING` 且 terminal/result 不变；无 successor 时的 Task 终态仍等待 D9/D10。Active cancel时保持slot占用，发一次`run_cancel_requested`，interrupt，上传终态诊断并提交`cancelled`。Server reaper先收敛外层 run 后，同attempt晚到cancelled receipt可被接受但不得覆盖Server的 transport 终态元数据，也不得据此伪造 Agent TaskResult。
 
 ### 12.12 公开 DTO 边界
 
@@ -1576,7 +1576,7 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 - Owner/owner_epoch、typed API、machine/semantic checkpoint、new-session recovery。
 - 以单个 claim-owner 事务实现 Attempt/STARTING Owner/current pointers/event/version 的全有或全无，并覆盖精确幂等、冲突、并发与 write-set 内 crash 注入。
 - 以版本化 Budget Ledger 持久化 elapsed consumption，移除裸 `monotonic_ms` 的恢复语义；从 immutable absolute deadline 与 durable budget head 重建每个进程的 local monotonic deadline，并保持 migration 1–3 digest 不变。
-- 以 Attempt/transport-scope lease-loss 事务记录独立 abandonment fact，并永久 fence 精确旧 transport/native Attempt 与 owner/session；Task 保持 `ACTIVE|FINALIZING`，不得写 terminal/result。当前 S2 shadow reducer 的 `outer_lease.fenced → TERMINAL/transport_abandoned` 不是生产契约，S4 decision gate 通过前不得修改 runtime/schema/migration 来“提前修复”。
+- 以 Attempt/transport-scope lease-loss Task 控制事务原子记录独立 abandonment fact、永久 fence 精确旧 transport/native Attempt 与 owner/session并令 Task version恰好 `+1`；Task 保持 `ACTIVE|FINALIZING`，不得写 terminal/result，精确重试不再增版。当前 S2 shadow reducer 的 `outer_lease.fenced → TERMINAL/transport_abandoned` 不是生产契约，S4 decision gate 通过前不得修改 runtime/schema/migration 来“提前修复”。
 - 同一outer lease故障恢复注入；MVP 对跨lease successor 明确拒绝且无 stale write，不得把拒绝替换为 Task terminalization。Post-MVP successor 仅在显式恢复资格谓词全部成立时接管。
 
 ### Slice 5：Quality Verifier、Proposal、Gate、TaskResult
