@@ -137,15 +137,15 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 
 ## 最近验证结果
 
-- Python 3.10/3.12 Slice 1 聚焦测试：50/50 通过。
-- Python 3.12 Worker 全量：729 tests 通过，4 个既有条件性 skip。
+- Python 3.12 Slice 1 聚焦测试：59/59 通过。
+- Python 3.12 Worker 全量：746 tests 通过，5 个既有条件性 skip。
 - output contracts 4/4、Slice 0 baseline `compatible`、cross-repo baseline
   `compatible`（14 个 fixed runner 全部通过）。
 - wheel 隔离安装成功，默认 registry 包含 13 个 schema 和 3 个 fixture pack，
   SQLite/CAS round-trip 通过。
-- 原 S1 GitHub Actions CI run 798 与当前完整证据提交
-  [#815](https://github.com/GoPullwise/pullwise-worker/actions/runs/29690292400)
-  均通过；后者覆盖 Python 3.10、dependency audit、隔离 wheel 与全量测试。
+- 当前完整证据提交 `c346db08fdcacf65270b06809eb83e6dd35ab723` 的
+  [GitHub Actions #826](https://github.com/GoPullwise/pullwise-worker/actions/runs/29715819480)
+  通过；覆盖 Python 3.10、dependency audit、隔离 wheel 与全量测试。
 
 ## 文件规模与模块化报告
 
@@ -154,23 +154,26 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `pullwise_worker/agent_kernel_canonical.py` | 130 | canonical JSON |
-| `pullwise_worker/agent_kernel_contract_semantics.py` | 203 | 跨字段语义不变量 |
+| `pullwise_worker/agent_kernel_contract_semantics.py` | 232 | 跨字段语义不变量 |
 | `pullwise_worker/agent_kernel_database.py` | 239 | SQLite 生命周期与 migration |
 | `pullwise_worker/agent_kernel_identity.py` | 64 | legacy identity mapping |
-| `pullwise_worker/agent_kernel_migrations.py` | 263 | 原子 migration registry |
-| `pullwise_worker/agent_kernel_object_store.py` | 391 | CAS side effects |
+| `pullwise_worker/agent_kernel_migrations.py` | 331 | 原子 migration registry |
+| `pullwise_worker/agent_kernel_object_store.py` | 400 | CAS side effects |
 | `pullwise_worker/agent_kernel_schema_registry.py` | 187 | digest-bound schema loading |
-| `pullwise_worker/agent_kernel_schema_validation.py` | 331 | 受控 schema 子集 |
+| `pullwise_worker/agent_kernel_schema_validation.py` | 337 | 受控 schema 子集 |
 | `pullwise_worker/agent_kernel_shadow_store.py` | 126 | validation/CAS composition |
-| `tests/test_ci_cross_repo_contract.py` | 38 | pinned sibling/package CI contract |
+| `tests/test_ci_cross_repo_contract.py` | 76 | pinned sibling/package CI contract |
 | `tests/test_agent_kernel_canonical.py` | 128 | canonical contract/property |
-| `tests/test_agent_kernel_contract_semantics.py` | 187 | semantic invariants |
+| `tests/test_agent_kernel_contract_semantics.py` | 248 | semantic invariants |
 | `tests/test_agent_kernel_legacy_mapping.py` | 67 | identity/collision |
-| `tests/test_agent_kernel_schema_registry.py` | 212 | schema/golden/fail-closed |
+| `tests/test_agent_kernel_schema_registry.py` | 298 | schema/golden/fail-closed |
 | `tests/test_agent_kernel_shadow_store.py` | 164 | shadow boundary/metrics |
-| `tests/test_agent_kernel_storage.py` | 358 | migration/CAS/crash/concurrency |
+| `tests/test_agent_kernel_storage.py` | 391 | migration/CAS/crash/concurrency |
+| `tests/test_agent_kernel_cas_concurrency.py` | 71 | CAS publish convergence regression |
 | `tests/test_agent_kernel_storage_boundaries.py` | 96 | limits/read/publish boundaries |
-| `scripts/check_agent_kernel_wheel.py` | 134 | isolated installed-wheel smoke |
+| `scripts/check_agent_kernel_wheel.py` | 170 | isolated installed-wheel smoke |
+| `MANIFEST.in` | 2 | source distribution contract inventory |
+| `setup.py` | 50 | Ubuntu 22.04 setuptools 59.6 wheel data fallback |
 | `contracts/agent-task/v1/actor.schema.json` | 56 | schema |
 | `contracts/agent-task/v1/availability-ref.schema.json` | 24 | schema |
 | `contracts/agent-task/v1/budget-entry.schema.json` | 53 | schema |
@@ -190,8 +193,8 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 | `contracts/agent-task/v1/fixtures/schema-golden.json` | 261 | frozen fixture |
 | `pyproject.toml` | 28 | wheel package data |
 | `.github/workflows/ci.yml` | 49 | pinned Server checkout/package smoke |
-| `AGENTS.md` | 1007 | 持久工程规则（非代码阈值） |
-| `docs/agent-first-worker-slice-1-runbook.md` | 183 | 本证据 |
+| `AGENTS.md` | 1018 | 持久工程规则（非代码阈值） |
+| `docs/agent-first-worker-slice-1-runbook.md` | 201 | 本证据 |
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行说明项，没有超过 600 行
 的新增文件，也没有生成/第三方/原子 registry 例外需要登记。S1 未触及任何超过

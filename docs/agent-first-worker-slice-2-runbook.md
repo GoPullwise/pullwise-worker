@@ -137,16 +137,16 @@ python3 scripts/check_agent_kernel_wheel.py
 
 ## 最近验证结果
 
-- Python 3.10/3.12 Agent Kernel S1+S2 聚焦测试：77/77 通过。
-- Python 3.12 Worker 全量：729 tests 通过，4 个既有条件性 skip。
+- Python 3.12 Agent Kernel S1+S2 聚焦测试：94/94 通过。
+- Python 3.12 Worker 全量：746 tests 通过，5 个既有条件性 skip。
 - output contracts 4/4；Slice 0 baseline `compatible`；cross-repo legacy baseline
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
 - decision register 为 `valid_pending`，S2 无 blocker；D3/D4/D5 已解决，active decision D6。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
-- GitHub Actions CI
-  [#820](https://github.com/GoPullwise/pullwise-worker/actions/runs/29692290148)
-  对 D5 决议及状态语义提交 `cf4fb35f8e34d014d6ac759ab9c11eb8f2387dad` 通过。
+- GitHub Actions
+  [#826](https://github.com/GoPullwise/pullwise-worker/actions/runs/29715819480)
+  对当前完整证据提交 `c346db08fdcacf65270b06809eb83e6dd35ab723` 通过。
 
 ## 文件规模与模块化报告
 
@@ -155,34 +155,35 @@ python3 scripts/check_agent_kernel_wheel.py
 | 文件 | 行数 | 职责 |
 |---|---:|---|
 | `pullwise_worker/agent_kernel_state.py` | 377 | 纯 Task/Attempt reducer |
-| `pullwise_worker/agent_kernel_task_store.py` | 360 | Task/version/owner 事务 |
+| `pullwise_worker/agent_kernel_task_store.py` | 366 | Task/version/owner 事务 |
 | `pullwise_worker/agent_kernel_task_validation.py` | 81 | reducer adapter 与 contract 校验 |
 | `pullwise_worker/agent_kernel_attempt_store.py` | 147 | Attempt 持久化与边应用 |
 | `pullwise_worker/agent_kernel_event_log.py` | 61 | append-only idempotency journal |
 | `pullwise_worker/agent_kernel_fencing.py` | 55 | actor/lease/epoch fence |
 | `pullwise_worker/agent_kernel_task_records.py` | 156 | typed records 与 row codec |
-| `pullwise_worker/agent_kernel_supervisor.py` | 148 | one-slot legacy projection |
-| `pullwise_worker/agent_kernel_review_worker.py` | 116 | rollbackable composition seam |
-| `pullwise_worker/agent_kernel_migrations.py` | 318 | atomic migration registry |
+| `pullwise_worker/agent_kernel_supervisor.py` | 151 | one-slot legacy projection |
+| `pullwise_worker/agent_kernel_review_worker.py` | 121 | rollbackable composition seam |
+| `pullwise_worker/agent_kernel_migrations.py` | 331 | atomic migration registry |
 | `pullwise_worker/main.py` | 124 | 单 Worker composition root |
 | `scripts/check_agent_kernel_wheel.py` | 170 | installed S1+S2 smoke |
-| `tests/test_agent_kernel_state_reducer.py` | 240 | Cartesian reducer contract |
-| `tests/test_agent_kernel_task_store.py` | 359 | persistence/idempotency/publication |
+| `tests/test_agent_kernel_state_reducer.py` | 272 | Cartesian reducer contract |
+| `tests/test_agent_kernel_task_store.py` | 398 | persistence/idempotency/publication |
 | `tests/test_agent_kernel_owner_fencing.py` | 147 | owner replacement 与 exact-session fence |
 | `tests/test_agent_kernel_task_races.py` | 193 | claim/cancel/publish schedules |
-| `tests/test_agent_kernel_supervisor.py` | 198 | slot/outbox/runtime projection |
-| `tests/test_agent_kernel_slice2_migration.py` | 102 | v1 upgrade/crash recovery |
-| `tests/test_agent_kernel_storage.py` | 358 | migration count regression |
-| `tests/test_ci_cross_repo_contract.py` | 41 | CI installed-wheel requirement |
+| `tests/test_agent_kernel_supervisor.py` | 261 | slot/outbox/runtime projection |
+| `tests/test_agent_kernel_slice2_migration.py` | 245 | v1/v2/v3 upgrade, dirty-data and crash recovery |
+| `tests/test_agent_kernel_storage.py` | 391 | migration count regression |
+| `tests/test_agent_kernel_cas_concurrency.py` | 71 | CAS publish convergence regression |
+| `tests/test_ci_cross_repo_contract.py` | 76 | CI installed-wheel requirement |
 | `tests/test_agent_first_decision_register.py` | 368 | D5 resolution/digest gate |
 | `contracts/agent-first/spec-decision-register.json` | 386 | machine decision source |
 | `contracts/agent-first/worker-slice-0-baseline.json` | 290 | composition anchor evidence |
 | `docs/agent-first-worker-current-code-map.md` | 96 | generated code-map view |
 | `docs/agent-first-worker-mvp-implementation-design.md` | 1741 | D5 normative state semantics |
 | `docs/agent-first-worker-spec-decision-register.md` | 553 | generated decision view |
-| `docs/agent-first-worker-slice-1-runbook.md` | 183 | D1-D5 gate 状态同步 |
-| `docs/agent-first-worker-slice-2-runbook.md` | 181 | 本完成证据 |
-| `AGENTS.md` | 1007 | durable Agent-First rules（非代码阈值） |
+| `docs/agent-first-worker-slice-1-runbook.md` | 201 | D1-D5 gate 状态同步 |
+| `docs/agent-first-worker-slice-2-runbook.md` | 191 | 本完成证据 |
+| `AGENTS.md` | 1018 | durable Agent-First rules（非代码阈值） |
 
 全部新增手写生产、测试和维护脚本不超过 400 行；没有 401–600 行说明项或超过
 600 行例外。S2 未修改 18,531 行的 `review_worker_v1.py`，因此 oversized legacy
