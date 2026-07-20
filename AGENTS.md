@@ -228,12 +228,17 @@ fail with `TASK_ALREADY_TERMINAL`.
   not change Task version unless a Task control transaction freezes their
   pointer. Keep the `mvp-state-semantics` unit bound to D5 digest
   `859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`.
-- D6 resolves `attempt.claimed` to one Task control event transaction that
-  creates both the new Attempt and its `STARTING` Owner incarnation. The full
-  claim write set uses one idempotency key and advances `task_version` exactly
-  once; never persist a claimed Attempt without its Owner. Keep the
+- D6 resolves `attempt.claimed` to one `BEGIN IMMEDIATE` Task control event
+  transaction. After validating claim guards, it atomically advances native
+  and owner epochs, creates one `LEASED` Attempt bound to one exact `STARTING`
+  Owner incarnation/session, updates current pointers, appends one event under
+  one idempotency key, and advances `task_version` exactly once. No commit may
+  expose only one side; an exact retry returns the original complete result,
+  while any conflict or rollback creates neither. Keep the
   `mvp-state-semantics` unit bound to D6 digest
   `e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8`.
+  The current two-transaction Slice 2 shadow scaffold is not this production
+  contract; do not promote or refactor it until the S4 decision gate passes.
 - An actor fence binds task/deletion version, lease/transport epoch, current
   Attempt/native epoch, stable owner ID, owner epoch, and the exact live owner
   session. A mismatch fails closed with the stable fence code; do not infer

@@ -177,15 +177,16 @@ python3 scripts/check_agent_kernel_wheel.py
 | `tests/test_agent_kernel_storage.py` | 391 | migration count regression |
 | `tests/test_agent_kernel_cas_concurrency.py` | 71 | CAS publish convergence regression |
 | `tests/test_ci_cross_repo_contract.py` | 76 | CI installed-wheel requirement |
-| `tests/test_agent_first_decision_register.py` | 368 | D5 resolution/digest gate |
-| `contracts/agent-first/spec-decision-register.json` | 386 | machine decision source |
+| `tests/test_agent_first_decision_register.py` | 377 | D5/D6 resolution/digest gate |
+| `tests/test_agent_first_decision_register_gate.py` | 392 | slice blocker and normative reference gate |
+| `contracts/agent-first/spec-decision-register.json` | 397 | machine decision source |
 | `contracts/agent-first/worker-slice-0-baseline.json` | 290 | composition anchor evidence |
 | `docs/agent-first-worker-current-code-map.md` | 96 | generated code-map view |
-| `docs/agent-first-worker-mvp-implementation-design.md` | 1741 | D5 normative state semantics |
-| `docs/agent-first-worker-spec-decision-register.md` | 553 | generated decision view |
-| `docs/agent-first-worker-slice-1-runbook.md` | 201 | D1-D5 gate 状态同步 |
-| `docs/agent-first-worker-slice-2-runbook.md` | 191 | 本完成证据 |
-| `AGENTS.md` | 1018 | durable Agent-First rules（非代码阈值） |
+| `docs/agent-first-worker-mvp-implementation-design.md` | 1761 | D5/D6 normative state semantics |
+| `docs/agent-first-worker-spec-decision-register.md` | 555 | generated decision view |
+| `docs/agent-first-worker-slice-1-runbook.md` | 203 | D1-D6 gate 状态同步 |
+| `docs/agent-first-worker-slice-2-runbook.md` | 194 | 本完成证据 |
+| `AGENTS.md` | 1029 | durable Agent-First rules（非代码阈值） |
 
 全部新增手写生产、测试和维护脚本不超过 400 行；没有 401–600 行说明项或超过
 600 行例外。S2 未修改 18,531 行的 `review_worker_v1.py`，因此 oversized legacy

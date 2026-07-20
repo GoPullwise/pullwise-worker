@@ -323,6 +323,12 @@ schema migration 使用单独 `schema_migrations` 表和 `BEGIN IMMEDIATE`。未
 | `result_publications` | PK `task_id`; UNIQUE result digest | 唯一 terminal publication |
 | `content_objects` | PK `sha256`; CHECK size/schema | CAS bytes index |
 
+`attempts`、`owner_incarnations`、`tasks` 和对应 `task_events` 还有跨表提交不变量：
+一次成功 claim 必须同时存在恰好一个新 native epoch 的 Attempt、恰好一个新 owner
+epoch 的 `STARTING` incarnation、两者相互一致的 session/current pointer，以及同一
+idempotency key 的单个控制事件。任何单边 row、空 owner pointer 或 epoch/session
+错配都不是可恢复中间态，而是必须回滚的事务失败。
+
 ### 4.5 TaskRecord
 
 `tasks` 的逻辑 `task-record/v1` 字段全部必填，nullable 字段必须显式为 null：
@@ -936,7 +942,7 @@ Task state 只有：`QUEUED|ACTIVE|WAITING_INPUT|WAITING_APPROVAL|FINALIZING|TER
 | From | Event | Guard | To | 同一事务写集 |
 |---|---|---|---|---|
 | 无 | `task.accepted` | request/policy/ledger/CAS durable | QUEUED | Task v1、roots、accepted event |
-| QUEUED | `attempt.claimed` | desired RUN、outer lease valid、budget可预留 | ACTIVE | native_epoch+1、Attempt LEASED、STARTING Owner incarnation、Task version+1 |
+| QUEUED | `attempt.claimed` | desired RUN、outer lease valid、budget可预留 | ACTIVE | native_epoch+1、owner_epoch+1、LEASED Attempt 绑定 STARTING Owner/session、current pointers、Task version+1 |
 | ACTIVE | `interaction.requested` | channel supported、无 in-flight write | WAITING_INPUT/APPROVAL | checkpoint head、Attempt SUSPENDED、interaction、version+1 |
 | WAITING_* | `interaction.responded` | 有效 response、未过期 | QUEUED | response、ledger additions、version+1 |
 | WAITING_* | `interaction.expired` | deadline reached | FINALIZING | reason、version+1 |
@@ -956,7 +962,7 @@ Task state 只有：`QUEUED|ACTIVE|WAITING_INPUT|WAITING_APPROVAL|FINALIZING|TER
 
 ### 10.2 AttemptRecord 与完整转移
 
-`attempt-record/v1` 的 keys 全部必填：`attempt_id/task_id/native_epoch/transport_binding/state/state_version/predecessor_checkpoint_generation/owner_session_id/lease_acquired_at/started_at/ended_at/termination_reason/budget_reservation_id`。nullable规则固定：`predecessor_checkpoint_generation` 在无前驱时 null；`owner_session_id` 在 owner未创建时 null；`lease_acquired_at/started_at` 在对应动作前 null；`ended_at/termination_reason` 在非终态必须同时 null、终态必须同时非 null；`budget_reservation_id` 仅在无需预算的 reconciler path可 null。其他字段不得 null。
+`attempt-record/v1` 的 keys 全部必填：`attempt_id/task_id/native_epoch/transport_binding/state/state_version/predecessor_checkpoint_generation/owner_session_id/lease_acquired_at/started_at/ended_at/termination_reason/budget_reservation_id`。nullable规则固定：`predecessor_checkpoint_generation` 在无前驱时 null；所有已提交 Attempt 的 `owner_session_id` 必须非 null，并精确指向同一 claim 事务创建的 Owner incarnation；`lease_acquired_at/started_at` 在对应动作前 null；`ended_at/termination_reason` 在非终态必须同时 null、终态必须同时非 null；`budget_reservation_id` 仅在无需预算的 reconciler path可 null。其他字段不得 null。
 
 Attempt terminal set是 `SUCCEEDED|SUSPENDED|FAILED|CANCELLED|FENCED`。Task transition若没有 current Attempt，禁止伪造一条仅为满足写集的 Attempt；若 current Attempt已terminal，Task终态事务只引用它，不改写它。
 
@@ -965,6 +971,9 @@ Attempt state：
 ```text
 CREATED → LEASED → PREPARING → RUNNING → VERIFYING → PUBLISHING → SUCCEEDED
 ```
+
+`CREATED` 只允许作为 claim 事务内部尚未提交的构造态；durable Attempt 首次可见时
+已经是 `LEASED`，并与同事务的 `STARTING` Owner incarnation 完整绑定。
 
 额外合法边：
 
@@ -994,7 +1003,7 @@ CREATED → LEASED → PREPARING → RUNNING → VERIFYING → PUBLISHING → SU
 5. archive/close owner runtime，释放 sandbox compute；logical owner_id 保留。
 6. 非 Agent supervisor 继续 outer heartbeat；absolute deadline 不暂停。
 
-响应到达后 Task `WAITING_*→QUEUED`，下一次 claim 创建新的 native epoch/Attempt/owner incarnation。Pullwise legacy profile interaction unavailable，因此不会进入该等待路径。
+响应到达后 Task `WAITING_*→QUEUED`，下一次 claim 使用同一个原子 claim-owner 事务创建新的 native epoch/Attempt/owner incarnation。Pullwise legacy profile interaction unavailable，因此不会进入该等待路径。
 
 ### 10.4 取消
 
@@ -1031,7 +1040,7 @@ CAS bytes/manifest的存在不等于committed checkpoint；恢复只读取SQLite
 2. 校验 Task DB、checkpoint index、manifest hash chain、全部 refs；损坏最新 generation 时只沿已验证 previous hash 回退，链缺口停止。
 3. 从 DB head 合并单调事实：desired CANCEL、task/deletion/policy/ledger version、budget consumed、native/owner epoch 只能保持或前进，绝不采用 checkpoint 的更小值。
 4. 先发送与现有 outer run绑定的 heartbeat；只有 Server ACK 且没有 cancel/fence，且本地 `now < lease/grace/deadline` 才可恢复执行。
-5. native_epoch+1、创建新 Attempt和 owner incarnation；旧 runtime/session全部 fenced。
+5. 用同一个原子 claim-owner 事务执行 native/owner epoch +1，并创建相互绑定的新 Attempt 与 `STARTING` Owner incarnation；旧 runtime/session 全部 fenced。
 6. 优先用 SDK thread ID 恢复。失败则以“request + Charter + Ledger + checkpoint + SourceState + evidence refs + remaining budget”启动新 Owner；恢复包不含 secret或实现者伪造事实。
 7. 120 秒内进入可执行 state，否则按已知安全交付 terminalize。
 
@@ -1079,6 +1088,10 @@ row 都是 MVP invariant violation，禁止所有 success outcome。
 - `created_at/terminal_at`。
 
 `attempt_identity` oneOf只有：`{kind:"started",attempt_id,native_epoch>=1}`或`{kind:"not_started",attempt_id:null,native_epoch:0,reason_code:"ATTEMPT_NOT_STARTED"}`。`owner_identity`同理只有`{kind:"started",owner_id,owner_epoch>=1}`或`{kind:"not_started",owner_id,owner_epoch:0,reason_code:"OWNER_NOT_STARTED"}`；not_started仍保留Task创建时生成的稳定`owner_id`。成功和PARTIAL outcome必须两者started且charter available；BLOCKED/FAILED/CANCELLED可not_started，charter未创建时必须`not_applicable/CHARTER_NOT_CREATED`。Task尚未accepted、因而连request/policy/ledger都没有时不创建TaskResult，只返回claim/contract error。
+
+D6 进一步要求所有 outcome 的两种 identity 同步出现：两者必须同时 `started` 或同时
+`not_started`，禁止 Attempt started/Owner not_started 及其反向组合。BLOCKED、FAILED、
+CANCELLED 只允许在 claim 从未提交时让两者同时 `not_started`。
 
 `diagnostics.worker_debug_fragment`只允许：
 
@@ -1538,6 +1551,7 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 
 - Runtime Adapter使用现有worker-scoped OpenAI Codex Python SDK/App Server，不增加第二个进程或手写JSON-RPC。
 - Owner/owner_epoch、typed API、machine/semantic checkpoint、new-session recovery。
+- 以单个 claim-owner 事务实现 Attempt/STARTING Owner/current pointers/event/version 的全有或全无，并覆盖精确幂等、冲突、并发与 write-set 内 crash 注入。
 - 同一outer lease故障注入；跨lease明确拒绝。
 
 ### Slice 5：Quality Verifier、Proposal、Gate、TaskResult
@@ -1580,7 +1594,7 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 ### 16.2 State/property/concurrency tests
 
 - 对Task/Attempt所有state/event做笛卡尔测试，未列边全拒绝。
-- 任意并发schedule下最多一个current Attempt、一个terminal publication、task_version严格递增。
+- 任意并发schedule下最多一个完整 current `(Attempt, STARTING Owner)` tuple、一个terminal publication、task_version严格递增；不得出现任一单边 row。
 - Cancel CAS先赢后零success；publish先赢后cancel返回already terminal。
 - old owner/native/lease epoch的每个typed tool和publish都拒绝。
 - max_agents计算包含Owner、Verifier、domain reviewer live sessions；顺序Q2不绕过总session预算。
@@ -1591,7 +1605,7 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 在以下每个边界前后kill进程并重启：
 
 - CAS file fsync/rename/DB ref。
-- Task accepted、Attempt claim、owner epoch commit。
+- Task accepted、原子 claim-owner 事务；在 Attempt/Owner/current pointers/event/version 写集的每个注入点证明全有或全无。
 - tool dispatch intent/child start/receipt/Observation commit。
 - checkpoint blobs/manifest/index/pointer。
 - WAITING transition/sandbox release/response。

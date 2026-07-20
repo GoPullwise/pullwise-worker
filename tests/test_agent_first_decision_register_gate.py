@@ -381,8 +381,8 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
 
     def test_resolved_decisions_cannot_skip_the_question_order(self) -> None:
         register = load_register(REGISTER_PATH)
-        option_id = register["decisions"][6]["options"][0]["id"]
-        changed = _resolve(register, "D7", option_id)
+        option_id = register["decisions"][7]["options"][0]["id"]
+        changed = _resolve(register, "D8", option_id)
         with self.assertRaisesRegex(
             DecisionRegisterFormatError, "out_of_question_order"
         ):
