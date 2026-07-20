@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from scripts.agent_first_contract_files import (
@@ -27,6 +28,24 @@ DEFAULT_INVENTORY = (
 )
 INVENTORY_SCHEMA_ID = "pullwise-agent-first-legacy-removal-inventory/v1"
 REPORT_SCHEMA_ID = "pullwise-agent-first-legacy-absence-report/v1"
+TEXT_SUFFIXES = {
+    ".css",
+    ".html",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".mjs",
+    ".py",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 
 
 class InventoryError(ValueError):
@@ -81,8 +100,37 @@ def _validate_d27(
     }
 
 
+def _worktree_paths(repo_root: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BaselineEnvironmentError("worktree_catalog_unavailable") from exc
+    if result.returncode != 0:
+        raise BaselineEnvironmentError("worktree_catalog_unavailable")
+    try:
+        decoded = result.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BaselineEnvironmentError("worktree_path_not_utf8") from exc
+    return sorted(set(decoded.split("\0")) - {""})
+
+
 def verify_legacy_absence(
-    inventory: dict[str, Any], workspace_root: Path
+    inventory: dict[str, Any], workspace_root: Path, *, require_absent: bool = False
 ) -> dict[str, Any]:
     roots = repository_roots(workspace_root)
     d27 = _validate_d27(inventory, roots)
@@ -110,17 +158,68 @@ def verify_legacy_absence(
             }
         )
     reports.sort(key=lambda item: item["id"])
+    registered = {
+        (surface["repo"], surface["path"], signature_id)
+        for surface in inventory.get("surfaces", [])
+        for signature_id in surface["signature_ids"]
+    }
+    whole_exclusions = {
+        (item["repo"], item["path"])
+        for item in inventory.get("evidence_exclusions", [])
+        if item["start_marker"] is None and item["end_marker"] is None
+    }
+    unexpected: list[dict[str, str]] = []
+    for repo_id, repo_root in roots.items():
+        for relative in _worktree_paths(repo_root):
+            path = surface_path(repo_root, relative)
+            if path is None:
+                raise BaselineEnvironmentError("worktree_path_disappeared")
+            if (repo_id, relative) in whole_exclusions:
+                canonical_text(path)
+                continue
+            if Path(relative).suffix.lower() not in TEXT_SUFFIXES:
+                continue
+            text = canonical_text(path)
+            for signature_id, literal in signatures.items():
+                key = (repo_id, relative, signature_id)
+                if literal in text and key not in registered:
+                    unexpected.append(
+                        {
+                            "repo": repo_id,
+                            "path": relative,
+                            "signature_id": signature_id,
+                        }
+                    )
+    unexpected.sort(key=lambda item: (item["repo"], item["path"], item["signature_id"]))
     legacy_absent = all(item["status"] == "absent" for item in reports)
+    ratchet_clean = not unexpected
+    status = (
+        "unexpected_legacy"
+        if unexpected
+        else "absent" if legacy_absent else "legacy_present"
+    )
     return {
+    failures: list[dict[str, str]] = [
+        {"code": "unexpected_legacy_surface", **item} for item in unexpected
+    ]
+    if require_absent:
+        failures.extend(
+            {
+                "code": "legacy_surface_present",
+                "surface_id": item["id"],
+            }
+            for item in reports if item["status"] == "present"
+        )
         "schema_id": REPORT_SCHEMA_ID,
         "inventory_id": inventory["inventory_id"],
         "d27": d27,
-        "status": "absent" if legacy_absent else "legacy_present",
+        "status": status,
         "legacy_absent": legacy_absent,
-        "ratchet_clean": True,
+        "require_absent": require_absent,
+        "ratchet_clean": ratchet_clean,
         "surfaces": reports,
-        "unexpected_surfaces": [],
-        "failures": [],
+        "unexpected_surfaces": unexpected,
+        "failures": failures,
         "indeterminate_reasons": [],
     }
 
@@ -141,10 +240,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace-root", type=Path, required=True)
     try:
         args = parser.parse_args(argv)
+    parser.add_argument("--require-absent", action="store_true")
         inventory = _load_inventory(args.inventory)
-        report = verify_legacy_absence(inventory, args.workspace_root)
+        report = verify_legacy_absence(
+            inventory,
+            args.workspace_root,
+            require_absent=args.require_absent,
+        )
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
+        return 0 if not report["failures"] else 1
     except (InventoryError, DecisionRegisterFormatError, KeyError, TypeError, ValueError):
         print(json.dumps(_error_report("inventory_invalid"), indent=2, sort_keys=True))
         return 2

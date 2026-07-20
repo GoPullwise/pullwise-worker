@@ -127,6 +127,55 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
         self.assertEqual("present", report["surfaces"][0]["status"])
         self.assertEqual([], report["unexpected_surfaces"])
 
+    def test_default_mode_blocks_an_unregistered_legacy_surface(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        (self.roots["worker"] / "legacy.py").write_text(
+            f"PROTOCOL = {marker!r}\n", encoding="utf-8"
+        )
+        (self.roots["worker"] / "new_legacy.py").write_text(
+            f"PROTOCOL = {marker!r}\n", encoding="utf-8"
+        )
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("unexpected_legacy", report["status"])
+        self.assertFalse(report["ratchet_clean"])
+        self.assertEqual(
+            [
+                {
+                    "repo": "worker",
+                    "path": "new_legacy.py",
+                    "signature_id": "legacy-protocol",
+                }
+            ],
+            report["unexpected_surfaces"],
+        )
+
+    def test_require_absent_blocks_an_inventoried_surface(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        (self.roots["worker"] / "legacy.py").write_text(
+            f"PROTOCOL = {marker!r}\n", encoding="utf-8"
+        )
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke("--require-absent")
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("legacy_present", report["status"])
+        self.assertTrue(report["require_absent"])
+        self.assertTrue(report["ratchet_clean"])
+        self.assertEqual(
+            [
+                {
+                    "code": "legacy_surface_present",
+                    "surface_id": "worker.legacy-runtime",
+                }
+            ],
+            report["failures"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
