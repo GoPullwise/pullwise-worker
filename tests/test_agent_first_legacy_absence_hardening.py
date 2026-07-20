@@ -228,6 +228,27 @@ class AgentFirstLegacyAbsenceHardeningTest(LegacyAbsenceTestCase):
         self.assertEqual("environment_invalid", report["error_kind"])
         self.assertEqual(2, observed)
 
+    def test_verifier_rejects_inventory_detached_from_control_bytes(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        (self.roots["worker"] / "legacy.py").write_text(
+            f"{marker}\n{marker}\n", encoding="utf-8"
+        )
+        disk_inventory = self._inventory()
+        self._write_inventory(disk_inventory)
+        inventory_raw = self.inventory_path.read_bytes()
+        detached_inventory = deepcopy(disk_inventory)
+        detached_inventory["surfaces"][0][
+            "signature_occurrence_ceilings"
+        ]["legacy-protocol"] = 3
+        detached_inventory["catalog_sha256"] = catalog_sha256(detached_inventory)
+
+        with self.assertRaises(InventoryError):
+            absence.verify_legacy_absence(
+                detached_inventory,
+                self.workspace,
+                inventory_raw=inventory_raw,
+            )
+
     def test_production_catalog_ceiling_applies_in_a_copied_workspace(self) -> None:
         payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
         added = deepcopy(payload["surfaces"][-1])

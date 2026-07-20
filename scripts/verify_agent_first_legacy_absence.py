@@ -25,7 +25,6 @@ from scripts.agent_first_legacy_inventory import (
     InventoryError,
     parse_inventory,
     reject_duplicate_keys,
-    validate_inventory,
 )
 from scripts.agent_first_legacy_catalog import (
     EXPECTED_CATALOG_SHA256,
@@ -53,8 +52,6 @@ class JsonArgumentParser(argparse.ArgumentParser):
 def _validate_d27(
     inventory: dict[str, Any],
     roots: dict[str, Path],
-    *,
-    register_raw: bytes | None = None,
 ) -> tuple[dict[str, str], bytes]:
     binding = inventory.get("d27")
     if not isinstance(binding, dict):
@@ -65,7 +62,7 @@ def _validate_d27(
     path = surface_path(roots["worker"], register_path)
     if path is None:
         raise InventoryError("d27_register_missing")
-    raw = read_surface(path) if register_raw is None else register_raw
+    raw = read_surface(path)
     try:
         register_text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -104,14 +101,17 @@ def verify_legacy_absence(
     inventory: dict[str, Any],
     workspace_root: Path,
     *,
+    inventory_raw: bytes,
     require_absent: bool = False,
-    inventory_raw: bytes | None = None,
 ) -> dict[str, Any]:
-    validate_inventory(inventory)
+    snapshot_inventory = parse_inventory(inventory_raw)
+    if snapshot_inventory != inventory:
+        raise InventoryError("inventory_snapshot_mismatch")
+    inventory = snapshot_inventory
     roots = repository_roots(workspace_root)
-    control_snapshot: dict[tuple[str, str], bytes] = {}
-    if inventory_raw is not None:
-        control_snapshot[("worker", INVENTORY_RELATIVE_PATH)] = inventory_raw
+    control_snapshot = {
+        ("worker", INVENTORY_RELATIVE_PATH): inventory_raw,
+    }
     d27, register_raw = _validate_d27(inventory, roots)
     control_snapshot[
         ("worker", inventory["d27"]["register_path"])

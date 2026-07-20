@@ -162,14 +162,14 @@ ratchet pass. This remains a deletion inventory, not a compatibility baseline.
   switch is authorized.
 - Current CI checks out both frozen Server and Web siblings and runs only the
   default ratchet. The retired candidate-refresh path remains forbidden.
-- Inventory paths are strict contained POSIX-relative paths. Reads reject
-  symlinks, reparse points, non-regular files, unsafe Git paths, changed
+- The CLI requires the fixed production inventory ID and catalog digest in every
+  workspace. Inventory paths are strict contained POSIX-relative paths. Reads
+  reject symlinks, reparse points, non-regular files, unsafe Git paths, changed
   descriptors, and descriptor targets that differ from the validated lexical
-  path. Whole-file exclusions are limited to the decision register, its
-  generated immutable view, and the inventory itself; bounded exclusions are
-  limited to the exact audited marker tuples for D27 sections in AGENTS and the
-  three normative design documents, with unique ordered non-overlapping
-  markers.
+  path. Keep first-read inventory and D27 register bytes in the observation
+  snapshot and exact-byte recheck them before exit. Whole-file exclusions remain
+  limited to the decision register, generated view, and inventory; bounded D27
+  marker exclusions remain exact, unique, ordered, and non-overlapping.
 
 ## Agent-First Slice 0 Evidence
 
