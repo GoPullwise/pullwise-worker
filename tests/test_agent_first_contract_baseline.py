@@ -186,105 +186,12 @@ class AgentFirstContractBaselineTest(AgentFirstContractTestCase):
         self.assertEqual(2, exit_code)
         self.assertEqual("manifest_invalid", json.loads(output.getvalue())["error_kind"])
         self.assertFalse(hasattr(baseline, "create_candidate"))
-
-    def test_candidate_is_read_only_and_uses_canonical_hashes(self) -> None:
-        original = copy.deepcopy(self.manifest)
-        path = self.server / "contract.txt"
-        path.write_bytes(b"strict-v1-contract-v2\r\n")
-        before = {
-            item.relative_to(self.workspace).as_posix(): item.read_bytes()
-            for item in self.workspace.rglob("*")
-            if item.is_file()
-        }
-
-        candidate = baseline.create_candidate(
-            self.manifest, self.workspace, runner_catalog=self.runners
+        appendix = baseline.render_appendix(
+            self.manifest,
+            runner_catalog=self.runners,
         )
-        after = {
-            item.relative_to(self.workspace).as_posix(): item.read_bytes()
-            for item in self.workspace.rglob("*")
-            if item.is_file()
-        }
-
-        self.assertEqual(original, self.manifest)
-        self.assertEqual(before, after)
-        surface = next(item for item in candidate["surfaces"] if item["path"] == "contract.txt")
-        self.assertEqual(baseline.text_sha256(path), surface["sha256"])
-        self.assertEqual(
-            baseline.git_head(self.server),
-            candidate["repositories"][0]["frozen_head"],
-        )
-
-    def test_candidate_rejects_evidence_for_a_different_input_snapshot(self) -> None:
-        evidence = self._verify()
-        (self.server / "contract.txt").write_text(
-            "strict-v1-contract changed" + chr(10),
-            encoding="utf-8",
-        )
-
-        with self.assertRaises(baseline.BaselineEnvironmentError):
-            baseline.create_candidate(
-                self.manifest,
-                self.workspace,
-                runner_catalog=self.runners,
-                evidence_report=evidence,
-            )
-
-    def test_candidate_rejects_structurally_incomplete_evidence(self) -> None:
-        evidence = copy.deepcopy(self._verify())
-        evidence["tests"] = []
-
-        with self.assertRaises(baseline.BaselineEnvironmentError):
-            baseline.create_candidate(
-                self.manifest,
-                self.workspace,
-                runner_catalog=self.runners,
-                evidence_report=evidence,
-            )
-
-    def test_candidate_cli_includes_passing_probe_evidence(self) -> None:
-        output = io.StringIO()
-        before = self.manifest_path.read_bytes()
-        with redirect_stdout(output):
-            exit_code = baseline.main(
-                [
-                    "candidate",
-                    "--manifest",
-                    str(self.manifest_path),
-                    "--workspace-root",
-                    str(self.workspace),
-                ],
-                runner_catalog=self.runners,
-            )
-        payload = json.loads(output.getvalue())
-
-        self.assertEqual(0, exit_code)
-        self.assertEqual("pullwise-contract-baseline-candidate/v1", payload["schema_id"])
-        self.assertEqual("passed", payload["probe_evidence"]["tests"][0]["status"])
-        self.assertRegex(payload["candidate_manifest_sha256"], r"^[0-9a-f]{64}$")
-        self.assertRegex(
-            payload["probe_evidence"]["input_snapshot_sha256"],
-            r"^[0-9a-f]{64}$",
-        )
-        self.assertIn("candidate_manifest", payload)
-        self.assertEqual(before, self.manifest_path.read_bytes())
-
-    def test_candidate_refuses_failed_probe_evidence(self) -> None:
-        fixture = self.server / "tests" / "test_contract.py"
-        fixture.write_text(
-            fixture.read_text(encoding="utf-8").replace(
-                "self.assertEqual('review-worker-protocol/v1', 'review-worker-protocol/v1')",
-                "self.fail('contract failed: review-worker-protocol/v1')",
-            ),
-            encoding="utf-8",
-        )
-        self._surface("server.strict-v1-fixture")["sha256"] = canonical_sha256(fixture)
-        self._write_matching_appendix()
-
-        with self.assertRaises(baseline.BaselineEnvironmentError):
-            baseline.create_candidate(
-                self.manifest, self.workspace, runner_catalog=self.runners
-            )
+        self.assertIn("Baseline refresh is retired", appendix)
+        self.assertNotIn("read-only candidate operation", appendix)
 
     def test_manifest_rejects_paths_collisions_unknown_fields_and_unknown_runners(self) -> None:
         cases = []

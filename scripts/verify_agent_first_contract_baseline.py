@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the frozen Server/Web review-worker-protocol/v1 baseline."""
+"""Inspect the frozen Server/Web review-worker-protocol/v1 removal baseline."""
 
 from __future__ import annotations
 
@@ -10,10 +10,6 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scripts.agent_first_contract_candidate import (
-        candidate_payload,
-        create_candidate as build_candidate,
-    )
     from scripts.agent_first_contract_files import (
         BaselineEnvironmentError,
         canonical_text,
@@ -41,10 +37,6 @@ try:
         input_snapshot_sha256,
     )
 except ModuleNotFoundError:
-    from agent_first_contract_candidate import (  # type: ignore[no-redef]
-        candidate_payload,
-        create_candidate as build_candidate,
-    )
     from agent_first_contract_files import (  # type: ignore[no-redef]
         BaselineEnvironmentError,
         canonical_text,
@@ -282,29 +274,6 @@ def verify_baseline(
     }
 
 
-def create_candidate(
-    manifest: dict[str, Any],
-    workspace_root: Path,
-    *,
-    runner_catalog: RunnerCatalog = RUNNER_CATALOG,
-    evidence_report: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return build_candidate(
-        manifest,
-        workspace_root,
-        verifier=verify_baseline,
-        runner_catalog=runner_catalog,
-        snapshotter=input_snapshot,
-        evidence_report=evidence_report,
-    )
-
-
-def _candidate_payload(
-    candidate: dict[str, Any], evidence: dict[str, Any]
-) -> dict[str, Any]:
-    return candidate_payload(candidate, evidence)
-
-
 def _error_report(kind: str) -> dict[str, Any]:
     return {
         "schema_id": REPORT_SCHEMA_ID,
@@ -321,10 +290,9 @@ def main(
 ) -> int:
     parser = JsonArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("check", "candidate"):
-        sub = subparsers.add_parser(command)
-        sub.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-        sub.add_argument("--workspace-root", type=Path, required=True)
+    check = subparsers.add_parser("check")
+    check.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    check.add_argument("--workspace-root", type=Path, required=True)
     render = subparsers.add_parser("render-appendix")
     render.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     try:
@@ -341,28 +309,6 @@ def main(
             return {"compatible": 0, "incompatible": 1, "indeterminate": 2}[
                 report["status"]
             ]
-        if args.command == "candidate":
-            evidence = verify_baseline(
-                manifest,
-                args.workspace_root,
-                run_tests=True,
-                runner_catalog=runner_catalog,
-            )
-            candidate = create_candidate(
-                manifest,
-                args.workspace_root,
-                runner_catalog=runner_catalog,
-                evidence_report=evidence,
-            )
-            print(
-                json.dumps(
-                    _candidate_payload(candidate, evidence),
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-            return 0
         print(render_appendix(manifest, runner_catalog=runner_catalog))
         return 0
     except ManifestError:

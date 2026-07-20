@@ -362,7 +362,7 @@ def render_appendix(manifest: dict[str, Any], *, runner_catalog: RunnerCatalog) 
             "drift, Appendix drift, or a completed failing fixed probe is incompatible. Broad watched source "
             "drift is compatible with a warning only while blocking fixtures match and every linked fixed "
             "probe passes; otherwise the result is indeterminate.",
-            "Baseline refresh is a read-only candidate operation and requires both the baseline owner and the affected repository owner.",
+            "Baseline refresh is retired under D27; do not regenerate or accept a legacy compatibility baseline.",
         ]
     )
     return "\n".join(lines)

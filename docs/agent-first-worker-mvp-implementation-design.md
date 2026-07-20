@@ -1797,7 +1797,7 @@ Fixed executable probes:
 - `worker.strict-v1-wire-canonical-fixture` (cwd `pullwise-worker`): `python -B tests/test_agent_first_contract_wire_fixture.py`
 
 Compatibility rule: HEAD and unlisted-path drift are informational. Blocking canonical-fixture drift, Appendix drift, or a completed failing fixed probe is incompatible. Broad watched source drift is compatible with a warning only while blocking fixtures match and every linked fixed probe passes; otherwise the result is indeterminate.
-Baseline refresh is a read-only candidate operation and requires both the baseline owner and the affected repository owner.
+Baseline refresh is retired under D27; do not regenerate or accept a legacy compatibility baseline.
 <!-- END GENERATED LEGACY V1 BASELINE -->
 
 根规范Appendix C.16–C.19当前只是占位草案，不能用于code generation；根规范中register返回token、裸result、空terminal manifest、缺encoding/compression等示例均不得覆盖本附录的executable contract。

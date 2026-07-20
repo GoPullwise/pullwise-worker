@@ -86,12 +86,14 @@ for an agent or reviewer to understand without loading an unrelated subsystem.
   considered split seam, owner, and removal condition. An undocumented exception
   fails completion.
 
-## Strict V1 Cross-Repository Baseline
+## Strict V1 Current-State Removal Baseline
 
-`contracts/agent-first/legacy-v1-contract-baseline.json` is the machine source
-for the current Server/Web `review-worker-protocol/v1` compatibility snapshot.
-It does not freeze the Worker producer or authorize Agent Kernel production
-implementation.
+`contracts/agent-first/legacy-v1-contract-baseline.json` is frozen evidence of
+the current Server/Web `review-worker-protocol/v1` surface and a deletion
+inventory. D27 forbids treating it as a target contract or compatibility
+commitment. The temporary `check` command may expose accidental current-state
+drift until coordinated cutover; it must not constrain the clean current design
+or authorize Agent Kernel production implementation.
 
 - Run `python scripts/verify_agent_first_contract_baseline.py check
   --workspace-root ..` from the Worker repository before relying on the
@@ -115,11 +117,11 @@ implementation.
   frozen baseline commit before collecting the cross-repository wire fixture
   tests. Install that sibling's declared Python dependencies; never skip the
   tests merely because a clean Worker checkout lacks `pullwise_server`.
-- `candidate` is a read-only proposal command. It requires every fixed probe to
-  pass against the same stable input snapshot and binds that snapshot digest to
-  the candidate. Never apply or write a refreshed baseline automatically;
-  accepting one requires both the Worker compatibility owner and the affected
-  Server or Web owner.
+- The baseline-refresh `candidate` path is retired. Do not recreate it, update
+  frozen hashes or fixtures to accept drift, or establish a replacement legacy
+  compatibility baseline. A mismatch is current-state evidence to investigate
+  and ultimately remove at coordinated cutover, not a request to preserve the
+  old surface.
 - `contracts/agent-first/fixtures/review-worker-protocol-v1.json` is a frozen
   canonical-fixture exception at 449 physical lines, owned by the Worker
   compatibility owner. It stays atomic because one blocking digest and one
@@ -348,18 +350,16 @@ Worker control transport separate from Agent capability risk; it is not an R2
 grant. The controlled MVP contract/state units must reference D3 resolution
 digest `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`.
 
-## Agent-First Legacy Policy Ownership
+## Agent-First Legacy Policy History
 
-D4 resolves legacy policy construction to field-by-field ownership. The S3
-machine manifest must account for every EffectiveExecutionPolicy field and each
-compound child exactly once, with a Server claim pointer, restrictive Adapter
-constant, pinned policy artifact, or versioned pure formula plus stable missing
-and invalid codes. Authority-bearing claim inputs fail closed when absent or
-invalid; Worker time, environment, repository text, Agent output, and incidental
-legacy defaults may not fill them. Adapter constants and formulas may only add
-structure or narrow authority. Keep the contract-pack and legacy-mapping units
-bound to D4 digest
-`b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`.
+D4's field-by-field legacy policy mapping is immutable history superseded by
+D27. Do not implement its S3 legacy-mapping manifest, Adapter constants,
+fallback inputs, or contract-pack compatibility work, and do not bind current
+implementation units to the D4 digest. Carry forward only the security
+invariant: authority-bearing current-contract inputs fail closed when absent or
+invalid, and Worker time, environment, repository text, or Agent output cannot
+invent authority. The current clean-break scope is bound to D27 digest
+`f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e`.
 
 ## Worker Host Platform
 
