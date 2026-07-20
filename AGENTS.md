@@ -165,7 +165,7 @@ include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
 `contracts/agent-first/spec-decision-register.json` is an atomic
-machine-registry exception at 408 physical lines, owned by the Worker
+machine-registry exception at 419 physical lines, owned by the Worker
 specification owner. It stays atomic because one ordered frozen
 question/definition/resolution packet enforces question order behind one
 structural-validation and immutable-history boundary. The considered split is
@@ -259,6 +259,24 @@ fail with `TASK_ALREADY_TERMINAL`.
   The current bare `budget_entries.monotonic_ms` schema and SQLite rows are
   shadow scaffolding; migrations 1-3 and runtime behavior remain unchanged
   until the S4 decision gate passes.
+- D8 resolves outer-lease loss as a Task/Attempt layering boundary. Lease loss
+  alone must leave an executing or finalizing Task in `ACTIVE` or `FINALIZING`
+  with every terminal/result field unchanged. The authoritative loss transition
+  is a newly applied D5 Task control transaction: it advances `task_version`
+  exactly once while atomically fencing the exact predecessor transport/native
+  Attempt and its actor owner/session, rejecting all later predecessor writes or
+  publication, and recording transport abandonment as separate non-result
+  evidence rather than a Task terminal kind. An exact idempotent replay reuses
+  the original event version and does not advance `task_version` again. A
+  successor may take over only after an explicit recovery
+  eligibility predicate passes and with a fresh fence/epoch; do not infer that
+  predicate or the eventual terminal authority/precedence while D9/D10 remain
+  unresolved. Keep the `mvp-state-semantics` and `post-closure` units bound to
+  D8 digest
+  `e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a`.
+  The current Slice 2 `outer_lease.fenced` Task-terminalization behavior is a
+  pre-D8 shadow scaffold, not a production contract; do not promote it or
+  change runtime, schemas, or migrations 1-3 until the S4 decision gate passes.
 - An actor fence binds task/deletion version, lease/transport epoch, current
   Attempt/native epoch, stable owner ID, owner epoch, and the exact live owner
   session. A mismatch fails closed with the stable fence code; do not infer

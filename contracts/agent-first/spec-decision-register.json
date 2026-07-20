@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D8",
+  "active_decision_id": "D9",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -169,7 +169,7 @@
     {
       "id": "D8", "key": "lease-resume-boundary", "scope": "P0.6/P0.7", "title": "lease loss 与 same-run resume 状态边界",
       "question": "外层 lease 丢失时 Task、transport Attempt 与未来 successor resume 应如何分层终态化？",
-      "status": "pending", "depends_on": ["D5"], "activation": null, "required_by_slice": "S4",
+      "status": "resolved", "depends_on": ["D5"], "activation": null, "required_by_slice": "S4",
       "effects": ["state_semantics", "compatibility"], "source_refs": ["handoff:P0.6/P0.7", "handoff:P0.6", "handoff:P0.7", "handoff:P1.4"],
       "affected_units": ["mvp-state-semantics", "post-closure"],
       "options": [
@@ -177,7 +177,18 @@
         {"id": "task_recovery_pending", "summary": "新增显式 RECOVERY_PENDING Task 状态等待 successor。", "rationale": "可见性更强，但扩大 state machine 与 public projection。", "consequences": ["所有状态矩阵和旧客户端行为需版本化"]},
         {"id": "task_terminal_no_resume", "summary": "lease loss 直接令 Task 终态，并放弃同 Task resume。", "rationale": "MVP 最简单，但不能与 V1.3 恢复同一 Task 同时成立。", "consequences": ["Post-MVP 必须改为新 Task 或取消 same-run resume"]}
       ],
-      "recommended_option_id": "task_active_attempt_fenced", "resolution": null, "supersedes": []
+      "recommended_option_id": "task_active_attempt_fenced",
+      "resolution": {
+        "kind": "option",
+        "selected_option_id": "task_active_attempt_fenced",
+        "custom_text": null,
+        "decision_text": "确认选择 task_active_attempt_fenced：外层 lease 丢失时，Task 保持 ACTIVE 或 FINALIZING；仅旧 transport/native Attempt 被 fenced，并由满足恢复资格谓词的 successor 接管；必须新增 transport abandonment 记录与恢复资格谓词，以保持 Task/Attempt 分层并支持 Post-MVP same-run resume。",
+        "authority": "user",
+        "decided_at": "2026-07-20",
+        "evidence_refs": ["conversation:user-selection:2026-07-20:task_active_attempt_fenced"],
+        "resolution_sha256": "e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a"
+      },
+      "supersedes": []
     },
     {
       "id": "D9", "key": "terminal-authority", "scope": "P0.7", "title": "内部结果与 legacy 发布的终态权威",

@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D8`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D9`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -18,7 +18,7 @@ Active question: `D8`. Questions are asked one at a time. User silence, existing
 | `D5` | `P0.6` | task_version 递增单位 | `resolved` | `active` | `S4` | D4 | `per_control_transaction` |
 | `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `resolved` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
 | `D7` | `P0.6` | monotonic 时间持久化形式 | `resolved` | `active` | `S4` | — | `persist_elapsed_consumption` |
-| `D8` | `P0.6/P0.7` | lease loss 与 same-run resume 状态边界 | `pending` | `active` | `S4` | D5 | `task_active_attempt_fenced` |
+| `D8` | `P0.6/P0.7` | lease loss 与 same-run resume 状态边界 | `resolved` | `active` | `S4` | D5 | `task_active_attempt_fenced` |
 | `D9` | `P0.7` | 内部结果与 legacy 发布的终态权威 | `pending` | `active` | `S4` | D8 | `internal_result_cas_authoritative` |
 | `D10` | `P0.7` | 并发终态事实优先级模型 | `pending` | `active` | `S4` | D9 | `global_safety_first_matrix` |
 | `D11` | `P0.7` | PARTIAL 安全交付证据表示 | `pending` | `active` | `S3` | D10 | `partial_delivery_manifest` |
@@ -186,17 +186,19 @@ Active question: `D8`. Questions are asked one at a time. User silence, existing
 
 ### D8 — lease loss 与 same-run resume 状态边界
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** 外层 lease 丢失时 Task、transport Attempt 与未来 successor resume 应如何分层终态化？
 
 **Options:**
 
-- `task_active_attempt_fenced` — non-normative recommendation, not selected: Task 保持 ACTIVE/FINALIZING；仅旧 transport/native Attempt fenced，并由 successor 接管。 与 Post-MVP same-run resume 目标一致且保持 Task/Attempt 分层。 Consequences: 必须新增 transport abandonment 与恢复资格谓词
+- `task_active_attempt_fenced` — selected by resolution: Task 保持 ACTIVE/FINALIZING；仅旧 transport/native Attempt fenced，并由 successor 接管。 与 Post-MVP same-run resume 目标一致且保持 Task/Attempt 分层。 Consequences: 必须新增 transport abandonment 与恢复资格谓词
 - `task_recovery_pending`: 新增显式 RECOVERY_PENDING Task 状态等待 successor。 可见性更强，但扩大 state machine 与 public projection。 Consequences: 所有状态矩阵和旧客户端行为需版本化
 - `task_terminal_no_resume`: lease loss 直接令 Task 终态，并放弃同 Task resume。 MVP 最简单，但不能与 V1.3 恢复同一 Task 同时成立。 Consequences: Post-MVP 必须改为新 Task 或取消 same-run resume
 
-**Resolution:** No option has been selected.
+**Resolution:** `task_active_attempt_fenced` (`option`). 确认选择 task_active_attempt_fenced：外层 lease 丢失时，Task 保持 ACTIVE 或 FINALIZING；仅旧 transport/native Attempt 被 fenced，并由满足恢复资格谓词的 successor 接管；必须新增 transport abandonment 记录与恢复资格谓词，以保持 Task/Attempt 分层并支持 Post-MVP same-run resume。
+
+**Authority/evidence:** `user` on `2026-07-20`; `conversation:user-selection:2026-07-20:task_active_attempt_fenced`; digest `e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a`.
 
 **Supersedes:** none
 
