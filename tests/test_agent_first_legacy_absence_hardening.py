@@ -171,6 +171,76 @@ class AgentFirstLegacyAbsenceHardeningTest(LegacyAbsenceTestCase):
         self.assertTrue(report["ratchet_clean"])
         self.assertEqual(1, observed)
 
+    def test_binary_suffix_does_not_hide_an_unregistered_literal(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        (self.roots["worker"] / "new_legacy.png").write_bytes(marker.encode("utf-8"))
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("new_legacy.png", report["unexpected_surfaces"][0]["path"])
+
+    def test_d27_control_bytes_must_remain_stable_through_observation(self) -> None:
+        register = (
+            self.roots["worker"]
+            / "contracts"
+            / "agent-first"
+            / "spec-decision-register.json"
+        ).resolve()
+        self._write_inventory(self._inventory())
+        original = absence.read_surface
+        observed = 0
+
+        def swapping_read(path: Path) -> bytes:
+            nonlocal observed
+            if path == register:
+                observed += 1
+                if observed == 2:
+                    return b"tampered after validation"
+            return original(path)
+
+        with patch.object(absence, "read_surface", side_effect=swapping_read):
+            exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("environment_invalid", report["error_kind"])
+        self.assertEqual(2, observed)
+
+    def test_inventory_control_bytes_must_remain_stable_through_observation(self) -> None:
+        inventory_path = self.inventory_path.resolve()
+        self._write_inventory(self._inventory())
+        original = absence.read_surface
+        observed = 0
+
+        def swapping_read(path: Path) -> bytes:
+            nonlocal observed
+            if path == inventory_path:
+                observed += 1
+                if observed == 2:
+                    return b"tampered after validation"
+            return original(path)
+
+        with patch.object(absence, "read_surface", side_effect=swapping_read):
+            exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("environment_invalid", report["error_kind"])
+        self.assertEqual(2, observed)
+
+    def test_production_catalog_ceiling_applies_in_a_copied_workspace(self) -> None:
+        payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
+        added = deepcopy(payload["surfaces"][-1])
+        added["id"] = "worker.999-added-legacy"
+        added["path"] = "copied-workspace-added-legacy.py"
+        payload["surfaces"].append(added)
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
     def test_default_catalog_ceiling_rejects_a_recomputed_expansion(self) -> None:
         payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
         payload["surfaces"].append(deepcopy(payload["surfaces"][-1]))

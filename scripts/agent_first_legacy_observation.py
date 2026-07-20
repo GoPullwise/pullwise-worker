@@ -25,27 +25,6 @@ from scripts.agent_first_legacy_inventory import (
 SurfaceKey = tuple[str, str]
 ReadSurface = Callable[[Path], bytes]
 ResolveSurface = Callable[[Path, str], Path | None]
-BINARY_SUFFIXES = {
-    ".7z",
-    ".apk",
-    ".avif",
-    ".bmp",
-    ".exe",
-    ".gif",
-    ".gz",
-    ".ico",
-    ".jpeg",
-    ".jpg",
-    ".pdf",
-    ".png",
-    ".tar",
-    ".tgz",
-    ".ttf",
-    ".webp",
-    ".woff",
-    ".woff2",
-    ".zip",
-}
 
 
 def _canonical_text(raw: bytes, error_kind: str) -> str:
@@ -219,13 +198,7 @@ def observe_legacy_surfaces(
                 raise BaselineEnvironmentError("worktree_path_disappeared")
             snapshot[key] = None  # type: ignore[assignment]
             continue
-        must_read = (
-            key in explicit_by_path
-            or key in baseline_paths
-            or key in exclusions_by_path
-            or Path(relative).suffix.lower() not in BINARY_SUFFIXES
-        )
-        snapshot[key] = read_file(path) if must_read else b""
+        snapshot[key] = read_file(path)
 
     searchable = {
         key: (
@@ -304,11 +277,6 @@ def observe_legacy_surfaces(
     for repo_id, paths in worktree_paths.items():
         for relative in sorted(paths):
             key = (repo_id, relative)
-            if (
-                Path(relative).suffix.lower() in BINARY_SUFFIXES
-                and key not in explicit_by_path
-            ):
-                continue
             content = searchable[key]
             if content is None:
                 continue
