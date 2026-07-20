@@ -72,7 +72,7 @@ class InventoryError(ValueError):
     """The deletion inventory is malformed, ambiguous, or not bound to D27."""
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -250,7 +250,7 @@ def load_inventory(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(
             read_surface(path).decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_keys,
+            object_pairs_hook=reject_duplicate_keys,
             parse_constant=lambda item: (_ for _ in ()).throw(
                 InventoryError(f"non_finite_number:{item}")
             ),

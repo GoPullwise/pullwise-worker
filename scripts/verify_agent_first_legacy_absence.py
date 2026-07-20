@@ -5,9 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 from scripts.agent_first_contract_files import (
     BaselineEnvironmentError,
@@ -19,20 +26,21 @@ from scripts.agent_first_contract_files import (
 from scripts.agent_first_legacy_inventory import (
     InventoryError,
     load_inventory,
+    reject_duplicate_keys,
     validate_inventory,
     validate_relative_path,
 )
 from scripts.agent_first_decision_core import (
     DecisionRegisterFormatError,
     selected_option_id,
+    validate_register,
 )
-from scripts.agent_first_decision_register import load_register
 
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INVENTORY = (
     ROOT / "contracts" / "agent-first" / "legacy-removal-inventory.json"
 )
+INVENTORY_RELATIVE_PATH = DEFAULT_INVENTORY.relative_to(ROOT).as_posix()
 REPORT_SCHEMA_ID = "pullwise-agent-first-legacy-absence-report/v1"
 BINARY_SUFFIXES = {
     ".7z",
@@ -75,7 +83,11 @@ def _validate_d27(
     path = surface_path(roots["worker"], register_path)
     if path is None:
         raise InventoryError("d27_register_missing")
-    register = load_register(path)
+    register = validate_register(
+        json.loads(
+            canonical_text(path), object_pairs_hook=reject_duplicate_keys
+        )
+    )
     decision = next(
         (item for item in register["decisions"] if item["id"] == binding.get("decision_id")),
         None,
@@ -148,9 +160,10 @@ def _without_excluded_sections(
         ):
             raise InventoryError("evidence_exclusion_markers_invalid")
         start = text.index(start_marker)
-        end = text.index(end_marker) + len(end_marker)
-        if start >= end:
+        end_start = text.index(end_marker)
+        if start + len(start_marker) > end_start:
             raise InventoryError("evidence_exclusion_markers_invalid")
+        end = end_start + len(end_marker)
         spans.append((start, end))
     spans.sort()
     if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
@@ -288,6 +301,17 @@ def _error_report(kind: str) -> dict[str, Any]:
     }
 
 
+def _canonical_inventory_path(provided: Path, workspace_root: Path) -> Path:
+    roots = repository_roots(workspace_root)
+    expected = surface_path(roots["worker"], INVENTORY_RELATIVE_PATH)
+    if expected is None:
+        raise InventoryError("inventory:missing")
+    lexical = Path(os.path.abspath(provided))
+    if os.path.normcase(str(lexical)) != os.path.normcase(str(expected)):
+        raise InventoryError("inventory:canonical_path")
+    return expected
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = JsonArgumentParser(description=__doc__)
     parser.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
@@ -295,7 +319,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--require-absent", action="store_true")
     try:
         args = parser.parse_args(argv)
-        inventory = load_inventory(args.inventory)
+        inventory_path = _canonical_inventory_path(args.inventory, args.workspace_root)
+        inventory = load_inventory(inventory_path)
         report = verify_legacy_absence(
             inventory,
             args.workspace_root,

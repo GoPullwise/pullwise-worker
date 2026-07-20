@@ -137,6 +137,32 @@ or authorize Agent Kernel production implementation.
   preserving one schema validation and Appendix render. Replace this exception
   when that generator becomes the contract source.
 
+### D27 Legacy Absence Ratchet
+
+`contracts/agent-first/legacy-removal-inventory.json` is the machine deletion
+inventory bound to resolved D27 option `clean_break_no_legacy` and digest
+`f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e`.
+It records 10 high-signal legacy literals across 81 current Server/Web/Worker
+paths plus 13 audited control/history evidence exclusions. It is a
+monotonically shrinking removal inventory, not a compatibility baseline; do
+not add a new legacy surface to make the ratchet pass.
+
+- Run `python scripts/verify_agent_first_legacy_absence.py --workspace-root ..`
+  for the current CI gate. Exit `0` reports inventoried legacy without blocking
+  while no new occurrence exists, exit `1` reports an unregistered legacy
+  occurrence, and exit `2` is indeterminate input or environment evidence.
+- `--require-absent` is the final-cutover mode: every inventoried surface must
+  be absent or it exits `1`. Keep it tested but do not add it to required CI
+  until the coordinated switch is authorized.
+- Current CI checks out both frozen Server and Web siblings and runs only the
+  default ratchet. The retired candidate-refresh path remains forbidden.
+- Inventory paths are strict contained POSIX-relative paths. Reads reject
+  symlinks, reparse points, non-regular files, unsafe Git paths, and changed
+  descriptors. Whole-file exclusions are limited to the decision register,
+  its generated immutable view, and the inventory itself; bounded exclusions
+  are limited to the audited D27 sections in AGENTS and the three normative
+  design documents, with unique ordered non-overlapping markers.
+
 ## Agent-First Slice 0 Evidence
 
 `contracts/agent-first/worker-slice-0-baseline.json` is the machine source for
