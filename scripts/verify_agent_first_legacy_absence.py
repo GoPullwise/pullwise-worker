@@ -33,6 +33,8 @@ DEFAULT_INVENTORY = (
 )
 REPORT_SCHEMA_ID = "pullwise-agent-first-legacy-absence-report/v1"
 TEXT_SUFFIXES = {
+    ".bak",
+    ".backup",
     ".css",
     ".html",
     ".js",
@@ -40,6 +42,8 @@ TEXT_SUFFIXES = {
     ".jsx",
     ".md",
     ".mjs",
+    ".old",
+    ".orig",
     ".py",
     ".sh",
     ".sql",
@@ -78,6 +82,7 @@ def _validate_d27(
     if (
         decision is None
         or decision["status"] != "resolved"
+        or decision["supersedes"] != ["D4"]
         or decision["resolution"]["kind"] != "option"
         or selected_option_id(decision) != binding.get("selected_option_id")
         or decision["resolution"]["resolution_sha256"]
@@ -225,7 +230,9 @@ def verify_legacy_absence(
                         }
                     )
     unexpected.sort(key=lambda item: (item["repo"], item["path"], item["signature_id"]))
-    legacy_absent = all(item["status"] == "absent" for item in reports)
+    legacy_absent = not unexpected and all(
+        item["status"] == "absent" for item in reports
+    )
     ratchet_clean = not unexpected
     status = (
         "unexpected_legacy"

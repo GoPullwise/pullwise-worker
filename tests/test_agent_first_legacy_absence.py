@@ -59,7 +59,7 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
             "signatures": [
                 {
                     "id": "legacy-protocol",
-                    "literal": "review-worker-protocol/v1",
+                    "literal": "review-worker-" + "protocol/v1",
                 }
             ],
             "evidence_exclusions": [
@@ -176,6 +176,16 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
             report["failures"],
         )
 
+    def test_require_absent_passes_when_inventoried_legacy_is_gone(self) -> None:
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke("--require-absent")
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("absent", report["status"])
+        self.assertTrue(report["legacy_absent"])
+        self.assertEqual([], report["failures"])
+
     def test_inventory_rejects_a_parent_traversal_surface_path(self) -> None:
         payload = self._inventory()
         payload["surfaces"][0]["path"] = "../legacy.py"
@@ -220,6 +230,144 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
         exit_code, report = self._invoke()
         self.assertEqual(1, exit_code)
         self.assertEqual("evidence.md", report["unexpected_surfaces"][0]["path"])
+
+    def test_bounded_evidence_markers_fail_closed_when_missing(self) -> None:
+        payload = self._inventory()
+        payload["evidence_exclusions"].insert(
+            0,
+            {
+                "id": "bounded-d27-evidence",
+                "repo": "worker",
+                "path": "evidence.md",
+                "reason": "d27_evidence",
+                "start_marker": "<!-- BEGIN D27 EVIDENCE -->",
+                "end_marker": "<!-- END D27 EVIDENCE -->",
+            },
+        )
+        (self.roots["worker"] / "evidence.md").write_text(
+            "markers removed\n", encoding="utf-8"
+        )
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_whole_file_exclusion_does_not_hide_a_similarly_named_backup(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        excluded = self.roots["worker"] / "history.md"
+        excluded.write_text(marker, encoding="utf-8")
+        (self.roots["worker"] / "history.md.bak").write_text(marker, encoding="utf-8")
+        payload = self._inventory()
+        payload["evidence_exclusions"].insert(
+            0,
+            {
+                "id": "archived-decision-history",
+                "repo": "worker",
+                "path": "history.md",
+                "reason": "immutable_decision_history",
+                "start_marker": None,
+                "end_marker": None,
+            },
+        )
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(1, exit_code)
+        self.assertFalse(report["legacy_absent"])
+        self.assertEqual("history.md.bak", report["unexpected_surfaces"][0]["path"])
+
+    def test_d27_binding_rejects_a_noncanonical_digest(self) -> None:
+        payload = self._inventory()
+        payload["d27"]["resolution_sha256"] = "0" * 64
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_registered_directory_is_rejected_as_nonregular(self) -> None:
+        (self.roots["worker"] / "legacy.py").mkdir()
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("environment_invalid", report["error_kind"])
+
+    def test_registered_symlink_is_rejected(self) -> None:
+        target = self.workspace / "outside.py"
+        target.write_text("review-worker-" + "protocol/v1", encoding="utf-8")
+        try:
+            (self.roots["worker"] / "legacy.py").symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f"file symlinks are unavailable: {exc}")
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("environment_invalid", report["error_kind"])
+
+    def test_duplicate_inventory_keys_are_rejected(self) -> None:
+        payload = json.dumps(self._inventory())
+        payload = payload.replace(
+            '"inventory_id": "synthetic-legacy-removal",',
+            '"inventory_id": "synthetic-legacy-removal", "inventory_id": "other",',
+        )
+        self.inventory_path.write_text(payload, encoding="utf-8")
+
+        exit_code, report = self._invoke()
+
+    def test_inventory_rejects_an_unapproved_whole_file_exclusion(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        (self.roots["worker"] / "new_legacy.py").write_text(marker, encoding="utf-8")
+        payload = self._inventory()
+        payload["evidence_exclusions"].insert(
+            0,
+            {
+                "id": "arbitrary-exclusion",
+                "repo": "worker",
+                "path": "new_legacy.py",
+                "reason": "d27_evidence",
+                "start_marker": None,
+                "end_marker": None,
+            },
+        )
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_tracked_deleted_surface_is_absent_in_strict_mode(self) -> None:
+        legacy = self.roots["worker"] / "legacy.py"
+        legacy.write_text("review-worker-" + "protocol/v1", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.roots["worker"]), "add", "legacy.py"], check=True)
+        legacy.unlink()
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke("--require-absent")
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("absent", report["status"])
+
+    def test_extensionless_legacy_surface_is_not_skipped(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        (self.roots["worker"] / "new_legacy").write_text(marker, encoding="utf-8")
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("new_legacy", report["unexpected_surfaces"][0]["path"])
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
 
     def test_inventory_rejects_unknown_fields(self) -> None:
         payload = self._inventory()

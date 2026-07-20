@@ -30,6 +30,30 @@ EXCLUSION_REASONS = {
     "d27_evidence",
     "immutable_decision_history",
 }
+ALLOWED_WHOLE_EXCLUSIONS = {
+    (
+        "worker",
+        "contracts/agent-first/legacy-removal-inventory.json",
+        "absence_gate_control",
+    ),
+    (
+        "worker",
+        "contracts/agent-first/spec-decision-register.json",
+        "immutable_decision_history",
+    ),
+    (
+        "worker",
+        "docs/agent-first-worker-spec-decision-register.md",
+        "immutable_decision_history",
+    ),
+}
+ALLOWED_BOUNDED_EXCLUSIONS = {
+    ("worker", "AGENTS.md", "d27_evidence"),
+    ("worker", "AGENTS.md", "immutable_decision_history"),
+    ("worker", "docs/agent-first-worker-design.md", "d27_evidence"),
+    ("worker", "docs/agent-first-worker-mvp-implementation-design.md", "d27_evidence"),
+    ("worker", "docs/agent-first-worker-post-mvp-implementation-design.md", "d27_evidence"),
+}
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 RESERVED_WINDOWS_NAMES = {
     "aux",
