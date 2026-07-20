@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 import re
 from typing import Callable
 
@@ -318,6 +319,11 @@ def _validate_string(
         instance
     ):
         raise SchemaValidationError("timestamp_not_canonical", path)
+    if schema.get("format") == "utc-rfc3339-ms":
+        try:
+            date.fromisoformat(instance[:10])
+        except ValueError as exc:
+            raise SchemaValidationError("timestamp_not_canonical", path) from exc
 
 
 def _validate_integer(

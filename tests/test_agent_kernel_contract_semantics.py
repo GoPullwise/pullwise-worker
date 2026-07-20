@@ -59,6 +59,67 @@ class AgentKernelContractSemanticsTest(unittest.TestCase):
             ):
                 self.registry.validate("effective-execution-policy/v1", instance)
 
+    def test_policy_rejects_capability_risk_above_the_mvp_ceiling(self) -> None:
+        valid = _fixture("effective-execution-policy/v1")
+        for ceiling in ("R2", "R3", "R4"):
+            policy = copy.deepcopy(valid)
+            policy["capability_risk_ceiling"] = ceiling
+
+            with self.subTest(ceiling=ceiling), self.assertRaisesRegex(
+                SchemaValidationError, "capability_risk_ceiling_exceeds_mvp"
+            ):
+                self.registry.validate(
+                    "effective-execution-policy/v1", _redigest(policy)
+                )
+
+    def test_policy_roots_are_strict_relative_paths(self) -> None:
+        valid = _fixture("effective-execution-policy/v1")
+        invalid_paths = (
+            "/absolute",
+            "segment//child",
+            "segment/./child",
+            "segment/../child",
+            "segment\\child",
+            "segment\0child",
+            "segment/",
+        )
+        for field in ("allowed_read_roots", "allowed_write_roots"):
+            for path in invalid_paths:
+                policy = copy.deepcopy(valid)
+                if field == "allowed_write_roots":
+                    policy["source_write_mode"] = "isolated_reversible"
+                policy[field] = [path]
+
+                with self.subTest(field=field, path=path), self.assertRaisesRegex(
+                    SchemaValidationError, "relative_path_invalid"
+                ):
+                    self.registry.validate(
+                        "effective-execution-policy/v1", _redigest(policy)
+                    )
+
+        valid_nested = copy.deepcopy(valid)
+        valid_nested["allowed_read_roots"] = ["repository", "task/runtime"]
+        valid_nested["allowed_write_roots"] = ["task/runtime"]
+        valid_nested["source_write_mode"] = "isolated_reversible"
+        self.registry.validate(
+            "effective-execution-policy/v1", _redigest(valid_nested)
+        )
+
+    def test_policy_root_sets_reject_casefold_collisions(self) -> None:
+        valid = _fixture("effective-execution-policy/v1")
+        for field in ("allowed_read_roots", "allowed_write_roots"):
+            policy = copy.deepcopy(valid)
+            if field == "allowed_write_roots":
+                policy["source_write_mode"] = "isolated_reversible"
+            policy[field] = ["Root", "root"]
+
+            with self.subTest(field=field), self.assertRaisesRegex(
+                SchemaValidationError, "relative_path_casefold_collision"
+            ):
+                self.registry.validate(
+                    "effective-execution-policy/v1", _redigest(policy)
+                )
+
     def test_task_record_refs_pointers_and_terminal_state_are_coherent(self) -> None:
         valid = _fixture("task-record/v1")
         self.registry.validate("task-record/v1", valid)

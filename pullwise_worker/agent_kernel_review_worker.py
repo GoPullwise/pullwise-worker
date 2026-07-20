@@ -90,6 +90,11 @@ class AgentKernelShadowReviewWorker(ReviewWorkerV1):
             # Shadow failure must remain observable without taking legacy authority down.
             self._agent_kernel_slot.record_error(exc)
 
+    def recover_persisted_active_job(self) -> ActiveJob | None:
+        active = super().recover_persisted_active_job()
+        self._observe_legacy_authority()
+        return active
+
     def persist_active_run_marker(self, active: ActiveJob) -> None:
         super().persist_active_run_marker(active)
         self._observe_legacy_authority()

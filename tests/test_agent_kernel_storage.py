@@ -310,6 +310,38 @@ class AgentKernelStorageTest(unittest.TestCase):
         self.assertTrue(unrelated.exists())
         self.assertTrue(linked.is_symlink())
 
+    def test_idle_gc_requires_a_positive_integer_age_threshold(self) -> None:
+        store = ObjectStore(self._database())
+
+        for threshold in (0, -1, True, 1.5):
+            with self.subTest(threshold=threshold), self.assertRaisesRegex(
+                AgentKernelStorageError, 'orphan_age_threshold_invalid'
+            ):
+                store.collect_orphans(idle=True, older_than_seconds=threshold)
+
+    def test_idle_gc_fails_closed_before_deleting_when_durable_bytes_are_missing(
+        self,
+    ) -> None:
+        store = ObjectStore(self._database())
+        ref = store.put_bytes(
+            b'referenced',
+            task_id='task_' + '1' * 32,
+            artifact_id='art_' + '2' * 32,
+            media_type='application/octet-stream',
+            content_schema_id='opaque-bytes/v1',
+            encoding='binary',
+        )
+        store.path_for_digest(ref['sha256']).unlink()
+        staging = store.tmp_root / 'object-abandoned.tmp'
+        staging.write_bytes(b'staged')
+        staging.chmod(0o600)
+        old = time.time() - 7200
+        os.utime(staging, (old, old))
+
+        with self.assertRaisesRegex(CasCorruptError, 'CAS_CORRUPT'):
+            store.collect_orphans(idle=True, older_than_seconds=3600)
+        self.assertTrue(staging.exists())
+
     def test_random_binary_objects_round_trip_with_matching_content_refs(self) -> None:
         store = ObjectStore(self._database())
         randomizer = random.Random(718)

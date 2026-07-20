@@ -115,6 +115,45 @@ class AgentKernelTaskStoreTest(unittest.TestCase):
                 facts=TransitionFacts.permissive(),
             )
 
+    def test_accept_task_rejects_changed_scan_identity_on_idempotent_retry(self) -> None:
+        self.store.accept_task(
+            self.record, idempotency_key='accept-scan', scan_id='scan-original'
+        )
+        retry = self.store.accept_task(
+            self.record, idempotency_key='accept-scan', scan_id='scan-original'
+        )
+        self.assertFalse(retry.applied)
+
+        with self.assertRaisesRegex(TaskStoreError, 'TASK_ID_COLLISION'):
+            self.store.accept_task(
+                self.record, idempotency_key='accept-scan', scan_id='scan-other'
+            )
+
+    def test_owner_idempotency_binds_the_event_timestamp(self) -> None:
+        _, claimed = self._accept_and_claim()
+        arguments = {
+            'expected_task_version': claimed.task.task_version,
+            'attempt_id': str(claimed.task.current_attempt_id),
+            'native_epoch': claimed.task.native_epoch,
+            'session_id': 'sess_' + '2' * 32,
+            'idempotency_key': 'owner-1',
+        }
+        started = self.store.begin_owner_incarnation(
+            self.task_id, occurred_at=NOW, **arguments
+        )
+        retried = self.store.begin_owner_incarnation(
+            self.task_id, occurred_at=NOW, **arguments
+        )
+        self.assertTrue(started.applied)
+        self.assertFalse(retried.applied)
+
+        with self.assertRaisesRegex(TaskStoreError, 'IDEMPOTENCY_CONFLICT'):
+            self.store.begin_owner_incarnation(
+                self.task_id,
+                occurred_at='2026-07-18T08:00:01.000Z',
+                **arguments,
+            )
+
     def test_waiting_transition_requires_attempt_to_finish_suspending(self) -> None:
         _, claimed = self._accept_and_claim()
         attempt_id = str(claimed.task.current_attempt_id)

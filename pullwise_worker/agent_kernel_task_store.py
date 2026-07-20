@@ -53,10 +53,15 @@ class TaskStore:
         scan_id: str | None = None,
     ) -> TransitionReceipt:
         task_id = str(record.get("task_id") or "")
-        digest = canonical_sha256(dict(record))
+        digest = canonical_sha256({'record': dict(record), 'scan_id': scan_id})
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                existing = connection.execute(
+                    'SELECT scan_id FROM tasks WHERE task_id=?', (task_id,)
+                ).fetchone()
+                if existing is not None and existing['scan_id'] != scan_id:
+                    raise TaskStoreError('TASK_ID_COLLISION')
                 retry = idempotent_event_version(
                     connection, task_id, TaskEventKind.TASK_ACCEPTED,
                     idempotency_key, digest,
@@ -242,6 +247,7 @@ class TaskStore:
             "event": OWNER_EVENT, "attempt_id": attempt_id,
             "native_epoch": native_epoch, "session_id": session_id,
         }
+        payload['occurred_at'] = occurred_at
         digest = canonical_sha256(payload)
         with self.database.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

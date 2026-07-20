@@ -6,6 +6,7 @@ import unittest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_PATH = REPO_ROOT / 'MANIFEST.in'
 BASELINE_PATH = (
     REPO_ROOT / "contracts" / "agent-first" / "legacy-v1-contract-baseline.json"
 )
@@ -26,6 +27,14 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
         self.assertIn(f"ref: {server['frozen_head']}", workflow)
         self.assertIn("path: pullwise-server", workflow)
         self.assertIn("python -m pip install -e ../pullwise-server", workflow)
+
+    def test_source_manifest_includes_agent_kernel_contract_data(self) -> None:
+        manifest_lines = MANIFEST_PATH.read_text(encoding='utf-8').splitlines()
+
+        self.assertIn(
+            'recursive-include contracts/agent-task/v1 *.json',
+            manifest_lines,
+        )
 
     def test_ci_runs_the_isolated_agent_kernel_wheel_check(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")

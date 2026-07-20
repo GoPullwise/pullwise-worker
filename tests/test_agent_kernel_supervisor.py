@@ -104,6 +104,21 @@ class AgentKernelSupervisorProjectionTest(unittest.TestCase):
         mirror.observe(_marker(run_id="run-2", job_id="job-2"), None)
         self.assertEqual("run-2", mirror.snapshot().run_id)
 
+    def test_active_projection_freezes_the_complete_transport_identity(self) -> None:
+        for field, value in (
+            ('job_id', 'job-other'),
+            ('run_id', 'run-other'),
+            ('lease_id', 'lease-other'),
+            ('attempt_id', 'attempt-other'),
+        ):
+            mirror = LegacySlotMirror()
+            original = mirror.observe(_marker(), None)
+            with self.subTest(field=field), self.assertRaisesRegex(
+                SupervisorProjectionError, 'STATE_TRANSITION_INVALID'
+            ):
+                mirror.observe(_marker(**{field: value}), None)
+            self.assertEqual(original, mirror.snapshot())
+
     def test_runtime_factory_is_rollbackable_and_shadow_is_not_a_second_queue(self) -> None:
         class LegacyWorker:
             def __init__(self, config: object, client: object) -> None:
@@ -130,6 +145,54 @@ class AgentKernelSupervisorProjectionTest(unittest.TestCase):
             projection.local_queue_depth,
             projection.maintains_local_queue,
         ))
+
+    def test_recovery_refreshes_shadow_from_persisted_marker_and_outbox(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='agent-kernel-recovery-') as tmp:
+            root = Path(tmp) / 'worker'
+            config = SimpleNamespace(
+                worker_id='wk-test',
+                worker_root=root,
+                service_home=str(Path(tmp)),
+            )
+            writer = AgentKernelShadowReviewWorker(config, client=object())
+            active = ActiveJob(
+                job_id='job-1',
+                run_id='run-1',
+                lease_id='lease-1',
+                attempt_id='attempt-1',
+            )
+            writer.persist_active_run_marker(active)
+            artifact_dir = writer.isolation.artifacts / active.run_id
+            artifact_dir.mkdir(parents=True)
+            writer.prepare_terminal_result_outbox(
+                active,
+                {'status': 'done'},
+                artifact_dir,
+                {'execution': {'status': 'completed'}},
+            )
+            active.state = 'finishing'
+            active.terminal_result_prepared = True
+            writer.persist_active_run_marker(active)
+
+            recovered_worker = AgentKernelShadowReviewWorker(config, client=object())
+            self.assertEqual(
+                'IDLE', recovered_worker.agent_kernel_slot_snapshot().slot_state
+            )
+
+            recovered = recovered_worker.recover_persisted_active_job()
+
+            self.assertIsNotNone(recovered)
+            projected = recovered_worker.agent_kernel_slot_snapshot()
+            self.assertEqual(
+                ('ACTIVE', 'FINALIZING', 'ready', 'run-1'),
+                (
+                    projected.slot_state,
+                    projected.task_lifecycle,
+                    projected.terminal_outbox_state,
+                    projected.run_id,
+                ),
+            )
+            self.assertIsNone(recovered_worker.agent_kernel_shadow_error)
 
     def test_enabled_runtime_mirrors_the_existing_marker_and_outbox_files(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-kernel-supervisor-") as tmp:

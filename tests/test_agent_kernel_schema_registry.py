@@ -81,6 +81,21 @@ class AgentKernelSchemaRegistryTest(unittest.TestCase):
                 with self.assertRaisesRegex(SchemaValidationError, "mismatch"):
                     validate_instance(True, schema, resolve=lambda _: {})
 
+    def test_utc_rfc3339_milliseconds_rejects_impossible_calendar_dates(self) -> None:
+        schema = {"type": "string", "format": "utc-rfc3339-ms"}
+        validate_instance(
+            "2024-02-29T23:59:59.999Z", schema, resolve=lambda _: {}
+        )
+        for timestamp in (
+            "2023-02-29T00:00:00.000Z",
+            "2026-02-30T00:00:00.000Z",
+            "2026-04-31T00:00:00.000Z",
+        ):
+            with self.subTest(timestamp=timestamp), self.assertRaisesRegex(
+                SchemaValidationError, "timestamp_not_canonical"
+            ):
+                validate_instance(timestamp, schema, resolve=lambda _: {})
+
     def test_registry_verifies_schema_identity_digest_and_golden_fixtures(self) -> None:
         registry = SchemaRegistry(CONTRACT_ROOT)
         cases = []

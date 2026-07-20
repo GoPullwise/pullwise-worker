@@ -20,9 +20,38 @@ def _content_sha(value: object) -> object:
     return value.get("sha256") if isinstance(value, dict) else None
 
 
+def _validate_relative_path_set(instance: dict[str, object], field: str) -> None:
+    roots = instance.get(field)
+    if not isinstance(roots, list):
+        return
+    folded_roots: set[str] = set()
+    for index, root in enumerate(roots):
+        if not isinstance(root, str):
+            continue
+        segments = root.split("/")
+        if (
+            root.startswith("/")
+            or chr(92) in root
+            or "\0" in root
+            or any(segment in {"", ".", ".."} for segment in segments)
+        ):
+            _fail("relative_path_invalid", f"$.{field}[{index}]")
+        folded = root.casefold()
+        if folded in folded_roots:
+            _fail("relative_path_casefold_collision", f"$.{field}[{index}]")
+        folded_roots.add(folded)
+
+
 def _validate_policy(instance: dict[str, object]) -> None:
     if instance.get("digest") != canonical_sha256(instance, digest_field="digest"):
         _fail("digest_mismatch", "$.digest")
+    if instance.get("capability_risk_ceiling") not in {"R0", "R1"}:
+        _fail(
+            "capability_risk_ceiling_exceeds_mvp",
+            "$.capability_risk_ceiling",
+        )
+    _validate_relative_path_set(instance, "allowed_read_roots")
+    _validate_relative_path_set(instance, "allowed_write_roots")
     granted = instance.get("granted_capabilities")
     denied = instance.get("denied_capabilities")
     granted_ids = set(granted) if isinstance(granted, list) else set()

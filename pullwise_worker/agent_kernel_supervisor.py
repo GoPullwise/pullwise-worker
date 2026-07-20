@@ -130,7 +130,10 @@ class LegacySlotMirror:
             if (
                 current.slot_state == "ACTIVE"
                 and projected.slot_state == "ACTIVE"
-                and current.run_id != projected.run_id
+                and any(
+                    getattr(current, key) != getattr(projected, key)
+                    for key in IDENTITY_KEYS
+                )
             ):
                 raise SupervisorProjectionError(
                     "STATE_TRANSITION_INVALID", "second active slot binding"

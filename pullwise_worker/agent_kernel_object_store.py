@@ -179,13 +179,21 @@ class ObjectStore:
     ) -> list[str]:
         if not idle:
             return []
-        cutoff = (time.time() if now is None else now) - max(0, older_than_seconds)
-        removed = self._collect_staging_orphans(cutoff)
+        invalid_age = isinstance(older_than_seconds, bool) or not isinstance(older_than_seconds, int)
+        if invalid_age or older_than_seconds <= 0:
+            raise AgentKernelStorageError('orphan_age_threshold_invalid')
+        cutoff = (time.time() if now is None else now) - older_than_seconds
         with self.database.connect() as connection:
+            object_rows = connection.execute(
+                'SELECT sha256,size_bytes FROM content_objects'
+            ).fetchall()
             referenced = {
                 row[0]
                 for row in connection.execute("SELECT DISTINCT sha256 FROM content_bindings")
             }
+        for digest, size in object_rows:
+            self._verify_path(self.path_for_digest(digest), digest, size)
+        removed = self._collect_staging_orphans(cutoff)
         object_digests: list[str] = []
         changed_parents: set[Path] = set()
         for prefix in sorted(self.objects_root.iterdir()):
