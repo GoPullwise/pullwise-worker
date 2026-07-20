@@ -62,7 +62,10 @@ RESERVED_WINDOWS_NAMES = {
     "prn",
     *(f"com{number}" for number in range(1, 10)),
     *(f"lpt{number}" for number in range(1, 10)),
+    "conin\u0024",
+    "conout\u0024",
 }
+FORBIDDEN_WINDOWS_PATH_CHARS = frozenset(map(chr, (34, 42, 60, 62, 63, 124)))
 
 
 class InventoryError(ValueError):
@@ -99,7 +102,7 @@ def _identifier(value: object, label: str) -> str:
     return text
 
 
-def _relative_path(value: object, label: str) -> str:
+def validate_relative_path(value: object, label: str) -> str:
     text = _text(value, label, single_line=True)
     path = PurePosixPath(text)
     if (
@@ -108,6 +111,7 @@ def _relative_path(value: object, label: str) -> str:
         or path.is_absolute()
         or text != path.as_posix()
         or any(part in {"", ".", ".."} for part in path.parts)
+        or not FORBIDDEN_WINDOWS_PATH_CHARS.isdisjoint(text)
     ):
         raise InventoryError(f"{label}:unsafe_path")
     for part in path.parts:
@@ -146,7 +150,7 @@ def validate_inventory(value: object) -> dict[str, Any]:
         {"register_path", "decision_id", "selected_option_id", "resolution_sha256"},
         "d27",
     )
-    _relative_path(binding["register_path"], "d27.register_path")
+    validate_relative_path(binding["register_path"], "d27.register_path")
     if binding != EXPECTED_D27:
         raise InventoryError("d27:not_canonical")
 
@@ -169,6 +173,8 @@ def validate_inventory(value: object) -> dict[str, Any]:
     exclusion_ids: list[str] = []
     canonical_paths: dict[tuple[str, str], str] = {}
     whole_paths: set[tuple[str, str]] = set()
+    bounded_paths: set[tuple[str, str]] = set()
+    seen_exclusions: set[tuple[object, ...]] = set()
     for index, value in enumerate(exclusions):
         label = f"evidence_exclusions[{index}]"
         item = _exact(
@@ -178,24 +184,36 @@ def validate_inventory(value: object) -> dict[str, Any]:
         )
         exclusion_ids.append(_identifier(item["id"], f"{label}.id"))
         repo = _repo(item["repo"], f"{label}.repo")
-        path = _relative_path(item["path"], f"{label}.path")
-        if item["reason"] not in EXCLUSION_REASONS:
+        path = validate_relative_path(item["path"], f"{label}.path")
+        reason = item["reason"]
+        if reason not in EXCLUSION_REASONS:
             raise InventoryError(f"{label}.reason")
         start, end = item["start_marker"], item["end_marker"]
         if (start is None) != (end is None):
             raise InventoryError(f"{label}.markers")
         if start is None:
             whole_paths.add((repo, path.casefold()))
+            exclusion_key = (repo, path, reason, None, None)
+            if exclusion_key[:3] not in ALLOWED_WHOLE_EXCLUSIONS:
+                raise InventoryError(f"{label}:unapproved")
         else:
-            if (
-                _text(start, f"{label}.start_marker", single_line=True)
-                == _text(end, f"{label}.end_marker", single_line=True)
-            ):
+            start = _text(start, f"{label}.start_marker", single_line=True)
+            end = _text(end, f"{label}.end_marker", single_line=True)
+            if start == end or start in end or end in start:
                 raise InventoryError(f"{label}.markers")
+            bounded_paths.add((repo, path.casefold()))
+            exclusion_key = (repo, path, reason, start, end)
+            if exclusion_key[:3] not in ALLOWED_BOUNDED_EXCLUSIONS:
+                raise InventoryError(f"{label}:unapproved")
+        if exclusion_key in seen_exclusions:
+            raise InventoryError("evidence_exclusions:duplicate")
+        seen_exclusions.add(exclusion_key)
         key = (repo, path.casefold())
         prior = canonical_paths.setdefault(key, path)
         if prior != path:
             raise InventoryError("evidence_exclusions:casefold_path_collision")
+    if whole_paths & bounded_paths:
+        raise InventoryError("evidence_exclusions:whole_bounded_collision")
     if exclusion_ids != sorted(set(exclusion_ids)):
         raise InventoryError("evidence_exclusions:not_sorted_unique")
 
@@ -210,7 +228,7 @@ def validate_inventory(value: object) -> dict[str, Any]:
         item = _exact(value, {"id", "repo", "path", "signature_ids"}, label)
         surface_ids.append(_identifier(item["id"], f"{label}.id"))
         repo = _repo(item["repo"], f"{label}.repo")
-        path = _relative_path(item["path"], f"{label}.path")
+        path = validate_relative_path(item["path"], f"{label}.path")
         signature_ids_for_surface = _sorted_ids(
             item["signature_ids"], f"{label}.signature_ids", known=known_signatures
         )

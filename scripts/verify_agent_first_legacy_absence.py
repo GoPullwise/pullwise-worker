@@ -13,12 +13,14 @@ from scripts.agent_first_contract_files import (
     BaselineEnvironmentError,
     canonical_text,
     repository_roots,
+    read_surface,
     surface_path,
 )
 from scripts.agent_first_legacy_inventory import (
     InventoryError,
     load_inventory,
     validate_inventory,
+    validate_relative_path,
 )
 from scripts.agent_first_decision_core import (
     DecisionRegisterFormatError,
@@ -32,27 +34,26 @@ DEFAULT_INVENTORY = (
     ROOT / "contracts" / "agent-first" / "legacy-removal-inventory.json"
 )
 REPORT_SCHEMA_ID = "pullwise-agent-first-legacy-absence-report/v1"
-TEXT_SUFFIXES = {
-    ".bak",
-    ".backup",
-    ".css",
-    ".html",
-    ".js",
-    ".json",
-    ".jsx",
-    ".md",
-    ".mjs",
-    ".old",
-    ".orig",
-    ".py",
-    ".sh",
-    ".sql",
-    ".toml",
-    ".ts",
-    ".tsx",
-    ".txt",
-    ".yaml",
-    ".yml",
+BINARY_SUFFIXES = {
+    ".7z",
+    ".apk",
+    ".avif",
+    ".bmp",
+    ".exe",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".pdf",
+    ".png",
+    ".tar",
+    ".tgz",
+    ".ttf",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".zip",
 }
 
 
@@ -96,19 +97,10 @@ def _validate_d27(
     }
 
 
-def _worktree_paths(repo_root: Path) -> list[str]:
+def _git_paths(repo_root: Path, *options: str) -> set[str]:
     try:
         result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_root),
-                "ls-files",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ],
+            ["git", "-C", str(repo_root), "ls-files", *options, "-z"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=15,
@@ -122,7 +114,21 @@ def _worktree_paths(repo_root: Path) -> list[str]:
         decoded = result.stdout.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise BaselineEnvironmentError("worktree_path_not_utf8") from exc
-    return sorted(set(decoded.split("\0")) - {""})
+    return set(decoded.split("\0")) - {""}
+
+
+def _worktree_paths(repo_root: Path) -> list[str]:
+    catalog = _git_paths(
+        repo_root, "--cached", "--others", "--exclude-standard"
+    )
+    deleted = _git_paths(repo_root, "--cached", "--deleted")
+    paths = catalog - deleted
+    try:
+        for relative in paths:
+            validate_relative_path(relative, "worktree.path")
+    except InventoryError as exc:
+        raise BaselineEnvironmentError("worktree_path_unsafe") from exc
+    return sorted(paths)
 
 def _without_excluded_sections(
     text: str, exclusions: list[dict[str, Any]]
@@ -172,11 +178,11 @@ def verify_legacy_absence(
         path = surface_path(roots[surface["repo"]], surface["path"])
         matched: list[str] = []
         if path is not None:
-            text = canonical_text(path)
+            raw = read_surface(path)
             matched = [
                 signature_id
                 for signature_id in surface["signature_ids"]
-                if signatures[signature_id] in text
+                if signatures[signature_id].encode("utf-8") in raw
             ]
         reports.append(
             {
@@ -205,23 +211,30 @@ def verify_legacy_absence(
             if path is None:
                 raise BaselineEnvironmentError("worktree_path_disappeared")
             if (repo_id, relative) in whole_exclusions:
-                canonical_text(path)
+                read_surface(path)
                 continue
-            if Path(relative).suffix.lower() not in TEXT_SUFFIXES:
+            if Path(relative).suffix.lower() in BINARY_SUFFIXES:
                 continue
-            text = canonical_text(path)
-            text = _without_excluded_sections(
-                text,
-                [
-                    item
-                    for item in inventory.get("evidence_exclusions", [])
-                    if (item["repo"], item["path"]) == (repo_id, relative)
-                    and (repo_id, relative) not in whole_exclusions
-                ],
-            )
-            for signature_id, literal in signatures.items():
+            section_exclusions = [
+                item
+                for item in inventory.get("evidence_exclusions", [])
+                if (item["repo"], item["path"]) == (repo_id, relative)
+                and (repo_id, relative) not in whole_exclusions
+            ]
+            if section_exclusions:
+                haystack: str | bytes = _without_excluded_sections(
+                    canonical_text(path), section_exclusions
+                )
+                needles: dict[str, str | bytes] = signatures
+            else:
+                haystack = read_surface(path)
+                needles = {
+                    signature_id: literal.encode("utf-8")
+                    for signature_id, literal in signatures.items()
+                }
+            for signature_id, needle in needles.items():
                 key = (repo_id, relative, signature_id)
-                if literal in text and key not in registered:
+                if needle in haystack and key not in registered:
                     unexpected.append(
                         {
                             "repo": repo_id,

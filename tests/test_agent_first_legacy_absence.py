@@ -199,9 +199,9 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
 
     def test_bounded_d27_evidence_is_excluded_without_hiding_the_file(self) -> None:
         marker = "review-worker-" + "protocol/v1"
-        start = "<!-- BEGIN D27 EVIDENCE -->"
-        end = "<!-- END D27 EVIDENCE -->"
-        (self.roots["worker"] / "evidence.md").write_text(
+        start = "## Agent-First Clean-Break Refactor Policy"
+        end = "## Module And File Size Discipline"
+        (self.roots["worker"] / "AGENTS.md").write_text(
             f"before\n{start}\n{marker}\n{end}\nafter\n",
             encoding="utf-8",
         )
@@ -210,7 +210,7 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
             {
                 "id": "bounded-d27-evidence",
                 "repo": "worker",
-                "path": "evidence.md",
+                "path": "AGENTS.md",
                 "reason": "d27_evidence",
                 "start_marker": start,
                 "end_marker": end,
@@ -224,12 +224,12 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
         self.assertEqual("absent", report["status"])
         self.assertEqual([], report["unexpected_surfaces"])
 
-        (self.roots["worker"] / "evidence.md").write_text(
+        (self.roots["worker"] / "AGENTS.md").write_text(
             f"{marker}\n{start}\n{marker}\n{end}\n", encoding="utf-8"
         )
         exit_code, report = self._invoke()
         self.assertEqual(1, exit_code)
-        self.assertEqual("evidence.md", report["unexpected_surfaces"][0]["path"])
+        self.assertEqual("AGENTS.md", report["unexpected_surfaces"][0]["path"])
 
     def test_bounded_evidence_markers_fail_closed_when_missing(self) -> None:
         payload = self._inventory()
@@ -238,13 +238,13 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
             {
                 "id": "bounded-d27-evidence",
                 "repo": "worker",
-                "path": "evidence.md",
+                "path": "AGENTS.md",
                 "reason": "d27_evidence",
-                "start_marker": "<!-- BEGIN D27 EVIDENCE -->",
-                "end_marker": "<!-- END D27 EVIDENCE -->",
+                "start_marker": "## Agent-First Clean-Break Refactor Policy",
+                "end_marker": "## Module And File Size Discipline",
             },
         )
-        (self.roots["worker"] / "evidence.md").write_text(
+        (self.roots["worker"] / "AGENTS.md").write_text(
             "markers removed\n", encoding="utf-8"
         )
         self._write_inventory(payload)
@@ -256,16 +256,22 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
 
     def test_whole_file_exclusion_does_not_hide_a_similarly_named_backup(self) -> None:
         marker = "review-worker-" + "protocol/v1"
-        excluded = self.roots["worker"] / "history.md"
+        excluded = (
+            self.roots["worker"]
+            / "docs"
+            / "agent-first-worker-spec-decision-register.md"
+        )
+        excluded.parent.mkdir()
         excluded.write_text(marker, encoding="utf-8")
-        (self.roots["worker"] / "history.md.bak").write_text(marker, encoding="utf-8")
+        backup = excluded.with_suffix(".md.bak")
+        backup.write_text(marker, encoding="utf-8")
         payload = self._inventory()
         payload["evidence_exclusions"].insert(
             0,
             {
                 "id": "archived-decision-history",
                 "repo": "worker",
-                "path": "history.md",
+                "path": "docs/agent-first-worker-spec-decision-register.md",
                 "reason": "immutable_decision_history",
                 "start_marker": None,
                 "end_marker": None,
@@ -277,7 +283,10 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
 
         self.assertEqual(1, exit_code)
         self.assertFalse(report["legacy_absent"])
-        self.assertEqual("history.md.bak", report["unexpected_surfaces"][0]["path"])
+        self.assertEqual(
+            "docs/agent-first-worker-spec-decision-register.md.bak",
+            report["unexpected_surfaces"][0]["path"],
+        )
 
     def test_d27_binding_rejects_a_noncanonical_digest(self) -> None:
         payload = self._inventory()
@@ -322,6 +331,9 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
 
         exit_code, report = self._invoke()
 
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
     def test_inventory_rejects_an_unapproved_whole_file_exclusion(self) -> None:
         marker = "review-worker-" + "protocol/v1"
         (self.roots["worker"] / "new_legacy.py").write_text(marker, encoding="utf-8")
@@ -365,9 +377,6 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
 
         self.assertEqual(1, exit_code)
         self.assertEqual("new_legacy", report["unexpected_surfaces"][0]["path"])
-
-        self.assertEqual(2, exit_code)
-        self.assertEqual("inventory_invalid", report["error_kind"])
 
     def test_inventory_rejects_unknown_fields(self) -> None:
         payload = self._inventory()
