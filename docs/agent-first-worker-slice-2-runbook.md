@@ -17,9 +17,11 @@ D2 失活，`--require-slice S2` 通过。D3 已由用户选择
 选择 `field_by_field_ownership`，resolution digest 为
 `b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`。D5 已由用户
 选择 `per_control_transaction`，resolution digest 为
-`859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`。当前 active
-decision 是 D6。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把
-推荐项或当前实现当成这些决策。
+`859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`。D6 已由用户
+选择 `single_claim_owner_transaction`，resolution digest 为
+`e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8`；它冻结 S4 的
+claim write set，但在 S4 gate 通过前不改写当前 S2 shadow seam。当前 active decision
+是 D7。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把推荐项或当前实现当成这些决策。
 
 ## 已实现范围
 
@@ -141,7 +143,7 @@ python3 scripts/check_agent_kernel_wheel.py
 - Python 3.12 Worker 全量：746 tests 通过，5 个既有条件性 skip。
 - output contracts 4/4；Slice 0 baseline `compatible`；cross-repo legacy baseline
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
-- decision register 为 `valid_pending`，S2 无 blocker；D3/D4/D5 已解决，active decision D6。
+- decision register 为 `valid_pending`，S2 无 blocker；D3-D6 已解决，active decision D7。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions

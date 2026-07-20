@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D6",
+  "active_decision_id": "D7",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -123,14 +123,25 @@
     {
       "id": "D6", "key": "claim-owner-transaction", "scope": "P0.6", "title": "Attempt claim 与 Owner 创建事务",
       "question": "attempt.claimed 是否在同一事务创建 Attempt 与 STARTING Owner incarnation？",
-      "status": "pending", "depends_on": ["D5"], "activation": null, "required_by_slice": "S4",
+      "status": "resolved", "depends_on": ["D5"], "activation": null, "required_by_slice": "S4",
       "effects": ["data_model", "state_semantics"], "source_refs": ["handoff:P0.6"],
       "affected_units": ["mvp-state-semantics"],
       "options": [
         {"id": "single_claim_owner_transaction", "summary": "同一事务创建 Attempt 和 STARTING Owner，task_version 总计 +1。", "rationale": "避免存在无 Owner 的已 claim Attempt 中间态。", "consequences": ["一个 idempotency key 覆盖完整 claim write set"]},
         {"id": "split_claim_owner_transactions", "summary": "拆成 attempt.claimed 与 owner.started 两个事务。", "rationale": "边界更细，但必须定义中间态、两套 guard 和 crash recovery。", "consequences": ["总版本变化和 orphan 处理增加"]}
       ],
-      "recommended_option_id": "single_claim_owner_transaction", "resolution": null, "supersedes": []
+      "recommended_option_id": "single_claim_owner_transaction",
+      "resolution": {
+        "kind": "option",
+        "selected_option_id": "single_claim_owner_transaction",
+        "custom_text": null,
+        "decision_text": "确认选择 single_claim_owner_transaction：attempt.claimed 在同一控制事件事务内创建 Attempt 和 STARTING Owner incarnation；完整 claim write set 共用一个 idempotency key，task_version 总计只增加一次，不允许持久化无 Owner 的已 claim Attempt 中间态。",
+        "authority": "user",
+        "decided_at": "2026-07-20",
+        "evidence_refs": ["conversation:user-selection:2026-07-20:single_claim_owner_transaction"],
+        "resolution_sha256": "e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8"
+      },
+      "supersedes": []
     },
     {
       "id": "D7", "key": "clock-persistence", "scope": "P0.6", "title": "monotonic 时间持久化形式",

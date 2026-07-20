@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D6`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D7`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -16,7 +16,7 @@ Active question: `D6`. Questions are asked one at a time. User silence, existing
 | `D3` | `P0.5` | MVP R2 能力边界 | `resolved` | `active` | `S3` | D1 | `mvp_r0_r1_reject_r2` |
 | `D4` | `P0.4` | legacy claim 缺失 policy 字段来源 | `resolved` | `active` | `S3` | D1, D3 | `field_by_field_ownership` |
 | `D5` | `P0.6` | task_version 递增单位 | `resolved` | `active` | `S4` | D4 | `per_control_transaction` |
-| `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `pending` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
+| `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `resolved` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
 | `D7` | `P0.6` | monotonic 时间持久化形式 | `pending` | `active` | `S4` | — | `persist_elapsed_consumption` |
 | `D8` | `P0.6/P0.7` | lease loss 与 same-run resume 状态边界 | `pending` | `active` | `S4` | D5 | `task_active_attempt_fenced` |
 | `D9` | `P0.7` | 内部结果与 legacy 发布的终态权威 | `pending` | `active` | `S4` | D8 | `internal_result_cas_authoritative` |
@@ -144,16 +144,18 @@ Active question: `D6`. Questions are asked one at a time. User silence, existing
 
 ### D6 — Attempt claim 与 Owner 创建事务
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** attempt.claimed 是否在同一事务创建 Attempt 与 STARTING Owner incarnation？
 
 **Options:**
 
-- `single_claim_owner_transaction` — non-normative recommendation, not selected: 同一事务创建 Attempt 和 STARTING Owner，task_version 总计 +1。 避免存在无 Owner 的已 claim Attempt 中间态。 Consequences: 一个 idempotency key 覆盖完整 claim write set
+- `single_claim_owner_transaction` — selected by resolution: 同一事务创建 Attempt 和 STARTING Owner，task_version 总计 +1。 避免存在无 Owner 的已 claim Attempt 中间态。 Consequences: 一个 idempotency key 覆盖完整 claim write set
 - `split_claim_owner_transactions`: 拆成 attempt.claimed 与 owner.started 两个事务。 边界更细，但必须定义中间态、两套 guard 和 crash recovery。 Consequences: 总版本变化和 orphan 处理增加
 
-**Resolution:** No option has been selected.
+**Resolution:** `single_claim_owner_transaction` (`option`). 确认选择 single_claim_owner_transaction：attempt.claimed 在同一控制事件事务内创建 Attempt 和 STARTING Owner incarnation；完整 claim write set 共用一个 idempotency key，task_version 总计只增加一次，不允许持久化无 Owner 的已 claim Attempt 中间态。
+
+**Authority/evidence:** `user` on `2026-07-20`; `conversation:user-selection:2026-07-20:single_claim_owner_transaction`; digest `e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8`.
 
 **Supersedes:** none
 

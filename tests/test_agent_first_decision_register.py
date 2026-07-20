@@ -76,7 +76,7 @@ def _pending_d1_register() -> dict[str, object]:
 
 
 class AgentFirstDecisionRegisterTest(unittest.TestCase):
-    def test_current_register_has_the_user_resolved_pullwise_scope(self) -> None:
+    def test_current_register_has_the_user_resolved_decision_prefix(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
@@ -84,9 +84,9 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D6", report["active_decision_id"])
-        self.assertEqual(21, report["pending_decision_count"])
-        self.assertEqual(4, report["resolved_decision_count"])
+        self.assertEqual("D7", report["active_decision_id"])
+        self.assertEqual(20, report["pending_decision_count"])
+        self.assertEqual(5, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -120,6 +120,15 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertEqual(
             "859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a",
             d5_resolution["resolution_sha256"],
+        )
+        d6_resolution = register["decisions"][5]["resolution"]
+        self.assertEqual(
+            "single_claim_owner_transaction", d6_resolution["selected_option_id"]
+        )
+        self.assertEqual("user", d6_resolution["authority"])
+        self.assertEqual(
+            "e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8",
+            d6_resolution["resolution_sha256"],
         )
         self.assertEqual(list(QUESTION_ORDER), register["question_order"])
         self.assertEqual(
@@ -289,7 +298,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D6", report["active_decision_id"])
+        self.assertEqual("D7", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_machine_entrypoint_is_documented(self) -> None:

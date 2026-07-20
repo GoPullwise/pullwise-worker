@@ -335,6 +335,15 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
 
+        report = verify_register(
+            register, REPO_ROOT, require_slice="S4",
+            check_document=False, check_history=False,
+        )
+        blocker = next(item for item in report["failures"]
+                       if item["code"] == "slice_blocked_by_pending_decisions")
+        self.assertEqual([f"D{index}" for index in range(7, 18)],
+                         blocker["decision_ids"])
+
     def test_rendered_resolution_contains_text_evidence_digest_and_relation(self) -> None:
         register = _resolved_d1()
         rendered = render_document(register)

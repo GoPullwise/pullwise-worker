@@ -71,7 +71,9 @@ D4 已由用户选择 `field_by_field_ownership`，resolution digest 为
 `b009c68af93c965837e562d57cd20328e037b5fca0da30cc694125e0fee79654`；
 D5 已由用户选择 `per_control_transaction`，resolution digest 为
 `859647945022b9d62bca4c6cf16b290c48e4e9bdb2f10700a40553194748b74a`；
-当前 active decision 为 D6。S2 gate 已通过，后续仍须按各 Slice 的 decision gate
+D6 已由用户选择 `single_claim_owner_transaction`，resolution digest 为
+`e1ad16c135ae5f0880123becdd640bf685c0f201b44dd941830590b0b39174d8`；
+当前 active decision 为 D7。S2 gate 已通过，后续仍须按各 Slice 的 decision gate
 执行，不得以当前代码或推荐项代替尚未作出的选择。
 
 ## 指标
