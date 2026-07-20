@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+from copy import deepcopy
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+from scripts import agent_first_contract_files as contract_files
+from scripts import verify_agent_first_legacy_absence as absence
+from scripts.agent_first_decision_core import canonical_resolution_sha256
+from scripts.agent_first_legacy_inventory import InventoryError, load_inventory
+from tests.legacy_absence_test_support import (
+    BASELINE,
+    LegacyAbsenceTestCase,
+    catalog_sha256,
+)
+
+
+class AgentFirstLegacyAbsenceHardeningTest(LegacyAbsenceTestCase):
+    def test_existing_surface_blocks_occurrences_above_its_ceiling(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        (self.roots["worker"] / "legacy.py").write_text(
+            f"{marker}\n{marker}\n", encoding="utf-8"
+        )
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(1, exit_code)
+        excess = report["unexpected_surfaces"][0]
+        self.assertEqual("occurrence_ceiling_exceeded", excess["kind"])
+        self.assertEqual(1, excess["allowed_occurrences"])
+        self.assertEqual(2, excess["actual_occurrences"])
+
+    def test_unapproved_bounded_marker_pair_is_inventory_invalid(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        start, end = "<!-- START OTHER -->", "<!-- END OTHER -->"
+        (self.roots["worker"] / "AGENTS.md").write_text(
+            f"{start}\n{marker}\n{end}\n", encoding="utf-8"
+        )
+        payload = self._inventory()
+        payload["evidence_exclusions"].insert(
+            0,
+            {
+                "id": "agents-arbitrary-section",
+                "repo": "worker",
+                "path": "AGENTS.md",
+                "reason": "d27_evidence",
+                "start_marker": start,
+                "end_marker": end,
+            },
+        )
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_actual_d27_register_supersession_tamper_is_rejected(self) -> None:
+        register_path = (
+            self.roots["worker"]
+            / "contracts"
+            / "agent-first"
+            / "spec-decision-register.json"
+        )
+        register = json.loads(register_path.read_text(encoding="utf-8"))
+        decision = next(item for item in register["decisions"] if item["id"] == "D27")
+        decision["supersedes"] = []
+        decision["resolution"]["resolution_sha256"] = canonical_resolution_sha256(
+            decision["id"], decision["resolution"], decision["supersedes"]
+        )
+        register_path.write_text(json.dumps(register), encoding="utf-8")
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_registered_path_is_read_once_for_report_and_ratchet(self) -> None:
+        legacy = self.roots["worker"] / "legacy.py"
+        legacy.write_text("review-worker-" + "protocol/v1", encoding="utf-8")
+        self._write_inventory(self._inventory())
+        original = absence.read_surface
+        observed = 0
+
+        def counting_read(path: Path) -> bytes:
+            nonlocal observed
+            if path == legacy:
+                observed += 1
+            return original(path)
+
+        with patch.object(absence, "read_surface", side_effect=counting_read):
+            exit_code, _ = self._invoke()
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(1, observed)
+
+    def test_strict_mode_includes_every_frozen_baseline_surface(self) -> None:
+        baseline = json.loads(BASELINE.read_text(encoding="utf-8"))
+        surface = baseline["surfaces"][0]
+        target = self.roots[surface["repo"]] / surface["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(surface["anchors"][0], encoding="utf-8")
+        self._write_inventory(self._inventory())
+
+        exit_code, report = self._invoke("--require-absent")
+
+        self.assertEqual(1, exit_code)
+        failures = {
+            item["surface_id"]
+            for item in report["failures"]
+            if item["code"] == "legacy_surface_present"
+        }
+        self.assertIn(surface["id"], failures)
+
+    def test_default_catalog_ceiling_rejects_a_recomputed_expansion(self) -> None:
+        payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
+        payload["surfaces"].append(deepcopy(payload["surfaces"][-1]))
+        payload["surfaces"][-1]["id"] = "worker.999-added-legacy"
+        payload["catalog_sha256"] = catalog_sha256(payload)
+
+        with self.assertRaises(InventoryError):
+            absence._require_catalog_ceiling(payload, absence.DEFAULT_INVENTORY)
+
+    def test_descriptor_target_must_equal_the_validated_lexical_path(self) -> None:
+        target = self.roots["worker"] / "safe.txt"
+        outside = self.workspace / "outside.txt"
+        target.write_text("safe", encoding="utf-8")
+        outside.write_text("outside", encoding="utf-8")
+
+        with patch.object(
+            contract_files, "_descriptor_final_path", return_value=outside
+        ):
+            with self.assertRaises(contract_files.BaselineEnvironmentError):
+                contract_files.read_surface(target)

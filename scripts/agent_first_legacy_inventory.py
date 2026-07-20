@@ -2,25 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
 from scripts.agent_first_contract_files import REPOSITORY_DIRS, read_surface
+from scripts.agent_first_legacy_catalog import (
+    ALLOWED_BOUNDED_EXCLUSIONS,
+    ALLOWED_WHOLE_EXCLUSIONS,
+    CATALOG_FIELDS,
+    EXPECTED_D27,
+    EXPECTED_FROZEN_BASELINE,
+)
 
 
 SCHEMA_ID = "pullwise-agent-first-legacy-removal-inventory/v1"
-EXPECTED_D27 = {
-    "register_path": "contracts/agent-first/spec-decision-register.json",
-    "decision_id": "D27",
-    "selected_option_id": "clean_break_no_legacy",
-    "resolution_sha256": "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e",
-}
 TOP_LEVEL_KEYS = {
     "schema_id",
     "inventory_id",
+    "catalog_sha256",
     "d27",
+    "frozen_baseline",
     "signatures",
     "evidence_exclusions",
     "surfaces",
@@ -30,31 +34,8 @@ EXCLUSION_REASONS = {
     "d27_evidence",
     "immutable_decision_history",
 }
-ALLOWED_WHOLE_EXCLUSIONS = {
-    (
-        "worker",
-        "contracts/agent-first/legacy-removal-inventory.json",
-        "absence_gate_control",
-    ),
-    (
-        "worker",
-        "contracts/agent-first/spec-decision-register.json",
-        "immutable_decision_history",
-    ),
-    (
-        "worker",
-        "docs/agent-first-worker-spec-decision-register.md",
-        "immutable_decision_history",
-    ),
-}
-ALLOWED_BOUNDED_EXCLUSIONS = {
-    ("worker", "AGENTS.md", "d27_evidence"),
-    ("worker", "AGENTS.md", "immutable_decision_history"),
-    ("worker", "docs/agent-first-worker-design.md", "d27_evidence"),
-    ("worker", "docs/agent-first-worker-mvp-implementation-design.md", "d27_evidence"),
-    ("worker", "docs/agent-first-worker-post-mvp-implementation-design.md", "d27_evidence"),
-}
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RESERVED_WINDOWS_NAMES = {
     "aux",
     "con",
@@ -100,6 +81,20 @@ def _identifier(value: object, label: str) -> str:
     if ID_PATTERN.fullmatch(text) is None:
         raise InventoryError(f"{label}:identifier")
     return text
+def _sha256(value: object, label: str) -> str:
+    digest = _text(value, label, single_line=True)
+    if SHA256_PATTERN.fullmatch(digest) is None:
+        raise InventoryError(f"{label}:sha256")
+    return digest
+
+
+def catalog_sha256(value: dict[str, Any]) -> str:
+    payload = {key: value[key] for key in CATALOG_FIELDS}
+    canonical = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 
 def validate_relative_path(value: object, label: str) -> str:
