@@ -15,6 +15,7 @@ from pullwise_worker.agent_kernel_database import (
     LATEST_SCHEMA_VERSION,
     REQUIRED_TABLES,
 )
+from pullwise_worker.agent_kernel_migrations import MIGRATIONS
 from pullwise_worker.agent_kernel_object_store import (
     CasCorruptError,
     ContentRefConflictError,
@@ -66,14 +67,14 @@ class AgentKernelStorageTest(unittest.TestCase):
         self.assertEqual(5000, pragmas["busy_timeout"])
         self.assertTrue(REQUIRED_TABLES <= tables)
         self.assertEqual(LATEST_SCHEMA_VERSION, user_version)
-        self.assertEqual(2, len(migrations))
+        self.assertEqual(len(MIGRATIONS), len(migrations))
         self.assertRegex(migrations[0][2], r"^[0-9a-f]{64}$")
         self.assertEqual(database.path, self.worker_root / "agent-kernel" / "state.sqlite3")
 
         database.initialize()
         with database.connect() as connection:
             self.assertEqual(
-                2,
+                len(MIGRATIONS),
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
             )
 
@@ -118,7 +119,7 @@ class AgentKernelStorageTest(unittest.TestCase):
         recovered.initialize()
         with recovered.connect() as connection:
             self.assertEqual(
-                2,
+                len(MIGRATIONS),
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
             )
             self.assertEqual(

@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import unittest
 
+import pullwise_worker.agent_kernel_schema_registry as schema_registry_module
 from pullwise_worker.agent_kernel_canonical import canonical_sha256
 from pullwise_worker.agent_kernel_schema_registry import (
     SchemaRegistry,
@@ -155,6 +156,76 @@ class AgentKernelSchemaRegistryTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(SchemaRegistryError, "schema_digest_mismatch"):
+                SchemaRegistry(copied)
+
+    def test_registry_rejects_symlinked_contract_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-schema-link-") as tmp_dir:
+            copied = Path(tmp_dir) / "v1-real"
+            shutil.copytree(CONTRACT_ROOT, copied)
+            linked_root = Path(tmp_dir) / "v1"
+            linked_root.symlink_to(copied.name, target_is_directory=True)
+
+            with self.assertRaisesRegex(SchemaRegistryError, "schema_root_invalid"):
+                SchemaRegistry(linked_root)
+
+        for label, relative in (
+            ("registry", Path("schema-registry.json")),
+            ("schema", Path("content-ref.schema.json")),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory(
+                prefix=f"agent-{label}-link-"
+            ) as tmp_dir:
+                copied = Path(tmp_dir) / "v1"
+                shutil.copytree(CONTRACT_ROOT, copied)
+                linked = copied / relative
+                target = linked.with_name(f"{linked.name}.target")
+                linked.rename(target)
+                linked.symlink_to(target.name)
+
+                with self.assertRaisesRegex(
+                    SchemaRegistryError, f"schema_file_not_regular: {linked.name}"
+                ):
+                    SchemaRegistry(copied)
+
+        with tempfile.TemporaryDirectory(prefix="agent-fixture-link-") as tmp_dir:
+            copied = Path(tmp_dir) / "v1"
+            shutil.copytree(CONTRACT_ROOT, copied)
+            linked = copied / "fixtures" / "schema-golden.json"
+            target = linked.with_name(f"{linked.name}.target")
+            linked.rename(target)
+            linked.symlink_to(target.name)
+
+            with self.assertRaisesRegex(
+                SchemaRegistryError, f"schema_file_not_regular: {linked.name}"
+            ):
+                schema_registry_module._read_regular(linked)
+
+    def test_registry_rejects_unknown_schema_reference(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-schema-ref-") as tmp_dir:
+            copied = Path(tmp_dir) / "v1"
+            shutil.copytree(CONTRACT_ROOT, copied)
+            schema_path = copied / "availability-ref.schema.json"
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            schema["oneOf"][0]["properties"]["ref"]["$ref"] = "future/v9"
+            schema_path.write_text(
+                json.dumps(schema, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            manifest_path = copied / "schema-registry.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for entry in manifest["schemas"]:
+                if entry["schema_id"] == "availability-ref/v1":
+                    entry["sha256"] = canonical_sha256(schema)
+                    break
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                SchemaRegistryError,
+                "schema_reference_unknown: availability-ref/v1: future/v9",
+            ):
                 SchemaRegistry(copied)
 
     def test_actor_session_kind_union_is_strict(self) -> None:

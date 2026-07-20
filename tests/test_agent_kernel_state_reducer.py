@@ -216,9 +216,41 @@ class AgentKernelStateReducerTest(unittest.TestCase):
         self.assertIsNone(fact_only.terminalization_reason)
 
     def test_cartesian_attempt_matrix_matches_the_frozen_edge_set(self) -> None:
+        expected_transitions = frozenset(
+            {
+                (AttemptState.CREATED, AttemptState.LEASED),
+                (AttemptState.CREATED, AttemptState.FENCED),
+                (AttemptState.LEASED, AttemptState.PREPARING),
+                (AttemptState.LEASED, AttemptState.FAILED),
+                (AttemptState.LEASED, AttemptState.CANCELLED),
+                (AttemptState.LEASED, AttemptState.FENCED),
+                (AttemptState.PREPARING, AttemptState.RUNNING),
+                (AttemptState.PREPARING, AttemptState.FAILED),
+                (AttemptState.PREPARING, AttemptState.CANCELLED),
+                (AttemptState.PREPARING, AttemptState.FENCED),
+                (AttemptState.RUNNING, AttemptState.VERIFYING),
+                (AttemptState.RUNNING, AttemptState.SUSPENDING),
+                (AttemptState.RUNNING, AttemptState.FAILED),
+                (AttemptState.RUNNING, AttemptState.CANCELLED),
+                (AttemptState.RUNNING, AttemptState.FENCED),
+                (AttemptState.VERIFYING, AttemptState.SUSPENDING),
+                (AttemptState.VERIFYING, AttemptState.RUNNING),
+                (AttemptState.VERIFYING, AttemptState.PUBLISHING),
+                (AttemptState.VERIFYING, AttemptState.FAILED),
+                (AttemptState.VERIFYING, AttemptState.CANCELLED),
+                (AttemptState.VERIFYING, AttemptState.FENCED),
+                (AttemptState.SUSPENDING, AttemptState.SUSPENDED),
+                (AttemptState.PUBLISHING, AttemptState.RUNNING),
+                (AttemptState.PUBLISHING, AttemptState.SUCCEEDED),
+                (AttemptState.PUBLISHING, AttemptState.FAILED),
+                (AttemptState.PUBLISHING, AttemptState.CANCELLED),
+                (AttemptState.PUBLISHING, AttemptState.FENCED),
+            }
+        )
+        self.assertEqual(expected_transitions, ATTEMPT_TRANSITIONS)
         for source, target in itertools.product(ATTEMPT_STATES, repeat=2):
             with self.subTest(source=source, target=target):
-                if (source, target) in ATTEMPT_TRANSITIONS:
+                if (source, target) in expected_transitions:
                     self.assertEqual(target, reduce_attempt(source, target))
                 else:
                     with self.assertRaisesRegex(
@@ -233,7 +265,7 @@ class AgentKernelStateReducerTest(unittest.TestCase):
             AttemptState.CANCELLED,
             AttemptState.FENCED,
         ):
-            self.assertFalse(any(source == terminal for source, _ in ATTEMPT_TRANSITIONS))
+            self.assertFalse(any(source == terminal for source, _ in expected_transitions))
 
 
 if __name__ == "__main__":

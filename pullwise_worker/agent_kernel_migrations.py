@@ -312,7 +312,20 @@ SLICE_2_CONTROL_STATE_STATEMENTS = (
 )
 
 
+GLOBAL_TASK_EVENT_IDEMPOTENCY_STATEMENTS = (
+    """
+    CREATE UNIQUE INDEX task_events_idempotency_key_unique
+        ON task_events(idempotency_key)
+    """,
+)
+
+
 MIGRATIONS = (
     Migration(1, "initial-shadow-store", INITIAL_STATEMENTS),
     Migration(2, "slice-2-control-state", SLICE_2_CONTROL_STATE_STATEMENTS),
+    Migration(
+        3,
+        "slice-2-global-event-idempotency",
+        GLOBAL_TASK_EVENT_IDEMPOTENCY_STATEMENTS,
+    ),
 )

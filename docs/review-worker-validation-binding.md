@@ -1,6 +1,6 @@
 # Review Worker Validation Binding Contract
 
-Status: implemented and verified on 2026-07-19.
+Status: synchronized with the current implementation on 2026-07-20.
 
 ## Goal
 
@@ -29,6 +29,13 @@ the main report. Unbacked, weak, disproven, rejected, false-positive, unrelated,
 or ambiguously matched content is demoted or rejected even when its report
 shape and location are otherwise valid.
 
+The main-report/validator relation is one-to-one at the QA boundary. A main
+finding must have exactly one accepted validator entry, one validator entry may
+not back multiple main findings, and every accepted validator entry must appear
+in the main report. Report repair enforces the no-reuse direction by demoting a
+second finding that resolves to an already-used entry; QA enforces both
+directions.
+
 ## Scope
 
 Affected project: `pullwise-worker`.
@@ -37,6 +44,7 @@ Primary files:
 
 - `pullwise_worker/review_worker_v1.py`
 - `tests/test_review_worker_v1.py`
+- `tests/test_result_truthfulness_regressions.py`
 - `AGENTS.md`
 
 This work does not change server protocol fields, the legacy top-level
@@ -57,44 +65,69 @@ Accepted validation status field aliases:
 - `validator_status`
 - `validation_status`
 - `classification`
+- `disposition`
 
-Rejected statuses include:
+Non-backing weak statuses are:
 
 - `weak`
+- `suppressed`
+- `unresolved`
+- `appendix`
+
+Non-backing disproven statuses are:
+
 - `disproven`
 - `rejected`
 - `false_positive`
-- empty or unknown values
+- `invalid`
+
+Empty or unknown statuses are also non-backing. Strict validation reports them
+as unsupported dispositions rather than silently treating them as confirmed.
 
 Finding id aliases:
 
 - `id`
 - `finding_id`
+- `finding_ids`
 - `cluster_id`
+- `source_cluster_id`
+- `candidate_id`
+- `canonical_finding_id`
 - `local_id`
 - `source_finding_id`
 - `source_finding_ids`
 
-`source_finding_ids` may be a scalar or a list. Empty values are ignored.
+Every ID alias is accepted as a scalar or collection; nested collection values
+are flattened by the shared collector. Empty values are ignored. The same
+alias set is applied to report findings and validator entries.
 
 ## Matching Strategy
 
-Prefer id matching. Collect all id aliases from the report finding and each
-validation entry. A non-empty intersection with an accepted validation entry is
-a successful binding.
+Prefer ID matching. Collect all ID aliases from the report finding and each
+accepted validation entry.
 
-Fallback matching is allowed only when the report finding has no usable id.
+- Exactly one accepted entry with a non-empty ID intersection is a successful
+  binding.
+- More than one ID match is ambiguous and fails binding; do not fall back.
+- Zero ID matches proceeds to the fallback key. This remains true when the
+  report and validator records both have usable IDs but those IDs do not
+  intersect, which covers model-local ID drift.
+
 Fallback key:
 
 `title + primary path + start_line`
 
 Fallback requirements:
 
-- Use fallback only when the report finding has no id aliases.
+- Use fallback when there is no ID match, whether the report has no usable ID
+  or has non-matching model-local IDs.
 - The validation entry must expose the same title, primary path, and start line.
 - The match must be unique across accepted validation entries.
 - Zero matches means unbacked.
 - Multiple matches means ambiguous and therefore unbacked.
+
+Titles are trimmed, lowercased, and whitespace-collapsed. Paths normalize
+backslashes to forward slashes and remove leading `./` segments.
 
 Primary path and line may be read from common shapes such as:
 
@@ -103,10 +136,14 @@ Primary path and line may be read from common shapes such as:
 - `path`
 - `file`
 - `primaryFile`
+- `primary_file`
 - `start_line`
 - `line`
 - `line_start`
 - `primaryLine`
+- `primary_line`
+- `startLine`
+- `lineStart`
 
 ## Report Repair Behavior
 
@@ -115,8 +152,14 @@ binding contract.
 
 For each normalized main finding:
 
-- If backed by accepted validation output, keep it in `findings`.
-- If unbacked, move it to `appendix_findings`.
+- If it resolves to one accepted, not-yet-used validator entry, keep it in
+  `findings`, mark that entry used, and copy the normalized accepted status to
+  `validator_status`.
+- If it is unbacked, ambiguous, or resolves to an entry already used by an
+  earlier main finding, move it to `appendix_findings`.
+
+Repair does not synthesize a report finding for an unmatched accepted validator
+entry. The later QA reverse-coverage check rejects that mismatch.
 
 Demoted findings must include:
 
@@ -140,17 +183,30 @@ If main findings are non-empty:
 - It must be a JSON object.
 - `schema_version` must be `validation-output/v1`.
 - `validated_findings` must be a list.
-- Every main finding must bind to an accepted validation entry.
+- Every main finding must bind to exactly one accepted validation entry.
+- No accepted validator entry may be reused by another main finding.
 
-If main findings are empty, empty or missing accepted validation findings must
-not fail QA by itself. A completed scan with no confirmed findings is a valid
-result and the markdown report must continue to say this is not proof that the
-repository has no defects.
+Whenever the validation artifact is structurally valid, every accepted
+validator entry must also be matched by a main report finding. This reverse
+check applies even when `report.agent.json.findings` is empty.
+
+An empty main report with a missing validation artifact or with a valid artifact
+whose accepted list is empty does not fail this binding check by itself. A
+completed scan with no accepted findings is a valid result, and the Markdown
+report must continue to say this is not proof that the repository has no
+defects.
 
 Stable QA errors:
 
 - `validated-findings.json is missing or invalid for non-empty main findings`
 - `finding[{index}] is not backed by confirmed/plausible validation`
+- `finding[{index}] reuses validation evidence already bound to another main finding`
+- `validated main finding {label} is missing from report.agent.json`
+
+For the reverse-coverage error, `{label}` is the entry's first usable stable ID
+according to the implementation's label order, or `validation[{index}]` when no
+usable ID exists. The existing confirmed/plausible error text remains stable
+even though `validated` is also an accepted status.
 
 ## Location Rules
 
