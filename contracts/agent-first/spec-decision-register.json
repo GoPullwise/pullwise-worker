@@ -2,21 +2,21 @@
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
   "active_decision_id": "D9",
-  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
+  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
     "start_marker": "<!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->",
     "end_marker": "<!-- END GENERATED AGENT-FIRST DECISION REGISTER -->"
   },
   "normative_units": [
-    {"id": "target-authority-scope", "decision_ids": ["D1", "D2"]},
-    {"id": "mvp-authority-scope", "decision_ids": ["D1", "D2"]},
-    {"id": "post-authority-scope", "decision_ids": ["D1", "D2"]},
-    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17"]},
-    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17"]},
-    {"id": "mvp-legacy-mapping", "decision_ids": ["D4", "D9", "D12", "D13", "D18", "D19", "D20"]},
-    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22"]},
-    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26"]}
+    {"id": "target-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
+    {"id": "mvp-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
+    {"id": "post-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
+    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27"]},
+    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27"]},
+    {"id": "mvp-legacy-mapping", "decision_ids": ["D4", "D9", "D12", "D13", "D18", "D19", "D20", "D27"]},
+    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27"]},
+    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27"]}
   ],
   "decisions": [
     {
@@ -414,6 +414,41 @@
         {"id": "complete_all_versions_now", "summary": "现在补齐 V1.1/V2.x/V3.0 的 schema/state/storage/wire/fixtures/rollout/DoD。", "rationale": "可维持完整实现设计标题，但本次规范范围显著扩大。", "consequences": ["S7 必须完成所有远期版本的实施级闭环"]}
       ],
       "recommended_option_id": "roadmap_separate_designs", "resolution": null, "supersedes": []
+    },
+    {
+      "id": "D27", "key": "agent-first-clean-break", "scope": "P0.4/P0.10/P0.11/P1.2", "title": "Agent-First 单协议 clean-break 边界",
+      "question": "Agent-First 重构是否跨 Worker、Server、Web 采用单一 current contract 并删除全部 legacy compatibility，还是保留有界的兼容迁移与双轨？",
+      "status": "resolved", "depends_on": ["D4"], "activation": null, "required_by_slice": "S3",
+      "effects": ["authority", "compatibility", "data_model", "external_behavior", "permission", "release_ownership", "state_semantics"],
+      "source_refs": ["conversation:user-directive:2026-07-20:all-legacy-compatibility-clean-break", "AGENTS.md#agent-first-clean-break-refactor-policy"],
+      "affected_units": ["target-authority-scope", "mvp-authority-scope", "post-authority-scope", "mvp-contract-pack", "mvp-state-semantics", "mvp-legacy-mapping", "mvp-executable-gates", "post-closure"],
+      "options": [
+        {
+          "id": "clean_break_no_legacy",
+          "summary": "Worker、Server、Web 协调切换到一套 current Agent-First contract；删除所有 legacy Adapter、旧协议/路由、旧数据形状、DTO alias、compat fixture、shadow、dual-read/write、fallback 与 downgrade 路径。",
+          "rationale": "项目处于内部重构阶段；单一 current model 可消除双权威、协议分叉和长期迁移债务。",
+          "consequences": [
+            "旧客户端、旧任务和旧持久化状态不获兼容保证；允许在受控环境 clean reset。",
+            "三仓必须协调切换，并以 current protocol 契约测试和 legacy-path absence gate 作为发布证据。",
+            "安全、权限、持久化、幂等和审计不变量仍须 fail closed。"
+          ]
+        },
+        {
+          "id": "bounded_legacy_coexistence",
+          "summary": "保留 strict legacy 协议，通过 Adapter、双读写、shadow、兼容 DTO 和分阶段 cutover 迁移。",
+          "rationale": "允许旧 Worker、Server、Web 滚动共存，但保留兼容分支和双权威收敛复杂度。",
+          "consequences": ["必须继续维护 legacy baseline、兼容矩阵、旧路径回滚和有期限的删除计划。"]
+        }
+      ],
+      "recommended_option_id": "clean_break_no_legacy",
+      "resolution": {
+        "kind": "option", "selected_option_id": "clean_break_no_legacy", "custom_text": null,
+        "decision_text": "确认选择 clean_break_no_legacy：Agent-First 重构只保留一套 current contract；不保留任何 legacy Adapter、shim、旧协议/路由、旧数据形状、DTO alias、双读写、shadow、fallback、protocol downgrade、compatibility mode、兼容性回滚路径，或仅为旧数据存在的 migration/backfill；门禁允许后协调切换 Worker、Server、Web，并删除旧 code、schema、routes、DTO、fixtures、tests、CI 与 docs。D4 的 legacy_v1 field-by-field ownership 决议由本决议显式 supersede；安全、权限、持久化、幂等、审计与正确性约束继续 fail closed。",
+        "authority": "user", "decided_at": "2026-07-20",
+        "evidence_refs": ["conversation:user-directive:2026-07-20:all-legacy-compatibility-clean-break"],
+        "resolution_sha256": "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e"
+      },
+      "supersedes": ["D4"]
     }
   ]
 }

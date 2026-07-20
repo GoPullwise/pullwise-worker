@@ -86,7 +86,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertEqual([], report["failures"])
         self.assertEqual("D9", report["active_decision_id"])
         self.assertEqual(18, report["pending_decision_count"])
-        self.assertEqual(7, report["resolved_decision_count"])
+        self.assertEqual(8, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -119,6 +119,10 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
                 "task_active_attempt_fenced",
                 "e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a",
             ),
+            "D27": (
+                "clean_break_no_legacy",
+                "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e",
+            ),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():
@@ -128,11 +132,14 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
                 self.assertEqual(expected[0], resolution["selected_option_id"])
                 self.assertEqual("user", resolution["authority"])
                 self.assertEqual(expected[1], resolution["resolution_sha256"])
-        self.assertEqual(list(QUESTION_ORDER), register["question_order"])
+        expected_order = list(QUESTION_ORDER)
+        expected_order.insert(8, "D27")
+        self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
-            [item["id"] for item in REQUIRED_CATALOG],
+            [*[item["id"] for item in REQUIRED_CATALOG], "D27"],
             [item["id"] for item in register["decisions"]],
         )
+        self.assertEqual(["D4"], decisions["D27"]["supersedes"])
 
     def test_required_catalog_and_single_slice_ordinal_are_frozen(self) -> None:
         register = load_register(REGISTER_PATH)
