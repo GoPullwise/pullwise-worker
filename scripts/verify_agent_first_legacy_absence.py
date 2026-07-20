@@ -15,6 +15,11 @@ from scripts.agent_first_contract_files import (
     repository_roots,
     surface_path,
 )
+from scripts.agent_first_legacy_inventory import (
+    InventoryError,
+    load_inventory,
+    validate_inventory,
+)
 from scripts.agent_first_decision_core import (
     DecisionRegisterFormatError,
     selected_option_id,
@@ -26,7 +31,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INVENTORY = (
     ROOT / "contracts" / "agent-first" / "legacy-removal-inventory.json"
 )
-INVENTORY_SCHEMA_ID = "pullwise-agent-first-legacy-removal-inventory/v1"
 REPORT_SCHEMA_ID = "pullwise-agent-first-legacy-absence-report/v1"
 TEXT_SUFFIXES = {
     ".css",
@@ -48,23 +52,10 @@ TEXT_SUFFIXES = {
 }
 
 
-class InventoryError(ValueError):
-    """The legacy-removal inventory is malformed or contradicts D27."""
-
 
 class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise InventoryError("invalid_cli_arguments")
-
-
-def _load_inventory(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise InventoryError("inventory_unreadable") from exc
-    if not isinstance(payload, dict) or payload.get("schema_id") != INVENTORY_SCHEMA_ID:
-        raise InventoryError("inventory_schema_invalid")
-    return payload
 
 
 def _validate_d27(
@@ -128,10 +119,44 @@ def _worktree_paths(repo_root: Path) -> list[str]:
         raise BaselineEnvironmentError("worktree_path_not_utf8") from exc
     return sorted(set(decoded.split("\0")) - {""})
 
+def _without_excluded_sections(
+    text: str, exclusions: list[dict[str, Any]]
+) -> str:
+    spans: list[tuple[int, int]] = []
+    for item in exclusions:
+        start_marker = item["start_marker"]
+        end_marker = item["end_marker"]
+        if (
+            not isinstance(start_marker, str)
+            or not start_marker
+            or not isinstance(end_marker, str)
+            or not end_marker
+            or start_marker == end_marker
+            or text.count(start_marker) != 1
+            or text.count(end_marker) != 1
+        ):
+            raise InventoryError("evidence_exclusion_markers_invalid")
+        start = text.index(start_marker)
+        end = text.index(end_marker) + len(end_marker)
+        if start >= end:
+            raise InventoryError("evidence_exclusion_markers_invalid")
+        spans.append((start, end))
+    spans.sort()
+    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+        raise InventoryError("evidence_exclusion_spans_overlap")
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(text[cursor:start])
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
 
 def verify_legacy_absence(
     inventory: dict[str, Any], workspace_root: Path, *, require_absent: bool = False
 ) -> dict[str, Any]:
+    validate_inventory(inventory)
     roots = repository_roots(workspace_root)
     d27 = _validate_d27(inventory, roots)
     signatures = {
@@ -180,6 +205,15 @@ def verify_legacy_absence(
             if Path(relative).suffix.lower() not in TEXT_SUFFIXES:
                 continue
             text = canonical_text(path)
+            text = _without_excluded_sections(
+                text,
+                [
+                    item
+                    for item in inventory.get("evidence_exclusions", [])
+                    if (item["repo"], item["path"]) == (repo_id, relative)
+                    and (repo_id, relative) not in whole_exclusions
+                ],
+            )
             for signature_id, literal in signatures.items():
                 key = (repo_id, relative, signature_id)
                 if literal in text and key not in registered:
@@ -198,7 +232,6 @@ def verify_legacy_absence(
         if unexpected
         else "absent" if legacy_absent else "legacy_present"
     )
-    return {
     failures: list[dict[str, str]] = [
         {"code": "unexpected_legacy_surface", **item} for item in unexpected
     ]
@@ -210,6 +243,7 @@ def verify_legacy_absence(
             }
             for item in reports if item["status"] == "present"
         )
+    return {
         "schema_id": REPORT_SCHEMA_ID,
         "inventory_id": inventory["inventory_id"],
         "d27": d27,
@@ -238,10 +272,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = JsonArgumentParser(description=__doc__)
     parser.add_argument("--inventory", type=Path, default=DEFAULT_INVENTORY)
     parser.add_argument("--workspace-root", type=Path, required=True)
+    parser.add_argument("--require-absent", action="store_true")
     try:
         args = parser.parse_args(argv)
-    parser.add_argument("--require-absent", action="store_true")
-        inventory = _load_inventory(args.inventory)
+        inventory = load_inventory(args.inventory)
         report = verify_legacy_absence(
             inventory,
             args.workspace_root,
@@ -249,7 +283,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if not report["failures"] else 1
-    except (InventoryError, DecisionRegisterFormatError, KeyError, TypeError, ValueError):
+    except (
+        InventoryError,
+        DecisionRegisterFormatError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
         print(json.dumps(_error_report("inventory_invalid"), indent=2, sort_keys=True))
         return 2
     except (BaselineEnvironmentError, OSError, UnicodeError):

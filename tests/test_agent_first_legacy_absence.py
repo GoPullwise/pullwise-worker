@@ -176,6 +176,62 @@ class AgentFirstLegacyAbsenceTest(unittest.TestCase):
             report["failures"],
         )
 
+    def test_inventory_rejects_a_parent_traversal_surface_path(self) -> None:
+        payload = self._inventory()
+        payload["surfaces"][0]["path"] = "../legacy.py"
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("indeterminate", report["status"])
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_bounded_d27_evidence_is_excluded_without_hiding_the_file(self) -> None:
+        marker = "review-worker-" + "protocol/v1"
+        start = "<!-- BEGIN D27 EVIDENCE -->"
+        end = "<!-- END D27 EVIDENCE -->"
+        (self.roots["worker"] / "evidence.md").write_text(
+            f"before\n{start}\n{marker}\n{end}\nafter\n",
+            encoding="utf-8",
+        )
+        payload = self._inventory()
+        payload["evidence_exclusions"].insert(0,
+            {
+                "id": "bounded-d27-evidence",
+                "repo": "worker",
+                "path": "evidence.md",
+                "reason": "d27_evidence",
+                "start_marker": start,
+                "end_marker": end,
+            }
+        )
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("absent", report["status"])
+        self.assertEqual([], report["unexpected_surfaces"])
+
+        (self.roots["worker"] / "evidence.md").write_text(
+            f"{marker}\n{start}\n{marker}\n{end}\n", encoding="utf-8"
+        )
+        exit_code, report = self._invoke()
+        self.assertEqual(1, exit_code)
+        self.assertEqual("evidence.md", report["unexpected_surfaces"][0]["path"])
+
+    def test_inventory_rejects_unknown_fields(self) -> None:
+        payload = self._inventory()
+        payload["compatibility_mode"] = True
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke()
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("indeterminate", report["status"])
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
 
 if __name__ == "__main__":
     unittest.main()
