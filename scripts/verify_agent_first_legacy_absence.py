@@ -17,18 +17,20 @@ if str(ROOT) not in sys.path:
 
 from scripts.agent_first_contract_files import (
     BaselineEnvironmentError,
-    canonical_text,
     repository_roots,
     read_surface,
     surface_path,
 )
 from scripts.agent_first_legacy_inventory import (
     InventoryError,
-    load_inventory,
+    parse_inventory,
     reject_duplicate_keys,
     validate_inventory,
 )
-from scripts.agent_first_legacy_catalog import EXPECTED_CATALOG_SHA256
+from scripts.agent_first_legacy_catalog import (
+    EXPECTED_CATALOG_SHA256,
+    EXPECTED_INVENTORY_ID,
+)
 from scripts.agent_first_legacy_observation import observe_legacy_surfaces
 from scripts.agent_first_decision_core import (
     DecisionRegisterFormatError,
@@ -49,8 +51,11 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
 
 def _validate_d27(
-    inventory: dict[str, Any], roots: dict[str, Path]
-) -> dict[str, str]:
+    inventory: dict[str, Any],
+    roots: dict[str, Path],
+    *,
+    register_raw: bytes | None = None,
+) -> tuple[dict[str, str], bytes]:
     binding = inventory.get("d27")
     if not isinstance(binding, dict):
         raise InventoryError("d27_binding_invalid")
@@ -60,9 +65,15 @@ def _validate_d27(
     path = surface_path(roots["worker"], register_path)
     if path is None:
         raise InventoryError("d27_register_missing")
+    raw = read_surface(path) if register_raw is None else register_raw
+    try:
+        register_text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BaselineEnvironmentError("d27_register_not_utf8") from exc
     register = validate_register(
         json.loads(
-            canonical_text(path), object_pairs_hook=reject_duplicate_keys
+            register_text.replace("\r\n", "\n").replace("\r", "\n"),
+            object_pairs_hook=reject_duplicate_keys,
         )
     )
     decision = next(
@@ -79,19 +90,32 @@ def _validate_d27(
         != binding.get("resolution_sha256")
     ):
         raise InventoryError("d27_binding_mismatch")
-    return {
-        "decision_id": decision["id"],
-        "selected_option_id": decision["resolution"]["selected_option_id"],
-        "resolution_sha256": decision["resolution"]["resolution_sha256"],
-    }
+    return (
+        {
+            "decision_id": decision["id"],
+            "selected_option_id": decision["resolution"]["selected_option_id"],
+            "resolution_sha256": decision["resolution"]["resolution_sha256"],
+        },
+        raw,
+    )
 
 
 def verify_legacy_absence(
-    inventory: dict[str, Any], workspace_root: Path, *, require_absent: bool = False
+    inventory: dict[str, Any],
+    workspace_root: Path,
+    *,
+    require_absent: bool = False,
+    inventory_raw: bytes | None = None,
 ) -> dict[str, Any]:
     validate_inventory(inventory)
     roots = repository_roots(workspace_root)
-    d27 = _validate_d27(inventory, roots)
+    control_snapshot: dict[tuple[str, str], bytes] = {}
+    if inventory_raw is not None:
+        control_snapshot[("worker", INVENTORY_RELATIVE_PATH)] = inventory_raw
+    d27, register_raw = _validate_d27(inventory, roots)
+    control_snapshot[
+        ("worker", inventory["d27"]["register_path"])
+    ] = register_raw
     signatures = {
         item["id"]: item["literal"] for item in inventory["signatures"]
     }
@@ -100,6 +124,7 @@ def verify_legacy_absence(
         roots,
         signatures,
         read_file=read_surface,
+        initial_snapshot=control_snapshot,
     )
     legacy_absent = not unexpected and all(
         item["status"] == "absent" for item in reports
@@ -159,14 +184,12 @@ def _canonical_inventory_path(provided: Path, workspace_root: Path) -> Path:
 
 
 def _require_catalog_ceiling(
-    inventory: dict[str, Any], inventory_path: Path
+    inventory: dict[str, Any], inventory_path: Path | None = None
 ) -> None:
-    provided = os.path.normcase(os.path.abspath(os.fspath(inventory_path)))
-    expected = os.path.normcase(os.path.abspath(os.fspath(DEFAULT_INVENTORY)))
-    if (
-        provided == expected
-        and inventory.get("catalog_sha256") != EXPECTED_CATALOG_SHA256
-    ):
+    del inventory_path
+    if inventory.get("inventory_id") != EXPECTED_INVENTORY_ID:
+        raise InventoryError("inventory_id:production_mismatch")
+    if inventory.get("catalog_sha256") != EXPECTED_CATALOG_SHA256:
         raise InventoryError("catalog_sha256:ceiling_mismatch")
 
 
@@ -178,12 +201,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
         inventory_path = _canonical_inventory_path(args.inventory, args.workspace_root)
-        inventory = load_inventory(inventory_path)
+        inventory_raw = read_surface(inventory_path)
+        inventory = parse_inventory(inventory_raw)
         _require_catalog_ceiling(inventory, inventory_path)
         report = verify_legacy_absence(
             inventory,
             args.workspace_root,
             require_absent=args.require_absent,
+            inventory_raw=inventory_raw,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if not report["failures"] else 1

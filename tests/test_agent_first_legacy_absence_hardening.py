@@ -236,7 +236,17 @@ class AgentFirstLegacyAbsenceHardeningTest(LegacyAbsenceTestCase):
         payload["surfaces"].append(added)
         self._write_inventory(payload)
 
-        exit_code, report = self._invoke()
+        exit_code, report = self._invoke(production_catalog=True)
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("inventory_invalid", report["error_kind"])
+
+    def test_production_inventory_id_applies_in_a_copied_workspace(self) -> None:
+        payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
+        payload["inventory_id"] = "forged-production-inventory"
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke(production_catalog=True)
 
         self.assertEqual(2, exit_code)
         self.assertEqual("inventory_invalid", report["error_kind"])

@@ -281,10 +281,10 @@ def validate_inventory(value: object) -> dict[str, Any]:
     return root
 
 
-def load_inventory(path: Path) -> dict[str, Any]:
+def parse_inventory(raw: bytes) -> dict[str, Any]:
     try:
         value = json.loads(
-            read_surface(path).decode("utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=lambda item: (_ for _ in ()).throw(
                 InventoryError(f"non_finite_number:{item}")
@@ -292,7 +292,14 @@ def load_inventory(path: Path) -> dict[str, Any]:
         )
     except InventoryError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise InventoryError("inventory:unreadable") from exc
     return validate_inventory(value)
 
+
+def load_inventory(path: Path) -> dict[str, Any]:
+    try:
+        raw = read_surface(path)
+    except OSError as exc:
+        raise InventoryError("inventory:unreadable") from exc
+    return parse_inventory(raw)

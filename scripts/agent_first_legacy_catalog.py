@@ -1,5 +1,6 @@
 """Immutable ceiling catalog for the D27 legacy-absence ratchet."""
 
+EXPECTED_INVENTORY_ID = "agent-first-clean-break-d27-legacy-removal-2026-07-20"
 EXPECTED_D27 = {
     "register_path": "contracts/agent-first/spec-decision-register.json",
     "decision_id": "D27",

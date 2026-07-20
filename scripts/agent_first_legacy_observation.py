@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from scripts.agent_first_contract_files import (
     BaselineEnvironmentError,
@@ -157,15 +157,22 @@ def observe_legacy_surfaces(
     *,
     read_file: ReadSurface = read_surface,
     resolve_file: ResolveSurface = surface_path,
+    initial_snapshot: Mapping[SurfaceKey, bytes] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return explicit/baseline reports and ratchet violations from one snapshot."""
 
-    baseline_surfaces, snapshot = _load_frozen_baseline(
+    control_snapshot = dict(initial_snapshot or {})
+    baseline_surfaces, baseline_snapshot = _load_frozen_baseline(
         inventory,
         roots,
         read_file=read_file,
         resolve_file=resolve_file,
     )
+    snapshot: dict[SurfaceKey, bytes | None] = dict(control_snapshot)
+    for key, raw in baseline_snapshot.items():
+        if key in snapshot and snapshot[key] != raw:
+            raise BaselineEnvironmentError("observation_snapshot_conflict")
+        snapshot[key] = raw
     worktree_paths = {
         repo_id: _worktree_paths(repo_root)
         for repo_id, repo_root in roots.items()
@@ -301,6 +308,10 @@ def observe_legacy_surfaces(
         for repo_id, initial_paths in worktree_paths.items()
     ):
         raise BaselineEnvironmentError("worktree_catalog_changed")
+    for (repo_id, relative), initial_raw in control_snapshot.items():
+        path = resolve_file(roots[repo_id], relative)
+        if path is None or read_file(path) != initial_raw:
+            raise BaselineEnvironmentError("control_surface_changed")
 
     report_ids = [item["id"] for item in reports]
     if len(report_ids) != len(set(report_ids)):

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts import verify_agent_first_legacy_absence as absence
 
@@ -93,6 +94,8 @@ class LegacyAbsenceTestCase(unittest.TestCase):
         shutil.copyfile(REGISTER, contract_root / REGISTER.name)
         shutil.copyfile(BASELINE, contract_root / BASELINE.name)
         self.inventory_path = contract_root / "legacy-removal-inventory.json"
+        self.expected_inventory_id = "synthetic-legacy-removal"
+        self.expected_catalog_sha256 = ""
         git_exclude = self.roots["worker"] / ".git" / "info" / "exclude"
         git_exclude.write_text(
             "contracts/agent-first/legacy-v1-contract-baseline.json\n"
@@ -156,21 +159,40 @@ class LegacyAbsenceTestCase(unittest.TestCase):
 
     def _write_inventory(self, payload: dict[str, object]) -> None:
         payload["catalog_sha256"] = catalog_sha256(payload)
+        self.expected_inventory_id = str(payload["inventory_id"])
+        self.expected_catalog_sha256 = str(payload["catalog_sha256"])
         self.inventory_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
 
-    def _invoke(self, *extra: str) -> tuple[int, dict[str, object]]:
+    def _invoke(
+        self, *extra: str, production_catalog: bool = False
+    ) -> tuple[int, dict[str, object]]:
         output = io.StringIO()
+        argv = [
+            "--inventory",
+            str(self.inventory_path),
+            "--workspace-root",
+            str(self.workspace),
+            *extra,
+        ]
         with redirect_stdout(output):
-            exit_code = absence.main(
-                [
-                    "--inventory",
-                    str(self.inventory_path),
-                    "--workspace-root",
-                    str(self.workspace),
-                    *extra,
-                ]
-            )
+            if production_catalog:
+                exit_code = absence.main(argv)
+            else:
+                with (
+                    patch.object(
+                        absence,
+                        "EXPECTED_INVENTORY_ID",
+                        self.expected_inventory_id,
+                        create=True,
+                    ),
+                    patch.object(
+                        absence,
+                        "EXPECTED_CATALOG_SHA256",
+                        self.expected_catalog_sha256,
+                    ),
+                ):
+                    exit_code = absence.main(argv)
         return exit_code, json.loads(output.getvalue())
