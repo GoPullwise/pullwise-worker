@@ -19,6 +19,7 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 | `D6` | `P0.6` | Attempt claim 与 Owner 创建事务 | `resolved` | `active` | `S4` | D5 | `single_claim_owner_transaction` |
 | `D7` | `P0.6` | monotonic 时间持久化形式 | `resolved` | `active` | `S4` | — | `persist_elapsed_consumption` |
 | `D8` | `P0.6/P0.7` | lease loss 与 same-run resume 状态边界 | `resolved` | `active` | `S4` | D5 | `task_active_attempt_fenced` |
+| `D27` | `P0.4/P0.10/P0.11/P1.2` | Agent-First 单协议 clean-break 边界 | `resolved` | `active` | `S3` | D4 | `clean_break_no_legacy` |
 | `D9` | `P0.7` | 内部结果与 legacy 发布的终态权威 | `pending` | `active` | `S4` | D8 | `internal_result_cas_authoritative` |
 | `D10` | `P0.7` | 并发终态事实优先级模型 | `pending` | `active` | `S4` | D9 | `global_safety_first_matrix` |
 | `D11` | `P0.7` | PARTIAL 安全交付证据表示 | `pending` | `active` | `S3` | D10 | `partial_delivery_manifest` |
@@ -205,6 +206,27 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 **Effects:** `state_semantics`, `compatibility`
 
 **Sources:** `handoff:P0.6/P0.7`, `handoff:P0.6`, `handoff:P0.7`, `handoff:P1.4`
+
+### D27 — Agent-First 单协议 clean-break 边界
+
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
+
+**Question:** Agent-First 重构是否跨 Worker、Server、Web 采用单一 current contract 并删除全部 legacy compatibility，还是保留有界的兼容迁移与双轨？
+
+**Options:**
+
+- `clean_break_no_legacy` — selected by resolution: Worker、Server、Web 协调切换到一套 current Agent-First contract；删除所有 legacy Adapter、旧协议/路由、旧数据形状、DTO alias、compat fixture、shadow、dual-read/write、fallback 与 downgrade 路径。 项目处于内部重构阶段；单一 current model 可消除双权威、协议分叉和长期迁移债务。 Consequences: 旧客户端、旧任务和旧持久化状态不获兼容保证；允许在受控环境 clean reset。; 三仓必须协调切换，并以 current protocol 契约测试和 legacy-path absence gate 作为发布证据。; 安全、权限、持久化、幂等和审计不变量仍须 fail closed。
+- `bounded_legacy_coexistence`: 保留 strict legacy 协议，通过 Adapter、双读写、shadow、兼容 DTO 和分阶段 cutover 迁移。 允许旧 Worker、Server、Web 滚动共存，但保留兼容分支和双权威收敛复杂度。 Consequences: 必须继续维护 legacy baseline、兼容矩阵、旧路径回滚和有期限的删除计划。
+
+**Resolution:** `clean_break_no_legacy` (`option`). 确认选择 clean_break_no_legacy：Agent-First 重构只保留一套 current contract；不保留任何 legacy Adapter、shim、旧协议/路由、旧数据形状、DTO alias、双读写、shadow、fallback、protocol downgrade、compatibility mode、兼容性回滚路径，或仅为旧数据存在的 migration/backfill；门禁允许后协调切换 Worker、Server、Web，并删除旧 code、schema、routes、DTO、fixtures、tests、CI 与 docs。D4 的 legacy_v1 field-by-field ownership 决议由本决议显式 supersede；安全、权限、持久化、幂等、审计与正确性约束继续 fail closed。
+
+**Authority/evidence:** `user` on `2026-07-20`; `conversation:user-directive:2026-07-20:all-legacy-compatibility-clean-break`; digest `f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e`.
+
+**Supersedes:** D4
+
+**Effects:** `authority`, `compatibility`, `data_model`, `external_behavior`, `permission`, `release_ownership`, `state_semantics`
+
+**Sources:** `conversation:user-directive:2026-07-20:all-legacy-compatibility-clean-break`, `AGENTS.md#agent-first-clean-break-refactor-policy`
 
 ### D9 — 内部结果与 legacy 发布的终态权威
 

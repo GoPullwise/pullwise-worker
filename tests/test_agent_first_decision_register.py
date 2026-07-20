@@ -68,6 +68,11 @@ def _resolve(
 
 def _pending_d1_register() -> dict[str, object]:
     changed = copy.deepcopy(load_register(REGISTER_PATH))
+    required_ids = {item["id"] for item in REQUIRED_CATALOG}
+    changed["decisions"] = changed["decisions"][: len(REQUIRED_CATALOG)]
+    changed["question_order"] = list(QUESTION_ORDER)
+    for unit in changed["normative_units"]:
+        unit["decision_ids"] = [item for item in unit["decision_ids"] if item in required_ids]
     for decision in changed["decisions"]:
         decision["status"] = "pending"
         decision["resolution"] = None
@@ -144,7 +149,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
     def test_required_catalog_and_single_slice_ordinal_are_frozen(self) -> None:
         register = load_register(REGISTER_PATH)
         removed = copy.deepcopy(register)
-        removed["decisions"].pop()
+        removed["decisions"] = removed["decisions"][: len(REQUIRED_CATALOG) - 1]
         with self.assertRaisesRegex(DecisionRegisterFormatError, "required_catalog"):
             validate_register(removed)
 

@@ -8,6 +8,8 @@ from pathlib import Path
 from scripts.agent_first_decision_catalog import (
     NORMATIVE_PATHS,
     NORMATIVE_UNIT_CATALOG,
+    QUESTION_ORDER,
+    REQUIRED_CATALOG,
 )
 from scripts.agent_first_decision_core import decision_applicability
 from scripts.agent_first_decision_gate import (
@@ -83,6 +85,11 @@ def _pending_d1() -> dict[str, object]:
 
 def _all_pending_register() -> dict[str, object]:
     changed = copy.deepcopy(load_register(REGISTER_PATH))
+    required_ids = {item["id"] for item in REQUIRED_CATALOG}
+    changed["decisions"] = changed["decisions"][: len(REQUIRED_CATALOG)]
+    changed["question_order"] = list(QUESTION_ORDER)
+    for unit in changed["normative_units"]:
+        unit["decision_ids"] = [item for item in unit["decision_ids"] if item in required_ids]
     for decision in changed["decisions"]:
         decision["status"] = "pending"
         decision["resolution"] = None

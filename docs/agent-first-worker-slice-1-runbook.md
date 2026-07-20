@@ -92,7 +92,7 @@ D7 已由用户选择 `persist_elapsed_consumption`，resolution digest 为
 `5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea`；
 D8 已由用户选择 `task_active_attempt_fenced`，resolution digest 为
 `e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a`。
-当前 register 有 18 个 pending、7 个 resolved，D2 inactive，唯一 active decision 为 D9；
+当前 register 有 18 个 pending、8 个 resolved（D1、D3-D8、D27），D2 inactive，唯一 active decision 为 D9；
 S2 gate 已通过，S3 blockers 保持 D11、D15、D16、D17，S4 blockers 为 D9–D17。
 后续仍须按各 Slice 的 decision gate 执行，不得以当前代码或推荐项代替尚未作出的选择。
 
@@ -220,7 +220,7 @@ decision check 的 pending/blocked 是规范状态证据，不应伪装成测试
 
 全部新增手写生产/测试文件不超过 400 行；没有 401–600 行代码说明项，也没有超过
 600 行的新增代码文件。canonical
-`contracts/agent-first/spec-decision-register.json` 以 419 行采用 AGENTS 已登记的
+`contracts/agent-first/spec-decision-register.json` 以 454 行采用 AGENTS 已登记的
 atomic machine-registry exception；其 human view 沿用已登记的 generated-file
 exception，没有新增其他 generated/third-party/atomic-registry 例外。S1 未触及任何
 超过 600 行的遗留生产或测试模块，因此 legacy baseline、职责和 extraction seam 无变化。

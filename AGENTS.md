@@ -206,7 +206,7 @@ include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
 `contracts/agent-first/spec-decision-register.json` is an atomic
-machine-registry exception at 419 physical lines, owned by the Worker
+machine-registry exception at 454 physical lines, owned by the Worker
 specification owner. It stays atomic because one ordered frozen
 question/definition/resolution packet enforces question order behind one
 structural-validation and immutable-history boundary. The considered split is

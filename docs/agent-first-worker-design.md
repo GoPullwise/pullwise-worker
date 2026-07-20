@@ -2,11 +2,21 @@
 
 > 状态：Proposed（目标态架构）  
 > 日期：2026-07-16  
-> 范围：面向任意软件工程任务的 Worker；本文不以当前 Worker 实现为设计起点。为避免牵连产品层，另定义与现有 Pullwise Server/Web 契约的增量兼容边界。
+> 范围：面向任意软件工程任务的 Worker；本文不以当前 Worker 实现为设计起点。Agent-First 切换在 Worker、Server、Web 间采用协调 clean break，不保留现有产品契约兼容层。
 
 <!-- BEGIN AGENT-FIRST DECISION REFS: TARGET_AUTHORITY_SCOPE -->
 <!-- D1@sha256:ab117e7c86472b7ce57bf2433978df0efe1299353ad747b7eabbff723fec469a -->
+<!-- D27@sha256:f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e -->
 <!-- END AGENT-FIRST DECISION REFS: TARGET_AUTHORITY_SCOPE -->
+
+## D27 clean-break override（Normative）
+
+D27 是本文跨章节的高优先级约束：目标态只允许一套 current Agent-First
+contract。后文凡要求 Pullwise Compatibility Adapter、旧协议/路由、DTO alias、
+双读写、shadow、fallback、protocol downgrade、旧数据 migration/backfill 或
+old/new 共存矩阵的内容，均为待删除的历史设计清单，不是实现目标或发布回滚路径。
+协调切换仍必须保持安全、权限、租约、fencing、持久化、幂等、审计和正确性
+不变量；尚未 resolved 的决策继续阻断相应实现，不能由 clean break 推断答案。
 
 ## 0. 结论先行
 
@@ -183,7 +193,7 @@ flowchart TB
 
 证据面保存不可变事实：输入 revision、最终 diff、命令、退出码、完整日志、截图、HTTP transcript、测试报告、环境指纹、Verifier 结论和内容摘要。自然语言总结只是一个产物，不是事实源或控制状态。
 
-### 3.5 Pullwise Compatibility Adapter
+### 3.5 Pullwise Compatibility Adapter（D27 已退役：仅删除清单）
 
 该层只做版本协商、字段映射、状态投影和传输，不做工程语义判断。通用内核只认识 Task、Attempt、Event、Artifact 和 TaskResult；Adapter 才认识 Pullwise 的 scan、job、reviewRun、现有进度事件和 artifact API。关闭或替换该 Adapter，不应改变 Agent 执行、证据门禁、恢复或安全模型。第 13 节给出完整兼容契约。
 
@@ -1047,7 +1057,7 @@ Agent 只保留当前决策所需上下文：
 
 ---
 
-## 13. Debug Bundle 与 Server/Web 增量兼容
+## 13. Debug Bundle 与 Server/Web 增量兼容（D27 已退役：仅删除清单）
 
 目标态协议不应迫使 Pullwise Server 变成 Agent 工作流引擎，也不应迫使 Web 解析 Agent 日志。做法是把通用 Worker 契约和产品兼容投影分开：内核保持新的 Task/Attempt/TaskResult 模型，Compatibility Adapter 继续承载现有 Pullwise 的 lease、event、artifact、result 与 scan detail 契约。
 
@@ -1077,7 +1087,7 @@ Agent 只保留当前决策所需上下文：
 
 当前 `repo_review.full_scan` Compatibility Adapter 只承载 Server 授权的只读 scan；不能把通用写代码、安装依赖或外部 mutation 偷渡进现有 scan API。将来写型工程任务需要独立的产品 task type、审批和 Effect Gateway capability，但仍可复用同一通用 Worker 内核。
 
-### 13.2 版本化兼容 envelope
+### 13.2 版本化兼容 envelope（D27 已退役：仅删除清单）
 
 #### 13.2.1 Capability 协商 wire contract
 
