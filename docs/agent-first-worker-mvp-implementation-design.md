@@ -31,7 +31,7 @@
 |---|---|---|
 | S0 | 完成 | `worker-slice-0-baseline.json`、当前代码地图、legacy fixture baseline 均可复算且 compatible |
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
-| S2 | 完成 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2、legacy one-slot shadow bridge |
+| S2 | 完成 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge |
 | S3-S8 | 未开始 | 机器 decision register 当前为 `valid_pending`；只能询问 `active_decision_id=D6`，S3 gate 仍由 D11/D15/D16/D17 阻断 |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |

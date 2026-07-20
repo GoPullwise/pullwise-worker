@@ -182,13 +182,15 @@ non-regular files, unsupported schema keywords, and unresolved references.
   never repair either silently. A verified read must open with `O_NOFOLLOW` and
   return bytes from the same descriptor whose `fstat`, size, and digest passed.
   During a no-clobber race, an observed two-link staging transition may already
-  have converged to one link; retry full verification, but never accept more.
+  have converged to one link; retry full verification under a bounded monotonic
+  deadline, but never accept more than two links or commit before convergence.
 - Slice 1 persistence is shadow-only. It must not publish a terminal result,
   replace the legacy v1 authority, or expose an Agent Kernel task runner before
   the applicable decision and later-slice gates pass.
-- Run CAS orphan collection only while the Worker is idle and only after the
-  configured age threshold. A database row without durable bytes remains an
-  error; a durable unbound object may be collected after the threshold.
+- Run CAS orphan collection only while the Worker is idle and only with a
+  positive integer age threshold. Verify every database-indexed object before
+  deleting staging files or objects: a database row without durable bytes
+  remains an error; a durable unbound object may be collected after the threshold.
 - The design names `transport-receipt/v1` and
   `transport-abandonment-record/v1` without defining their field contracts.
   Record this as `SPEC_GAP`; do not invent or register either schema until its
@@ -198,6 +200,9 @@ non-regular files, unsupported schema keywords, and unresolved references.
   registry from outside the source tree. The smoke check must also validate the
   installed schema/fixture inventory and a SQLite/CAS round trip; inspecting a
   wheel archive alone is not sufficient evidence that runtime discovery works.
+  Keep `MANIFEST.in`, `setup.py` data files, and `pyproject.toml` synchronized:
+  Ubuntu 22.04 setuptools 59.6 does not consume the current pyproject data-file
+  declaration on the supported fallback build path.
 
 ## Agent Kernel Slice 2 Control State
 
@@ -209,9 +214,11 @@ fail with `TASK_ALREADY_TERMINAL`.
 - Task control events use one `BEGIN IMMEDIATE` transaction for version CAS,
   Attempt action, terminal publication row, and append-only event. Exact
   idempotency retries return the original event version; a reused key with any
-  other task/type/payload fails `IDEMPOTENCY_CONFLICT`. A FINALIZING
-  terminalization fact may append at the current version; it advances the
-  version only when its authoritative outcome selection changes.
+  other task/type/payload fails `IDEMPOTENCY_CONFLICT`; SQLite also enforces the
+  event idempotency key globally. Task acceptance idempotency binds `scan_id`,
+  and owner-incarnation idempotency binds the event timestamp. A newly accepted
+  FINALIZING terminalization fact always advances exactly once; only the
+  selected reason/outcome fields depend on `terminal_outcome_changed`.
 - D5 resolves `task_version` to one increment per newly applied Task control
   event transaction. Every such transaction must advance exactly once even
   when it changes several fields or records a new FINALIZING terminalization
@@ -231,11 +238,15 @@ fail with `TASK_ALREADY_TERMINAL`.
   `PULLWISE_AGENT_KERNEL_SHADOW_ENABLED`; disabling it constructs the unchanged
   legacy worker. It must never create a local queue/prefetch slot, publish a
   second result, or treat a stale outbox as pending after an exact bound success
-  receipt has won.
+  receipt has won. An ACTIVE observation freezes the complete
+  job/run/lease/attempt identity, and persisted-run recovery must immediately
+  refresh the shadow projection from the recovered marker/outbox.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must
-  leave a valid v1 database that cleanly upgrades once on restart.
+  leave a valid v1 database that cleanly upgrades once on restart. Migration 3
+  adds the global task-event idempotency index without changing migrations 1/2;
+  duplicate v2 data or a commit crash must fail closed and leave v2 intact.
 
 ## Agent-First MVP Capability Boundary
 

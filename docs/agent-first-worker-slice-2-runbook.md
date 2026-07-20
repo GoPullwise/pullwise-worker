@@ -1,12 +1,12 @@
 # Agent-First Worker Slice 2 运行与完成证据
 
-日期：2026-07-18
+日期：2026-07-20
 
 ## 当前结论
 
 Slice 2 已实现 Task/Attempt/Supervisor 的 typed shadow foundation：完整状态矩阵、
 SQLite version CAS、幂等事件、native/owner epoch、actor fencing、单槽 legacy 投影、
-取消/发布竞态和 v1→v2 crash-safe migration 均有自动测试。它仍不接管 legacy v1
+取消/发布竞态和 v1→v3 crash-safe migration 均有自动测试。它仍不接管 legacy v1
 terminal publisher，不创建第二个本地队列，也不运行 Agent Kernel Task。
 
 D1 已由用户选择 `pullwise_full_scan`，resolution digest 为
@@ -32,7 +32,8 @@ decision 是 D6。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把
 - `task.accepted` 是唯一无 prior Task 的 transition；`attempt.claimed` 原子产生
   `native_epoch+1`、新 current Attempt 和 `LEASED` 状态。
 - FINALIZING 中同一 idempotency retry 是 no-op；新的权威 terminalization fact
-  可以在当前 version append，只有 outcome selection 改变才加 version。
+  可以在当前 version append，并作为新控制事务恰好增加一次 version；只有
+  outcome selection 字段是否改变由 `terminal_outcome_changed` 决定。
 - terminalization reason 只允许八个冻结值；全部 guard 默认 fail closed，测试必须
   显式给出 authority、lease、budget、deadline、effect/tool quiescence 等事实。
 - Attempt reducer 固定完整合法边和 terminal set；Cartesian 测试遍历全部
@@ -45,6 +46,9 @@ decision 是 D6。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把
   和 append-only event；affected row 不为一即失败。
 - event digest 绑定 typed payload。相同 idempotency key 只允许同 task/type/digest
   exact retry，并返回原 event version；任何重绑都拒绝 `IDEMPOTENCY_CONFLICT`。
+  SQLite migration 3 同时在数据库层全局唯一化 event idempotency key。
+- `task.accepted` 的幂等摘要与 identity collision 检查绑定原始 `scan_id`；
+  owner-incarnation event digest 绑定 `occurred_at`，改变任一值都不是 exact retry。
 - `attempts.state_version` 单独 CAS；Task current Attempt/native epoch 必须匹配，不能
   修改历史 Attempt，也不能从 terminal Task 继续推进 Attempt。
 - owner incarnation 在同一事务中递增 `owner_epoch`、绑定 exact session、更新
@@ -58,7 +62,7 @@ decision 是 D6。进入 S3 前仍须解决 D11、D15、D16、D17，本文不把
   不插入 Worker TaskResult publication。缺失的 abandonment contract 仍遵守 Slice 1
   `SPEC_GAP-TRANSPORT-CONTRACTS`，没有猜造 wire bytes。
 
-### SQLite migration 2
+### SQLite migration 2/3
 
 Migration 1 的 statement 和 digest 保持不变；migration 2 原子增加：
 
@@ -67,8 +71,10 @@ Migration 1 的 statement 和 digest 保持不变；migration 2 原子增加：
 - Attempt 的 `transport_binding/state_version/predecessor_checkpoint_generation/
   owner_session_id/lease_acquired_at/budget_reservation_id` 与 lookup index。
 
-测试从真实 v1 schema 原地升级，并在 v2 commit 前注入 crash：失败后 user version、
-history 和 columns 仍为 v1；干净重启只应用一次 v2。
+Migration 3 在不改变 migration 1/2 statement 或 digest 的前提下增加
+`UNIQUE task_events(idempotency_key)`。测试覆盖真实 v1→latest 升级、v2→v3
+commit 前 crash、干净重启只应用一次，以及含跨 Task 重复 key 的 v2 数据
+fail closed 并完整保留 v2 user version/history/index 状态。
 
 ## Legacy 单槽接入与回滚
 
@@ -80,12 +86,14 @@ history 和 columns 仍为 v1；干净重启只应用一次 v2。
   `persist_active_run_marker/clear_active_run_marker` 后读取 legacy marker、terminal
   outbox 和 success receipt，形成内存中的 typed one-slot projection。
 - projection 永远报告 `maintains_local_queue=false`、`local_queue_depth=0`；active 时
-  available slot 为零。不同 run 未先清槽就出现时 fail closed。
+  available slot 为零。同一 ACTIVE 生命周期冻结完整 job/run/lease/attempt identity，
+  任一字段漂移或不同 run 未先清槽都 fail closed。
 - marker/outbox identity 必须 exact 匹配 job/run/lease/attempt。marker 消失但 outbox
   尚在时保持 FINALIZING 并暴露 shadow error；exact-bound success receipt 已赢时，
   stale outbox 不再阻止投影回到 IDLE。
 - shadow 异常可通过 `agent_kernel_shadow_error` 观察，但不会让 legacy authority
-  停机；bridge 没有网络写入、TaskResult publisher 或 Task runner。
+  停机；bridge 没有网络写入、TaskResult publisher 或 Task runner。进程启动恢复
+  persisted active job 后会立即重读 marker/outbox，避免 shadow 错留在 IDLE。
 
 ## D5 决议与后续 Slice 边界
 
@@ -111,6 +119,7 @@ python3 -m unittest \
   tests.test_agent_kernel_supervisor \
   tests.test_agent_kernel_slice2_migration \
   tests.test_agent_kernel_storage \
+  tests.test_agent_kernel_cas_concurrency \
   tests.test_agent_kernel_storage_boundaries \
   tests.test_agent_kernel_shadow_store \
   tests.test_agent_kernel_canonical \
