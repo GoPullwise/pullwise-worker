@@ -6,11 +6,18 @@ from pathlib import Path
 import stat
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
+from pullwise_worker.agent_kernel_checkout_lifecycle import (
+    CheckoutAcquisitionBounds,
+)
 from pullwise_worker.agent_kernel_checkout_window import (
     CheckoutCaptureCoordinator,
+)
+from pullwise_worker.agent_kernel_checkout_writer import (
+    CheckoutWriterCoordinator,
 )
 from pullwise_worker.agent_kernel_source_state import (
     SourceSelectionPolicy,
@@ -47,13 +54,33 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
         self.scratch.cleanup()
 
     def coordinator(
-        self, *, lock_timeout_seconds: int = 30
+        self,
+        *,
+        acquisition_bounds: CheckoutAcquisitionBounds | None = None,
+        lock_timeout_seconds: int = 30,
     ) -> CheckoutCaptureCoordinator:
         return CheckoutCaptureCoordinator(
             checkout_root=self.root,
             control_root=self.control,
             policy=self.policy,
             git_executable=self.git,
+            acquisition_bounds=acquisition_bounds or self.bounds(),
+            lock_timeout_seconds=lock_timeout_seconds,
+        )
+
+    @staticmethod
+    def bounds() -> CheckoutAcquisitionBounds:
+        return CheckoutAcquisitionBounds(
+            deadline_monotonic=time.monotonic() + 30,
+            cancellation_requested=lambda: False,
+        )
+
+    def writer(
+        self, *, lock_timeout_seconds: int = 30
+    ) -> CheckoutWriterCoordinator:
+        return CheckoutWriterCoordinator(
+            control_root=self.control,
+            acquisition_bounds=self.bounds(),
             lock_timeout_seconds=lock_timeout_seconds,
         )
 
@@ -119,25 +146,21 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
 
         self.assertEqual(1, inspect.call_count)
         self.assertTrue(session.closed)
-        with self.coordinator().writer():
+        with self.writer().writer():
             pass
 
     def test_process_mutex_contention_uses_one_bounded_deadline(self) -> None:
         errors: list[BaseException] = []
         entered = threading.Event()
         first = self.coordinator()
-        second = self.coordinator(lock_timeout_seconds=1)
+        second = self.writer(lock_timeout_seconds=1)
 
         def contend() -> None:
-            with mock.patch(
-                "pullwise_worker.agent_kernel_checkout_lock.time.monotonic",
-                side_effect=(100.0, 102.0),
-            ):
-                try:
-                    with second.writer():
-                        entered.set()
-                except BaseException as exc:
-                    errors.append(exc)
+            try:
+                with second.writer():
+                    entered.set()
+            except BaseException as exc:
+                errors.append(exc)
 
         with mock.patch(
             "pullwise_worker.agent_kernel_checkout_window.inspect_gitlinks",
@@ -149,7 +172,7 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
             session = first.begin_capture(base_revision=BASE_REVISION)
             thread = threading.Thread(target=contend, daemon=True)
             thread.start()
-            thread.join(timeout=1.0)
+            thread.join(timeout=2.0)
             session.close()
 
         self.assertFalse(thread.is_alive())
@@ -160,18 +183,13 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
 
     def test_flock_contention_uses_the_same_bounded_deadline(self) -> None:
         with mock.patch(
-            "pullwise_worker.agent_kernel_checkout_lock.time.monotonic",
-            side_effect=(100.0, 100.0, 100.5, 102.0),
-        ), mock.patch(
             "pullwise_worker.agent_kernel_checkout_lock._fcntl.flock",
             side_effect=BlockingIOError(errno.EWOULDBLOCK, "busy"),
-        ) as flock, mock.patch(
-            "pullwise_worker.agent_kernel_checkout_lock.time.sleep"
-        ) as sleep:
+        ) as flock:
             with self.assertRaisesRegex(
                 SourceStateError, "CHECKOUT_LOCK_TIMEOUT"
             ):
-                with self.coordinator(lock_timeout_seconds=1).writer():
+                with self.writer(lock_timeout_seconds=1).writer():
                     pass
 
         import fcntl
@@ -179,8 +197,7 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
         self.assertEqual(
             fcntl.LOCK_EX | fcntl.LOCK_NB, flock.call_args.args[1]
         )
-        sleep.assert_called_once_with(0.05)
-        with self.coordinator().writer():
+        with self.writer().writer():
             pass
 
     def test_writer_detects_control_replacement_after_body(self) -> None:
@@ -190,7 +207,7 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
         with self.assertRaisesRegex(
             SourceStateError, "CHECKOUT_CONTROL_ROOT_CHANGED"
         ):
-            with self.coordinator().writer():
+            with self.writer().writer():
                 self.control.rename(original)
                 replacement.rename(self.control)
 
@@ -199,7 +216,7 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
         replacement = self.base / "replacement-control"
         replacement.mkdir(mode=0o700)
         with self.assertRaisesRegex(RuntimeError, "writer body failed"):
-            with self.coordinator().writer():
+            with self.writer().writer():
                 self.control.rename(original)
                 replacement.rename(self.control)
                 raise RuntimeError("writer body failed")

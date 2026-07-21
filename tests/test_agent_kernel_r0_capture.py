@@ -7,12 +7,19 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from tests.agent_kernel_capture_fakes import FakeCaptureProvider
+from pullwise_worker.agent_kernel_checkout_lifecycle import (
+    CheckoutAcquisitionBounds,
+)
 from pullwise_worker.agent_kernel_checkout_window import (
     CheckoutCaptureCoordinator,
+)
+from pullwise_worker.agent_kernel_checkout_writer import (
+    CheckoutWriterCoordinator,
 )
 from pullwise_worker.agent_kernel_gateway import (
     CheckedInvocation,
@@ -180,11 +187,20 @@ class AgentKernelR0CaptureTest(unittest.TestCase):
         ).stdout.strip()
         control_root = Path(self.scratch.name) / "control"
         control_root.mkdir(mode=0o700)
+        bounds = CheckoutAcquisitionBounds(
+            deadline_monotonic=time.monotonic() + 30,
+            cancellation_requested=lambda: False,
+        )
         provider = CheckoutCaptureCoordinator(
             checkout_root=self.root,
             control_root=control_root,
             policy=self.policy,
             git_executable=Path(executable).resolve(),
+            acquisition_bounds=bounds,
+        )
+        writer = CheckoutWriterCoordinator(
+            control_root=control_root,
+            acquisition_bounds=bounds,
         )
         preparer = R0ReadPreparer(
             capture_provider=provider,
@@ -198,7 +214,7 @@ class AgentKernelR0CaptureTest(unittest.TestCase):
 
         self.assertEqual(self.payload, receipt.payload)
         self.assertTrue(diff_source_trees(prepared.source_before, after).is_empty)
-        with provider.writer():
+        with writer.writer():
             pass
 
 

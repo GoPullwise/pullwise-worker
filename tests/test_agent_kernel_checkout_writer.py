@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from pullwise_worker.agent_kernel_checkout_lifecycle import (
-    CheckoutInvocationBounds,
+    CheckoutAcquisitionBounds,
 )
 from pullwise_worker.agent_kernel_checkout_window import (
     CheckoutCaptureCoordinator,
@@ -44,22 +44,22 @@ class CheckoutWriterCoordinatorTest(unittest.TestCase):
         *,
         seconds: float = 5.0,
         cancellation_requested=lambda: False,
-    ) -> CheckoutInvocationBounds:
-        return CheckoutInvocationBounds(
+    ) -> CheckoutAcquisitionBounds:
+        return CheckoutAcquisitionBounds(
             deadline_monotonic=time.monotonic() + seconds,
             cancellation_requested=cancellation_requested,
         )
 
     def writer(
         self,
-        bounds: CheckoutInvocationBounds,
+        bounds: CheckoutAcquisitionBounds,
         *,
         control_root: Path | None = None,
         lock_timeout_seconds: int = 30,
     ) -> CheckoutWriterCoordinator:
         return CheckoutWriterCoordinator(
             control_root=control_root or self.control,
-            invocation_bounds=bounds,
+            acquisition_bounds=bounds,
             lock_timeout_seconds=lock_timeout_seconds,
         )
 
@@ -75,14 +75,14 @@ class CheckoutWriterCoordinatorTest(unittest.TestCase):
         cases = (
             (
                 "cancelled",
-                CheckoutInvocationBounds(
+                CheckoutAcquisitionBounds(
                     deadline_monotonic=time.monotonic() + 5,
                     cancellation_requested=lambda: True,
                 ),
             ),
             (
                 "expired",
-                CheckoutInvocationBounds(
+                CheckoutAcquisitionBounds(
                     deadline_monotonic=time.monotonic() - 1,
                     cancellation_requested=lambda: False,
                 ),
@@ -138,6 +138,19 @@ class CheckoutWriterCoordinatorTest(unittest.TestCase):
 
         self.assert_later_writer_succeeds()
 
+    def test_cancellation_after_successful_body_is_reported_and_cleans_up(
+        self,
+    ) -> None:
+        cancelled = threading.Event()
+
+        with self.assertRaises(SourceStateError):
+            with self.writer(
+                self.bounds(cancellation_requested=cancelled.is_set)
+            ).writer():
+                cancelled.set()
+
+        self.assert_later_writer_succeeds()
+
     def test_capture_and_writer_share_the_control_root_lock_domain(self) -> None:
         checkout_root = self.base / "repository"
         checkout_root.mkdir(mode=0o700)
@@ -157,7 +170,7 @@ class CheckoutWriterCoordinatorTest(unittest.TestCase):
             control_root=self.control,
             policy=policy,
             git_executable=git,
-            invocation_bounds=self.bounds(),
+            acquisition_bounds=self.bounds(),
         )
         entered = threading.Event()
 

@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
 import stat
 import threading
-from typing import Iterator
 
 from .agent_kernel_checkout_lock import (
     _HeldPosixLock,
-    _PosixCheckoutLock,
     _canonical_existing_directory,
     _require_absolute,
 )
+from .agent_kernel_checkout_lifecycle import CheckoutAcquisitionBounds
+from .agent_kernel_checkout_writer import CheckoutWriterCoordinator
 from .agent_kernel_gitlinks import inspect_gitlinks
 from .agent_kernel_source_scan import snapshot_source_tree
 from .agent_kernel_source_state import (
@@ -49,6 +48,24 @@ def _contains(path: Path, root: Path) -> bool:
 def _assert_checkout_directory(metadata: os.stat_result) -> None:
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise SourceStateError("CHECKOUT_ROOT_INVALID")
+
+
+def _cleanup_steps(
+    primary_error: BaseException | None,
+    *steps: object,
+) -> BaseException | None:
+    error = primary_error
+    for step in steps:
+        try:
+            step()
+        except BaseException as exc:
+            if error is None:
+                error = exc
+    return error
+
+
+def _raise_preserved(error: BaseException) -> None:
+    raise error.with_traceback(error.__traceback__)
 
 
 class _CheckoutBinding:
@@ -120,10 +137,13 @@ class _CaptureWindow:
             if self._released:
                 return
             self._released = True
-            try:
-                self._checkout.close()
-            finally:
-                self._lock.release()
+            error = _cleanup_steps(
+                None,
+                self._checkout.close,
+                self._lock.release,
+            )
+        if error is not None:
+            _raise_preserved(error)
 
 
 class CheckoutCaptureSession:
@@ -165,13 +185,24 @@ class CheckoutCaptureSession:
         with self._operation_lock:
             if self._closed:
                 raise SourceStateError("CHECKOUT_CAPTURE_SESSION_CLOSED")
+            captured: SourceTreeSnapshot | None = None
+            primary_error: BaseException | None = None
             try:
-                return self._coordinator._capture(
+                captured = self._coordinator._capture(
                     self._window, self._base_revision
                 )
+            except BaseException as exc:
+                primary_error = exc
             finally:
                 self._closed = True
-                self._window.release()
+                primary_error = _cleanup_steps(
+                    primary_error,
+                    self._window.release,
+                )
+            if primary_error is not None:
+                _raise_preserved(primary_error)
+            assert captured is not None
+            return captured
 
     def close(self) -> None:
         with self._operation_lock:
@@ -197,11 +228,14 @@ class CheckoutCaptureCoordinator:
         control_root: Path,
         policy: SourceSelectionPolicy,
         git_executable: Path,
+        acquisition_bounds: CheckoutAcquisitionBounds,
         git_timeout_seconds: int = 30,
         lock_timeout_seconds: int = 30,
     ) -> None:
-        self._lock = _PosixCheckoutLock(
-            control_root, lock_timeout_seconds=lock_timeout_seconds
+        self._writer = CheckoutWriterCoordinator(
+            control_root=control_root,
+            acquisition_bounds=acquisition_bounds,
+            lock_timeout_seconds=lock_timeout_seconds,
         )
         if not isinstance(policy, SourceSelectionPolicy):
             raise SourceStateError("SOURCE_POLICY_INVALID")
@@ -214,8 +248,8 @@ class CheckoutCaptureCoordinator:
         self._checkout_root = _canonical_existing_directory(
             checkout_root, "CHECKOUT_ROOT_INVALID"
         )
-        if _contains(self._checkout_root, self._lock.control_root) or _contains(
-            self._lock.control_root, self._checkout_root
+        if _contains(self._checkout_root, self._writer.control_root) or _contains(
+            self._writer.control_root, self._checkout_root
         ):
             raise SourceStateError("CHECKOUT_ROOTS_NOT_DISJOINT")
         self._policy = policy
@@ -254,7 +288,7 @@ class CheckoutCaptureCoordinator:
             base_revision
         ):
             raise SourceStateError("SOURCE_BASE_REVISION_INVALID")
-        held_lock = self._lock.acquire()
+        held_lock = self._writer._acquire()
         checkout: _CheckoutBinding | None = None
         try:
             checkout = _CheckoutBinding.open(self._checkout_root)
@@ -263,34 +297,13 @@ class CheckoutCaptureCoordinator:
             return CheckoutCaptureSession(
                 self, window, base_revision, source_before
             )
-        except BaseException:
-            if checkout is not None:
-                checkout.close()
-            held_lock.release()
-            raise
-
-    @contextmanager
-    def writer(self) -> Iterator[None]:
-        held_lock = self._lock.acquire()
-        primary_error: BaseException | None = None
-        try:
-            held_lock.assert_current()
-            yield
         except BaseException as exc:
-            primary_error = exc
-        finally:
-            try:
-                held_lock.assert_current()
-            except BaseException as exc:
-                if primary_error is None:
-                    primary_error = exc
-            try:
-                held_lock.release()
-            except BaseException as exc:
-                if primary_error is None:
-                    primary_error = exc
-        if primary_error is not None:
-            raise primary_error.with_traceback(primary_error.__traceback__)
+            steps = (
+                (checkout.close,) if checkout is not None else ()
+            ) + (held_lock.release,)
+            error = _cleanup_steps(exc, *steps)
+            assert error is not None
+            _raise_preserved(error)
 
 
 __all__ = ["CheckoutCaptureCoordinator", "CheckoutCaptureSession"]

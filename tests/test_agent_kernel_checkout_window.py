@@ -4,11 +4,18 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
+from pullwise_worker.agent_kernel_checkout_lifecycle import (
+    CheckoutAcquisitionBounds,
+)
 from pullwise_worker.agent_kernel_checkout_window import (
     CheckoutCaptureCoordinator,
+)
+from pullwise_worker.agent_kernel_checkout_writer import (
+    CheckoutWriterCoordinator,
 )
 from pullwise_worker.agent_kernel_source_state import (
     SourceSelectionPolicy,
@@ -35,6 +42,10 @@ class AgentKernelCheckoutWindowPlatformTest(unittest.TestCase):
                         root_identity="repository:windows-dev-only"
                     ),
                     git_executable=root / "git",
+                    acquisition_bounds=CheckoutAcquisitionBounds(
+                        deadline_monotonic=time.monotonic() + 30,
+                        cancellation_requested=lambda: False,
+                    ),
                 )
 
 
@@ -74,6 +85,20 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
             control_root=self.control,
             policy=self.policy,
             git_executable=self.git,
+            acquisition_bounds=self.bounds(),
+        )
+
+    @staticmethod
+    def bounds() -> CheckoutAcquisitionBounds:
+        return CheckoutAcquisitionBounds(
+            deadline_monotonic=time.monotonic() + 30,
+            cancellation_requested=lambda: False,
+        )
+
+    def writer(self) -> CheckoutWriterCoordinator:
+        return CheckoutWriterCoordinator(
+            control_root=self.control,
+            acquisition_bounds=self.bounds(),
         )
 
     def test_checkout_root_is_the_validated_read_only_absolute_root(self) -> None:
@@ -91,6 +116,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
             control_root=self.control,
             policy=self.policy,
             git_executable=self.git,
+            acquisition_bounds=self.bounds(),
         )
         self.assertEqual(self.root.resolve(strict=True), aliased.checkout_root)
 
@@ -103,6 +129,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
                 control_root=self.root,
                 policy=self.policy,
                 git_executable=self.git,
+                acquisition_bounds=self.bounds(),
             )
 
         nested_control = self.root / "control"
@@ -115,6 +142,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
                 control_root=nested_control,
                 policy=self.policy,
                 git_executable=self.git,
+                acquisition_bounds=self.bounds(),
             )
 
         aliased_control_target = self.root / "aliased-control-target"
@@ -131,6 +159,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
                 control_root=control_alias,
                 policy=self.policy,
                 git_executable=self.git,
+                acquisition_bounds=self.bounds(),
             )
 
         nested_checkout = self.control / "repository"
@@ -143,6 +172,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
                 control_root=self.control,
                 policy=self.policy,
                 git_executable=self.git,
+                acquisition_bounds=self.bounds(),
             )
 
     def test_session_keeps_catalog_private_and_reinspects_for_after(self) -> None:
@@ -192,7 +222,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
         entered = threading.Event()
         finished = threading.Event()
         first = self.coordinator()
-        second = self.coordinator()
+        second = self.writer()
 
         def write() -> None:
             with second.writer():
@@ -241,7 +271,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
         entered = threading.Event()
 
         def write() -> None:
-            with self.coordinator().writer():
+            with self.writer().writer():
                 entered.set()
 
         thread = threading.Thread(target=write, daemon=True)
@@ -264,7 +294,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
                 session.capture_after()
 
         self.assertTrue(session.closed)
-        with self.coordinator().writer():
+        with self.writer().writer():
             pass
 
     def test_checkout_replacement_before_after_capture_is_rejected(self) -> None:
@@ -291,7 +321,7 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
 
         self.assertEqual(1, snapshot.call_count)
         self.assertTrue(session.closed)
-        with self.coordinator().writer():
+        with self.writer().writer():
             pass
 
     def test_context_and_close_are_exception_safe_and_idempotent(self) -> None:
@@ -324,6 +354,30 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
             ):
                 self.coordinator().begin_capture(base_revision="HEAD")
             inspect.assert_not_called()
+
+    def test_begin_failure_preserves_primary_when_checkout_close_also_fails(
+        self,
+    ) -> None:
+        coordinator = self.coordinator()
+        held_lock = mock.Mock()
+        checkout = mock.Mock()
+        checkout.close.side_effect = OSError("checkout close failed")
+
+        with mock.patch.object(
+            coordinator._writer, "_acquire", return_value=held_lock
+        ), mock.patch(
+            "pullwise_worker.agent_kernel_checkout_window._CheckoutBinding.open",
+            return_value=checkout,
+        ), mock.patch.object(
+            coordinator,
+            "_capture",
+            side_effect=RuntimeError("before capture failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "before capture failed"):
+                coordinator.begin_capture(base_revision=BASE_REVISION)
+
+        checkout.close.assert_called_once_with()
+        held_lock.release.assert_called_once_with()
 
 
 if __name__ == "__main__":

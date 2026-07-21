@@ -9,6 +9,7 @@ import stat
 import threading
 import time
 
+from .agent_kernel_checkout_lifecycle import CheckoutAcquisitionBounds
 from .agent_kernel_source_state import SourceStateError
 
 
@@ -113,17 +114,24 @@ class _ProcessMutex:
         self._condition = threading.Condition()
         self._owner: int | None = None
 
-    def acquire(self, deadline: float) -> None:
+    def acquire(
+        self,
+        deadline: float,
+        bounds: CheckoutAcquisitionBounds,
+    ) -> None:
         identity = threading.get_ident()
         with self._condition:
             if self._owner == identity:
                 raise SourceStateError("CHECKOUT_WINDOW_REENTRANT")
-            while self._owner is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise SourceStateError("CHECKOUT_LOCK_TIMEOUT")
-                self._condition.wait(timeout=remaining)
-            self._owner = identity
+        while True:
+            wait_seconds = bounds._wait_seconds(deadline)
+            with self._condition:
+                if self._owner == identity:
+                    raise SourceStateError("CHECKOUT_WINDOW_REENTRANT")
+                if self._owner is None:
+                    self._owner = identity
+                    return
+                self._condition.wait(timeout=wait_seconds)
 
     def release(self) -> None:
         with self._condition:
@@ -244,13 +252,18 @@ class _PosixCheckoutLock:
     def control_root(self) -> Path:
         return self._control_root
 
-    def acquire(self) -> _HeldPosixLock:
-        deadline = time.monotonic() + self._lock_timeout_seconds
-        self._mutex.acquire(deadline)
+    def acquire(
+        self, bounds: CheckoutAcquisitionBounds
+    ) -> _HeldPosixLock:
+        if not isinstance(bounds, CheckoutAcquisitionBounds):
+            raise SourceStateError("CHECKOUT_ACQUISITION_BOUNDS_INVALID")
+        deadline = bounds._effective_deadline(self._lock_timeout_seconds)
+        self._mutex.acquire(deadline, bounds)
         control_descriptor: int | None = None
         lock_descriptor: int | None = None
         locked = False
         try:
+            bounds._checkpoint(deadline)
             control_descriptor, control_identity = _open_directory(
                 self._control_root, "CHECKOUT_CONTROL_ROOT_INVALID"
             )
@@ -281,8 +294,7 @@ class _PosixCheckoutLock:
             if stat.S_IMODE(lock_metadata.st_mode) != 0o600:
                 raise SourceStateError("CHECKOUT_LOCK_INVALID")
             while True:
-                if deadline - time.monotonic() <= 0:
-                    raise SourceStateError("CHECKOUT_LOCK_TIMEOUT")
+                bounds._checkpoint(deadline)
                 try:
                     assert _fcntl is not None
                     _fcntl.flock(
@@ -298,10 +310,8 @@ class _PosixCheckoutLock:
                         raise SourceStateError(
                             "CHECKOUT_LOCK_UNAVAILABLE"
                         ) from exc
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise SourceStateError("CHECKOUT_LOCK_TIMEOUT") from exc
-                    time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+                    time.sleep(bounds._wait_seconds(deadline))
+            bounds._checkpoint(deadline)
             held = _HeldPosixLock(
                 control_root=self._control_root,
                 control_descriptor=control_descriptor,
@@ -311,6 +321,7 @@ class _PosixCheckoutLock:
                 process_mutex=self._mutex,
             )
             held.assert_current()
+            bounds._checkpoint(deadline)
             return held
         except BaseException:
             if lock_descriptor is not None:
