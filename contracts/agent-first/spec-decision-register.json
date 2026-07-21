@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D23",
+  "active_decision_id": "D24",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -367,7 +367,7 @@
     {
       "id": "D23", "key": "contract-package-owner", "scope": "P1.2", "title": "C0 contract package 真源归属",
       "question": "跨端 contract package 的唯一真源应在 Server、Worker，还是独立 shared package？",
-      "status": "pending", "depends_on": ["D1", "D2"], "activation": null, "required_by_slice": "S7",
+      "status": "resolved", "depends_on": ["D1", "D2"], "activation": null, "required_by_slice": "S7",
       "effects": ["authority", "compatibility", "data_model"], "source_refs": ["handoff:P1.2"],
       "affected_units": ["post-closure"],
       "options": [
@@ -375,7 +375,7 @@
         {"id": "worker_owned_package", "summary": "由 Worker 仓库发布，Server/Web 消费。", "rationale": "producer 靠近内部 schema，但 Server wire authority 被倒置。", "consequences": ["Server 必须信任 Worker 发布周期"]},
         {"id": "independent_shared_package", "summary": "建立独立 shared contract package 仓库/包。", "rationale": "三端中立，但新增发布、ownership 和供应链边界。", "consequences": ["必须定义 generator、签名、pin 和回滚流程"]}
       ],
-      "recommended_option_id": "server_owned_package", "resolution": null, "supersedes": []
+      "recommended_option_id": "server_owned_package", "resolution": {"kind":"option","selected_option_id":"server_owned_package","custom_text":null,"decision_text":"Select server_owned_package: 由 Server 仓库发布，Worker/Web pin 消费。 Server 拥有 wire ingest、storage 和 public projection，且当前 Post 文档沿用此方向。 Constraints: Worker/Web 更新需显式 pin 与 compatibility matrix","authority":"user","decided_at":"2026-07-21","evidence_refs":["conversation:user-directive:2026-07-21:all-subsequent-recommended-options"],"resolution_sha256":"cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2"}, "supersedes": []
     },
     {
       "id": "D24", "key": "task-bootstrap", "scope": "P1.2", "title": "Server TaskRecord v2 bootstrap 策略",

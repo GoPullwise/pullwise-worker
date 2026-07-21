@@ -71,9 +71,9 @@ Agent-First contract，Agent Kernel 权威是固有语义而非可选择 mode；
 mode/protocol，Worker 仅验证并执行，缺失、未知或不匹配时 fail closed。D24 的迁移
 假设仍须取得 D27-compatible custom；门禁允许生产切换前不得提前改 runtime/schema/migration。
 
-## D9-D21 resolution overlay（Normative）
+## D9-D21 与 D23 resolution overlay（Normative）
 
-机器注册表已按用户授权依次解决 D9-D21，当前唯一活动问题是 D23。以下决议优先于
+机器注册表已按用户授权解决 D9-D21 与 D23，当前唯一活动问题是 D24。以下决议优先于
 后文仍以“候选”或“待决”表述的旧段落，但不代表对应生产代码已经实现：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
@@ -110,7 +110,7 @@ mode/protocol，Worker 仅验证并执行，缺失、未知或不匹配时 fail 
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
 | S3-S4 | 未开始；决策门已闭合 | D9-D17 已解决；仍须按本文实现、测试并取得切片证据，不能把决议记录当作实现完成 |
-| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 21 个 resolved、5 个 applicable pending 与 inactive D2；S5 无 pending decision blocker，S6 仅由 D22 阻断，唯一活动问题为 `active_decision_id=D23` |
+| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 22 个 resolved、4 个 applicable pending 与 inactive D2；S5 无 pending decision blocker，S6 仅由 D22 阻断，S7/S8 由 D24-D26 与 D22 阻断，唯一活动问题为 `active_decision_id=D24` |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
 

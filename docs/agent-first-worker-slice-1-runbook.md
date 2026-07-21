@@ -94,8 +94,8 @@ D7 已由用户选择 `persist_elapsed_consumption`，resolution digest 为
 `5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea`；
 D8 已由用户选择 `task_active_attempt_fenced`，resolution digest 为
 `e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a`。
-当前 register 有 6 个 pending（其中 D2 inactive）、21 个 resolved，唯一 active decision 为 D23；
-S2-S5 的 decision gate 已无 pending blocker，S6 仅由 D22 阻断，但对应实现与验证仍须分别完成。
+当前 register 有 5 个 pending（其中 D2 inactive）、22 个 resolved，唯一 active decision 为 D24；
+S2-S5 的 decision gate 已无 pending blocker，S6 仅由 D22 阻断，S7/S8 由 D24-D26 与 D22 阻断；对应实现与验证仍须分别完成。
 后续仍须按各 Slice 的 decision gate 执行，不得以当前代码或推荐项代替尚未作出的选择。
 
 ## 指标

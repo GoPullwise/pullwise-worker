@@ -233,16 +233,15 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The current resolved prefix is D1, D3-D21, and D27; D2 remains pending but
-  inactive under D1, and D23 is the only active question. D20 remains bound to
+- The current resolved set is D1, D3-D21, D23, and D27; D2 remains pending but
+  inactive under D1, and D24 is the only active question. D20 remains bound to
   custom `new_gate_immediate_authority` digest
-  `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`;
-  D21 is bound to custom `server_claim_bound_mode` digest
-  `ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282`.
-  D21 single-value-specializes that option to one current contract, with
-  immutable Server claim/grant binding and fail-closed Worker verification,
-  not mode or protocol negotiation. The user's recommendation directive remains
-  bounded by D27; D24 still requires an explicit D27-compatible custom resolution.
+  `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
+  bound to custom `server_claim_bound_mode` digest
+  `ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282`; D23 is
+  bound to recommended `server_owned_package` digest `cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2`.
+  D23 means one Server-published current package with exact Worker/Web pins, not legacy coexistence or negotiation.
+  The recommendation directive remains bounded by D27; D24 requires an explicit D27-compatible custom resolution.
 
 The generated Markdown view is a generated-file size exception owned by the
 Worker specification owner. It stays atomic because it is one ordered decision
@@ -402,6 +401,7 @@ fail with `TASK_ALREADY_TERMINAL`.
   job/run scope, and authorization; Worker only validates/executes and fails closed.
   Config/deployment/job cannot change tracks; authorization loss stops, fences, or rejects.
   Staged same-contract rollout and earlier same-contract build rollback remain allowed, but fallback, downgrade, or different-authority tracks do not.
+- D23 makes the Server repository the sole cross-end current-package source; Worker/Web exact-pin it and may not redefine its schemas.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must

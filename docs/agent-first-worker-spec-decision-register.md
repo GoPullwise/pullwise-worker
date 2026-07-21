@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D23`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D24`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -33,7 +33,7 @@ Active question: `D23`. Questions are asked one at a time. User silence, existin
 | `D19` | `P0.10` | reviewer fanout 期间 Owner liveness | `resolved` | `active` | `S5` | D4, D18 | `owner_remains_live` |
 | `D20` | `P0.10` | 旧 QA 与新 Gate 权威切换 | `resolved` | `active` | `S5` | D10, D17, D18 | `shadow_floor_then_gate_cutover` |
 | `D21` | `P0.11` | outer job 执行模式配置权威 | `resolved` | `active` | `S6` | D9, D20 | `server_claim_bound_mode` |
-| `D23` | `P1.2` | C0 contract package 真源归属 | `pending` | `active` | `S7` | D1, D2 | `server_owned_package` |
+| `D23` | `P1.2` | C0 contract package 真源归属 | `resolved` | `active` | `S7` | D1, D2 | `server_owned_package` |
 | `D24` | `P1.2` | Server TaskRecord v2 bootstrap 策略 | `pending` | `active` | `S7` | D8, D23 | `lazy_eligible_claim_migration` |
 | `D25` | `P1.5` | TaskResult/receipt digest DAG | `pending` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
 | `D26` | `P1.6` | 远期版本规范深度与完成口径 | `pending` | `active` | `S7` | D1 | `roadmap_separate_designs` |
@@ -509,17 +509,19 @@ Active question: `D23`. Questions are asked one at a time. User silence, existin
 
 ### D23 — C0 contract package 真源归属
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S7`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S7`.
 
 **Question:** 跨端 contract package 的唯一真源应在 Server、Worker，还是独立 shared package？
 
 **Options:**
 
-- `server_owned_package` — non-normative recommendation, not selected: 由 Server 仓库发布，Worker/Web pin 消费。 Server 拥有 wire ingest、storage 和 public projection，且当前 Post 文档沿用此方向。 Consequences: Worker/Web 更新需显式 pin 与 compatibility matrix
+- `server_owned_package` — selected by resolution: 由 Server 仓库发布，Worker/Web pin 消费。 Server 拥有 wire ingest、storage 和 public projection，且当前 Post 文档沿用此方向。 Consequences: Worker/Web 更新需显式 pin 与 compatibility matrix
 - `worker_owned_package`: 由 Worker 仓库发布，Server/Web 消费。 producer 靠近内部 schema，但 Server wire authority 被倒置。 Consequences: Server 必须信任 Worker 发布周期
 - `independent_shared_package`: 建立独立 shared contract package 仓库/包。 三端中立，但新增发布、ownership 和供应链边界。 Consequences: 必须定义 generator、签名、pin 和回滚流程
 
-**Resolution:** No option has been selected.
+**Resolution:** `server_owned_package` (`option`). Select server_owned_package: 由 Server 仓库发布，Worker/Web pin 消费。 Server 拥有 wire ingest、storage 和 public projection，且当前 Post 文档沿用此方向。 Constraints: Worker/Web 更新需显式 pin 与 compatibility matrix
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2`.
 
 **Supersedes:** none
 
