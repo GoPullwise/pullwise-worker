@@ -145,8 +145,10 @@ D5 已冻结为 `per_control_transaction`：每个新应用的 Task 控制事件
 新 FINALIZING terminalization fact 即使不改变已选 outcome 仍是一次控制事务并
 增版。TaskStore 会拒绝 0 或大于 1 的版本跳跃。
 
-S3 尚未开始。Policy Gateway、Source/ExecutionState、Observation、工具 dispatch 和
-Agent 权限仍没有接线；不得把本 Slice 的 actor fence helper 宣称为已完成 Gateway。
+生产 S3 尚未开始。后续实现的 package-independent internal S3a primitives 只提供
+SourceState/checkout capture/R0/Gateway sequencing 安全骨架，不构成生产接线；Server-owned
+Policy Gateway、ExecutionState、Observation、durable tool dispatch 和 Agent 权限仍没有
+接线。不得把本 Slice 的 actor fence helper 或 internal S3a 宣称为已完成生产 Gateway。
 
 ## 验证命令
 

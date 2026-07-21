@@ -87,9 +87,11 @@ runtime/schema/protocol/deployment。
 
 ## D9-D26 resolution overlay（Normative）
 
-机器注册表已按用户授权解决 D9-D26；D2 是唯一 inactive 决策，当前没有活动问题或
-applicable pending decision。以下决议优先于后文仍以“候选”或“待决”表述的旧段落，
-但不代表对应生产代码已经实现：
+机器注册表的冻结前缀已按用户授权解决 D9-D26；在该前缀原始闭合点上，D2 是唯一
+inactive 决策且没有 applicable pending decision。当前 append-only register 已新增
+D28-D30，状态为 `valid_pending`，D28 是唯一 active question，S3-S8 blocked。以下已决
+前缀仍优先于后文以“候选”或“待决”表述的旧段落，但不代表对应生产代码已经实现；未决
+D28-D30 也不得从这些旧段落推断答案：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
   transport projection，不能创建、替换或改写已提交 outcome。D10 要求以一张全局

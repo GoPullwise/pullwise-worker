@@ -22,7 +22,7 @@ BASE_REVISION = "a" * 40
 
 class AgentKernelCheckoutWindowPlatformTest(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows-only fail-closed check")
-    def test_windows_explicitly_rejects_the_production_coordinator(self) -> None:
+    def test_windows_explicitly_rejects_the_internal_coordinator(self) -> None:
         with tempfile.TemporaryDirectory(prefix="checkout-window-") as scratch:
             root = Path(scratch)
             with self.assertRaisesRegex(
@@ -38,7 +38,7 @@ class AgentKernelCheckoutWindowPlatformTest(unittest.TestCase):
                 )
 
 
-@unittest.skipUnless(os.name == "posix", "production coordinator is POSIX-only")
+@unittest.skipUnless(os.name == "posix", "internal checkout coordinator is POSIX-only")
 class AgentKernelCheckoutWindowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.scratch = tempfile.TemporaryDirectory(prefix="checkout-window-")
