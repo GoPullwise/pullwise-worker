@@ -77,11 +77,13 @@ mode/protocol，Worker 仅验证并执行，缺失、未知或不匹配时 fail 
 runtime/schema/migration。D25 进一步冻结无环 receipt 拓扑：upload/transport receipt bytes
 保持 immutable，独立 Server-owned binding/index 只允许一次性绑定 exact transport
 envelope digest；TaskResultCore digest 与 transport envelope digest 分离，binding/ACK
-不得替代 D9 的内部 TaskResult CAS。该决议同样不授权提前修改 runtime/schema/protocol。
+不得替代 D9 的内部 TaskResult CAS。D26 将尚未闭合的远期版本降为 roadmap；每版
+开工前必须另写完整 implementation design。D25/D26 均不授权提前修改
+runtime/schema/protocol/deployment。
 
-## D9-D21 与 D23-D25 resolution overlay（Normative）
+## D9-D21 与 D23-D26 resolution overlay（Normative）
 
-机器注册表已按用户授权解决 D9-D21 与 D23-D25，当前唯一活动问题是 D26。以下决议优先于
+机器注册表已按用户授权解决 D9-D21 与 D23-D26，当前唯一活动问题是 D22。以下决议优先于
 后文仍以“候选”或“待决”表述的旧段落，但不代表对应生产代码已经实现：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
@@ -120,6 +122,11 @@ envelope digest；TaskResultCore digest 与 transport envelope digest 分离，b
   transport envelope 使用两个独立 digest，保持无环内容 DAG；binding/ACK 仅属 transport
   metadata，不替代 D9 的内部 TaskResult CAS。完整 schema 与 crash fixtures 仍由 D23
   的 Server-published current package 定义。
+- D26 选择 `roadmap_separate_designs`：未形成 schema/state/storage/wire/fixtures/
+  rollout/DoD 闭环的远期版本只属于 roadmap，不构成当前实现授权或完成标准；每版开工
+  前须另写完整 implementation design 并取得独立决议。Roadmap 不得复活 legacy
+  coexistence、runtime multi-major negotiation、downgrade、old-Web compatibility 或
+  第二生产轨道；未来 current-contract 演进仍需协调切换。
 
 ## 当前实施状态（非规范证据）
 
@@ -131,7 +138,7 @@ envelope digest；TaskResultCore digest 与 transport envelope digest 分离，b
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
 | S3-S4 | 未开始；决策门已闭合 | D9-D17 已解决；仍须按本文实现、测试并取得切片证据，不能把决议记录当作实现完成 |
-| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 24 个 resolved、3 个 pending（其中 D2 inactive）与 2 个 applicable pending；S5 无 pending decision blocker，S6 仅由 D22 阻断，S7/S8 由 D26、D22 阻断，唯一活动问题为 `active_decision_id=D26` |
+| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 25 个 resolved、2 个 pending（其中 D2 inactive）与 1 个 applicable pending；S5 无 pending decision blocker，S6/S7/S8 均仅由 D22 阻断，唯一活动问题为 `active_decision_id=D22` |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
 
@@ -210,7 +217,7 @@ MVP 明确不包含：
 - 新 ServerDebugSnapshot、terminal Assembly、Debug availability DTO、retention/support pin。
 - fleet 调度、跨 Worker cache、自动学习策略。
 
-这些内容必须按 [Post-MVP 完整实现设计](agent-first-worker-post-mvp-implementation-design.md) 实施，不能在 MVP 中以未版本化字段抢跑。
+其中已达到 implementation-baseline 成熟度的内容按 [Post-MVP 设计](agent-first-worker-post-mvp-implementation-design.md) 实施；明确标为 Roadmap 的远期版本必须在开工前另写完整 implementation design。任何后续内容都不能在 MVP 中以未版本化字段抢跑。
 
 ## 1. 已确认决策
 
@@ -218,7 +225,7 @@ MVP 明确不包含：
 
 | 编号 | 决策 |
 |---|---|
-| M-01 | 路线为“契约冻结 → Worker MVP → compatibility/debug 增量 → V1/V2/V3 完整态”。 |
+| M-01 | 路线为“契约冻结 → Worker MVP → current-contract 增量”；V1/V2/V3 未闭合部分是长期 Roadmap，不是当前可执行规格或完成声明，每版开工前另写完整 implementation design。 |
 | M-02 | 通用内核在隔离 local/eval profile 中支持 R0/R1 可逆写；Pullwise `repo_review.full_scan` Adapter 始终只读 SourceState。 |
 | M-03 | MVP 的通用编排角色只有 Task Owner 和 Quality Policy Verifier。现有 Pullwise 领域 reviewer 是 Adapter 内部受协议约束的 domain activity，不获得通用 delegation 权限；所有活跃 SDK thread 仍计入 `max_agents`。 |
 | M-04 | Task Owner 是逻辑身份；thread/session 是 incarnation。`owner_epoch` 单调递增，旧 epoch 永久 fenced。 |

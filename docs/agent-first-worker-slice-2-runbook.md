@@ -34,9 +34,12 @@ Task acceptance/TaskRecord creation cutover 屏障只允许 post-cutover Task，
 或兼容路径。D25 已选择 recommended `immutable_receipt_mutable_binding`，resolution
 digest 为 `03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0`；immutable
 receipt 与独立 Server binding/index 分离，并使用 TaskResultCore/transport envelope 两个
-digest 保持无环 DAG。当前 register 有 3 个 pending（其中 D2 inactive）、24 个 resolved，
-唯一 active decision 是 D26。S2-S5 的 decision gate 已无 pending blocker，S6 仅由
-D22 阻断，S7/S8 由 D26、D22 阻断；本文不把已决选项当成实现完成证据。
+digest 保持无环 DAG。D26 已选择 recommended `roadmap_separate_designs`，resolution
+digest 为 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`；未闭合
+远期版本只属 roadmap，每版开工前须另写完整 implementation design。当前 register 有
+2 个 pending（其中 D2 inactive）、25 个 resolved，唯一 active decision 是 D22。
+S2-S5 的 decision gate 已无 pending blocker，S6/S7/S8 均仅由 D22 阻断；本文不把
+已决选项当成实现完成证据。
 
 ## 已实现范围
 
@@ -176,8 +179,8 @@ python3 scripts/check_agent_kernel_wheel.py
 - Python 3.12 Worker 全量：746 tests 通过，5 个既有条件性 skip。
 - output contracts 4/4；Slice 0 baseline `compatible`；cross-repo legacy baseline
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
-- decision register 为 `valid_pending`，3 个 pending（其中 D2 inactive）、24 个 resolved；
-  active decision 为 D26，S2-S5 无 pending blocker，S6 仅由 D22 阻断，S7/S8 由 D26、D22 阻断。
+- decision register 为 `valid_pending`，2 个 pending（其中 D2 inactive）、25 个 resolved；
+  active decision 为 D22，S2-S5 无 pending blocker，S6/S7/S8 均仅由 D22 阻断。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions

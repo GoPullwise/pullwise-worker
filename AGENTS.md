@@ -233,9 +233,9 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The current resolved set is D1, D3-D21, D23-D25, and D27; D2 remains pending
-  but inactive under D1, and D26 is the only active question. The register has
-  24 resolved records and two applicable pending records in order D26, D22.
+- The current resolved set is D1, D3-D21, D23-D26, and D27; D2 remains pending
+  but inactive under D1, and D22 is the only active question. The register has
+  25 resolved records and one applicable pending record, D22.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -253,6 +253,10 @@ inference never select an option or authorize production implementation.
   `03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0`:
   upload/transport receipts stay immutable, while a separate Server-owned binding
   index performs the one-time CAS to the exact transport-envelope digest.
+  D26 is bound to recommended `roadmap_separate_designs` digest
+  `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`:
+  unclosed long-range versions remain roadmap until each receives a separate
+  complete implementation design before work starts.
   The recommendation directive remains bounded by D27.
 
 The generated Markdown view is a generated-file size exception owned by the
@@ -433,6 +437,12 @@ fail with `TASK_ALREADY_TERMINAL`.
   are distinct DAG identities. The binding/ACK is transport metadata and never
   replaces D9's internal TaskResult CAS or rewrites outcome; D23's Server-owned
   package defines both digest algorithms, binding schema, and crash fixtures.
+- D26 classifies unclosed long-range versions as roadmap, not executable
+  specification or current DoD. Each version requires a separate complete
+  implementation design and independent decision before work starts. Roadmap
+  prose cannot authorize legacy coexistence, runtime multi-major negotiation,
+  downgrade, old-Web compatibility, or a second production track; future
+  current-contract evolution still requires a coordinated cutover.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must

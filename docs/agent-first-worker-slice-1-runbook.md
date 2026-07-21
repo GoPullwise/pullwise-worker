@@ -101,9 +101,12 @@ Task acceptance/TaskRecord creation 屏障只允许 post-cutover Task，pre-cuto
 协商或兼容路径。D25 已选择 recommended `immutable_receipt_mutable_binding`，resolution
 digest 为 `03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0`；receipt
 保持 immutable，独立 Server binding/index 一次性绑定 transport envelope digest，并与
-TaskResultCore digest 形成无环 DAG。当前 register 有 3 个 pending（其中 D2 inactive）、
-24 个 resolved，唯一 active decision 为 D26；S2-S5 的 decision gate 已无 pending
-blocker，S6 仅由 D22 阻断，S7/S8 由 D26、D22 阻断；对应实现与验证仍须分别完成。
+TaskResultCore digest 形成无环 DAG。D26 已选择 recommended `roadmap_separate_designs`，
+resolution digest 为 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`；
+未闭合远期版本只属 roadmap，每版开工前须另写完整 implementation design。当前 register
+有 2 个 pending（其中 D2 inactive）、25 个 resolved，唯一 active decision 为 D22；
+S2-S5 的 decision gate 已无 pending blocker，S6/S7/S8 均仅由 D22 阻断；对应实现与
+验证仍须分别完成。
 后续仍须按各 Slice 的 decision gate 执行，不得以当前代码或推荐项代替尚未作出的选择。
 
 ## 指标

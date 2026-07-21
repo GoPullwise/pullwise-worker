@@ -51,9 +51,9 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D26", report["active_decision_id"])
-        self.assertEqual(2, report["pending_decision_count"])
-        self.assertEqual(24, report["resolved_decision_count"])
+        self.assertEqual("D22", report["active_decision_id"])
+        self.assertEqual(1, report["pending_decision_count"])
+        self.assertEqual(25, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -81,6 +81,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D23": ("server_owned_package", "cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2"),
             "D24": ("new_tasks_only", "8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806"),
             "D25": ("immutable_receipt_mutable_binding", "03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0"),
+            "D26": ("roadmap_separate_designs", "ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f"),
             "D27": ("clean_break_no_legacy", "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
@@ -194,6 +195,37 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual(expected_resolution, decision["resolution"])
         self.assertEqual([], decision["supersedes"])
 
+    def test_d26_records_the_exact_authorized_option_resolution(self) -> None:
+        decision_text = (
+            "Select roadmap_separate_designs: 把未闭合远期版本明确标为 roadmap；"
+            "每版开工前另写完整 implementation design。 诚实区分路线图与可执行规格，"
+            "不让远期债务阻塞已闭合 MVP。 Constraints: 不得再宣称当前 Post 文档完整实现所有版本"
+        )
+        expected_resolution = {
+            "kind": "option",
+            "selected_option_id": "roadmap_separate_designs",
+            "custom_text": None,
+            "decision_text": decision_text,
+            "authority": "user",
+            "decided_at": "2026-07-21",
+            "evidence_refs": [
+                "conversation:user-directive:2026-07-21:all-subsequent-recommended-options"
+            ],
+            "resolution_sha256": (
+                "ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f"
+            ),
+        }
+        register = load_register(REGISTER_PATH)
+        decision = next(
+            item for item in register["decisions"] if item["id"] == "D26"
+        )
+
+        self.assertEqual(154, len(decision_text))
+        self.assertEqual(286, len(decision_text.encode("utf-8")))
+        self.assertEqual("resolved", decision["status"])
+        self.assertEqual(expected_resolution, decision["resolution"])
+        self.assertEqual([], decision["supersedes"])
+
     def test_pullwise_scope_resolution_unblocks_slice_two(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(
@@ -204,7 +236,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D26", report["active_decision_id"])
+        self.assertEqual("D22", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_slice_gate_reports_every_due_active_pending_decision(self) -> None:
@@ -233,7 +265,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D26", "D22"], blocker["decision_ids"])
+        self.assertEqual(["D22"], blocker["decision_ids"])
 
         report = verify_register(
             register, REPO_ROOT, require_slice="S8",
@@ -241,7 +273,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D26", "D22"], blocker["decision_ids"])
+        self.assertEqual(["D22"], blocker["decision_ids"])
 
 
 if __name__ == "__main__":
