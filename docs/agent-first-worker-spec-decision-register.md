@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `None`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `none`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|

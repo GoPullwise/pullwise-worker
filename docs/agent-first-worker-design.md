@@ -1661,32 +1661,79 @@ SLO 必须配套固定测量合同，不能只列数字：
 
 ### 16.2 可执行实验协议
 
-每次候选发布必须先冻结并计算一个 `ControlPlaneDigest`，覆盖：Worker、Codex Runtime Adapter、Gateway、BaselineProfile manifest 与 image digest、默认 prompt/skills、自定义 Agent、调度与 Quality/Permission Policy、结果 schema/解析器。评测期间这些内容一律不可变；否则结果作废并重新开始。
+#### 16.2.1 候选身份、签名制品与职责分离
 
-模型运行面另计算强绑定的 `EvaluationRuntimeDigest`：Codex client/SDK/runtime 版本、实际模型 ID 与可用的不可变 snapshot（不能只记 alias）、alias 解析结果、reasoning effort、feature flags、上下文/compaction 设置、所有工具 schema、MCP server/tool 版本，以及 Task Owner 与 Verifier 的模型配置。候选身份为 `CandidateDigest = hash(ControlPlaneDigest + EvaluationRuntimeDigest + benchmark_version)`；任一项变化都是新候选。若供应方不暴露不可变模型 snapshot，则必须记录这一可复现性限制，并在同一时间窗重新运行上一稳定版作为并发对照，不能把跨时间结果直接归因给 Worker 改动。
+D22 将发布门冻结为 `absolute_plus_baseline` 的 current-contract 单值特化。每次候选发布必须先计算：
 
-测试集分三部分：
+- `ControlPlaneDigest`：覆盖 Worker、Codex Runtime Adapter、Gateway、BaselineProfile manifest 与 image digest、默认 prompt/skills、自定义 Agent、调度与 Quality/Permission Policy、结果 schema/解析器。
+- `EvaluationRuntimeDigest`：覆盖 Codex client/SDK/runtime 版本、实际模型 ID 与可用的不可变 snapshot、alias 解析结果、reasoning effort、feature flags、上下文/compaction 设置、所有工具 schema、MCP server/tool 版本，以及 Task Owner 与 Verifier 的模型配置。
+- `CandidateDigest = hash(ControlPlaneDigest + EvaluationRuntimeDigest + benchmark_version)`。任何被绑定输入变化都形成新候选，不得沿用旧报告或 attestation。
 
-1. **已知 gold set**：至少 120 个任务，覆盖上表技术栈与任务类型。
-2. **密封未知栈集**：至少 3 个彼此不同、开发期间不可见的技术栈家族，每个至少 15 个任务；每次发布轮换至少一个家族，暴露后的家族进入已知集。
-3. **故障/对抗集**：每个核心评测簇包含真实可修任务、错误或不完整 patch、伪成功命令/零测试、环境能力故障和恶意输入。
+候选结果揭示前，benchmark owner 必须签发 canonical `benchmark-bundle/v1`，release operator 必须签发 canonical `release-gate-policy/v1`。评测完成后，CI/eval owner 生成 canonical `release-gate-report/v1`；release operator 核验 exact report 后才可签发 `release-gate-attestation/v1`。四类制品必须 exact-bind：
+
+- current contract package identity/version/digest、candidate 与 stable build identity；
+- `ControlPlaneDigest`、`EvaluationRuntimeDigest`、`CandidateDigest`、`benchmark_version`；
+- task inventory、hidden-oracle/rubric、environment/image digest；
+- 预声明 seed、每 task 重复次数、统计实现版本、absolute/relative threshold 表和 canary plan；
+- policy/report digest、`signer_id`、`key_id`、`issued_at` 与 `expires_at`。
+
+签名只接受 organization trust registry 中未撤销 release key 对 RFC 8785 JCS bytes 的 Ed25519 signature。benchmark owner、CI evidence producer 与最终 release operator 必须是不同 principal；deployment operator 只能执行已签发的 canary/rollback plan，不能改写门值或 promote。policy 最长有效 30 天，attestation 最长有效 7 天，key 撤销立即使其失效。制品 missing、过期、撤销、签名无效、scope/digest 不匹配或证据不新鲜均是 `indeterminate` 并阻断发布。
+
+#### 16.2.2 数据集、分母与统计协议
+
+冻结的 benchmark 必须同时满足：
+
+1. 至少 120 个 known-gold tasks，覆盖第 16.1 节的技术栈与任务类型。
+2. 至少 3 个彼此不同、开发期间不可见的 sealed unknown-stack families，每个 family 至少 15 tasks。
+3. 每个适用核心评测簇对 real-fix、bad/incomplete patch、fake-success/zero-test、environment/capability failure、adversarial input 五类各至少 3 tasks。
+4. 全集至少包含 50 个 oracle-positive in-scope findings。
+
+每个 task 使用 policy 预声明的 3 个不同 seed 独立运行 3 次；每个有效 run 等权进入预声明分母。只有 policy 预列的 infrastructure reason code 可以排除 invalid run，报告必须保留原始样本、排除样本和逐项 reason。零分母、样本不足、oracle/rubric 冲突、超时、证据缺失或 evaluator failure 均为 `indeterminate`；不得通过追加运行、重采样、改变权重或更换 baseline 追到通过。比例由冻结实现计算，false-verified 的 95% 上界固定使用 Wilson score interval。
 
 未知栈运行时只允许改变仓库输入或提供不含流程语义的 opaque 环境制品；该制品须在任务抽样前固定 digest，只暴露工具链/运行时，不能携带默认命令、Agent 指令、结果解析器或针对 benchmark 的脚本。不得临时新增默认 Skill、包装脚本、Gateway 分支、调度规则或结果解析器。语言专用 Skill 只能作为单独 treatment 评估，基础正确性路径必须在禁用它时成立。
 
-每个任务至少独立运行 3 次。成功由 Agent 看不到的 hidden oracle 判定，例如隐藏行为测试、预先签名的目标 artifact、运行时断言或盲审人工 rubric；不得用 Agent 自己生成的测试作为 gold label。报告 Task Success、False Verified Success、人工介入、回归、时延和成本的点估计及 95% 置信区间，并保留逐任务 provenance。
+成功由 Agent 看不到的 hidden oracle 判定，例如隐藏行为测试、预先签名的目标 artifact、运行时断言或盲审人工 rubric；不得用 Agent 自己生成的测试作为 gold label。解题任务分母包含所有有效抽样 run；只有 hidden oracle 通过的 `COMPLETED` 或 `NO_CHANGE_NEEDED` 进入 Task Success 分子。`COMPLETED_WITH_WAIVERS/PARTIAL/BLOCKED/FAILED/CANCELLED` 全部按未成功计。环境故障 fixture 不混入解题成功率，单独计算 classification accuracy；unaided completion 要求整个 Task 没有用户补充、waiver 或人工审批。
 
-解题任务的分母是所有有效抽样任务；只有 hidden oracle 通过的 `COMPLETED` 或 `NO_CHANGE_NEEDED` 进入 Task Success 分子。`COMPLETED_WITH_WAIVERS/PARTIAL/BLOCKED/FAILED/CANCELLED` 全部按未成功计，避免靠 abstain 获得低 false-positive。专门的环境故障 fixture 不混入解题成功率，单独测“正确返回 BLOCKED/capability gap”的分类准确率。无需人工帮助完成率要求整个 Task 没有用户补充、waiver 或人工审批。
+多 Agent 仍须做同预算配对消融：对同一 task、环境和 token/wall/tool 总预算，随机运行 Task Owner only 与动态多 Agent；两组保留相同独立 Verifier 并把其成本计入总预算。动态多 Agent 不得增加 false verified 或越权；在适合并行的复杂任务子集上，至少达到成功率提高 5 percentage points，或 p50 wall time 降低 15% 且成本增加不超过 10%，否则该类任务默认退回单 Agent。该实验不能改写下述发布硬门。
 
-多 Agent 必须做同预算配对消融：对同一任务、同一环境、同一总 token/wall/tool 预算，随机运行“Task Owner only”和“动态多 Agent”两组。两组都保留完全相同、由 Quality Policy 强制启动的独立 Verifier，Verifier 的 token/时间/工具成本计入相同总预算；“only”只表示禁用可选 Explorer/Implementer/Troubleshooter。动态多 Agent 不得增加 false verified 或越权；在适合并行的复杂任务子集上，至少达到“成功率提高 5 个百分点”或“p50 墙钟时间降低 15% 且成本增加不超过 10%”之一，否则该类任务默认退回单 Agent。阈值可在首次真实基线后版本化调整，但不能在看到候选版本结果后临时修改。
+#### 16.2.3 绝对门与 stable-relative 门
 
-初始发布硬门：
+候选必须同时通过全部绝对门：
 
-- 安全越权、stale publish 和 critical/adversarial false verified 均为 0。
-- 总体 False Verified Success 点估计 < 1%，95% 置信区间上界 < 2%，且不得比上一稳定版恶化。
-- 所有 `COMPLETED` 的 Requirement Ledger 覆盖率和最终 SourceState 证明均为 100%。
-- 首版绝对门：已知 gold set Task Success ≥ 70%，密封未知栈 Task Success ≥ 50%；无需人工帮助完成率分别 ≥ 60% 和 ≥ 40%。这些数值必须在打开候选结果前随 benchmark version 固定，后续只能通过正式 ADR 调高或基于任务集难度变更重新定版。
-- 与上一稳定版相比，已知集和未知集 Task Success 的下降均不得超过 2 个百分点；超过时必须明确批准例外。
-- 新增未知栈时 `ControlPlaneDigest` 与 `EvaluationRuntimeDigest` 都保持不变。
+- 安全越权、stale publish、duplicate effect/result 和 critical/adversarial false verified 均为 0。
+- 所有 `COMPLETED` 的 active mandatory Requirement Ledger 与 final SourceState proof 覆盖率均为 100%。
+- 总体 `false_verified_rate` 点估计 < 1%，95% Wilson 上界 < 2%。
+- known/unknown `task_success_rate` 分别 ≥ 70% / 50%。
+- known/unknown unaided completion 分别 ≥ 60% / 40%。
+- `false_discovery_rate` ≤ 20%。
+- environment/capability `classification_accuracy` ≥ 95%。
+- 每个 task profile 都在 policy 中签发正数、有限、无 wildcard 的 wall/token/cost 绝对上限；任一超限即失败。
+
+存在已接受 stable baseline 时，还必须同时满足全部相对门：总体 false verified 不得恶化；known/unknown task success、unaided completion 与 classification accuracy 的下降分别不得超过 2 percentage points；false discovery 增加不得超过 2 percentage points；verified-success p95 wall time 与 p95 cost 增加均不得超过 20%。zero-tolerance 与 absolute safety gate 不可 waiver。其他阈值放宽、benchmark 难度重定版、统计实现或分母变更，必须在候选结果揭示前取得新的独立决议或 ADR；当次 operator exception 无效。
+
+#### 16.2.4 Baseline、bootstrap 与可比性
+
+只有通过全部 offline 门和后续 canary 的 candidate 才能晋升。release operator 签发 immutable baseline record 后，它才是下一版本的 stable comparison object；不得自动刷新、事后挑选最有利 baseline，或把失败 candidate 写入 baseline。
+
+relative comparison 必须使用 exact stable package 与 `ControlPlaneDigest`，且 candidate/stable 使用相同 `benchmark_version`、task/oracle inventory、统计实现及 `EvaluationRuntimeDigest`。若 runtime/model 变化或供应方不提供 immutable model snapshot，必须在同一 72 小时窗口内以 candidate runtime 交错重跑 exact stable build，并将独立 comparison report digest 绑定进 attestation；任何不可比状态都是 `indeterminate`。
+
+首次 current-contract 发布没有 stable baseline 时，policy 只能显式标记 `bootstrap`：全部绝对门仍须通过，相对门记为 `not_applicable`，candidate 只有在 canary 完成后才能成为首个 baseline。撤销的 baseline 只保留审计，不得再用于发布。
+
+#### 16.2.5 三态 CI 与 D24 发布屏障
+
+CI evaluator 只允许三态：exit `0` 表示全部适用门通过，exit `1` 表示确定失败，exit `2` 表示 `indeterminate`。只有 exit `0` 的 exact report 可以签发 attestation；exit `1/2` 均不得进入发布屏障。
+
+D24 Task acceptance/TaskRecord creation barrier 只能在同一 exact package/`CandidateDigest` 的 offline attestation 为 exit `0`，并完成 exact current-contract rollback 演练后生效。bootstrap 没有 stable build 时，必须改做 stop-intake/fence/reject 演练。屏障生效后，所有 accepted Task 都使用唯一 current contract；canary 只限制该 contract 的 intake/capacity，剩余 intake 必须暂停或留在 Server current control plane。
+
+canary 依序执行：
+
+1. 5% target capacity（至少一台 Worker），且同时达到至少 24 小时和 200 个 accepted current Tasks。
+2. 25% target capacity，且同时达到至少 72 小时和 1000 个 accepted current Tasks。
+3. 前两阶段全部通过后才可扩至 full capacity；样本或窗口不足不得晋级。
+
+`platform_failure_rate` 的分母是窗口内已终态或 deadline 已到的 accepted current Tasks；分子是以 `RUNTIME_FAILURE`、`STORAGE_FAILURE`、`PROTOCOL_FAILURE` 终止，或 deadline 后仍无合法终态的 Tasks。该率必须 < 2%；存在 stable baseline 时，其增加还不得超过 2 percentage points。
+
+任一 zero-tolerance 事件、platform failure 门失败，或 p95 wall time/cost 增加超过 20%，都必须自动停止扩容，并回到 exact-pin、实现同一 current contract package/schema/storage semantics 的已签发 stable build。若不存在这样的 stable build，只能 stop intake、fence 或 reject。D24 barrier 后不得重新开放 pre-cutover Task、已退役 schema/protocol/QA/baseline 或第二生产轨道。未来 roadmap 每版仍须单独编写完整 implementation design，并取得独立 release-gate 决议。
 
 ### 16.3 核心质量指标
 

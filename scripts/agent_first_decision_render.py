@@ -23,10 +23,11 @@ def render_document(register: dict[str, Any]) -> str:
         decisions_by_id[decision_id]
         for decision_id in register["question_order"]
     ]
+    active_decision_id = register["active_decision_id"] or "none"
     lines = [
         f"> Generated from `{register['register_id']}`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.",
         "",
-        f"Active question: `{register['active_decision_id']}`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.",
+        f"Active question: `{active_decision_id}`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.",
         "",
         "| ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |",
         "|---|---|---|---|---|---|---|---|",

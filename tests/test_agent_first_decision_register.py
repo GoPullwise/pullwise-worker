@@ -260,7 +260,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("valid_pending", json.loads(result.stdout)["status"])
+        self.assertEqual("ready", json.loads(result.stdout)["status"])
         with self.assertRaisesRegex(
             DecisionRegisterFormatError, "manifest:canonical_path"
         ):
