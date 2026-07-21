@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D25",
+  "active_decision_id": "D26",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -393,7 +393,7 @@
     {
       "id": "D25", "key": "receipt-dag", "scope": "P1.5", "title": "TaskResult/receipt digest DAG",
       "question": "如何消除 immutable receipt 与 full TaskResult digest 的循环？",
-      "status": "pending", "depends_on": ["D9", "D23"], "activation": null, "required_by_slice": "S7",
+      "status": "resolved", "depends_on": ["D9", "D23"], "activation": null, "required_by_slice": "S7",
       "effects": ["data_model", "compatibility"], "source_refs": ["handoff:P1.5"],
       "affected_units": ["post-closure"],
       "options": [
@@ -401,7 +401,7 @@
         {"id": "receipt_after_full_digest", "summary": "等 full result digest 已知后才创建 receipt。", "rationale": "避免回填 receipt，但 receipt 无法被 result 本体引用。", "consequences": ["transport envelope 必须把 receipt 放在被哈希 core 之外"]},
         {"id": "mutable_receipt_record", "summary": "明确 receipt 是可变 DB record，不再作为 immutable ContentRef。", "rationale": "实现直接，但失去内容寻址不可变语义。", "consequences": ["所有引用和审计必须改为 versioned row identity"]}
       ],
-      "recommended_option_id": "immutable_receipt_mutable_binding", "resolution": null, "supersedes": []
+      "recommended_option_id": "immutable_receipt_mutable_binding", "resolution": {"kind":"option","selected_option_id":"immutable_receipt_mutable_binding","custom_text":null,"decision_text":"Select immutable_receipt_mutable_binding: 拆分 immutable upload/transport receipt、mutable Server binding/index，并分离 TaskResultCore 与 transport envelope digest。 形成无环内容 DAG，同时保留一次性 Server 绑定。 Constraints: 需要两个 digest、绑定 CAS 和 crash fixtures","authority":"user","decided_at":"2026-07-21","evidence_refs":["conversation:user-directive:2026-07-21:all-subsequent-recommended-options"],"resolution_sha256":"03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0"}, "supersedes": []
     },
     {
       "id": "D26", "key": "post-spec-depth", "scope": "P1.6", "title": "远期版本规范深度与完成口径",

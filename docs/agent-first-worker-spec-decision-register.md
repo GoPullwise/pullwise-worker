@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D25`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D26`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -35,7 +35,7 @@ Active question: `D25`. Questions are asked one at a time. User silence, existin
 | `D21` | `P0.11` | outer job 执行模式配置权威 | `resolved` | `active` | `S6` | D9, D20 | `server_claim_bound_mode` |
 | `D23` | `P1.2` | C0 contract package 真源归属 | `resolved` | `active` | `S7` | D1, D2 | `server_owned_package` |
 | `D24` | `P1.2` | Server TaskRecord v2 bootstrap 策略 | `resolved` | `active` | `S7` | D8, D23 | `lazy_eligible_claim_migration` |
-| `D25` | `P1.5` | TaskResult/receipt digest DAG | `pending` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
+| `D25` | `P1.5` | TaskResult/receipt digest DAG | `resolved` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
 | `D26` | `P1.6` | 远期版本规范深度与完成口径 | `pending` | `active` | `S7` | D1 | `roadmap_separate_designs` |
 | `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `pending` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
 
@@ -553,17 +553,19 @@ Active question: `D25`. Questions are asked one at a time. User silence, existin
 
 ### D25 — TaskResult/receipt digest DAG
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S7`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S7`.
 
 **Question:** 如何消除 immutable receipt 与 full TaskResult digest 的循环？
 
 **Options:**
 
-- `immutable_receipt_mutable_binding` — non-normative recommendation, not selected: 拆分 immutable upload/transport receipt、mutable Server binding/index，并分离 TaskResultCore 与 transport envelope digest。 形成无环内容 DAG，同时保留一次性 Server 绑定。 Consequences: 需要两个 digest、绑定 CAS 和 crash fixtures
+- `immutable_receipt_mutable_binding` — selected by resolution: 拆分 immutable upload/transport receipt、mutable Server binding/index，并分离 TaskResultCore 与 transport envelope digest。 形成无环内容 DAG，同时保留一次性 Server 绑定。 Consequences: 需要两个 digest、绑定 CAS 和 crash fixtures
 - `receipt_after_full_digest`: 等 full result digest 已知后才创建 receipt。 避免回填 receipt，但 receipt 无法被 result 本体引用。 Consequences: transport envelope 必须把 receipt 放在被哈希 core 之外
 - `mutable_receipt_record`: 明确 receipt 是可变 DB record，不再作为 immutable ContentRef。 实现直接，但失去内容寻址不可变语义。 Consequences: 所有引用和审计必须改为 versioned row identity
 
-**Resolution:** No option has been selected.
+**Resolution:** `immutable_receipt_mutable_binding` (`option`). Select immutable_receipt_mutable_binding: 拆分 immutable upload/transport receipt、mutable Server binding/index，并分离 TaskResultCore 与 transport envelope digest。 形成无环内容 DAG，同时保留一次性 Server 绑定。 Constraints: 需要两个 digest、绑定 CAS 和 crash fixtures
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0`.
 
 **Supersedes:** none
 

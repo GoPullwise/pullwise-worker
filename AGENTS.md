@@ -233,10 +233,10 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The current resolved set is D1, D3-D21, D23-D24, and D27; D2 remains pending
-  but inactive under D1, and D25 is the only active question. The register has
-  23 resolved records and three applicable pending records in order D25, D26,
-  D22. D20 remains bound to
+- The current resolved set is D1, D3-D21, D23-D25, and D27; D2 remains pending
+  but inactive under D1, and D26 is the only active question. The register has
+  24 resolved records and two applicable pending records in order D26, D22.
+  D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
   bound to custom `server_claim_bound_mode` digest
@@ -249,6 +249,10 @@ inference never select an option or authorize production implementation.
   post-cutover tasks, isolates every pre-cutover task as non-executable, forbids
   legacy migration or coexistence, and permits rollback only to an exact-pinned
   build implementing the same current package, schema, storage semantics, and contract.
+  D25 is bound to recommended `immutable_receipt_mutable_binding` digest
+  `03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0`:
+  upload/transport receipts stay immutable, while a separate Server-owned binding
+  index performs the one-time CAS to the exact transport-envelope digest.
   The recommendation directive remains bounded by D27.
 
 The generated Markdown view is a generated-file size exception owned by the
@@ -422,6 +426,13 @@ fail with `TASK_ALREADY_TERMINAL`.
   prior build with the same current package identity/version/digest, TaskRecord
   schema, storage semantics, and Agent-First contract; it must not reopen old
   tasks, data shapes, protocols, or entry points.
+- D25 keeps each upload/transport receipt byte-immutable and content-addressed.
+  A separate Server-owned mutable binding/index may CAS exactly once from
+  unbound to one exact `transport_envelope_digest`; it cannot rebind, clear, or
+  mutate the receipt. `task_result_core_digest` and `transport_envelope_digest`
+  are distinct DAG identities. The binding/ACK is transport metadata and never
+  replaces D9's internal TaskResult CAS or rewrites outcome; D23's Server-owned
+  package defines both digest algorithms, binding schema, and crash fixtures.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must

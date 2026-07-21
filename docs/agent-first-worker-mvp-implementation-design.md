@@ -74,11 +74,14 @@ mode/protocol，Worker 仅验证并执行，缺失、未知或不匹配时 fail 
 或撤权后的不可执行隔离；屏障后旧任务及迟到的 lease/event/result/replay 均 fail closed，
 且不得加入 legacy migration/backfill、双读写、协商或兼容。安全回滚仅限 exact-pin
 同一 current package/schema/storage contract 的先前 build。该决议不授权提前修改
-runtime/schema/migration。
+runtime/schema/migration。D25 进一步冻结无环 receipt 拓扑：upload/transport receipt bytes
+保持 immutable，独立 Server-owned binding/index 只允许一次性绑定 exact transport
+envelope digest；TaskResultCore digest 与 transport envelope digest 分离，binding/ACK
+不得替代 D9 的内部 TaskResult CAS。该决议同样不授权提前修改 runtime/schema/protocol。
 
-## D9-D21 与 D23-D24 resolution overlay（Normative）
+## D9-D21 与 D23-D25 resolution overlay（Normative）
 
-机器注册表已按用户授权解决 D9-D21 与 D23-D24，当前唯一活动问题是 D25。以下决议优先于
+机器注册表已按用户授权解决 D9-D21 与 D23-D25，当前唯一活动问题是 D26。以下决议优先于
 后文仍以“候选”或“待决”表述的旧段落，但不代表对应生产代码已经实现：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
@@ -111,6 +114,12 @@ runtime/schema/migration。
   幂等重放或迟到 lease/event/result/replay 都不得重新进入执行，且不允许 legacy
   migration/backfill、双读写、运行时协商或兼容。回滚只允许 exact-pin 同一 current
   package、TaskRecord schema、storage semantics 与 Agent-First contract 的先前 build。
+- D25 选择 `immutable_receipt_mutable_binding`：immutable upload/transport receipt
+  与 Server-owned mutable binding/index 分离，binding 只可从 unbound 一次性 CAS 到
+  exact `transport_envelope_digest`，禁止重绑、清空或改写 receipt。TaskResultCore 与
+  transport envelope 使用两个独立 digest，保持无环内容 DAG；binding/ACK 仅属 transport
+  metadata，不替代 D9 的内部 TaskResult CAS。完整 schema 与 crash fixtures 仍由 D23
+  的 Server-published current package 定义。
 
 ## 当前实施状态（非规范证据）
 
@@ -122,7 +131,7 @@ runtime/schema/migration。
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
 | S3-S4 | 未开始；决策门已闭合 | D9-D17 已解决；仍须按本文实现、测试并取得切片证据，不能把决议记录当作实现完成 |
-| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 23 个 resolved、4 个 pending（其中 D2 inactive）与 3 个 applicable pending；S5 无 pending decision blocker，S6 仅由 D22 阻断，S7/S8 由 D25、D26、D22 阻断，唯一活动问题为 `active_decision_id=D25` |
+| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 24 个 resolved、3 个 pending（其中 D2 inactive）与 2 个 applicable pending；S5 无 pending decision blocker，S6 仅由 D22 阻断，S7/S8 由 D26、D22 阻断，唯一活动问题为 `active_decision_id=D26` |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
 

@@ -51,9 +51,9 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D25", report["active_decision_id"])
-        self.assertEqual(3, report["pending_decision_count"])
-        self.assertEqual(23, report["resolved_decision_count"])
+        self.assertEqual("D26", report["active_decision_id"])
+        self.assertEqual(2, report["pending_decision_count"])
+        self.assertEqual(24, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -80,6 +80,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D21": ("server_claim_bound_mode", "ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282"),
             "D23": ("server_owned_package", "cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2"),
             "D24": ("new_tasks_only", "8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806"),
+            "D25": ("immutable_receipt_mutable_binding", "03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0"),
             "D27": ("clean_break_no_legacy", "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
@@ -161,6 +162,38 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         )
         self.assertEqual(expected_resolution, resolution)
 
+    def test_d25_records_the_exact_authorized_option_resolution(self) -> None:
+        decision_text = (
+            "Select immutable_receipt_mutable_binding: 拆分 immutable "
+            "upload/transport receipt、mutable Server binding/index，并分离 "
+            "TaskResultCore 与 transport envelope digest。 形成无环内容 DAG，同时保留"
+            "一次性 Server 绑定。 Constraints: 需要两个 digest、绑定 CAS 和 crash fixtures"
+        )
+        expected_resolution = {
+            "kind": "option",
+            "selected_option_id": "immutable_receipt_mutable_binding",
+            "custom_text": None,
+            "decision_text": decision_text,
+            "authority": "user",
+            "decided_at": "2026-07-21",
+            "evidence_refs": [
+                "conversation:user-directive:2026-07-21:all-subsequent-recommended-options"
+            ],
+            "resolution_sha256": (
+                "03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0"
+            ),
+        }
+        register = load_register(REGISTER_PATH)
+        decision = next(
+            item for item in register["decisions"] if item["id"] == "D25"
+        )
+
+        self.assertEqual(235, len(decision_text))
+        self.assertEqual(303, len(decision_text.encode("utf-8")))
+        self.assertEqual("resolved", decision["status"])
+        self.assertEqual(expected_resolution, decision["resolution"])
+        self.assertEqual([], decision["supersedes"])
+
     def test_pullwise_scope_resolution_unblocks_slice_two(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(
@@ -171,7 +204,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D25", report["active_decision_id"])
+        self.assertEqual("D26", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_slice_gate_reports_every_due_active_pending_decision(self) -> None:
@@ -200,7 +233,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D25", "D26", "D22"], blocker["decision_ids"])
+        self.assertEqual(["D26", "D22"], blocker["decision_ids"])
 
         report = verify_register(
             register, REPO_ROOT, require_slice="S8",
@@ -208,7 +241,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D25", "D26", "D22"], blocker["decision_ids"])
+        self.assertEqual(["D26", "D22"], blocker["decision_ids"])
 
 
 if __name__ == "__main__":
