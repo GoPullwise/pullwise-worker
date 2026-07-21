@@ -188,6 +188,17 @@ class AgentKernelSourceStateTest(unittest.TestCase):
                 entries=entries,
             )
 
+        component_entries = (
+            SourceEntry.file("Folder/one.txt", size_bytes=1, sha256=digest),
+            SourceEntry.file("folder/two.txt", size_bytes=1, sha256=digest),
+        )
+        with self.assertRaisesRegex(SourceStateError, "SOURCE_PATH_CASE_COLLISION"):
+            SourceTreeSnapshot(
+                base_revision=BASE_REVISION,
+                selection_policy_digest=self.policy.digest,
+                entries=component_entries,
+            )
+
     def test_snapshot_rejects_case_colliding_directory_components(self) -> None:
         (self.root / "Folder").mkdir()
         (self.root / "Folder" / "one.txt").write_text("one", encoding="utf-8")
@@ -226,6 +237,13 @@ class AgentKernelSourceStateTest(unittest.TestCase):
             SourceEntry.file(
                 "bad-" + chr(0xDCFF),
                 size_bytes=1,
+                sha256=hashlib.sha256(b"x").hexdigest(),
+            )
+
+        with self.assertRaisesRegex(SourceStateError, "SOURCE_FILE_ENTRY_INVALID"):
+            SourceEntry.file(
+                "huge",
+                size_bytes=2**53,
                 sha256=hashlib.sha256(b"x").hexdigest(),
             )
 

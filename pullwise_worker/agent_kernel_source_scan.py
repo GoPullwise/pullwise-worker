@@ -106,20 +106,35 @@ def snapshot_source_tree(
     gitlink_catalog: object | None = None,
     stage_hook: StageHook | None = None,
 ) -> SourceTreeSnapshot:
-    if gitlink_catalog is not None:
-        raise SourceStateError("SOURCE_GITLINK_CATALOG_UNVERIFIED")
     root = Path(root)
     try:
         root_metadata = root.lstat()
     except OSError as exc:
         raise SourceStateError("SOURCE_ROOT_UNREADABLE") from exc
     _assert_directory(root_metadata, ".")
+    from .agent_kernel_gitlinks import VerifiedGitlinkCatalog
+
+    has_git_metadata = any(
+        candidate.exists() or candidate.is_symlink()
+        for candidate in (root / ".git", root / ".gitmodules")
+    )
+    if gitlink_catalog is None:
+        if has_git_metadata:
+            raise SourceStateError("SOURCE_GITLINK_CATALOG_REQUIRED")
+        catalog_entries: tuple[SourceEntry, ...] = ()
+    elif isinstance(gitlink_catalog, VerifiedGitlinkCatalog):
+        gitlink_catalog.assert_matches(root, base_revision)
+        catalog_entries = gitlink_catalog.entries
+    else:
+        raise SourceStateError("SOURCE_GITLINK_CATALOG_UNVERIFIED")
+    gitlinks = {entry.path: entry for entry in catalog_entries}
     if _HAS_DIRFD:
-        entries = _scan_with_dirfd(root, policy, stage_hook)
+        scanned = _scan_with_dirfd(root, policy, stage_hook, gitlinks)
     else:
         from .agent_kernel_source_scan_windows import scan_with_paths
 
-        entries = scan_with_paths(root, policy, stage_hook)
+        scanned = scan_with_paths(root, policy, stage_hook, gitlinks)
+    entries = [*catalog_entries, *scanned]
     return SourceTreeSnapshot(
         base_revision=base_revision,
         selection_policy_digest=policy.digest,

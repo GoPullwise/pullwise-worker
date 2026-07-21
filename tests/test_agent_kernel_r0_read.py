@@ -7,8 +7,11 @@ import tempfile
 import unittest
 
 from pullwise_worker.agent_kernel_gateway import (
+    AgentKernelGateway,
     CheckedInvocation,
+    DispatchDecision,
     PreparedDispatch,
+    ReplayState,
     ToolDescriptor,
 )
 from pullwise_worker.agent_kernel_r0_read import (
@@ -186,6 +189,18 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         with self.assertRaisesRegex(R0ReadError, "PREPARED_READ_CLOSED"):
             R0ReadDispatcher().dispatch(prepared)
 
+    def test_prepare_hook_failure_does_not_leak_the_leaf_descriptor(self) -> None:
+        def fail(stage: str, path: Path) -> None:
+            if stage == "after_file_prepared":
+                raise RuntimeError("injected hook failure")
+
+        with self.assertRaisesRegex(RuntimeError, "injected hook failure"):
+            self.preparer(stage_hook=fail).prepare(
+                object(), self.call("nested/README.md"), self.descriptor
+            )
+
+        self.target.unlink()
+
     def test_dispatcher_rejects_untrusted_handle_shape(self) -> None:
         preparer = self.preparer()
         valid = preparer.prepare(
@@ -202,6 +217,90 @@ class AgentKernelR0ReadTest(unittest.TestCase):
 
         with self.assertRaisesRegex(R0ReadError, "PREPARED_READ_INVALID"):
             R0ReadDispatcher().dispatch(forged)
+
+    def test_real_r0_reader_composes_through_the_gateway(self) -> None:
+        call = self.call("nested/README.md")
+        tracer = _TracerAuthorities(call)
+        preparer = self.preparer()
+        gateway = AgentKernelGateway(
+            codec=tracer,
+            journal=tracer,
+            authority=tracer,
+            catalog=tracer,
+            policy=tracer,
+            preparer=preparer,
+            budget=tracer,
+            dispatcher=R0ReadDispatcher(),
+            committer=tracer,
+        )
+
+        result = gateway.invoke(b"package-validated-request")
+
+        self.assertEqual(self.payload, result)
+        self.assertEqual(1, tracer.commit_count)
+
+
+class _TracerAuthorities:
+    def __init__(self, call: CheckedInvocation) -> None:
+        self.call = call
+        self.reservation = object()
+        self.commit_count = 0
+
+    def validate(self, raw: bytes) -> CheckedInvocation:
+        return self.call
+
+    def probe(self, key: str, digest: str) -> ReplayState:
+        return ReplayState.new()
+
+    def assert_actor_current(self, call: CheckedInvocation) -> object:
+        return object()
+
+    def assert_lease_current(self, ticket: object, call: CheckedInvocation) -> None:
+        return None
+
+    def assert_runnable(self, ticket: object, call: CheckedInvocation) -> None:
+        return None
+
+    def resolve(self, tool_key: str) -> ToolDescriptor:
+        return ToolDescriptor(
+            tool_key="internal.read_source",
+            tool_version="test",
+            risk="R0",
+            capability="source.read",
+            uses_command=False,
+            uses_network=False,
+            uses_secret=False,
+            requests_approval=False,
+        )
+
+    def assert_capability(self, *args: object) -> None:
+        return None
+
+    def assert_execution_controls(self, *args: object) -> None:
+        return None
+
+    def reserve(self, *args: object) -> object:
+        return self.reservation
+
+    def release_before_dispatch(self, reservation: object) -> None:
+        raise AssertionError("winning dispatch must not release before dispatch")
+
+    def begin(self, *args: object) -> DispatchDecision:
+        return DispatchDecision.winner(object())
+
+    def commit(self, *args: object) -> bytes:
+        receipt = args[3]
+        self.commit_count += 1
+        return receipt.payload
+
+    def commit_source_violation(self, *args: object) -> object:
+        raise AssertionError("unchanged source cannot be a violation")
+
+    def commit_source_unavailable(self, *args: object) -> object:
+        raise AssertionError("source identity must remain available")
+
+    def commit_dispatch_failure(self, *args: object) -> object:
+        raise AssertionError("descriptor dispatch must succeed")
 
 
 if __name__ == "__main__":

@@ -124,6 +124,7 @@ def _assert_entry_matches(
 
 def _open_with_dirfd(root: Path, relative: str) -> int:
     directory_fds: list[int] = []
+    descriptor: int | None = None
     try:
         root_before = root.lstat()
         _assert_directory(root_before, ".")
@@ -163,20 +164,24 @@ def _open_with_dirfd(root: Path, relative: str) -> int:
             and _same_identity(opened, after)
             and _same_identity(root_opened, root.lstat())
         ):
-            os.close(descriptor)
             raise R0ReadError("READ_PATH_UNSAFE")
-        return descriptor
+        result = descriptor
+        descriptor = None
+        return result
     except R0ReadError:
         raise
     except (OSError, SourceStateError) as exc:
         raise R0ReadError("READ_PATH_UNSAFE") from exc
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         for directory_fd in reversed(directory_fds):
             os.close(directory_fd)
 
 
 def _open_with_paths(root: Path, relative: str) -> int:
     parents: list[tuple[Path, os.stat_result]] = []
+    descriptor: int | None = None
     try:
         current = root
         root_metadata = root.lstat()
@@ -211,13 +216,17 @@ def _open_with_paths(root: Path, relative: str) -> int:
             and _same_identity(opened, after)
             and parents_stable
         ):
-            os.close(descriptor)
             raise R0ReadError("READ_PATH_UNSAFE")
-        return descriptor
+        result = descriptor
+        descriptor = None
+        return result
     except R0ReadError:
         raise
     except (OSError, SourceStateError) as exc:
         raise R0ReadError("READ_PATH_UNSAFE") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _open_verified(root: Path, relative: str) -> int:
@@ -280,7 +289,6 @@ class R0ReadPreparer:
                 raise R0ReadError("READ_LEAF_NOT_REGULAR")
             _assert_entry_matches(descriptor_fd, entry, self.max_bytes)
             handle = PreparedR0ReadHandle(descriptor_fd, entry)
-            descriptor_fd = None
             prepared = PreparedDispatch(
                 tool_key=descriptor.tool_key,
                 tool_version=descriptor.tool_version,
@@ -289,6 +297,7 @@ class R0ReadPreparer:
             )
             if self.stage_hook is not None:
                 self.stage_hook("after_file_prepared", self.root)
+            descriptor_fd = None
             return prepared
         finally:
             if descriptor_fd is not None:

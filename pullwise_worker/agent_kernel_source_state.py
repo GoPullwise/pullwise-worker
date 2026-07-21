@@ -15,6 +15,7 @@ DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 REVISION_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|unversioned:[0-9a-f]{64})$")
 DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 PULLWISE_EXCLUDED_CONTROL_ROOTS = (".codex-review", ".git")
+MAX_SAFE_INTEGER = 2**53 - 1
 
 
 class SourceStateError(RuntimeError):
@@ -63,9 +64,15 @@ def _ordered_paths(values: tuple[str, ...]) -> tuple[str, ...]:
         raise SourceStateError("SOURCE_PATH_DUPLICATE")
     folded: dict[str, str] = {}
     for value in ordered:
-        prior = folded.setdefault(value.casefold(), value)
-        if prior != value:
-            raise SourceStateError("SOURCE_PATH_CASE_COLLISION", f"{prior}, {value}")
+        parts = value.split("/")
+        for length in range(1, len(parts) + 1):
+            component_path = "/".join(parts[:length])
+            prior = folded.setdefault(component_path.casefold(), component_path)
+            if prior != component_path:
+                raise SourceStateError(
+                    "SOURCE_PATH_CASE_COLLISION",
+                    f"{prior}, {component_path}",
+                )
     return ordered
 
 
@@ -109,6 +116,7 @@ class SourceSelectionPolicy:
         object.__setattr__(self, "excluded_control_roots", roots)
         if self.ephemeral_patterns:
             raise SourceStateError("SOURCE_EPHEMERAL_PATTERN_UNSUPPORTED")
+        object.__setattr__(self, "ephemeral_patterns", ())
         if self.symlink_policy != "record_target_no_follow":
             raise SourceStateError("SOURCE_SYMLINK_POLICY_UNSUPPORTED")
         if self.case_collision_policy != "reject":
@@ -170,6 +178,7 @@ class SourceEntry:
                 isinstance(self.size_bytes, bool)
                 or not isinstance(self.size_bytes, int)
                 or self.size_bytes < 0
+                or self.size_bytes > MAX_SAFE_INTEGER
                 or not isinstance(self.sha256, str)
                 or not DIGEST_PATTERN.fullmatch(self.sha256)
                 or not isinstance(self.executable, bool)

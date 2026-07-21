@@ -474,6 +474,37 @@ Worker control transport separate from Agent capability risk; it is not an R2
 grant. The controlled MVP contract/state units must reference D3 resolution
 digest `0126d5ee3329c0f954e88e08979e8f0883086b3846315e2904cd7d323b97b07a`.
 
+### S3a Internal Read Tracer Boundary
+
+The current S3a work is package-independent safety infrastructure only, not a
+production Agent-First runner or a completed S3 slice.
+
+- agent_kernel_source_state.py contains only internal typed identity facts and
+  pure diffs. agent_kernel_source_scan.py owns Ubuntu descriptor-rooted
+  traversal; the focused Windows fallback exists for development tests. Worker
+  must not add versioned schema tags, construct current manifests, or treat
+  these internal shapes as a substitute for D23's exact-pinned Server package.
+- Pullwise source selection has fixed .git and .codex-review exclusions.
+  Caller-selected exclusions and ephemeral patterns fail closed. A caller
+  cannot supply raw gitlink mappings: until a trusted exact-revision Git catalog
+  is implemented, a supplied catalog fails
+  SOURCE_GITLINK_CATALOG_UNVERIFIED. This remaining catalog gap blocks
+  production SourceState completeness.
+- agent_kernel_gateway.py is only the fixed-order orchestration kernel. Its
+  codec, authority, policy, budget, dispatch journal, and execution committer
+  are injected current-only boundaries. Do not satisfy them with Slice 2 shadow
+  state, legacy Task rows, bare budget_entries.monotonic_ms, or the legacy-FK
+  observations table.
+- agent_kernel_r0_read.py prepares one internal R0 source read by binding a
+  full SourceState snapshot to a held regular-file descriptor. The dispatcher
+  receives no unresolved path, shell, network client, approval channel, or
+  secret handle. Every pre-dispatch loss path closes the descriptor; a fresh
+  post-dispatch snapshot with any diff withholds the normal result.
+- This tracer deliberately does not construct an Observation, dispatch-intent
+  contract, ContentRef, or durable idempotency result. Those require the
+  exact-pinned current package plus a current-only journal/CAS transaction
+  boundary. The existing shadow database cannot fill that role.
+
 ## Agent-First Legacy Policy History
 
 D4's field-by-field legacy policy mapping is immutable history superseded by
