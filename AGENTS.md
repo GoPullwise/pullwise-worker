@@ -199,7 +199,7 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
 ## Agent-First Specification Decision Gate
 
 contracts/agent-first/spec-decision-register.json is the only machine source
-for unresolved Agent-First specification decisions. The generated human view is
+for Agent-First specification decision state. The generated human view is
 docs/agent-first-worker-spec-decision-register.md. Recommendations in either
 artifact are non-normative: current code, existing prose, silence, and Agent
 inference never select an option or authorize production implementation.
@@ -233,6 +233,12 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
+- The current resolved prefix is D1, D3-D19, and D27; D2 remains pending but
+  inactive under D1, and D20 is the only active question. The user's
+  2026-07-21 directive selects each subsequent machine recommendation only
+  while it is compatible with D27. It is not a compatibility exception: D20's
+  recommended old-QA/shadow coexistence requires a new option-anchored custom
+  user resolution before D20 or any dependent decision can be recorded.
 
 The generated Markdown view is a generated-file size exception owned by the
 Worker specification owner. It stays atomic because it is one ordered decision
@@ -345,10 +351,13 @@ fail with `TASK_ALREADY_TERMINAL`.
   publication, and recording transport abandonment as separate non-result
   evidence rather than a Task terminal kind. An exact idempotent replay reuses
   the original event version and does not advance `task_version` again. A
-  successor may take over only after an explicit recovery
-  eligibility predicate passes and with a fresh fence/epoch; do not infer that
-  predicate or the eventual terminal authority/precedence while D9/D10 remain
-  unresolved. Keep the `mvp-state-semantics` and `post-closure` units bound to
+  successor may take over only after an explicit recovery eligibility
+  predicate passes and with a fresh fence/epoch; do not infer that predicate.
+  D9 now makes the internal TaskResult CAS the sole semantic terminal
+  linearization point, and D10 requires one exhaustive global safety-first
+  matrix to select the outcome. Until that complete matrix is frozen, no
+  candidate precedence is implementation authority. Keep the
+  `mvp-state-semantics` and `post-closure` units bound to
   D8 digest
   `e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a`.
   The current Slice 2 `outer_lease.fenced` Task-terminalization behavior is a
@@ -358,15 +367,31 @@ fail with `TASK_ALREADY_TERMINAL`.
   Attempt/native epoch, stable owner ID, owner epoch, and the exact live owner
   session. A mismatch fails closed with the stable fence code; do not infer
   freshness from only one epoch or from an Agent-provided identity.
-- The legacy active-run marker, terminal outbox, and success receipt remain the
-  production terminal authority. The Agent Kernel bridge is a read-only
-  one-slot shadow projection enabled by
+- The legacy active-run marker, terminal outbox, and success receipt remain
+  current runtime state only until coordinated replacement; they are not the
+  target Agent-First semantic authority after D9. The Agent Kernel bridge is a
+  read-only one-slot shadow projection enabled by
   `PULLWISE_AGENT_KERNEL_SHADOW_ENABLED`; disabling it constructs the unchanged
   legacy worker. It must never create a local queue/prefetch slot, publish a
   second result, or treat a stale outbox as pending after an exact bound success
   receipt has won. An ACTIVE observation freezes the complete
   job/run/lease/attempt identity, and persisted-run recovery must immediately
-  refresh the shadow projection from the recovered marker/outbox.
+  refresh the shadow projection from the recovered marker/outbox. In the
+  current-only replacement, a TaskResult CAS commits the immutable semantic
+  outcome; Server ACK is only a recoverable transport projection and cannot
+  create, replace, or rewrite it.
+- D11-D17 resolve the S3/S4 design choices to a Worker-owned partial-delivery
+  manifest, immutable generation supersession, prepublication cancel plus
+  postpublication addendum, a separate bundle-integrity manifest, separate
+  Gate-predicate and stable-error registries, removal of the Q0 success path,
+  and a versioned concern/coverage table. Under D9, D12 repair may create only
+  a new transport projection/envelope generation; it never rewrites a CASed
+  TaskResultCore or outcome. D13 addenda likewise never mutate the result.
+- D18 makes the existing root coordinator the sole current logical Task Owner
+  at coordinated cutover, with coordinator identity separated from owner
+  incarnation; D27 forbids a parallel second controller or old-protocol path.
+  D19 keeps that Owner incarnation live through fanout and reserves its fixed
+  agent/session slot alongside reviewers and verifiers.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must

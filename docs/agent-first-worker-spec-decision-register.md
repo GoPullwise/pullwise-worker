@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D9`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D20`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -20,17 +20,17 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 | `D7` | `P0.6` | monotonic 时间持久化形式 | `resolved` | `active` | `S4` | — | `persist_elapsed_consumption` |
 | `D8` | `P0.6/P0.7` | lease loss 与 same-run resume 状态边界 | `resolved` | `active` | `S4` | D5 | `task_active_attempt_fenced` |
 | `D27` | `P0.4/P0.10/P0.11/P1.2` | Agent-First 单协议 clean-break 边界 | `resolved` | `active` | `S3` | D4 | `clean_break_no_legacy` |
-| `D9` | `P0.7` | 内部结果与 legacy 发布的终态权威 | `pending` | `active` | `S4` | D8 | `internal_result_cas_authoritative` |
-| `D10` | `P0.7` | 并发终态事实优先级模型 | `pending` | `active` | `S4` | D9 | `global_safety_first_matrix` |
-| `D11` | `P0.7` | PARTIAL 安全交付证据表示 | `pending` | `active` | `S3` | D10 | `partial_delivery_manifest` |
-| `D12` | `P0.7` | Server 拒绝前的结果修复与代次 | `pending` | `active` | `S4` | D9 | `new_generation_supersession` |
-| `D13` | `P0.7` | authoritative cancel 与已准备结果协调 | `pending` | `active` | `S4` | D9, D10, D12 | `prepublish_cancel_postpublish_reconcile` |
-| `D14` | `P0.8` | SourceState 与 bundle 完整性归属 | `pending` | `active` | `S4` | D1 | `separate_bundle_integrity_manifest` |
-| `D15` | `P0.3` | GATE_* predicate 与 stable error taxonomy | `pending` | `active` | `S3` | — | `separate_predicate_registry` |
-| `D16` | `P0.9` | MVP Q0 Owner self-attestation 路径 | `pending` | `active` | `S3` | D1, D4 | `remove_q0_success_path` |
-| `D17` | `P0.9` | Q2 concern/slot 规划算法 | `pending` | `active` | `S3` | D16 | `versioned_concern_table` |
-| `D18` | `P0.10` | 现有 root coordinator 与 Task Owner 关系 | `pending` | `active` | `S5` | D1, D6 | `coordinator_is_owner` |
-| `D19` | `P0.10` | reviewer fanout 期间 Owner liveness | `pending` | `active` | `S5` | D4, D18 | `owner_remains_live` |
+| `D9` | `P0.7` | 内部结果与 legacy 发布的终态权威 | `resolved` | `active` | `S4` | D8 | `internal_result_cas_authoritative` |
+| `D10` | `P0.7` | 并发终态事实优先级模型 | `resolved` | `active` | `S4` | D9 | `global_safety_first_matrix` |
+| `D11` | `P0.7` | PARTIAL 安全交付证据表示 | `resolved` | `active` | `S3` | D10 | `partial_delivery_manifest` |
+| `D12` | `P0.7` | Server 拒绝前的结果修复与代次 | `resolved` | `active` | `S4` | D9 | `new_generation_supersession` |
+| `D13` | `P0.7` | authoritative cancel 与已准备结果协调 | `resolved` | `active` | `S4` | D9, D10, D12 | `prepublish_cancel_postpublish_reconcile` |
+| `D14` | `P0.8` | SourceState 与 bundle 完整性归属 | `resolved` | `active` | `S4` | D1 | `separate_bundle_integrity_manifest` |
+| `D15` | `P0.3` | GATE_* predicate 与 stable error taxonomy | `resolved` | `active` | `S3` | — | `separate_predicate_registry` |
+| `D16` | `P0.9` | MVP Q0 Owner self-attestation 路径 | `resolved` | `active` | `S3` | D1, D4 | `remove_q0_success_path` |
+| `D17` | `P0.9` | Q2 concern/slot 规划算法 | `resolved` | `active` | `S3` | D16 | `versioned_concern_table` |
+| `D18` | `P0.10` | 现有 root coordinator 与 Task Owner 关系 | `resolved` | `active` | `S5` | D1, D6 | `coordinator_is_owner` |
+| `D19` | `P0.10` | reviewer fanout 期间 Owner liveness | `resolved` | `active` | `S5` | D4, D18 | `owner_remains_live` |
 | `D20` | `P0.10` | 旧 QA 与新 Gate 权威切换 | `pending` | `active` | `S5` | D10, D17, D18 | `shadow_floor_then_gate_cutover` |
 | `D21` | `P0.11` | outer job 执行模式配置权威 | `pending` | `active` | `S6` | D9, D20 | `server_claim_bound_mode` |
 | `D23` | `P1.2` | C0 contract package 真源归属 | `pending` | `active` | `S7` | D1, D2 | `server_owned_package` |
@@ -230,16 +230,18 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D9 — 内部结果与 legacy 发布的终态权威
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** 内部 TaskResult CAS 还是 Server ACK 应成为唯一语义终态线性化点？
 
 **Options:**
 
-- `internal_result_cas_authoritative` — non-normative recommendation, not selected: 内部 TaskResult CAS 是语义终态；legacy outbox/Server ACK 只是可恢复 transport projection。 保持一套内部真相并复用现有 terminal outbox 作为投影 WAL。 Consequences: ACK 前 slot 仍占用，但不得改写已提交 outcome
+- `internal_result_cas_authoritative` — selected by resolution: 内部 TaskResult CAS 是语义终态；legacy outbox/Server ACK 只是可恢复 transport projection。 保持一套内部真相并复用现有 terminal outbox 作为投影 WAL。 Consequences: ACK 前 slot 仍占用，但不得改写已提交 outcome
 - `server_ack_authoritative`: 只有 Server 接受 ACK 才形成语义终态。 控制面与外部投影一致，但本地结果在网络故障期间没有最终身份。 Consequences: TaskResult publication 与 Server transaction 强耦合
 
-**Resolution:** No option has been selected.
+**Resolution:** `internal_result_cas_authoritative` (`option`). Select internal_result_cas_authoritative: the internal TaskResult CAS is the sole semantic terminal linearization point; Server ACK is only a recoverable transport projection and cannot create, replace, or rewrite the committed TaskResult outcome.
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-selection:2026-07-21:internal_result_cas_authoritative`; digest `3e8a5cf9d69cccd50667009c80e9a3176501d3c0150d5bec931ee71fb1cc46ce`.
 
 **Supersedes:** none
 
@@ -249,17 +251,19 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D10 — 并发终态事实优先级模型
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** cancel、deadline、effect、quality、protocol 等并发事实采用何种确定性优先规则？
 
 **Options:**
 
-- `global_safety_first_matrix` — non-normative recommendation, not selected: 采用一张全局 safety-first 穷举优先矩阵。 同一权威事实组合可跨 profile 机械复算唯一 outcome。 Consequences: 必须冻结完整 fact×state×availability×effect 表
+- `global_safety_first_matrix` — selected by resolution: 采用一张全局 safety-first 穷举优先矩阵。 同一权威事实组合可跨 profile 机械复算唯一 outcome。 Consequences: 必须冻结完整 fact×state×availability×effect 表
 - `first_cas_wins`: 第一个成功 CAS 的候选终态获胜，后到事实只审计。 事务简单，但可能让低优先结果隐藏未知 effect 或删除 fence。 Consequences: 需要证明所有先到候选都安全且诚实
 - `profile_specific_precedence`: 每个 profile 使用独立终态优先表。 可按领域定制，但通用内核不再有单一总函数。 Consequences: 跨 profile 兼容与验证矩阵扩大
 
-**Resolution:** No option has been selected.
+**Resolution:** `global_safety_first_matrix` (`option`). Select global_safety_first_matrix: 采用一张全局 safety-first 穷举优先矩阵。 同一权威事实组合可跨 profile 机械复算唯一 outcome。 Constraints: 必须冻结完整 fact×state×availability×effect 表
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `1daae4c66d41bd95a3eef8e24756590c8e6f75a05899548dc3126bfd39172e31`.
 
 **Supersedes:** none
 
@@ -269,16 +273,18 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D11 — PARTIAL 安全交付证据表示
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** PARTIAL 是否新增 Worker-owned partial-delivery-manifest，还是只依赖严格 AvailabilityRef？
 
 **Options:**
 
-- `partial_delivery_manifest` — non-normative recommendation, not selected: 新增 Worker-owned partial-delivery-manifest，显式列出安全可交付对象。 Terminalization 不必依赖尚不可构造的 proposal/ObservationManifest。 Consequences: 新增 schema、digest、owner 和 fixtures
+- `partial_delivery_manifest` — selected by resolution: 新增 Worker-owned partial-delivery-manifest，显式列出安全可交付对象。 Terminalization 不必依赖尚不可构造的 proposal/ObservationManifest。 Consequences: 新增 schema、digest、owner 和 fixtures
 - `availability_refs_only`: 只用严格 AvailabilityRef 表达 PARTIAL 可交付性。 对象更少，但必须为每个缺失组合冻结 safe-deliverable 谓词。 Consequences: availability union 和终态矩阵更复杂
 
-**Resolution:** No option has been selected.
+**Resolution:** `partial_delivery_manifest` (`option`). Select partial_delivery_manifest: 新增 Worker-owned partial-delivery-manifest，显式列出安全可交付对象。 Terminalization 不必依赖尚不可构造的 proposal/ObservationManifest。 Constraints: 新增 schema、digest、owner 和 fixtures
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `dc65778d9f60563e39a9c3262200f8e26efd8c48c29aa0141087793186032a7e`.
 
 **Supersedes:** none
 
@@ -288,16 +294,18 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D12 — Server 拒绝前的结果修复与代次
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** terminal payload 在 Server 400 拒绝后是否允许生成新 generation 并保留 supersession journal？
 
 **Options:**
 
-- `new_generation_supersession` — non-normative recommendation, not selected: ACK 前允许以新 generation 修复，并写不可变 supersession journal。 闭合 immutable payload 与可修复 contract error 的冲突。 Consequences: 旧代次永不覆盖且所有 replay 必须识别 supersession
+- `new_generation_supersession` — selected by resolution: ACK 前允许以新 generation 修复，并写不可变 supersession journal。 闭合 immutable payload 与可修复 contract error 的冲突。 Consequences: 旧代次永不覆盖且所有 replay 必须识别 supersession
 - `no_repair_terminal_failure`: contract-invalid 后不修 payload，直接诚实非成功终态。 不可变性最简单，但瞬时格式问题会永久终止任务。 Consequences: operator 或新 Task 才能重试
 
-**Resolution:** No option has been selected.
+**Resolution:** `new_generation_supersession` (`option`). Select new_generation_supersession: ACK 前允许以新 generation 修复，并写不可变 supersession journal。 闭合 immutable payload 与可修复 contract error 的冲突。 Constraints: 旧代次永不覆盖且所有 replay 必须识别 supersession
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `b459cd0e371c34702e654761aa89caa21238f5c5314020e9d9c7484d60902764`.
 
 **Supersedes:** none
 
@@ -307,17 +315,19 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D13 — authoritative cancel 与已准备结果协调
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** authoritative cancellation 在内部结果发布前后分别如何与 prepared non-cancel result 协调？
 
 **Options:**
 
-- `prepublish_cancel_postpublish_reconcile` — non-normative recommendation, not selected: 内部发布前改为 CANCELLED；发布后只允许显式 reconciled variant/addendum。 避免 Worker completed 与 Server cancelled 静默分叉。 Consequences: 必须冻结 publication boundary 和 reconciled schema
+- `prepublish_cancel_postpublish_reconcile` — selected by resolution: 内部发布前改为 CANCELLED；发布后只允许显式 reconciled variant/addendum。 避免 Worker completed 与 Server cancelled 静默分叉。 Consequences: 必须冻结 publication boundary 和 reconciled schema
 - `transport_projection_only`: cancel 永远只改变 legacy transport projection，不改变内部 outcome。 内部记录稳定，但 public 状态可能不同。 Consequences: 必须公开且可审计地表示内部/外部差异
 - `reject_supersession`: 拒绝 cancellation supersession 并阻塞 operator。 不产生双版本，但无法自动满足 Server authority。 Consequences: slot 可能长期占用且需人工协调
 
-**Resolution:** No option has been selected.
+**Resolution:** `prepublish_cancel_postpublish_reconcile` (`option`). Select prepublish_cancel_postpublish_reconcile: 内部发布前改为 CANCELLED；发布后只允许显式 reconciled variant/addendum。 避免 Worker completed 与 Server cancelled 静默分叉。 Constraints: 必须冻结 publication boundary 和 reconciled schema
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `4a90df4dce3840e2f726d952fa0b49ef9294e73e851208f968df30642720e5a7`.
 
 **Supersedes:** none
 
@@ -327,17 +337,19 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D14 — SourceState 与 bundle 完整性归属
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** run/bundles 源码副本应属于 SourceState、独立 BundleIntegrityManifest，还是普通 runtime artifact？
 
 **Options:**
 
-- `separate_bundle_integrity_manifest` — non-normative recommendation, not selected: SourceState 仅描述 materialized source；独立 BundleIntegrityManifest 绑定派生 bundle。 消除 source ownership 与 worker runtime tree 的循环。 Consequences: bundle plan、entry digest、render digest 和 reviewer assignment 必须绑定
+- `separate_bundle_integrity_manifest` — selected by resolution: SourceState 仅描述 materialized source；独立 BundleIntegrityManifest 绑定派生 bundle。 消除 source ownership 与 worker runtime tree 的循环。 Consequences: bundle plan、entry digest、render digest 和 reviewer assignment 必须绑定
 - `bundles_inside_source_state`: 把 rendered bundles 纳入 SourceState。 统一 source-bearing 对象，但 SourceState 会包含自身派生物。 Consequences: 必须证明 digest DAG 无环
 - `bundles_runtime_only`: bundles 只作为不受 SourceState 约束的 runtime artifact。 实现简单，但无法机械证明 reviewer 输入来自冻结源码。 Consequences: 证据完整性目标无法满足
 
-**Resolution:** No option has been selected.
+**Resolution:** `separate_bundle_integrity_manifest` (`option`). Select separate_bundle_integrity_manifest: SourceState 仅描述 materialized source；独立 BundleIntegrityManifest 绑定派生 bundle。 消除 source ownership 与 worker runtime tree 的循环。 Constraints: bundle plan、entry digest、render digest 和 reviewer assignment 必须绑定
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `1798cd24165aa5be17f5e5b256e3ecfd61a2f02e63d064e9f5da60edcf30a889`.
 
 **Supersedes:** none
 
@@ -347,16 +359,18 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D15 — GATE_* predicate 与 stable error taxonomy
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** GATE_* 应是独立 predicate ID，还是直接作为 stable error code？
 
 **Options:**
 
-- `separate_predicate_registry` — non-normative recommendation, not selected: GATE_* 属独立 predicate registry，失败结果引用 stable error registry。 谓词身份与失败原因是不同维度，可保持多对多映射。 Consequences: 两个 registry 必须有双向消费校验
+- `separate_predicate_registry` — selected by resolution: GATE_* 属独立 predicate registry，失败结果引用 stable error registry。 谓词身份与失败原因是不同维度，可保持多对多映射。 Consequences: 两个 registry 必须有双向消费校验
 - `gate_ids_are_errors`: 全部 GATE_* 直接纳入 stable error registry。 registry 更少，但一个谓词的不同失败原因难以区分。 Consequences: schema 和 prose 必须统一只使用 error code 语义
 
-**Resolution:** No option has been selected.
+**Resolution:** `separate_predicate_registry` (`option`). Select separate_predicate_registry: GATE_* 属独立 predicate registry，失败结果引用 stable error registry。 谓词身份与失败原因是不同维度，可保持多对多映射。 Constraints: 两个 registry 必须有双向消费校验
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `47cf85a523a63a4c26775fe6929bdd132fb37ac82f5cdda41128ee248827cb1b`.
 
 **Supersedes:** none
 
@@ -366,16 +380,18 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D16 — MVP Q0 Owner self-attestation 路径
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** MVP 是否删除 Q0 Owner self-attestation 成功路径，还是补齐其签名与 key-owner 契约？
 
 **Options:**
 
-- `remove_q0_success_path` — non-normative recommendation, not selected: 删除 MVP Q0 self-attestation 成功路径；当前 full-scan 至少使用 Q1。 避免在没有签名/key ownership 的情况下制造伪验证。 Consequences: Q0 请求拒绝或提升到 Q1
+- `remove_q0_success_path` — selected by resolution: 删除 MVP Q0 self-attestation 成功路径；当前 full-scan 至少使用 Q1。 避免在没有签名/key ownership 的情况下制造伪验证。 Consequences: Q0 请求拒绝或提升到 Q1
 - `implement_q0_signing`: 保留 Q0 并补齐 self-attestation schema、签名、key owner 和验证。 支持低风险任务快速闭环，但增加密钥与信任面。 Consequences: 必须加入签发、轮换、撤销和 negative fixtures
 
-**Resolution:** No option has been selected.
+**Resolution:** `remove_q0_success_path` (`option`). Select remove_q0_success_path: 删除 MVP Q0 self-attestation 成功路径；当前 full-scan 至少使用 Q1。 避免在没有签名/key ownership 的情况下制造伪验证。 Constraints: Q0 请求拒绝或提升到 Q1
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `0acca8727c0044d5bc7ef7542e2bc51384c1ca56865889cec8e389b559403130`.
 
 **Supersedes:** none
 
@@ -385,16 +401,18 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D17 — Q2 concern/slot 规划算法
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** Q2 slots 应由固定版本化 concern/coverage 表，还是由版本化纯函数 classifier 生成？
 
 **Options:**
 
-- `versioned_concern_table` — non-normative recommendation, not selected: 使用固定版本化 concern/coverage 表生成 slot ID。 最易审计、复算和冻结 golden vectors。 Consequences: 新增 concern 必须升 registry version
+- `versioned_concern_table` — selected by resolution: 使用固定版本化 concern/coverage 表生成 slot ID。 最易审计、复算和冻结 golden vectors。 Consequences: 新增 concern 必须升 registry version
 - `pure_classifier_slots`: 由版本化纯函数 QualityRisk classifier 生成 slots。 表达力更高，但输入维度和完整决策表必须全部冻结。 Consequences: classifier 版本与所有 slot fixtures 成为 contract
 
-**Resolution:** No option has been selected.
+**Resolution:** `versioned_concern_table` (`option`). Select versioned_concern_table: 使用固定版本化 concern/coverage 表生成 slot ID。 最易审计、复算和冻结 golden vectors。 Constraints: 新增 concern 必须升 registry version
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `8f125e98166a1fa6edacc6ef2e29a1749eb13d5ab5d187d1aab63c38d5cac3a8`.
 
 **Supersedes:** none
 
@@ -404,16 +422,18 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D18 — 现有 root coordinator 与 Task Owner 关系
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S5`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S5`.
 
 **Question:** strangler 接管中现有 root coordinator 是否直接成为逻辑 Task Owner？
 
 **Options:**
 
-- `coordinator_is_owner` — non-normative recommendation, not selected: 现有 root coordinator 直接成为逻辑 Task Owner，旧 phase 逐步成为其 activities。 符合 strangler 约束并避免并行第二控制器。 Consequences: 必须把 coordinator identity 与 owner incarnation 明确分层
+- `coordinator_is_owner` — selected by resolution: 现有 root coordinator 直接成为逻辑 Task Owner，旧 phase 逐步成为其 activities。 符合 strangler 约束并避免并行第二控制器。 Consequences: 必须把 coordinator identity 与 owner incarnation 明确分层
 - `new_owner_wraps_coordinator`: 新增 Owner，把旧 coordinator 作为 domain activity 调用。 新内核边界更纯，但过渡期存在两层协调控制。 Consequences: 必须证明只有新 Owner 拥有状态与终态权威
 
-**Resolution:** No option has been selected.
+**Resolution:** `coordinator_is_owner` (`option`). Select coordinator_is_owner: 现有 root coordinator 直接成为逻辑 Task Owner，旧 phase 逐步成为其 activities。 符合 strangler 约束并避免并行第二控制器。 Constraints: 必须把 coordinator identity 与 owner incarnation 明确分层
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `16fb38386dfedc25cbd4f7d3cc25aeeeb9512b3d0e3733fdb8591441eca3c8de`.
 
 **Supersedes:** none
 
@@ -423,17 +443,19 @@ Active question: `D9`. Questions are asked one at a time. User silence, existing
 
 ### D19 — reviewer fanout 期间 Owner liveness
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S5`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S5`.
 
 **Question:** fanout 期间 Owner 应保持 live、suspend/archive，还是按阶段使用混合规则？
 
 **Options:**
 
-- `owner_remains_live` — non-normative recommendation, not selected: Owner incarnation 在 fanout 全程保持 live，并与 reviewer/verifier 一起计入 agent/session budget。 保持一个连续控制 owner，不需要恢复新 incarnation。 Consequences: max_agents 必须为 Owner 预留固定 slot
+- `owner_remains_live` — selected by resolution: Owner incarnation 在 fanout 全程保持 live，并与 reviewer/verifier 一起计入 agent/session budget。 保持一个连续控制 owner，不需要恢复新 incarnation。 Consequences: max_agents 必须为 Owner 预留固定 slot
 - `owner_suspended`: fanout 前 suspend/archive Owner，完成后创建新 incarnation。 释放并发 slot，但增加 checkpoint 与恢复边界。 Consequences: 每次 fanout 都需要 owner epoch 与恢复事务
 - `phase_specific_liveness`: 按 domain reviewer 与 Quality Verifier 阶段冻结不同 liveness 规则。 可优化资源，但控制模型更复杂。 Consequences: 每个阶段必须有确定 transition 和 budget 公式
 
-**Resolution:** No option has been selected.
+**Resolution:** `owner_remains_live` (`option`). Select owner_remains_live: Owner incarnation 在 fanout 全程保持 live，并与 reviewer/verifier 一起计入 agent/session budget。 保持一个连续控制 owner，不需要恢复新 incarnation。 Constraints: max_agents 必须为 Owner 预留固定 slot
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `0fb4d7e749fb873ccb7691ff2a87c30f2792969534311903ce439a5ac86c2796`.
 
 **Supersedes:** none
 
