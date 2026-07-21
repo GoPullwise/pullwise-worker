@@ -24,6 +24,7 @@ from pullwise_worker.agent_kernel_r0_read import (
 from pullwise_worker.agent_kernel_source_state import (
     SourceSelectionPolicy,
     diff_source_trees,
+    snapshot_source_tree,
 )
 
 
@@ -101,6 +102,32 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         after = preparer.capture_after(prepared)
 
         self.assertTrue(diff_source_trees(prepared.source_before, after).is_empty)
+
+    def test_verified_gitlink_catalog_is_used_for_both_snapshots(self) -> None:
+        catalog = object()
+        source = snapshot_source_tree(
+            self.root,
+            policy=self.policy,
+            base_revision=BASE_REVISION,
+        )
+        preparer = self.preparer(gitlink_catalog=catalog)
+        with mock.patch(
+            "pullwise_worker.agent_kernel_r0_read.snapshot_source_tree",
+            return_value=source,
+        ) as snapshot:
+            prepared = preparer.prepare(
+                object(), self.call("nested/README.md"), self.descriptor
+            )
+            R0ReadDispatcher().dispatch(object(), prepared)
+            preparer.capture_after(prepared)
+
+        self.assertEqual(2, snapshot.call_count)
+        self.assertTrue(
+            all(
+                call.kwargs["gitlink_catalog"] is catalog
+                for call in snapshot.call_args_list
+            )
+        )
 
     def test_path_grammar_fails_before_source_open(self) -> None:
         invalid = (

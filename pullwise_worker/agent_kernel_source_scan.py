@@ -6,7 +6,7 @@ import hashlib
 import os
 from pathlib import Path
 import stat
-from typing import Callable
+from typing import BinaryIO, Callable
 
 from .agent_kernel_source_state import (
     SourceEntry,
@@ -108,6 +108,20 @@ def _path_present(path: Path) -> bool:
     return True
 
 
+def _hash_initial_extent(
+    handle: BinaryIO, expected_size: int
+) -> tuple[str, bool]:
+    digest = hashlib.sha256()
+    remaining = expected_size
+    while remaining:
+        chunk = handle.read(min(1024 * 1024, remaining))
+        if not chunk:
+            return digest.hexdigest(), True
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest(), bool(handle.read(1))
+
+
 def snapshot_source_tree(
     root: Path,
     *,
@@ -132,18 +146,34 @@ def snapshot_source_tree(
         if has_git_metadata:
             raise SourceStateError("SOURCE_GITLINK_CATALOG_REQUIRED")
         catalog_entries: tuple[SourceEntry, ...] = ()
+        expected_root_identity: tuple[int, int] | None = None
     elif isinstance(gitlink_catalog, VerifiedGitlinkCatalog):
         gitlink_catalog.assert_matches(root, base_revision)
         catalog_entries = gitlink_catalog.entries
+        expected_root_identity = gitlink_catalog.root_identity
     else:
         raise SourceStateError("SOURCE_GITLINK_CATALOG_UNVERIFIED")
     gitlinks = {entry.path: entry for entry in catalog_entries}
+    if stage_hook is not None:
+        stage_hook("before_root_open", root)
     if _HAS_DIRFD:
-        scanned = _scan_with_dirfd(root, policy, stage_hook, gitlinks)
+        scanned = _scan_with_dirfd(
+            root,
+            policy,
+            stage_hook,
+            gitlinks,
+            expected_root_identity,
+        )
     else:
         from .agent_kernel_source_scan_windows import scan_with_paths
 
-        scanned = scan_with_paths(root, policy, stage_hook, gitlinks)
+        scanned = scan_with_paths(
+            root,
+            policy,
+            stage_hook,
+            gitlinks,
+            expected_root_identity,
+        )
     entries = [*catalog_entries, *scanned]
     return SourceTreeSnapshot(
         base_revision=base_revision,
@@ -168,9 +198,9 @@ def _read_at(
             opened = os.fstat(handle.fileno())
             if not stat.S_ISREG(opened.st_mode) or _is_reparse(opened):
                 raise SourceStateError("SOURCE_CHANGED_DURING_SCAN", relative)
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+            digest, extent_changed = _hash_initial_extent(
+                handle, opened.st_size
+            )
             after_read = os.fstat(handle.fileno())
         if hook is not None:
             hook("after_file_read", display_path)
@@ -179,7 +209,7 @@ def _read_at(
         raise
     except OSError as exc:
         raise SourceStateError("SOURCE_FILE_UNREADABLE", relative) from exc
-    if not (
+    if extent_changed or not (
         _same_identity(before, opened)
         and _same_identity(opened, after_read)
         and _same_identity(after_read, after_path)
@@ -188,7 +218,7 @@ def _read_at(
     return SourceEntry.file(
         relative,
         size_bytes=opened.st_size,
-        sha256=digest.hexdigest(),
+        sha256=digest,
         executable=bool(opened.st_mode & 0o111),
     )
 
@@ -306,6 +336,7 @@ def _scan_with_dirfd(
     policy: SourceSelectionPolicy,
     hook: StageHook | None,
     gitlinks: dict[str, SourceEntry],
+    expected_root_identity: tuple[int, int] | None,
 ) -> list[SourceEntry]:
     try:
         before = root.lstat()
@@ -314,6 +345,11 @@ def _scan_with_dirfd(
         raise SourceStateError("SOURCE_ROOT_UNREADABLE") from exc
     try:
         opened = os.fstat(root_fd)
+        if (
+            expected_root_identity is not None
+            and (opened.st_dev, opened.st_ino) != expected_root_identity
+        ):
+            raise SourceStateError("SOURCE_GITLINK_CATALOG_MISMATCH")
         if not _same_identity(before, opened):
             raise SourceStateError("SOURCE_CHANGED_DURING_SCAN", ".")
         if hook is not None:

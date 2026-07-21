@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from pullwise_worker.agent_kernel_gitlinks import inspect_gitlinks
 from pullwise_worker.agent_kernel_source_state import (
@@ -129,6 +130,82 @@ class AgentKernelGitlinkCatalogTest(unittest.TestCase):
 
         self.assertEqual(first.entries, second.entries)
         self.assertEqual(first.tree_digest, second.tree_digest)
+
+    def test_replace_refs_cannot_change_the_exact_revision_tree(self) -> None:
+        self._git("replace", self.base_revision, self.gitlink_commit)
+        try:
+            catalog = inspect_gitlinks(
+                self.root,
+                base_revision=self.base_revision,
+                git_executable=self.git,
+            )
+        finally:
+            self._git("replace", "-d", self.base_revision)
+
+        self.assertEqual(["vendor"], [entry.path for entry in catalog.entries])
+
+    def test_git_subprocess_disables_replace_objects_and_lazy_fetch(self) -> None:
+        with mock.patch(
+            "pullwise_worker.agent_kernel_gitlinks.subprocess.run",
+            wraps=subprocess.run,
+        ) as run:
+            inspect_gitlinks(
+                self.root,
+                base_revision=self.base_revision,
+                git_executable=self.git,
+            )
+
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual("1", environment["GIT_NO_REPLACE_OBJECTS"])
+        self.assertEqual("1", environment["GIT_NO_LAZY_FETCH"])
+
+    def test_catalog_rejects_root_identity_change_during_git_inspection(self) -> None:
+        metadata = self.root.lstat()
+        first = (metadata.st_dev, metadata.st_ino)
+        second = (metadata.st_dev, metadata.st_ino + 1)
+        with mock.patch(
+            "pullwise_worker.agent_kernel_gitlinks._root_identity",
+            side_effect=(first, second),
+        ):
+            with self.assertRaisesRegex(
+                SourceStateError, "SOURCE_GITLINK_CATALOG_MISMATCH"
+            ):
+                inspect_gitlinks(
+                    self.root,
+                    base_revision=self.base_revision,
+                    git_executable=self.git,
+                )
+
+    def test_catalog_identity_is_bound_to_the_root_opened_by_scanner(self) -> None:
+        catalog = inspect_gitlinks(
+            self.root,
+            base_revision=self.base_revision,
+            git_executable=self.git,
+        )
+        replacement = Path(self.scratch.name) / "replacement"
+        replacement.mkdir()
+        (replacement / "README.md").write_text("replacement", encoding="utf-8")
+        original = Path(self.scratch.name) / "original"
+
+        def swap(stage: str, path: Path) -> None:
+            if stage != "before_root_open":
+                return
+            try:
+                self.root.rename(original)
+                replacement.rename(self.root)
+            except OSError as exc:
+                self.skipTest(f"root replacement unavailable: {exc}")
+
+        with self.assertRaisesRegex(
+            SourceStateError, "SOURCE_GITLINK_CATALOG_MISMATCH"
+        ):
+            snapshot_source_tree(
+                self.root,
+                policy=self.policy,
+                base_revision=self.base_revision,
+                gitlink_catalog=catalog,
+                stage_hook=swap,
+            )
 
 
 if __name__ == "__main__":

@@ -485,12 +485,17 @@ production Agent-First runner or a completed S3 slice.
   must not add versioned schema tags, construct current manifests, or treat
   these internal shapes as a substitute for D23's exact-pinned Server package.
 - Pullwise source selection has fixed .git and .codex-review exclusions.
-  Caller-selected exclusions and ephemeral patterns fail closed. A caller
-  cannot supply raw gitlink mappings: until a trusted exact-revision Git catalog
-  is implemented, a supplied catalog fails
-  SOURCE_GITLINK_CATALOG_UNVERIFIED. This remaining catalog gap blocks
-  production SourceState completeness.
-- agent_kernel_gateway.py is only the fixed-order orchestration kernel. Its
+  Caller-selected exclusions, ephemeral patterns, and raw gitlink mappings fail
+  closed. Verified gitlinks come only from an exact 40-hex Git revision with
+  replace objects and lazy fetch disabled; the catalog is bound to the checkout
+  device/inode and the scanner-opened root. Production composition must require
+  Git 2.45 or newer and a materializer-enforced single-writer catalog/scan
+  window. The Windows path scanner remains development-only.
+- agent_kernel_gateway.py is only the fixed-order orchestration kernel. Journal
+  begin must atomically revalidate the authority ticket and bind one opaque
+  dispatch capability consumed by the dispatcher and every settlement path.
+  Cancellation cleans prepared resources without creating a false settlement.
+  Its
   codec, authority, policy, budget, dispatch journal, and execution committer
   are injected current-only boundaries. Do not satisfy them with Slice 2 shadow
   state, legacy Task rows, bare budget_entries.monotonic_ms, or the legacy-FK
@@ -498,8 +503,10 @@ production Agent-First runner or a completed S3 slice.
 - agent_kernel_r0_read.py prepares one internal R0 source read by binding a
   full SourceState snapshot to a held regular-file descriptor. The dispatcher
   receives no unresolved path, shell, network client, approval channel, or
-  secret handle. Every pre-dispatch loss path closes the descriptor; a fresh
-  post-dispatch snapshot with any diff withholds the normal result.
+  secret handle. Excluded roots fail before leaf open, reads are capped at the
+  policy/expected extent plus one byte, and every pre-dispatch loss path closes
+  the descriptor. A fresh post-dispatch snapshot with any diff withholds the
+  normal result.
 - This tracer deliberately does not construct an Observation, dispatch-intent
   contract, ContentRef, or durable idempotency result. Those require the
   exact-pinned current package plus a current-only journal/CAS transaction

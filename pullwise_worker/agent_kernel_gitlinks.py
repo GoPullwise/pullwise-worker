@@ -77,11 +77,15 @@ class VerifiedGitlinkCatalog:
     def tree_digest(self) -> str:
         return self._tree_digest
 
+    @property
+    def root_identity(self) -> tuple[int, int]:
+        return self._root_device, self._root_inode
+
     def assert_matches(self, root: Path, base_revision: str) -> None:
         identity = _root_identity(Path(root))
         if (
             base_revision != self._base_revision
-            or identity != (self._root_device, self._root_inode)
+            or identity != self.root_identity
         ):
             raise SourceStateError("SOURCE_GITLINK_CATALOG_MISMATCH")
 
@@ -96,6 +100,8 @@ def _git_environment() -> dict[str, str]:
         {
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "LC_ALL": "C",
         }
@@ -155,6 +161,8 @@ def inspect_gitlinks(
         raise SourceStateError("SOURCE_GIT_TIMEOUT_INVALID")
     command = [
         str(executable),
+        "--no-replace-objects",
+        "--no-lazy-fetch",
         "-c",
         f"core.hooksPath={os.devnull}",
         "-c",
@@ -179,6 +187,8 @@ def inspect_gitlinks(
         raise SourceStateError("SOURCE_GITLINK_CATALOG_UNAVAILABLE") from exc
     if result.returncode != 0 or result.stderr:
         raise SourceStateError("SOURCE_GITLINK_CATALOG_UNAVAILABLE")
+    if _root_identity(root) != identity:
+        raise SourceStateError("SOURCE_GITLINK_CATALOG_MISMATCH")
     entries = _parse_tree(result.stdout)
     return VerifiedGitlinkCatalog(
         token=_CATALOG_TOKEN,

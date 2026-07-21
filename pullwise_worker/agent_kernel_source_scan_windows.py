@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 import stat
@@ -11,6 +10,7 @@ from .agent_kernel_source_scan import (
     StageHook,
     _FILE_FLAGS,
     _assert_directory,
+    _hash_initial_extent,
     _is_reparse,
     _names,
     _normalize_link_target,
@@ -41,9 +41,9 @@ def _read_path(
             opened = os.fstat(handle.fileno())
             if not stat.S_ISREG(opened.st_mode) or _is_reparse(opened):
                 raise SourceStateError("SOURCE_CHANGED_DURING_SCAN", relative)
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+            digest, extent_changed = _hash_initial_extent(
+                handle, opened.st_size
+            )
             after_read = os.fstat(handle.fileno())
         if hook is not None:
             hook("after_file_read", path)
@@ -52,7 +52,7 @@ def _read_path(
         raise
     except OSError as exc:
         raise SourceStateError("SOURCE_FILE_UNREADABLE", relative) from exc
-    if not (
+    if extent_changed or not (
         _same_identity(before, opened)
         and _same_identity(opened, after_read)
         and _same_identity(after_read, after_path)
@@ -61,7 +61,7 @@ def _read_path(
     return SourceEntry.file(
         relative,
         size_bytes=opened.st_size,
-        sha256=digest.hexdigest(),
+        sha256=digest,
         executable=os.name != "nt" and bool(opened.st_mode & 0o111),
     )
 
@@ -165,9 +165,15 @@ def scan_with_paths(
     policy: SourceSelectionPolicy,
     hook: StageHook | None,
     gitlinks: dict[str, SourceEntry],
+    expected_root_identity: tuple[int, int] | None,
 ) -> list[SourceEntry]:
     before = root.lstat()
     _assert_directory(before, ".")
+    if (
+        expected_root_identity is not None
+        and (before.st_dev, before.st_ino) != expected_root_identity
+    ):
+        raise SourceStateError("SOURCE_GITLINK_CATALOG_MISMATCH")
     if hook is not None:
         hook("after_root_open", root)
     entries = _scan_path(

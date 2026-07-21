@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 import os
 from pathlib import Path
 import tempfile
 import unittest
 
 from pullwise_worker.agent_kernel_canonical import canonical_sha256
+from pullwise_worker.agent_kernel_source_scan import _hash_initial_extent
 from pullwise_worker.agent_kernel_source_state import (
     SourceEntry,
     SourceSelectionPolicy,
@@ -73,6 +75,12 @@ class AgentKernelSourceStateTest(unittest.TestCase):
         self.assertEqual("file", entry.type)
         self.assertEqual(hashlib.sha256(script.read_bytes()).hexdigest(), entry.sha256)
         self.assertEqual(os.name != "nt", entry.executable)
+
+    def test_file_hash_is_bounded_to_the_initial_extent(self) -> None:
+        digest, changed = _hash_initial_extent(BytesIO(b"abcd"), 3)
+
+        self.assertEqual(hashlib.sha256(b"abc").hexdigest(), digest)
+        self.assertTrue(changed)
 
     def test_symlink_identity_is_recorded_without_following_target(self) -> None:
         outside = Path(self.scratch.name) / "outside.txt"
