@@ -8,6 +8,7 @@ import unittest
 from pullwise_worker.agent_kernel_checkout_lifecycle import (
     CheckoutAcquisitionBounds,
 )
+from pullwise_worker.agent_kernel_checkout_lock import _ProcessMutex
 from pullwise_worker.agent_kernel_checkout_window import (
     CheckoutCaptureCoordinator,
 )
@@ -84,6 +85,47 @@ class CheckoutAcquisitionBoundsContractTest(unittest.TestCase):
 
         self.assertEqual(inspect.Parameter.KEYWORD_ONLY, parameter.kind)
         self.assertIs(inspect.Parameter.empty, parameter.default)
+
+    def test_process_mutex_never_polls_callback_under_condition_lock(
+        self,
+    ) -> None:
+        class TrackingCondition:
+            def __init__(self) -> None:
+                self.owned = False
+
+            def __enter__(self) -> "TrackingCondition":
+                self.owned = True
+                return self
+
+            def __exit__(self, *exc_info: object) -> None:
+                self.owned = False
+
+            def wait(self, *, timeout: float) -> None:
+                self.fail_if_called(timeout)
+
+            def notify(self) -> None:
+                pass
+
+            @staticmethod
+            def fail_if_called(_timeout: float) -> None:
+                raise AssertionError("free mutex must not wait")
+
+        condition = TrackingCondition()
+        callback_lock_states: list[bool] = []
+        bounds = CheckoutAcquisitionBounds(
+            deadline_monotonic=time.monotonic() + 5,
+            cancellation_requested=lambda: bool(
+                callback_lock_states.append(condition.owned)
+            ),
+        )
+        mutex = _ProcessMutex()
+        mutex._condition = condition  # type: ignore[assignment]
+
+        mutex.acquire(time.monotonic() + 1, bounds)
+        mutex.release()
+
+        self.assertGreaterEqual(len(callback_lock_states), 1)
+        self.assertFalse(any(callback_lock_states))
 
 
 if __name__ == "__main__":

@@ -150,10 +150,15 @@ D28-D30 也不得从这些旧段落推断答案：
 | S0 | 历史基线已冻结 | `worker-slice-0-baseline.json`、当前代码地图、legacy fixture baseline 仅用于定位待删除 surface，不构成 clean-break 验收 |
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
-| S3-S4 | S3a package-independent 内部安全 primitives 已实现且本地 focused tests 通过；exact-SHA CI 仍是发布证据门，生产 S3/S4 未开始 | [S3a runbook](agent-first-worker-slice-3a-runbook.md)：SourceState/SourceDiff、repo-root/version/topology verified gitlink catalog、POSIX cooperating-writer checkout capture window、provider-bound descriptor R0 read 与固定顺序 Gateway；它们不生成 versioned contract、Observation 或 durable journal。D28-D30 decision gate 当前 blocked；Server-owned current package/exact pin、生产 materializer all-writers window、current-only authority/budget/journal/CAS transaction 仍阻断生产接线 |
+| S3-S4 | S3a package-independent 内部安全 primitives 已实现且本地 focused tests 通过；exact-SHA CI 仍是发布证据门，生产 S3/S4 未开始 | [S3a runbook](agent-first-worker-slice-3a-runbook.md)：SourceState/SourceDiff、repo-root/version/topology verified gitlink catalog、必填 finite process-local acquisition bounds、独立 pre-materialization writer、共享 canonical POSIX lock domain、provider-bound descriptor R0 read 与固定顺序 Gateway；它们不生成 versioned contract、Observation 或 durable journal。D28-D30 decision gate 当前 blocked；Server-owned current package/exact pin、权威 invocation 派生、Git/copy/clone/scanner/body lifecycle 贯穿、current-only authority/budget/journal/CAS transaction 仍阻断生产接线 |
 | S5-S8 | 未开始；决策门 blocked | 机器 decision register 为 `valid_pending`，含 26 个 resolved、3 个 applicable pending，D2 inactive，D28 是唯一 active question；D28-D30 required before S3，因此 S3-S8 均有 pending-decision blocker，且仍须逐切片实现和验证 |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
+
+当前 D27 default ratchet 只证明 inventory 没有扩张；现有 strict
+--require-absent 还不能形成最终 cutover 证据，因为它必须保留并 exact-load 的 frozen
+baseline 同时是 inventoried live surface。修正 final gate 前需要显式 decision/ADR，
+不得刷新 baseline、跳过 observation 或据此宣称 clean break。
 
 因此“当前 legacy Worker 已有的 review 能力”不能冒充 Agent Kernel S3-S8；MVP
 Definition of Done 仍未满足。每完成一个 Slice，必须更新本表、对应 runbook、机器

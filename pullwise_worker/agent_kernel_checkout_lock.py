@@ -33,9 +33,6 @@ _LOCK_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
-_LOCK_POLL_SECONDS = 0.05
-
-
 def _require_absolute(value: Path, code: str) -> Path:
     try:
         path = Path(value)

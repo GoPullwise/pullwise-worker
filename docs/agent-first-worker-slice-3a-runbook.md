@@ -68,11 +68,13 @@ S3 decision gate 明确 blocked；本文中的 injected interfaces 和内部 tra
   caller deadline，加上 trusted、nonblocking 且返回 exact bool 的 cancellation callback。
   它不解释 wall time、不持久化 authority、也不定义 schema。每次 acquire 只计算一次
   min(caller deadline, local lock cap)，同一 effective deadline 贯穿 process mutex 与
-  POSIX flock；以不超过 50 ms 的间隔轮询 callback，且 callback 不在 process-mutex
-  condition lock 内执行。不存在零参数或无界 acquire fallback。
+  POSIX flock；每次 contention wait request 最多 50 ms，且 callback 不在
+  process-mutex condition lock 内执行。scheduler delay 与 blocking OS call 不构成
+  hard 50 ms cancellation latency 保证。不存在零参数或无界 acquire fallback。
 - capture session 在同一锁内重新生成 before catalog/snapshot，跨真实 dispatch 持有
   lease，再重新生成 after catalog/snapshot；catalog 不会逃出该 window。writer 成功
-  body 的退出顺序是 lock/control integrity、cancellation/caller deadline、local cap；
+  body 的退出顺序是 lock/control integrity、cancellation/caller deadline；local cap
+  只约束 acquisition。
   body 原始错误始终优先于取消、完整性或 release 故障，所有清理步骤仍会被尝试。
   cancellation callback 自身失败也会 fail closed 并释放 lease。
 - 这只是 cooperating-writer primitive：advisory flock 不会阻止绕过 coordinator 的
@@ -171,6 +173,7 @@ grant/intent/receipt/budget 的唯一 durable linearization；该 seam 不是 D3
       tests.test_agent_kernel_gitlinks \
       tests.test_agent_kernel_gateway \
       tests.test_agent_kernel_checkout_lifecycle \
+      tests.test_agent_kernel_checkout_session_lifecycle \
       tests.test_agent_kernel_checkout_writer_lifecycle \
       tests.test_agent_kernel_checkout_writer \
       tests.test_agent_kernel_checkout_lock \
@@ -179,9 +182,13 @@ grant/intent/receipt/budget 的唯一 durable linearization；该 seam 不是 D3
       tests.test_agent_kernel_r0_read \
       tests.test_agent_kernel_r0_gateway
 
-当前工作树本地 Windows 证据：Ran 87 tests，OK（20 个 POSIX/host-capability 用例按
-平台跳过）。Ubuntu CI 必须实际覆盖 dirfd、FIFO race、case-sensitive component
-collision、real Git >=2.45 checkout、symlink alias 和 POSIX flock contention；最终
+当前工作树本地 Windows 完整 S3a 证据：Ran 114 tests，OK（35 个
+POSIX/host-capability 用例按平台跳过）。Ubuntu 22.04 WSL 的 checkout/R0 POSIX
+子集：Ran 65 tests，OK（2 个 host-capability 用例跳过），实际覆盖 flock、
+symlink-alias lock domain、mutex/flock contention、deadline/cancellation 与 cleanup
+faults。该 WSL 的 Git 低于 2.45，完整 gitlink 套件按设计 fail closed 为
+SOURCE_GIT_VERSION_UNSUPPORTED；exact-SHA Ubuntu CI 仍必须用 Git >=2.45 覆盖 dirfd、
+FIFO race、case-sensitive component collision、real Git catalog 和全仓测试。最终
 发布证据必须绑定包含本文修订的 exact SHA，不能沿用过渡提交的结果。
 
 Decision gate：
@@ -208,18 +215,24 @@ self-surface 阻断而 exit 1；删除或修改 baseline 会 indeterminate/exit 
 - agent_kernel_source_scan.py：377 行，Ubuntu dirfd scanner。
 - agent_kernel_source_scan_windows.py：196 行，开发平台 fallback。
 - agent_kernel_gitlinks.py：356 行，repo-root/version/topology verified catalog。
-- agent_kernel_checkout_lock.py：329 行，POSIX bounded cooperating-writer lock。
-- agent_kernel_checkout_window.py：296 行，atomic before/dispatch/after capture lease。
+- agent_kernel_checkout_lifecycle.py：140 行，required process-local acquisition bounds。
+- agent_kernel_checkout_writer.py：73 行，独立 pre-materialization writer coordinator。
+- agent_kernel_checkout_lock.py：346 行，POSIX bounded cooperating-writer lock。
+- agent_kernel_checkout_window.py：319 行，atomic before/dispatch/after capture lease。
 - agent_kernel_gateway.py：400 行，固定顺序 orchestration。
 - agent_kernel_r0_capture.py：120 行，descriptor/capture lease ownership。
 - agent_kernel_r0_read.py：361 行，provider-bound held-descriptor R0 read。
-- agent_kernel_capture_fakes.py：88 行，跨平台 capture provider test fixture。
+- tests/agent_kernel_capture_fakes.py：88 行，跨平台 capture provider test fixture。
 - test_agent_kernel_source_state.py：381 行。
 - test_agent_kernel_gitlinks.py：394 行。
-- test_agent_kernel_checkout_lock.py：209 行。
-- test_agent_kernel_checkout_window.py：330 行。
+- test_agent_kernel_checkout_lifecycle.py：132 行。
+- test_agent_kernel_checkout_session_lifecycle.py：60 行。
+- test_agent_kernel_checkout_writer_lifecycle.py：106 行。
+- test_agent_kernel_checkout_writer.py：358 行。
+- test_agent_kernel_checkout_lock.py：323 行。
+- test_agent_kernel_checkout_window.py：384 行。
 - test_agent_kernel_gateway.py：400 行。
-- test_agent_kernel_r0_capture.py：206 行。
+- test_agent_kernel_r0_capture.py：222 行。
 - test_agent_kernel_r0_read.py：381 行。
 - test_agent_kernel_r0_gateway.py：274 行。
 

@@ -215,8 +215,17 @@ class CheckoutCaptureSession:
     def __enter__(self) -> "CheckoutCaptureSession":
         return self
 
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
+    def __exit__(
+        self,
+        _exc_type: object,
+        body_error: object,
+        _traceback: object,
+    ) -> None:
+        try:
+            self.close()
+        except BaseException:
+            if body_error is None:
+                raise
 
 
 class CheckoutCaptureCoordinator:

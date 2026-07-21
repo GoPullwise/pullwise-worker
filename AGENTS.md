@@ -518,8 +518,10 @@ production Agent-First runner or a completed S3 slice.
   wall time, persists no authority, and defines no schema. Each acquire computes
   one effective deadline from the caller bound and local lock cap, then passes
   the same value through both the process mutex and private no-follow flock;
-  callback polling is at most 50 ms and never runs under the process-mutex
-  condition lock. There is no zero-argument or unbounded acquisition path.
+  each requested contention wait is capped at 50 ms, and callback polling never
+  runs under the process-mutex condition lock. Scheduler delay and blocking OS
+  calls do not promise a hard 50 ms cancellation latency. There is no
+  zero-argument or unbounded acquisition path.
 - agent_kernel_checkout_window.py keeps the package-independent POSIX capture
   open from exact-revision gitlink inspection and before snapshot through fresh
   inspection and after snapshot, or until explicit close.
