@@ -40,9 +40,10 @@ digest 为 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`；
 custom `absolute_plus_baseline` 解决，resolution digest 为
 `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`；发布须同时通过
 签名 absolute/relative gate、三态 CI、D24 barrier 前置检查和 capacity-only canary，
-不得回到旧权威。当前 register 为 `ready`：仅 D2 stored pending 但 inactive，26 个
-resolved、0 个 applicable pending、无 active decision，S2-S8 均无 pending-decision
-blocker；本文不把已决选项当成实现完成证据。
+不得回到旧权威。该 Slice 原始取证时 register 为 `ready`：仅 D2 stored pending 但
+inactive，26 个 resolved、0 个 applicable pending。当前 append-only register 已新增
+D28-D30：状态为 `valid_pending`，D28 是唯一 active question，S2 无 blocker，
+S3-S8 被 D28-D30 阻断；本文不把已决选项当成实现完成证据。
 
 ## 已实现范围
 
@@ -182,9 +183,10 @@ python3 scripts/check_agent_kernel_wheel.py
 - Python 3.12 Worker 全量：746 tests 通过，5 个既有条件性 skip。
 - output contracts 4/4；Slice 0 baseline `compatible`；cross-repo legacy baseline
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
-- decision register 为 `ready`，仅 D2 stored pending 但 inactive、26 个 resolved、0 个
-  applicable pending、无 active decision；S2-S8 均无 pending-decision blocker。决策闭合
-  不代表对应 Slice 实现或验证已完成。
+- 该证据提交上的 decision register 为 `ready`，仅 D2 stored pending but inactive、
+  26 个 resolved、0 个 applicable pending；此项保留为历史取证结果。当前 append-only
+  register 已新增 D28-D30，状态为 `valid_pending`，D28 active，S2 无 blocker，
+  S3-S8 blocked。任何决策状态都不代表对应 Slice 实现或验证已完成。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions

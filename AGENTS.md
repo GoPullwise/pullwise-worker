@@ -233,10 +233,18 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The current resolved set is D1 and D3-D27; D2 is the only stored pending
-  record but is inactive under D1. There is no active question: the register is
-  `ready` with 26 resolved records and zero applicable pending records, and
-  S2-S8 have no pending-decision blocker.
+- The resolved prefix remains D1 and D3-D27; D2 remains pending but inactive
+  under D1. D28-D30 are append-only applicable pending records required by S3.
+  The register is `valid_pending` with 26 resolved records, three applicable
+  pending records, and D28 as the only active question. Ask only D28; D29 and
+  D30 remain dependency-blocked and must not be selected or inferred. S2 has
+  no slice blocker, while S3-S8 are blocked by D28-D30 until explicit
+  option-anchored resolutions exist. D28 freezes current-package artifact
+  identity/distribution/pinning, D29 freezes the atomic foundation contract
+  closure, and D30 freezes dispatch-intent/receipt/budget linearization.
+  Recommendations remain non-normative; do not author the Server package
+  schemas or connect production Gateway/Observation state from these pending
+  records.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -281,7 +289,7 @@ include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
 `contracts/agent-first/spec-decision-register.json` is an atomic
-machine-registry exception at 454 physical lines, owned by the Worker
+machine-registry exception at 541 physical lines, owned by the Worker
 specification owner. It stays atomic because one ordered frozen
 question/definition/resolution packet enforces question order behind one
 structural-validation and immutable-history boundary. The considered split is
@@ -484,13 +492,18 @@ production Agent-First runner or a completed S3 slice.
   traversal; the focused Windows fallback exists for development tests. Worker
   must not add versioned schema tags, construct current manifests, or treat
   these internal shapes as a substitute for D23's exact-pinned Server package.
+  Every merged SourceTreeSnapshot must reject duplicate entries and any
+  ancestor/descendant path prefix conflict across physical scan and gitlink
+  catalog facts.
 - Pullwise source selection has fixed .git and .codex-review exclusions.
   Caller-selected exclusions, ephemeral patterns, and raw gitlink mappings fail
   closed. Verified gitlinks come only from an exact 40-hex Git revision with
-  replace objects and lazy fetch disabled; the catalog is bound to the checkout
-  device/inode and the scanner-opened root. Production composition must require
-  Git 2.45 or newer and a materializer-enforced single-writer catalog/scan
-  window. The Windows path scanner remains development-only.
+  replace objects and lazy fetch disabled. Git must prove that the canonical
+  repository top-level is exactly the supplied scan root; the catalog is bound
+  to the checkout device/inode and the scanner-opened root. Production
+  composition must require Git 2.45 or newer and a materializer-enforced
+  single-writer catalog/scan window. The Windows path scanner remains
+  development-only.
 - agent_kernel_checkout_window.py keeps that package-independent POSIX window
   open from the exact-revision gitlink inspection and before snapshot through
   the fresh inspection and after snapshot, or until explicit close. Its fixed
@@ -500,7 +513,11 @@ production Agent-First runner or a completed S3 slice.
   cooperating checkout writer must use the same coordinator writer window.
   This fences cooperating materializers only; arbitrary host mutation must
   still fail the descriptor/root identity and SourceState checks. Windows
-  rejects this production coordinator rather than emulating the guarantee.
+  explicitly rejects this POSIX-only internal coordinator rather than emulating
+  the guarantee. Its lock timeout is only an internal bounded upper limit, not
+  authoritative invocation budget. Production composition must clamp it to
+  the current absolute deadline started before checkout and poll the same
+  cancellation throughout acquisition.
 - agent_kernel_gateway.py is only the fixed-order orchestration kernel. Journal
   begin must atomically revalidate the authority ticket and bind one opaque
   dispatch capability consumed by the dispatcher and every settlement path.

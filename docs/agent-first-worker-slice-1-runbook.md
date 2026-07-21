@@ -107,9 +107,11 @@ resolution digest 为 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74
 以 custom `absolute_plus_baseline` 解决，resolution digest 为
 `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`；发布须同时通过
 签名 absolute/relative gate、三态 CI、D24 barrier 前置检查和 capacity-only canary，
-不得回到旧权威。当前 register 为 `ready`：仅 D2 stored pending 但 inactive，26 个
-resolved、0 个 applicable pending、无 active decision，S2-S8 均无 pending-decision
-blocker。决策闭合不代表对应实现或验证已经完成，后续仍须逐 Slice 取得独立证据。
+不得回到旧权威。该 Slice 原始取证时 register 为 `ready`：仅 D2 stored pending 但
+inactive，26 个 resolved、0 个 applicable pending。当前 append-only register 已新增
+D28-D30：状态为 `valid_pending`，D28 是唯一 active question，S2 无 blocker，
+S3-S8 被 D28-D30 阻断。决策状态不代表对应实现或验证已经完成，后续仍须逐 Slice
+取得独立证据。
 
 ## 指标
 
