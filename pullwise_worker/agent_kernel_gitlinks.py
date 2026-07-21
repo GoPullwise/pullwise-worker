@@ -11,7 +11,6 @@ import subprocess
 
 from .agent_kernel_source_state import (
     PULLWISE_EXCLUDED_CONTROL_ROOTS,
-    REVISION_PATTERN,
     SourceEntry,
     SourceStateError,
     _canonical_path,
@@ -141,7 +140,7 @@ def inspect_gitlinks(
 ) -> VerifiedGitlinkCatalog:
     root = Path(root)
     identity = _root_identity(root)
-    if not REVISION_PATTERN.fullmatch(base_revision):
+    if not _OBJECT_PATTERN.fullmatch(base_revision):
         raise SourceStateError("SOURCE_BASE_REVISION_INVALID")
     executable = Path(git_executable).resolve(strict=True)
     metadata = executable.lstat()

@@ -1,5 +1,4 @@
 """Package-independent ordering kernel for current-only tool invocations."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,7 +10,6 @@ from .agent_kernel_source_state import SourceDiff, SourceTreeSnapshot, diff_sour
 
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RISK_LEVELS = frozenset({"R0", "R1", "R2", "R3", "R4"})
-
 
 class GatewayError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
@@ -114,12 +112,12 @@ class ReplayState:
 @dataclass(frozen=True)
 class DispatchDecision:
     kind: str
-    dispatch_ticket: object | None = None
+    dispatch_capability: object | None = None
     result: object | None = None
 
     @classmethod
-    def winner(cls, ticket: object) -> "DispatchDecision":
-        return cls("WINNER", dispatch_ticket=ticket)
+    def winner(cls, capability: object) -> "DispatchDecision":
+        return cls("WINNER", dispatch_capability=capability)
 
     @classmethod
     def pending(cls) -> "DispatchDecision":
@@ -135,10 +133,13 @@ class InvocationCodec(Protocol):
 
 
 class DispatchJournal(Protocol):
+    """Atomically revalidate authority and bind a winning dispatch capability."""
+
     def probe(self, key: str, digest: str) -> ReplayState: ...
 
     def begin(
         self,
+        authority_ticket: object,
         call: CheckedInvocation,
         descriptor: ToolDescriptor,
         prepared: PreparedDispatch,
@@ -149,9 +150,7 @@ class DispatchJournal(Protocol):
 class CurrentAuthority(Protocol):
     def assert_actor_current(self, call: CheckedInvocation) -> object: ...
 
-    def assert_lease_current(
-        self, ticket: object, call: CheckedInvocation
-    ) -> None: ...
+    def assert_lease_current(self, ticket: object, call: CheckedInvocation) -> None: ...
 
     def assert_runnable(self, ticket: object, call: CheckedInvocation) -> None: ...
 
@@ -204,13 +203,13 @@ class BudgetAuthority(Protocol):
 
 
 class Dispatcher(Protocol):
-    def dispatch(self, prepared: PreparedDispatch) -> object: ...
+    def dispatch(self, capability: object, prepared: PreparedDispatch) -> object: ...
 
 
 class ExecutionCommitter(Protocol):
     def commit(
         self,
-        dispatch_ticket: object,
+        dispatch_capability: object,
         call: CheckedInvocation,
         prepared: PreparedDispatch,
         receipt: object,
@@ -220,7 +219,7 @@ class ExecutionCommitter(Protocol):
 
     def commit_source_violation(
         self,
-        dispatch_ticket: object,
+        dispatch_capability: object,
         call: CheckedInvocation,
         prepared: PreparedDispatch,
         receipt: object,
@@ -231,7 +230,7 @@ class ExecutionCommitter(Protocol):
 
     def commit_source_unavailable(
         self,
-        dispatch_ticket: object,
+        dispatch_capability: object,
         call: CheckedInvocation,
         prepared: PreparedDispatch,
         receipt: object,
@@ -241,7 +240,7 @@ class ExecutionCommitter(Protocol):
 
     def commit_dispatch_failure(
         self,
-        dispatch_ticket: object,
+        dispatch_capability: object,
         call: CheckedInvocation,
         prepared: PreparedDispatch,
         reservation: object,
@@ -314,15 +313,15 @@ class AgentKernelGateway:
                 authority_ticket, call, descriptor, prepared
             )
             reservation = self.budget.reserve(authority_ticket, call, descriptor)
-        except Exception:
+        except BaseException:
             self.preparer.discard(prepared)
             raise
 
         try:
             decision = self.journal.begin(
-                call, descriptor, prepared, reservation
+                authority_ticket, call, descriptor, prepared, reservation
             )
-        except Exception:
+        except BaseException:
             self._abandon_pre_dispatch(prepared, reservation)
             raise
         if decision.kind != "WINNER":
@@ -333,16 +332,18 @@ class AgentKernelGateway:
             if replayed is not _NOT_REPLAY:
                 return replayed
             raise GatewayError("JOURNAL_STATE_INVALID")
-        if decision.dispatch_ticket is None:
+        if decision.dispatch_capability is None:
             self._abandon_pre_dispatch(prepared, reservation)
-            raise GatewayError("DISPATCH_TICKET_MISSING")
+            raise GatewayError("DISPATCH_CAPABILITY_MISSING")
 
         try:
-            receipt = self.dispatcher.dispatch(prepared)
-        except Exception as exc:
+            receipt = self.dispatcher.dispatch(decision.dispatch_capability, prepared)
+        except BaseException as exc:
             self.preparer.discard(prepared)
+            if not isinstance(exc, Exception):
+                raise
             return self.committer.commit_dispatch_failure(
-                decision.dispatch_ticket,
+                decision.dispatch_capability,
                 call,
                 prepared,
                 reservation,
@@ -353,7 +354,7 @@ class AgentKernelGateway:
             changes = diff_source_trees(prepared.source_before, source_after)
         except Exception as exc:
             return self.committer.commit_source_unavailable(
-                decision.dispatch_ticket,
+                decision.dispatch_capability,
                 call,
                 prepared,
                 receipt,
@@ -362,7 +363,7 @@ class AgentKernelGateway:
             )
         if not changes.is_empty:
             return self.committer.commit_source_violation(
-                decision.dispatch_ticket,
+                decision.dispatch_capability,
                 call,
                 prepared,
                 receipt,
@@ -371,7 +372,7 @@ class AgentKernelGateway:
                 changes,
             )
         return self.committer.commit(
-            decision.dispatch_ticket,
+            decision.dispatch_capability,
             call,
             prepared,
             receipt,

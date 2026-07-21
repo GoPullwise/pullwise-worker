@@ -98,6 +98,16 @@ def _names(directory: int | Path) -> tuple[str, ...]:
         raise SourceStateError("SOURCE_DIRECTORY_UNREADABLE") from exc
 
 
+def _path_present(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SourceStateError("SOURCE_ENTRY_UNREADABLE", path.name) from exc
+    return True
+
+
 def snapshot_source_tree(
     root: Path,
     *,
@@ -115,7 +125,7 @@ def snapshot_source_tree(
     from .agent_kernel_gitlinks import VerifiedGitlinkCatalog
 
     has_git_metadata = any(
-        candidate.exists() or candidate.is_symlink()
+        _path_present(candidate)
         for candidate in (root / ".git", root / ".gitmodules")
     )
     if gitlink_catalog is None:
@@ -191,6 +201,7 @@ def _scan_fd(
     policy: SourceSelectionPolicy,
     seen: dict[str, str],
     hook: StageHook | None,
+    gitlinks: dict[str, SourceEntry],
 ) -> list[SourceEntry]:
     before = os.fstat(directory_fd)
     _assert_directory(before, prefix or ".")
@@ -208,6 +219,16 @@ def _scan_fd(
         except OSError as exc:
             raise SourceStateError("SOURCE_ENTRY_UNREADABLE", relative) from exc
         display_path = root / Path(relative)
+        if relative in gitlinks:
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse(metadata)
+            ):
+                raise SourceStateError(
+                    "SOURCE_GITLINK_IDENTITY_INVALID", relative
+                )
+            continue
         if stat.S_ISLNK(metadata.st_mode):
             try:
                 target = _normalize_link_target(
@@ -248,6 +269,7 @@ def _scan_fd(
                         policy=policy,
                         seen=seen,
                         hook=hook,
+                        gitlinks=gitlinks,
                     )
                 )
                 after = os.stat(
@@ -280,7 +302,10 @@ def _scan_fd(
 
 
 def _scan_with_dirfd(
-    root: Path, policy: SourceSelectionPolicy, hook: StageHook | None
+    root: Path,
+    policy: SourceSelectionPolicy,
+    hook: StageHook | None,
+    gitlinks: dict[str, SourceEntry],
 ) -> list[SourceEntry]:
     try:
         before = root.lstat()
@@ -300,6 +325,7 @@ def _scan_with_dirfd(
             policy=policy,
             seen={},
             hook=hook,
+            gitlinks=gitlinks,
         )
         try:
             after = root.lstat()

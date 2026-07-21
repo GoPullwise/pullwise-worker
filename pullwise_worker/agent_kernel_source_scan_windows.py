@@ -73,6 +73,7 @@ def _scan_path(
     policy: SourceSelectionPolicy,
     seen: dict[str, str],
     hook: StageHook | None,
+    gitlinks: dict[str, SourceEntry],
 ) -> list[SourceEntry]:
     try:
         before = directory.lstat()
@@ -93,6 +94,16 @@ def _scan_path(
             metadata = path.lstat()
         except OSError as exc:
             raise SourceStateError("SOURCE_ENTRY_UNREADABLE", relative) from exc
+        if relative in gitlinks:
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse(metadata)
+            ):
+                raise SourceStateError(
+                    "SOURCE_GITLINK_IDENTITY_INVALID", relative
+                )
+            continue
         if stat.S_ISLNK(metadata.st_mode):
             try:
                 target = _normalize_link_target(os.readlink(path))
@@ -124,6 +135,7 @@ def _scan_path(
                     policy=policy,
                     seen=seen,
                     hook=hook,
+                    gitlinks=gitlinks,
                 )
             )
             try:
@@ -149,7 +161,10 @@ def _scan_path(
 
 
 def scan_with_paths(
-    root: Path, policy: SourceSelectionPolicy, hook: StageHook | None
+    root: Path,
+    policy: SourceSelectionPolicy,
+    hook: StageHook | None,
+    gitlinks: dict[str, SourceEntry],
 ) -> list[SourceEntry]:
     before = root.lstat()
     _assert_directory(before, ".")
@@ -161,6 +176,7 @@ def scan_with_paths(
         policy=policy,
         seen={},
         hook=hook,
+        gitlinks=gitlinks,
     )
     try:
         after = root.lstat()

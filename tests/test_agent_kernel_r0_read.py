@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from pullwise_worker.agent_kernel_gateway import (
     AgentKernelGateway,
@@ -84,7 +85,7 @@ class AgentKernelR0ReadTest(unittest.TestCase):
 
         self.assertFalse(hasattr(prepared, "relative_path"))
         self.assertFalse(hasattr(prepared.dispatch_handle, "relative_path"))
-        receipt = R0ReadDispatcher().dispatch(prepared)
+        receipt = R0ReadDispatcher().dispatch(object(), prepared)
         self.assertEqual(self.payload, receipt.payload)
         self.assertEqual(hashlib.sha256(self.payload).hexdigest(), receipt.sha256)
         self.assertEqual(len(self.payload), receipt.size_bytes)
@@ -95,7 +96,7 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         prepared = preparer.prepare(
             object(), self.call("nested/README.md"), self.descriptor
         )
-        R0ReadDispatcher().dispatch(prepared)
+        R0ReadDispatcher().dispatch(object(), prepared)
 
         after = preparer.capture_after(prepared)
 
@@ -145,6 +146,66 @@ class AgentKernelR0ReadTest(unittest.TestCase):
                 object(), self.call("nested/README.md"), self.descriptor
             )
 
+    def test_descriptor_reads_are_always_explicitly_bounded(self) -> None:
+        read_sizes: list[int] = []
+        real_fdopen = os.fdopen
+
+        class GuardedFile:
+            def __init__(self, handle: object) -> None:
+                self.handle = handle
+
+            def __enter__(self) -> "GuardedFile":
+                return self
+
+            def __exit__(self, *args: object) -> object:
+                return self.handle.__exit__(*args)
+
+            def fileno(self) -> int:
+                return self.handle.fileno()
+
+            def read(self, size: int = -1) -> bytes:
+                if size < 0:
+                    raise AssertionError("unbounded descriptor read")
+                read_sizes.append(size)
+                return self.handle.read(size)
+
+        def guarded_fdopen(*args: object, **kwargs: object) -> GuardedFile:
+            return GuardedFile(real_fdopen(*args, **kwargs))
+
+        with mock.patch(
+            "pullwise_worker.agent_kernel_r0_read.os.fdopen",
+            side_effect=guarded_fdopen,
+        ):
+            prepared = self.preparer().prepare(
+                object(), self.call("nested/README.md"), self.descriptor
+            )
+            receipt = R0ReadDispatcher().dispatch(object(), prepared)
+
+        self.assertEqual(self.payload, receipt.payload)
+        self.assertTrue(read_sizes)
+
+    def test_in_place_growth_after_prepare_is_bounded_and_rejected(self) -> None:
+        prepared = self.preparer().prepare(
+            object(), self.call("nested/README.md"), self.descriptor
+        )
+        self.target.write_bytes(b"x" * 4096)
+
+        with self.assertRaisesRegex(R0ReadError, "READ_SOURCE_ENTRY_CHANGED"):
+            R0ReadDispatcher().dispatch(object(), prepared)
+
+        self.assertTrue(prepared.dispatch_handle.closed)
+
+    def test_excluded_control_path_is_rejected_before_any_leaf_open(self) -> None:
+        with mock.patch(
+            "pullwise_worker.agent_kernel_r0_read._open_verified"
+        ) as open_verified:
+            with self.assertRaisesRegex(R0ReadError, "READ_PATH_EXCLUDED"):
+                self.preparer().prepare(
+                    object(), self.call(".git/config"), self.descriptor
+                )
+
+        open_verified.assert_not_called()
+
     def test_source_change_between_snapshot_and_open_is_rejected(self) -> None:
         changed = False
 
@@ -172,7 +233,7 @@ class AgentKernelR0ReadTest(unittest.TestCase):
             prepared.dispatch_handle.discard()
             self.skipTest(f"host does not permit replacing an open file: {exc}")
 
-        receipt = R0ReadDispatcher().dispatch(prepared)
+        receipt = R0ReadDispatcher().dispatch(object(), prepared)
 
         self.assertEqual(self.payload, receipt.payload)
 
@@ -187,7 +248,7 @@ class AgentKernelR0ReadTest(unittest.TestCase):
 
         self.assertTrue(prepared.dispatch_handle.closed)
         with self.assertRaisesRegex(R0ReadError, "PREPARED_READ_CLOSED"):
-            R0ReadDispatcher().dispatch(prepared)
+            R0ReadDispatcher().dispatch(object(), prepared)
 
     def test_prepare_hook_failure_does_not_leak_the_leaf_descriptor(self) -> None:
         def fail(stage: str, path: Path) -> None:
@@ -216,7 +277,7 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(R0ReadError, "PREPARED_READ_INVALID"):
-            R0ReadDispatcher().dispatch(forged)
+            R0ReadDispatcher().dispatch(object(), forged)
 
     def test_real_r0_reader_composes_through_the_gateway(self) -> None:
         call = self.call("nested/README.md")

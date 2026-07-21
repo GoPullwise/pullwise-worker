@@ -30,6 +30,7 @@ from .agent_kernel_source_state import (
     SourceStateError,
     SourceTreeSnapshot,
     _canonical_path,
+    _is_excluded,
     snapshot_source_tree,
 )
 
@@ -91,27 +92,46 @@ class R0ReadReceipt:
     size_bytes: int
 
 
-def _read_descriptor(descriptor: int) -> tuple[bytes, os.stat_result]:
+def _read_descriptor(
+    descriptor: int,
+    *,
+    byte_limit: int,
+    overflow_code: str,
+) -> tuple[bytes, os.stat_result]:
     before = os.fstat(descriptor)
     if not stat.S_ISREG(before.st_mode) or _is_reparse(before):
         raise R0ReadError("READ_LEAF_NOT_REGULAR")
-    with os.fdopen(os.dup(descriptor), "rb", closefd=True) as handle:
-        payload = handle.read()
+    if before.st_size > byte_limit:
+        raise R0ReadError(overflow_code)
+    chunks: list[bytes] = []
+    remaining = byte_limit + 1
+    try:
+        with os.fdopen(os.dup(descriptor), "rb", closefd=True) as handle:
+            while remaining:
+                chunk = handle.read(min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+    finally:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    payload = b"".join(chunks)
+    if len(payload) > byte_limit:
+        raise R0ReadError(overflow_code)
     after = os.fstat(descriptor)
     if not _same_identity(before, after):
         raise R0ReadError("READ_SOURCE_ENTRY_CHANGED")
-    os.lseek(descriptor, 0, os.SEEK_SET)
     return payload, before
 
 
 def _assert_entry_matches(
     descriptor: int, entry: SourceEntry, max_bytes: int
 ) -> None:
-    if os.fstat(descriptor).st_size > max_bytes:
-        raise R0ReadError("READ_SIZE_LIMIT")
-    payload, metadata = _read_descriptor(descriptor)
-    if len(payload) > max_bytes:
-        raise R0ReadError("READ_SIZE_LIMIT")
+    payload, metadata = _read_descriptor(
+        descriptor,
+        byte_limit=max_bytes,
+        overflow_code="READ_SIZE_LIMIT",
+    )
     executable = os.name != "nt" and bool(metadata.st_mode & 0o111)
     if (
         entry.type != "file"
@@ -245,6 +265,7 @@ class R0ReadPreparer:
         policy: SourceSelectionPolicy,
         base_revision: str,
         max_bytes: int,
+        gitlink_catalog: object | None = None,
         stage_hook: StageHook | None = None,
     ) -> None:
         if (
@@ -257,6 +278,7 @@ class R0ReadPreparer:
         self.policy = policy
         self.base_revision = base_revision
         self.max_bytes = max_bytes
+        self.gitlink_catalog = gitlink_catalog
         self.stage_hook = stage_hook
 
     def prepare(
@@ -270,14 +292,17 @@ class R0ReadPreparer:
             raise R0ReadError("READ_TOOL_IDENTITY_INVALID")
         if not isinstance(call.tool_input, ReadSourceFileInput):
             raise R0ReadError("READ_INPUT_INVALID")
+        relative = call.tool_input.relative_path
+        if _is_excluded(relative, self.policy.excluded_control_roots):
+            raise R0ReadError("READ_PATH_EXCLUDED")
         source_before = snapshot_source_tree(
             self.root,
             policy=self.policy,
             base_revision=self.base_revision,
+            gitlink_catalog=self.gitlink_catalog,
         )
         if self.stage_hook is not None:
             self.stage_hook("after_source_before", self.root)
-        relative = call.tool_input.relative_path
         descriptor_fd: int | None = None
         try:
             descriptor_fd = _open_verified(self.root, relative)
@@ -311,6 +336,7 @@ class R0ReadPreparer:
             self.root,
             policy=self.policy,
             base_revision=self.base_revision,
+            gitlink_catalog=self.gitlink_catalog,
         )
 
     def discard(self, prepared: PreparedDispatch) -> None:
@@ -328,11 +354,19 @@ class R0ReadPreparer:
 
 
 class R0ReadDispatcher:
-    def dispatch(self, prepared: PreparedDispatch) -> R0ReadReceipt:
+    def dispatch(
+        self, dispatch_capability: object, prepared: PreparedDispatch
+    ) -> R0ReadReceipt:
+        if dispatch_capability is None:
+            raise R0ReadError("DISPATCH_CAPABILITY_INVALID")
         handle = R0ReadPreparer._handle(prepared)
         descriptor, expected_digest, expected_size = handle.take()
         try:
-            payload, _ = _read_descriptor(descriptor)
+            payload, _ = _read_descriptor(
+                descriptor,
+                byte_limit=expected_size,
+                overflow_code="READ_SOURCE_ENTRY_CHANGED",
+            )
             digest = hashlib.sha256(payload).hexdigest()
             if len(payload) != expected_size or digest != expected_digest:
                 raise R0ReadError("READ_SOURCE_ENTRY_CHANGED")

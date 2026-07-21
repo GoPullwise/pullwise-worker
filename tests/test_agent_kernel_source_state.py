@@ -38,8 +38,6 @@ class AgentKernelSourceStateTest(unittest.TestCase):
         (self.root / "a.txt").write_bytes(b"a\r\n")
         (self.root / "nested").mkdir()
         (self.root / "nested" / "b.bin").write_bytes(b"\x00\xff")
-        (self.root / ".git").mkdir()
-        (self.root / ".git" / "config").write_text("secret", encoding="utf-8")
         (self.root / ".codex-review").mkdir()
         (self.root / ".codex-review" / "runtime.json").write_text(
             "runtime", encoding="utf-8"
