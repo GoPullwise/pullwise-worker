@@ -40,6 +40,37 @@ D24_CUSTOM_TEXT = (
     "contract 的 clean initialization/rebuild、current-version upgrade、分批部署，或未来经独立决议"
     "协调切换的 current-contract 演进；这些路径不得引入 pre-Agent-First 兼容层、运行时协商或并行生产轨道。"
 )
+D22_CUSTOM_TEXT = (
+    "该 option 采用 D27-compatible 单值特化。`absolute_plus_baseline` 只以唯一 current Agent-First contract 的候选版本和已接受 stable build 为对象；legacy-v1 compatibility baseline、旧 QA、pre-cutover 任务或任何并行旧权威均不得成为 release baseline、hard floor、fallback 或 rollback target。"
+    "benchmark owner 必须在揭示候选结果前签发 canonical `benchmark-bundle/v1`，release operator 必须在同一时点前签发 canonical `release-gate-policy/v1`；CI/eval owner 在评测完成后生成 canonical `release-gate-report/v1`，release operator 核验后再签发 `release-gate-attestation/v1`。"
+    "policy、report 与 attestation 必须 exact-bind current contract package identity/version/digest、candidate 与 stable build identity、ControlPlaneDigest、EvaluationRuntimeDigest、CandidateDigest、benchmark_version、task inventory digest、hidden-oracle/rubric digest、environment/image digest、预声明抽样 seed、每 task 重复次数、统计实现版本、absolute/relative threshold 表、canary plan、policy/report digest、signer_id/key_id、issued_at/expires_at。"
+    "签名固定为 organization trust registry 中未撤销 release key 对 RFC 8785 JCS bytes 的 Ed25519 signature；benchmark owner、CI evidence producer 与最终 release operator 必须是不同 principal。"
+    "policy 最长有效 30 天，attestation 最长有效 7 天；key 撤销立即失效。"
+    "missing、过期、撤销、签名无效、scope/digest 不匹配或证据不新鲜均为 indeterminate，并阻断发布。"
+    "离线 benchmark 至少包含 120 个 known-gold tasks、3 个互不相同的 sealed unknown-stack families 且每 family 至少 15 tasks；每个适用核心评测簇对 real-fix、bad/incomplete patch、fake-success/zero-test、environment/capability failure、adversarial input 五类各至少 3 tasks，并合计包含至少 50 个 oracle-positive in-scope findings。"
+    "每 task 使用预声明的 3 个不同 seed 独立运行 3 次；每个有效 run 等权进入预声明分母，不允许看到结果后改变权重。"
+    "只有 policy 预列的 infrastructure reason code 可排除 invalid run，并必须报告原始样本、排除样本和逐项 reason；零分母、样本不足、oracle/rubric 冲突、超时、证据缺失或 evaluator failure 均为 indeterminate，禁止通过追加运行、重采样或更换 baseline 追到通过。"
+    "比例使用冻结实现计算，false-verified 的 95% 上界固定使用 Wilson score interval。"
+    "绝对门必须全部满足：安全越权、stale publish、duplicate effect/result 和 critical/adversarial false verified 均为 0；所有 `COMPLETED` 的 active mandatory Requirement Ledger 与 final SourceState proof 覆盖率均为 100%；总体 false_verified_rate 点估计小于 1% 且 95% Wilson 上界小于 2%；known/unknown task_success_rate 分别不低于 70%/50%；known/unknown unaided completion 分别不低于 60%/40%；false_discovery_rate 不高于 20%；environment/capability classification_accuracy 不低于 95%。"
+    "相对已接受 stable baseline：总体 false verified 不得恶化；known/unknown task success、unaided completion 与 classification accuracy 的下降分别不得超过 2 percentage points；false discovery 增加不得超过 2 percentage points；verified-success p95 wall time 与 p95 cost 增加均不得超过 20%。"
+    "每个 task profile 还必须在 policy 中签发正数、有限、无 wildcard 的 wall/token/cost 绝对上限，任一超限即失败。"
+    "zero-tolerance 和 absolute safety gate 不可 waiver；其他阈值放宽、benchmark 难度重定版、统计算法或分母变更必须在候选结果揭示前取得新的独立决议或 ADR，不能用当次 operator exception 绕过。"
+    "baseline 只能从通过全部 offline 门和后续 canary 的 candidate 晋升；release operator 签发 immutable baseline record 后，它才可成为下一版本比较对象，不得自动刷新、事后选择最有利 baseline 或把失败 candidate 写成 baseline。"
+    "relative comparison 必须使用 exact stable package/ControlPlaneDigest，并与 candidate 使用相同 benchmark_version、task/oracle inventory、统计算法及 EvaluationRuntimeDigest；若 runtime/model 发生变化或供应方不提供 immutable model snapshot，必须在同一 72 小时窗口内以 candidate runtime 交错重跑 exact stable build，并把独立 comparison report digest 绑定进 attestation。"
+    "任何不可比状态均为 indeterminate。"
+    "首次 current-contract 发布没有 stable baseline 时，只允许 policy 显式标记 bootstrap：全部绝对门仍须通过，相对门记为 not_applicable，candidate 只有在 canary 完成后才能晋升为首个 baseline。"
+    "旧 baseline 保留审计但撤销后不得用于新发布。"
+    "CI evaluator 只允许三态：exit 0 表示全部适用门通过，exit 1 表示确定失败，exit 2 表示 indeterminate；只有 exit 0 的 exact report 可以签发 attestation。"
+    "benchmark owner 负责冻结数据集与 oracle，CI/eval owner 负责产生可复算报告但无 promote 权，release operator 负责冻结 policy/baseline、核验报告与签发 promote，deployment operator 只能执行已签发的 canary/rollback plan且不得改写门值。"
+    "D24 Task acceptance/TaskRecord creation barrier 只能在同一 exact package/CandidateDigest 的 offline attestation 为 exit 0，并完成 exact current-contract rollback 演练；bootstrap 没有 stable build 时必须改为 stop-intake/fence/reject 演练，绝不能回 legacy。"
+    "barrier 生效后所有 accepted Task 都必须使用唯一 current contract；canary 只能限制 current-contract intake/capacity，剩余 intake 必须暂停或留在 Server current control plane，不得发往旧 contract。"
+    "canary 先运行 5% target capacity（至少一台 Worker）且同时满足至少 24 小时和 200 个 accepted current Tasks，再运行 25% capacity 且同时满足至少 72 小时和 1000 个 accepted current Tasks，之后才可扩至 full capacity。"
+    "canary platform_failure_rate 的分母是窗口内已终态或 deadline 已到的 accepted current Tasks，分子是以 `RUNTIME_FAILURE`、`STORAGE_FAILURE`、`PROTOCOL_FAILURE` 终止或 deadline 后仍无合法终态的 Task；该率必须低于 2%，且在已有 stable baseline 时增加不得超过 2 percentage points。"
+    "任一 zero-tolerance 事件、platform failure 门失败或 p95 wall time/cost 增加超过 20% 都必须自动停止扩容并回到 exact-pin、实现同一 current contract package/schema/storage semantics 的已签发 stable build；样本或窗口不足不得晋级。"
+    "若没有这样的 stable build，只能停止 intake、fence 或 reject，不能回到 legacy。"
+    "D24 barrier 后不得重新开放旧任务、旧 schema、旧协议、旧 QA、legacy baseline 或第二生产轨道。"
+    "未来 roadmap 每版必须另写完整 implementation design，并取得独立 release-gate 决议。"
+)
 
 
 class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
@@ -47,13 +78,13 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
-        self.assertEqual("valid_pending", report["status"])
+        self.assertEqual("ready", report["status"])
         self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
+        self.assertTrue(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D22", report["active_decision_id"])
-        self.assertEqual(1, report["pending_decision_count"])
-        self.assertEqual(25, report["resolved_decision_count"])
+        self.assertIsNone(report["active_decision_id"])
+        self.assertEqual(0, report["pending_decision_count"])
+        self.assertEqual(26, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -78,6 +109,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D19": ("owner_remains_live", "0fb4d7e749fb873ccb7691ff2a87c30f2792969534311903ce439a5ac86c2796"),
             "D20": ("new_gate_immediate_authority", "3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a"),
             "D21": ("server_claim_bound_mode", "ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282"),
+            "D22": ("absolute_plus_baseline", "94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96"),
             "D23": ("server_owned_package", "cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2"),
             "D24": ("new_tasks_only", "8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806"),
             "D25": ("immutable_receipt_mutable_binding", "03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0"),
@@ -226,54 +258,59 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual(expected_resolution, decision["resolution"])
         self.assertEqual([], decision["supersedes"])
 
+    def test_d22_records_the_exact_user_confirmed_custom_resolution(self) -> None:
+        decision_text = f"确认选择 absolute_plus_baseline：{D22_CUSTOM_TEXT}"
+        expected_resolution = {
+            "kind": "custom",
+            "selected_option_id": "absolute_plus_baseline",
+            "custom_text": D22_CUSTOM_TEXT,
+            "decision_text": decision_text,
+            "authority": "user",
+            "decided_at": "2026-07-21",
+            "evidence_refs": [
+                "conversation:user-confirmation:2026-07-21:D22:absolute_plus_baseline"
+            ],
+            "resolution_sha256": (
+                "94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96"
+            ),
+        }
+        register = load_register(REGISTER_PATH)
+        decision = next(
+            item for item in register["decisions"] if item["id"] == "D22"
+        )
+
+        self.assertEqual(4725, len(D22_CUSTOM_TEXT))
+        self.assertEqual(6931, len(D22_CUSTOM_TEXT.encode("utf-8")))
+        self.assertEqual(4753, len(decision_text))
+        self.assertEqual(6969, len(decision_text.encode("utf-8")))
+        self.assertEqual("resolved", decision["status"])
+        self.assertEqual(expected_resolution, decision["resolution"])
+        self.assertEqual([], decision["supersedes"])
+
     def test_pullwise_scope_resolution_unblocks_slice_two(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(
             register, REPO_ROOT, require_slice="S2", check_document=False
         )
 
-        self.assertEqual("valid_pending", report["status"])
+        self.assertEqual("ready", report["status"])
         self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
+        self.assertTrue(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D22", report["active_decision_id"])
+        self.assertIsNone(report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
-    def test_slice_gate_reports_every_due_active_pending_decision(self) -> None:
+    def test_slice_gates_have_no_applicable_pending_decisions(self) -> None:
         register = load_register(REGISTER_PATH)
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S5",
-            check_document=False, check_history=False,
-        )
-        self.assertEqual([], report["failures"])
-        self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
-
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S6",
-            check_document=False, check_history=False,
-        )
-        blocker = next(item for item in report["failures"]
-                       if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D22"], blocker["decision_ids"])
-        self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
-
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S7",
-            check_document=False, check_history=False,
-        )
-        blocker = next(item for item in report["failures"]
-                       if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D22"], blocker["decision_ids"])
-
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S8",
-            check_document=False, check_history=False,
-        )
-        blocker = next(item for item in report["failures"]
-                       if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D22"], blocker["decision_ids"])
+        for slice_id in ("S2", "S3", "S4", "S5", "S6", "S7", "S8"):
+            with self.subTest(slice_id=slice_id):
+                report = verify_register(
+                    register, REPO_ROOT, require_slice=slice_id,
+                    check_document=False, check_history=False,
+                )
+                self.assertEqual([], report["failures"])
+                self.assertTrue(report["valid"])
+                self.assertTrue(report["ready"])
 
 
 if __name__ == "__main__":

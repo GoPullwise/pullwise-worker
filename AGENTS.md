@@ -233,9 +233,10 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The current resolved set is D1, D3-D21, D23-D26, and D27; D2 remains pending
-  but inactive under D1, and D22 is the only active question. The register has
-  25 resolved records and one applicable pending record, D22.
+- The current resolved set is D1 and D3-D27; D2 is the only stored pending
+  record but is inactive under D1. There is no active question: the register is
+  `ready` with 26 resolved records and zero applicable pending records, and
+  S2-S8 have no pending-decision blocker.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -257,6 +258,19 @@ inference never select an option or authorize production implementation.
   `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`:
   unclosed long-range versions remain roadmap until each receives a separate
   complete implementation design before work starts.
+  D22 is bound to custom `absolute_plus_baseline` digest
+  `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`:
+  pre-result signed benchmark/policy inputs, a reproducible three-state CI
+  report, and a post-result release attestation use separated owners and bind
+  the exact current package, candidate, dataset, oracle, runtime, thresholds,
+  baseline, and canary plan. Every applicable absolute and stable-baseline
+  relative gate must pass; missing, stale, invalid, incomparable, or
+  undersampled evidence is indeterminate and blocks release. Bootstrap may
+  waive only the nonexistent relative baseline, never an absolute gate, and
+  becomes the first baseline only after the signed offline gate and capacity-only
+  canary pass. The D24 barrier precedes production canary intake; rollback stays
+  on the same current contract or stops/fences intake, never restores an old
+  protocol, QA authority, task population, or compatibility baseline.
   The recommendation directive remains bounded by D27.
 
 The generated Markdown view is a generated-file size exception owned by the

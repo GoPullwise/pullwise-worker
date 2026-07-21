@@ -103,11 +103,13 @@ digest 为 `03564c29030767d552a5759828970f30ed10c11bbd46c42c51f16a08c3e2f2d0`；
 保持 immutable，独立 Server binding/index 一次性绑定 transport envelope digest，并与
 TaskResultCore digest 形成无环 DAG。D26 已选择 recommended `roadmap_separate_designs`，
 resolution digest 为 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`；
-未闭合远期版本只属 roadmap，每版开工前须另写完整 implementation design。当前 register
-有 2 个 pending（其中 D2 inactive）、25 个 resolved，唯一 active decision 为 D22；
-S2-S5 的 decision gate 已无 pending blocker，S6/S7/S8 均仅由 D22 阻断；对应实现与
-验证仍须分别完成。
-后续仍须按各 Slice 的 decision gate 执行，不得以当前代码或推荐项代替尚未作出的选择。
+未闭合远期版本只属 roadmap，每版开工前须另写完整 implementation design。D22 已由用户
+以 custom `absolute_plus_baseline` 解决，resolution digest 为
+`94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`；发布须同时通过
+签名 absolute/relative gate、三态 CI、D24 barrier 前置检查和 capacity-only canary，
+不得回到旧权威。当前 register 为 `ready`：仅 D2 stored pending 但 inactive，26 个
+resolved、0 个 applicable pending、无 active decision，S2-S8 均无 pending-decision
+blocker。决策闭合不代表对应实现或验证已经完成，后续仍须逐 Slice 取得独立证据。
 
 ## 指标
 

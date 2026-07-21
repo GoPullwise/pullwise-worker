@@ -364,6 +364,8 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         earlier["resolution"] = None
         register["active_decision_id"] = "D26"
         skipped = next(item for item in register["decisions"] if item["id"] == "D22")
+        skipped["status"] = "pending"
+        skipped["resolution"] = None
         changed = _resolve(register, "D22", skipped["options"][0]["id"])
         with self.assertRaisesRegex(
             DecisionRegisterFormatError, "out_of_question_order"

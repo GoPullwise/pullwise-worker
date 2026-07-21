@@ -53,6 +53,7 @@
 <!-- D9@sha256:3e8a5cf9d69cccd50667009c80e9a3176501d3c0150d5bec931ee71fb1cc46ce -->
 <!-- D20@sha256:3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a -->
 <!-- D21@sha256:ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282 -->
+<!-- D22@sha256:94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96 -->
 <!-- D27@sha256:f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e -->
 <!-- END AGENT-FIRST DECISION REFS: MVP_EXECUTABLE_GATES -->
 
@@ -78,13 +79,17 @@ runtime/schema/migration。D25 进一步冻结无环 receipt 拓扑：upload/tra
 保持 immutable，独立 Server-owned binding/index 只允许一次性绑定 exact transport
 envelope digest；TaskResultCore digest 与 transport envelope digest 分离，binding/ACK
 不得替代 D9 的内部 TaskResult CAS。D26 将尚未闭合的远期版本降为 roadmap；每版
-开工前必须另写完整 implementation design。D25/D26 均不授权提前修改
+开工前必须另写完整 implementation design。D22 再以 `absolute_plus_baseline` 的
+D27-compatible custom 特化冻结唯一 current contract 的发布证据、绝对与相对数值门、
+baseline 生命周期、分阶段 canary 和同契约回滚；legacy baseline、旧 QA、pre-cutover
+任务或第二生产权威均不得参与发布、hard floor 或回滚。D22/D25/D26 均不授权提前修改
 runtime/schema/protocol/deployment。
 
-## D9-D21 与 D23-D26 resolution overlay（Normative）
+## D9-D26 resolution overlay（Normative）
 
-机器注册表已按用户授权解决 D9-D21 与 D23-D26，当前唯一活动问题是 D22。以下决议优先于
-后文仍以“候选”或“待决”表述的旧段落，但不代表对应生产代码已经实现：
+机器注册表已按用户授权解决 D9-D26；D2 是唯一 inactive 决策，当前没有活动问题或
+applicable pending decision。以下决议优先于后文仍以“候选”或“待决”表述的旧段落，
+但不代表对应生产代码已经实现：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
   transport projection，不能创建、替换或改写已提交 outcome。D10 要求以一张全局
@@ -108,7 +113,13 @@ runtime/schema/protocol/deployment。
   不存在可签发或选择的执行 mode。缺失、未知或不匹配必须 fail closed，授权失效只能
   stop、fence 或 reject。Worker config、deployment 或单个 job 均不得换轨；同一
   current contract 的横向副本、分批扩容和先前 build 回滚仍允许，但不得形成不同
-  协议/权威的双轨。D22 仍独立决定 release 数值门与签发 owner。
+  协议/权威的双轨。
+- D22 选择 option-anchored custom `absolute_plus_baseline`：发布只比较唯一 current
+  Agent-First contract 的 candidate 与已接受 stable build，并同时执行不可 waiver 的
+  absolute safety gates 和版本化 baseline-relative regression gates。benchmark owner、
+  CI/eval owner 与 release operator 必须是不同 principal；RFC 8785 JCS/Ed25519 签名、
+  证据有效期、离线样本与统计口径、baseline 晋升、canary 阶段和同契约回滚均按第 16.5 节
+  fail closed。legacy baseline、旧 QA、pre-cutover Task 或第二生产轨道均不具发布权威。
 - D24 选择 `new_tasks_only` 的 option-anchored custom 边界：以 Server 受审计的
   Task acceptance/TaskRecord creation 屏障作为 cutover 线性化点。屏障前须暂停 intake，
   并将 pre-cutover Task 处置为权威终态、tombstone/delete 或撤权后的不可执行隔离；
@@ -138,7 +149,7 @@ runtime/schema/protocol/deployment。
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
 | S3-S4 | 未开始；决策门已闭合 | D9-D17 已解决；仍须按本文实现、测试并取得切片证据，不能把决议记录当作实现完成 |
-| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 25 个 resolved、2 个 pending（其中 D2 inactive）与 1 个 applicable pending；S5 无 pending decision blocker，S6/S7/S8 均仅由 D22 阻断，唯一活动问题为 `active_decision_id=D22` |
+| S5-S8 | 未开始；决策门已闭合 | 机器 decision register 为 `ready`，含 26 个 resolved、0 个 applicable pending，D2 是唯一 inactive 决策，`active_decision_id=null`；S5/S6/S7/S8 均无 pending decision blocker，但仍须逐切片实现和验证 |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
 
