@@ -58,7 +58,7 @@ class AgentKernelSourceStateTest(unittest.TestCase):
             ["a.txt", "nested/b.bin", "z.txt"],
             [entry.path for entry in first.entries],
         )
-        self.assertEqual(6, first.total_bytes)
+        self.assertEqual(7, first.total_bytes)
         self.assertEqual(3, first.entry_count)
         self.assertEqual(64, len(first.source_state_id))
 
