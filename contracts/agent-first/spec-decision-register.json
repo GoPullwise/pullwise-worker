@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D26",
+  "active_decision_id": "D22",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -406,14 +406,14 @@
     {
       "id": "D26", "key": "post-spec-depth", "scope": "P1.6", "title": "远期版本规范深度与完成口径",
       "question": "V1.1/V2.x/V3.0 现在补成可实施规格，还是明确标为 roadmap 并逐版另写 implementation design？",
-      "status": "pending", "depends_on": ["D1"], "activation": null, "required_by_slice": "S7",
+      "status": "resolved", "depends_on": ["D1"], "activation": null, "required_by_slice": "S7",
       "effects": ["authority", "release_ownership"], "source_refs": ["handoff:P1.6"],
       "affected_units": ["post-closure"],
       "options": [
         {"id": "roadmap_separate_designs", "summary": "把未闭合远期版本明确标为 roadmap；每版开工前另写完整 implementation design。", "rationale": "诚实区分路线图与可执行规格，不让远期债务阻塞已闭合 MVP。", "consequences": ["不得再宣称当前 Post 文档完整实现所有版本"]},
         {"id": "complete_all_versions_now", "summary": "现在补齐 V1.1/V2.x/V3.0 的 schema/state/storage/wire/fixtures/rollout/DoD。", "rationale": "可维持完整实现设计标题，但本次规范范围显著扩大。", "consequences": ["S7 必须完成所有远期版本的实施级闭环"]}
       ],
-      "recommended_option_id": "roadmap_separate_designs", "resolution": null, "supersedes": []
+      "recommended_option_id": "roadmap_separate_designs", "resolution": {"kind":"option","selected_option_id":"roadmap_separate_designs","custom_text":null,"decision_text":"Select roadmap_separate_designs: 把未闭合远期版本明确标为 roadmap；每版开工前另写完整 implementation design。 诚实区分路线图与可执行规格，不让远期债务阻塞已闭合 MVP。 Constraints: 不得再宣称当前 Post 文档完整实现所有版本","authority":"user","decided_at":"2026-07-21","evidence_refs":["conversation:user-directive:2026-07-21:all-subsequent-recommended-options"],"resolution_sha256":"ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f"}, "supersedes": []
     },
     {
       "id": "D27", "key": "agent-first-clean-break", "scope": "P0.4/P0.10/P0.11/P1.2", "title": "Agent-First 单协议 clean-break 边界",

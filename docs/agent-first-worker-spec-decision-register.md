@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D26`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D22`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -36,7 +36,7 @@ Active question: `D26`. Questions are asked one at a time. User silence, existin
 | `D23` | `P1.2` | C0 contract package 真源归属 | `resolved` | `active` | `S7` | D1, D2 | `server_owned_package` |
 | `D24` | `P1.2` | Server TaskRecord v2 bootstrap 策略 | `resolved` | `active` | `S7` | D8, D23 | `lazy_eligible_claim_migration` |
 | `D25` | `P1.5` | TaskResult/receipt digest DAG | `resolved` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
-| `D26` | `P1.6` | 远期版本规范深度与完成口径 | `pending` | `active` | `S7` | D1 | `roadmap_separate_designs` |
+| `D26` | `P1.6` | 远期版本规范深度与完成口径 | `resolved` | `active` | `S7` | D1 | `roadmap_separate_designs` |
 | `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `pending` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
 
 ### D1 — MVP/Post-MVP 产品范围
@@ -575,16 +575,18 @@ Active question: `D26`. Questions are asked one at a time. User silence, existin
 
 ### D26 — 远期版本规范深度与完成口径
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S7`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S7`.
 
 **Question:** V1.1/V2.x/V3.0 现在补成可实施规格，还是明确标为 roadmap 并逐版另写 implementation design？
 
 **Options:**
 
-- `roadmap_separate_designs` — non-normative recommendation, not selected: 把未闭合远期版本明确标为 roadmap；每版开工前另写完整 implementation design。 诚实区分路线图与可执行规格，不让远期债务阻塞已闭合 MVP。 Consequences: 不得再宣称当前 Post 文档完整实现所有版本
+- `roadmap_separate_designs` — selected by resolution: 把未闭合远期版本明确标为 roadmap；每版开工前另写完整 implementation design。 诚实区分路线图与可执行规格，不让远期债务阻塞已闭合 MVP。 Consequences: 不得再宣称当前 Post 文档完整实现所有版本
 - `complete_all_versions_now`: 现在补齐 V1.1/V2.x/V3.0 的 schema/state/storage/wire/fixtures/rollout/DoD。 可维持完整实现设计标题，但本次规范范围显著扩大。 Consequences: S7 必须完成所有远期版本的实施级闭环
 
-**Resolution:** No option has been selected.
+**Resolution:** `roadmap_separate_designs` (`option`). Select roadmap_separate_designs: 把未闭合远期版本明确标为 roadmap；每版开工前另写完整 implementation design。 诚实区分路线图与可执行规格，不让远期债务阻塞已闭合 MVP。 Constraints: 不得再宣称当前 Post 文档完整实现所有版本
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-directive:2026-07-21:all-subsequent-recommended-options`; digest `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`.
 
 **Supersedes:** none
 

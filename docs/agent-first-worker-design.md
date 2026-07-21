@@ -1721,7 +1721,14 @@ SLO 必须配套固定测量合同，不能只列数字：
 
 ---
 
-## 17. MVP 与演进路线
+## 17. Roadmap：MVP 与演进路线
+
+本节只描述目标路线，不是当前 implementation authority。各阶段的 maturity 与开工边界受
+[Post-MVP D26 roadmap maturity overlay](agent-first-worker-post-mvp-implementation-design.md#d26-roadmap-maturity-overlaynormative)
+约束：被归类为 roadmap 的版本必须先另写完整 implementation design 并取得适用独立决议，
+才能实施。以下仍出现的 Compatibility Adapter、old/new matrix、旧 API fallback 或 downgrade
+描述均受 D27 clean-break override 约束，只是待删除历史目标，不得被 roadmap 复活为 dual-read、
+multi-major negotiation、old-Web compatibility 或第二生产轨道。
 
 ### Phase 0：先固定契约与评测
 

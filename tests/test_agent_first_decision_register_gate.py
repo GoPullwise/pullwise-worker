@@ -357,6 +357,12 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
 
     def test_resolved_decisions_cannot_skip_the_question_order(self) -> None:
         register = load_register(REGISTER_PATH)
+        earlier = next(
+            item for item in register["decisions"] if item["id"] == "D26"
+        )
+        earlier["status"] = "pending"
+        earlier["resolution"] = None
+        register["active_decision_id"] = "D26"
         skipped = next(item for item in register["decisions"] if item["id"] == "D22")
         changed = _resolve(register, "D22", skipped["options"][0]["id"])
         with self.assertRaisesRegex(
