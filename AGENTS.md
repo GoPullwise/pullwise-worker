@@ -164,12 +164,14 @@ ratchet pass. This remains a deletion inventory, not a compatibility baseline.
   `worker.004-frozen-contract-baseline`. Strict mode now observes all surfaces,
   retains that live evidence, and fails closed with `status=indeterminate`,
   reason `strict_catalog_self_reference`, and exit `2`; deleting or changing
-  the baseline also exits `2` because its exact frozen input is invalid. Treat
-  only the default ratchet as current evidence. Before cutover, record an
-  explicit decision/ADR and correct the final gate so immutable historical
-  catalog evidence is separate from live forbidden surfaces. This diagnostic
-  does not define that correction. Do not refresh the baseline or claim clean
-  break from the current strict command.
+  the baseline also exits `2` because its exact frozen input is invalid. The
+  self-referential surface is not emitted as a deterministic
+  `legacy_surface_present` failure, but every independent observed legacy or
+  unexpected surface remains in `failures`. Treat only the default ratchet as
+  current evidence. Before cutover, record an explicit decision/ADR and correct
+  the final gate so immutable historical catalog evidence is separate from live
+  forbidden surfaces. This diagnostic does not define that correction. Do not
+  refresh the baseline or claim clean break from the current strict command.
 - Current CI checks out both frozen Server and Web siblings and runs only the
   default ratchet. The retired candidate-refresh path remains forbidden.
 - The CLI requires the fixed production inventory ID and catalog digest in every

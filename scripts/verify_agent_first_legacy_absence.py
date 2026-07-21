@@ -167,14 +167,20 @@ def verify_legacy_absence(
     failures: list[dict[str, Any]] = [
         {"code": "unexpected_legacy_surface", **item} for item in unexpected
     ]
-    if require_absent and not indeterminate_reasons:
+    self_reference_ids = {
+        item["surface_id"] for item in indeterminate_reasons
+    }
+    if require_absent:
         failures.extend(
             {
                 "code": "legacy_surface_present",
                 "surface_id": item["id"],
             }
             for item in reports
-            if item["status"] == "present"
+            if (
+                item["status"] == "present"
+                and item["id"] not in self_reference_ids
+            )
         )
     return {
         "schema_id": REPORT_SCHEMA_ID,

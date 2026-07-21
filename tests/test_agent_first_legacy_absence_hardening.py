@@ -321,6 +321,61 @@ class AgentFirstLegacyAbsenceHardeningTest(LegacyAbsenceTestCase):
             )["status"],
         )
 
+    def test_strict_indeterminate_preserves_independent_failures(self) -> None:
+        payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
+        surface = next(
+            item
+            for item in payload["surfaces"]
+            if item["id"] != "worker.004-frozen-contract-baseline"
+        )
+        signature_id = next(iter(surface["signature_occurrence_ceilings"]))
+        literal = next(
+            item["literal"]
+            for item in payload["signatures"]
+            if item["id"] == signature_id
+        )
+        target = self.roots[surface["repo"]] / surface["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(literal, encoding="utf-8")
+        (self.roots["worker"] / "strict-new-legacy.py").write_text(
+            literal, encoding="utf-8"
+        )
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke(
+            "--require-absent", production_catalog=True
+        )
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("indeterminate", report["status"])
+        self.assertEqual(
+            "strict_catalog_self_reference",
+            report["indeterminate_reasons"][0]["code"],
+        )
+        self.assertIn(
+            {
+                "code": "legacy_surface_present",
+                "surface_id": surface["id"],
+            },
+            report["failures"],
+        )
+        self.assertIn(
+            {
+                "code": "unexpected_legacy_surface",
+                "repo": "worker",
+                "path": "strict-new-legacy.py",
+                "signature_id": signature_id,
+            },
+            report["failures"],
+        )
+        self.assertNotIn(
+            {
+                "code": "legacy_surface_present",
+                "surface_id": "worker.004-frozen-contract-baseline",
+            },
+            report["failures"],
+        )
+
     def test_default_catalog_ceiling_rejects_a_recomputed_expansion(self) -> None:
         payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
         payload["surfaces"].append(deepcopy(payload["surfaces"][-1]))
