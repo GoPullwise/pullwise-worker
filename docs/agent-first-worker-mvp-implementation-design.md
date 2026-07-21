@@ -52,6 +52,7 @@
 <!-- BEGIN AGENT-FIRST DECISION REFS: MVP_EXECUTABLE_GATES -->
 <!-- D9@sha256:3e8a5cf9d69cccd50667009c80e9a3176501d3c0150d5bec931ee71fb1cc46ce -->
 <!-- D20@sha256:3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a -->
+<!-- D21@sha256:ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282 -->
 <!-- D27@sha256:f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e -->
 <!-- END AGENT-FIRST DECISION REFS: MVP_EXECUTABLE_GATES -->
 
@@ -64,12 +65,15 @@ fallback、protocol downgrade、compatibility mode，或仅为旧数据存在的
 migration/backfill。S0-S2 已存在的 legacy baseline 与 shadow bridge 只是当前状态和
 协调切换时的删除清单，不构成新协议验收证据。D20 已确认协调切换后新 Gate 立即成为
 唯一生产权威，旧 QA 不作为 hard floor，且不保留 production shadow、fallback、
-downgrade 或双轨共存。D21 及其后续活动决策仍须逐项闭合；门禁允许生产切换前，
-不得提前改 runtime/schema/migration。
+downgrade 或双轨共存。D21 进一步将推荐 option 单值特化：生产只有唯一 current
+Agent-First contract，Agent Kernel 权威是固有语义而非可选择 mode；Server claim/grant
+只不可变绑定固定 contract identity、exact version、job/run scope 与授权，不协商
+mode/protocol，Worker 仅验证并执行，缺失、未知或不匹配时 fail closed。D24 的迁移
+假设仍须取得 D27-compatible custom；门禁允许生产切换前不得提前改 runtime/schema/migration。
 
-## D9-D20 resolution overlay（Normative）
+## D9-D21 resolution overlay（Normative）
 
-机器注册表已按用户授权依次解决 D9-D20，当前唯一活动问题是 D21。以下决议优先于
+机器注册表已按用户授权依次解决 D9-D21，当前唯一活动问题是 D23。以下决议优先于
 后文仍以“候选”或“待决”表述的旧段落，但不代表对应生产代码已经实现：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
@@ -89,6 +93,12 @@ downgrade 或双轨共存。D21 及其后续活动决策仍须逐项闭合；门
 - D20 选择 `new_gate_immediate_authority` 的 option-anchored custom 边界：协调切换后
   新 Gate 立即成为唯一生产权威；旧 QA 不作为 hard floor，不保留 production
   shadow、fallback、downgrade 或双轨共存。该决议不代表生产切换已经实现。
+- D21 将 `server_claim_bound_mode` 单值特化：Server claim/grant 不可变绑定唯一 current
+  contract 的 identity、exact version、job/run scope 与授权，Worker 只验证并执行；
+  不存在可签发或选择的执行 mode。缺失、未知或不匹配必须 fail closed，授权失效只能
+  stop、fence 或 reject。Worker config、deployment 或单个 job 均不得换轨；同一
+  current contract 的横向副本、分批扩容和先前 build 回滚仍允许，但不得形成不同
+  协议/权威的双轨。D22 仍独立决定 release 数值门与签发 owner。
 
 ## 当前实施状态（非规范证据）
 
@@ -100,7 +110,7 @@ downgrade 或双轨共存。D21 及其后续活动决策仍须逐项闭合；门
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
 | S3-S4 | 未开始；决策门已闭合 | D9-D17 已解决；仍须按本文实现、测试并取得切片证据，不能把决议记录当作实现完成 |
-| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 20 个 resolved、6 个 applicable pending 与 inactive D2；S5 无 pending decision blocker，唯一活动问题为 `active_decision_id=D21` |
+| S5-S8 | 未开始 | 机器 decision register 为 `valid_pending`，含 21 个 resolved、5 个 applicable pending 与 inactive D2；S5 无 pending decision blocker，S6 仅由 D22 阻断，唯一活动问题为 `active_decision_id=D23` |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
 
@@ -1658,10 +1668,14 @@ current contract，不得通过 feature flag 回到旧生产权威。
 
 ### Slice 6：Pullwise Adapter切换（D27 已退役：须由 current-protocol clean cutover 替换）
 
-- 保留固定领域pipeline；将claim映射TaskRequest，将领域输出映射内部evidence/result，再构造exact legacy wire。
-- completed/failed/cancelled/partial、artifact、event/outbox、run-once contract tests。
-- current-contract 发布可分批扩容；安全部署 rollback 只能回到此前的 current-contract
-  build，不得恢复旧 QA、旧协议或第二生产权威，新 store 可留作只读诊断。
+- 保留固定领域 pipeline；Server claim/grant 不可变绑定固定 current contract identity、
+  exact version、job/run scope 与授权，Worker 只验证并执行该绑定，不进行 mode/protocol 协商。
+- 缺失、未知或不匹配的绑定必须 fail closed；授权失效只能 stop、fence 或 reject。
+  Worker config、deployment 或单个 job 均不得切换执行轨道。
+- completed/failed/cancelled/partial、artifact、event、run-once current-contract tests。
+- 同一 current contract 的横向副本、分批扩容和先前 build 安全回滚仍允许；不得恢复旧
+  QA、旧协议或不同权威的第二生产轨道。未来 contract version 演进必须协调发布，不能
+  由单个 job 协商；新 store 可留作只读诊断。
 
 ### Slice 7：WorkerDebugFragment
 

@@ -89,9 +89,9 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D21", report["active_decision_id"])
-        self.assertEqual(6, report["pending_decision_count"])
-        self.assertEqual(20, report["resolved_decision_count"])
+        self.assertEqual("D23", report["active_decision_id"])
+        self.assertEqual(5, report["pending_decision_count"])
+        self.assertEqual(21, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -115,6 +115,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             "D18": ("coordinator_is_owner", "16fb38386dfedc25cbd4f7d3cc25aeeeb9512b3d0e3733fdb8591441eca3c8de"),
             "D19": ("owner_remains_live", "0fb4d7e749fb873ccb7691ff2a87c30f2792969534311903ce439a5ac86c2796"),
             "D20": ("new_gate_immediate_authority", "3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a"),
+            "D21": ("server_claim_bound_mode", "ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282"),
             "D27": ("clean_break_no_legacy", "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
@@ -125,21 +126,28 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
                 self.assertEqual(expected[0], resolution["selected_option_id"])
                 self.assertEqual("user", resolution["authority"])
                 self.assertEqual(expected[1], resolution["resolution_sha256"])
-        d20_resolution = decisions["D20"]["resolution"]
-        self.assertEqual("custom", d20_resolution["kind"])
-        self.assertEqual(
-            "协调切换后，新 Gate 立即成为唯一生产权威；旧 QA 不作为 hard floor，"
-            "不保留 production shadow、fallback、downgrade 或双轨共存。",
-            d20_resolution["custom_text"],
-        )
-        self.assertEqual("2026-07-21", d20_resolution["decided_at"])
-        self.assertEqual(
-            [
-                "conversation:user-confirmation:2026-07-21:"
-                "D20:new_gate_immediate_authority"
-            ],
-            d20_resolution["evidence_refs"],
-        )
+        custom_resolutions = {
+            "D20": ("协调切换后，新 Gate 立即成为唯一生产权威；旧 QA 不作为 hard floor，不保留 production shadow、fallback、downgrade 或双轨共存。", "conversation:user-confirmation:2026-07-21:D20:new_gate_immediate_authority"),
+            "D21": (
+                "该 option 采用单值特化。协调切换后，生产执行只有唯一 current Agent-First contract；"
+                "`legacy-only`、`shadow`、`kernel-authoritative` 不再是可签发、持久化或选择的 mode，"
+                "Agent Kernel 权威是该 contract 的固有语义。Server claim/grant 只不可变绑定固定 "
+                "contract identity、exact version、job/run scope 与授权，不进行 mode/protocol 协商；"
+                "Worker 仅验证并执行该绑定，缺失、未知或不匹配时 fail closed。Worker config、deployment "
+                "或单个 job 均不得换轨；不保留 production shadow、legacy fallback、protocol downgrade、"
+                "compatibility rollback 或不同协议/权威的双轨部署。安全回滚仅可回到实现同一 current "
+                "contract 的先前 build；授权失效时只能 stop、fence 或 reject，不能换轨。",
+                "conversation:user-confirmation:2026-07-21:D21:server_claim_bound_mode",
+            ),
+        }
+        for decision_id, (custom_text, evidence_ref) in custom_resolutions.items():
+            with self.subTest(custom_decision_id=decision_id):
+                resolution = decisions[decision_id]["resolution"]
+                self.assertEqual("custom", resolution["kind"])
+                self.assertEqual(custom_text, resolution["custom_text"])
+                self.assertEqual(f"确认选择 {resolution['selected_option_id']}：{custom_text}", resolution["decision_text"])
+                self.assertEqual("2026-07-21", resolution["decided_at"])
+                self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
         self.assertEqual(expected_order, register["question_order"])
@@ -311,7 +319,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D21", report["active_decision_id"])
+        self.assertEqual("D23", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_machine_entrypoint_is_documented(self) -> None:

@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D21`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D23`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -32,7 +32,7 @@ Active question: `D21`. Questions are asked one at a time. User silence, existin
 | `D18` | `P0.10` | 现有 root coordinator 与 Task Owner 关系 | `resolved` | `active` | `S5` | D1, D6 | `coordinator_is_owner` |
 | `D19` | `P0.10` | reviewer fanout 期间 Owner liveness | `resolved` | `active` | `S5` | D4, D18 | `owner_remains_live` |
 | `D20` | `P0.10` | 旧 QA 与新 Gate 权威切换 | `resolved` | `active` | `S5` | D10, D17, D18 | `shadow_floor_then_gate_cutover` |
-| `D21` | `P0.11` | outer job 执行模式配置权威 | `pending` | `active` | `S6` | D9, D20 | `server_claim_bound_mode` |
+| `D21` | `P0.11` | outer job 执行模式配置权威 | `resolved` | `active` | `S6` | D9, D20 | `server_claim_bound_mode` |
 | `D23` | `P1.2` | C0 contract package 真源归属 | `pending` | `active` | `S7` | D1, D2 | `server_owned_package` |
 | `D24` | `P1.2` | Server TaskRecord v2 bootstrap 策略 | `pending` | `active` | `S7` | D8, D23 | `lazy_eligible_claim_migration` |
 | `D25` | `P1.5` | TaskResult/receipt digest DAG | `pending` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
@@ -487,17 +487,19 @@ Active question: `D21`. Questions are asked one at a time. User silence, existin
 
 ### D21 — outer job 执行模式配置权威
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S6`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S6`.
 
 **Question:** legacy-only、shadow、kernel-authoritative 模式应由 Worker config、Server claim/grant，还是独立 deployment 绑定？
 
 **Options:**
 
-- `server_claim_bound_mode` — non-normative recommendation, not selected: Server 在 claim/grant 中签发并不可变绑定每个 outer job 的 mode。 控制面是 job authority，重启与 rollback 不会由本地配置换轨。 Consequences: 需要 additive/versioned claim 字段或冻结 legacy 常量
+- `server_claim_bound_mode` — selected by resolution: Server 在 claim/grant 中签发并不可变绑定每个 outer job 的 mode。 控制面是 job authority，重启与 rollback 不会由本地配置换轨。 Consequences: 需要 additive/versioned claim 字段或冻结 legacy 常量
 - `worker_config_bound_mode`: Worker config 在 claim 时快照 mode 并持久化。 无需 Server 字段，但配置 owner 与租约事实分离。 Consequences: 必须证明多 Worker 与重启使用同一 mode
 - `deployment_bound_mode`: 使用独立 binary/deployment 固定 mode。 运行时无切换，但发布拓扑与回滚更重。 Consequences: shadow 与 canary 需要多套部署身份
 
-**Resolution:** No option has been selected.
+**Resolution:** `server_claim_bound_mode` (`custom`). 确认选择 server_claim_bound_mode：该 option 采用单值特化。协调切换后，生产执行只有唯一 current Agent-First contract；`legacy-only`、`shadow`、`kernel-authoritative` 不再是可签发、持久化或选择的 mode，Agent Kernel 权威是该 contract 的固有语义。Server claim/grant 只不可变绑定固定 contract identity、exact version、job/run scope 与授权，不进行 mode/protocol 协商；Worker 仅验证并执行该绑定，缺失、未知或不匹配时 fail closed。Worker config、deployment 或单个 job 均不得换轨；不保留 production shadow、legacy fallback、protocol downgrade、compatibility rollback 或不同协议/权威的双轨部署。安全回滚仅可回到实现同一 current contract 的先前 build；授权失效时只能 stop、fence 或 reject，不能换轨。 Custom text: 该 option 采用单值特化。协调切换后，生产执行只有唯一 current Agent-First contract；`legacy-only`、`shadow`、`kernel-authoritative` 不再是可签发、持久化或选择的 mode，Agent Kernel 权威是该 contract 的固有语义。Server claim/grant 只不可变绑定固定 contract identity、exact version、job/run scope 与授权，不进行 mode/protocol 协商；Worker 仅验证并执行该绑定，缺失、未知或不匹配时 fail closed。Worker config、deployment 或单个 job 均不得换轨；不保留 production shadow、legacy fallback、protocol downgrade、compatibility rollback 或不同协议/权威的双轨部署。安全回滚仅可回到实现同一 current contract 的先前 build；授权失效时只能 stop、fence 或 reject，不能换轨。
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-confirmation:2026-07-21:D21:server_claim_bound_mode`; digest `ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282`.
 
 **Supersedes:** none
 

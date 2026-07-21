@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D21",
+  "active_decision_id": "D23",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -342,7 +342,7 @@
     {
       "id": "D21", "key": "run-mode-owner", "scope": "P0.11", "title": "outer job 执行模式配置权威",
       "question": "legacy-only、shadow、kernel-authoritative 模式应由 Worker config、Server claim/grant，还是独立 deployment 绑定？",
-      "status": "pending", "depends_on": ["D9", "D20"], "activation": null, "required_by_slice": "S6",
+      "status": "resolved", "depends_on": ["D9", "D20"], "activation": null, "required_by_slice": "S6",
       "effects": ["authority", "compatibility", "release_ownership"], "source_refs": ["handoff:P0.11"],
       "affected_units": ["mvp-executable-gates"],
       "options": [
@@ -350,7 +350,7 @@
         {"id": "worker_config_bound_mode", "summary": "Worker config 在 claim 时快照 mode 并持久化。", "rationale": "无需 Server 字段，但配置 owner 与租约事实分离。", "consequences": ["必须证明多 Worker 与重启使用同一 mode"]},
         {"id": "deployment_bound_mode", "summary": "使用独立 binary/deployment 固定 mode。", "rationale": "运行时无切换，但发布拓扑与回滚更重。", "consequences": ["shadow 与 canary 需要多套部署身份"]}
       ],
-      "recommended_option_id": "server_claim_bound_mode", "resolution": null, "supersedes": []
+      "recommended_option_id": "server_claim_bound_mode", "resolution": {"kind":"custom","selected_option_id":"server_claim_bound_mode","custom_text":"该 option 采用单值特化。协调切换后，生产执行只有唯一 current Agent-First contract；`legacy-only`、`shadow`、`kernel-authoritative` 不再是可签发、持久化或选择的 mode，Agent Kernel 权威是该 contract 的固有语义。Server claim/grant 只不可变绑定固定 contract identity、exact version、job/run scope 与授权，不进行 mode/protocol 协商；Worker 仅验证并执行该绑定，缺失、未知或不匹配时 fail closed。Worker config、deployment 或单个 job 均不得换轨；不保留 production shadow、legacy fallback、protocol downgrade、compatibility rollback 或不同协议/权威的双轨部署。安全回滚仅可回到实现同一 current contract 的先前 build；授权失效时只能 stop、fence 或 reject，不能换轨。","decision_text":"确认选择 server_claim_bound_mode：该 option 采用单值特化。协调切换后，生产执行只有唯一 current Agent-First contract；`legacy-only`、`shadow`、`kernel-authoritative` 不再是可签发、持久化或选择的 mode，Agent Kernel 权威是该 contract 的固有语义。Server claim/grant 只不可变绑定固定 contract identity、exact version、job/run scope 与授权，不进行 mode/protocol 协商；Worker 仅验证并执行该绑定，缺失、未知或不匹配时 fail closed。Worker config、deployment 或单个 job 均不得换轨；不保留 production shadow、legacy fallback、protocol downgrade、compatibility rollback 或不同协议/权威的双轨部署。安全回滚仅可回到实现同一 current contract 的先前 build；授权失效时只能 stop、fence 或 reject，不能换轨。","authority":"user","decided_at":"2026-07-21","evidence_refs":["conversation:user-confirmation:2026-07-21:D21:server_claim_bound_mode"],"resolution_sha256":"ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282"}, "supersedes": []
     },
     {
       "id": "D22", "key": "release-gates", "scope": "P0.11", "title": "Release/Operations 数值门与签发 owner",
