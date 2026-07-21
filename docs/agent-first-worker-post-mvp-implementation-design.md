@@ -49,10 +49,12 @@ D26 已选择 `roadmap_separate_designs`（resolution digest
 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f`）。本文不再把
 所有远期版本宣称为已经闭合的 implementation design。D22 已按用户确认的
 `absolute_plus_baseline` current-contract 单值特化解决（resolution digest
-`94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`）；机器
-decision register 已无 active decision，所有适用问题均 resolved，规范状态为 ready。
-D2 仍是 inactive pending，不适用且不得据此恢复旧生产权威。D26 只确定文档成熟度与
-开工边界，不授权 runtime、schema、protocol 或 deployment 变更。
+`94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`）。D22/D26
+原始闭合点上的机器 decision register 无 active decision，规范状态为 ready；当前
+append-only register 已新增 D28-D30，状态为 `valid_pending`，D28 是唯一 active
+question，D29/D30 仍 dependency-blocked，S3-S8 因而 blocked。D2 仍是 inactive pending，
+不适用且不得据此恢复旧生产权威。D26 只确定文档成熟度与开工边界，不授权 runtime、
+schema、protocol 或 deployment 变更。
 
 本文按以下 maturity 分类：
 
@@ -85,8 +87,10 @@ package 真源与 Worker/Web exact pin；D24 已冻结受审计 cutover barrier 
 fail-closed 隔离边界；D25 已冻结 immutable receipt、独立 mutable binding/index 与
 core/transport 双 digest 的无环关系；D26 已冻结上述 maturity 分流；D22 已冻结签名
 release-gate 制品、职责分离、绝对与 stable-relative 门、三态 CI、baseline/bootstrap 规则，
-以及 D24 barrier 后的 capacity-only canary。所有适用 decision 均已闭合；D2 保持 inactive，
-不得被实现或发布流程激活。ready 只表示规范决策完整，不表示实现、评测或部署证据已存在。
+以及 D24 barrier 后的 capacity-only canary。原始决策前缀 D1 与 D3-D27 已 resolved，D2
+保持 inactive，不得被实现或发布流程激活；当前 append-only D28-D30 仍 pending，D28
+active，S3-S8 blocked。当前 `valid_pending` 只证明登记结构有效，不表示规范完整，也不表示
+实现、评测或部署证据已存在。
 
 R4 roadmap 的目标包括受信审批、Effect Ledger、不可重试/对账语义和默认拒绝；生产没有获批
 R4 tool profile 时保持 off。该目标是未来独立 implementation design 的约束，不是当前能力或
