@@ -79,9 +79,22 @@ class PreparedR0ReadHandle:
             self._descriptor = None
         if capture is None:
             raise R0ReadError("PREPARED_READ_CLOSED")
-        try:
-            if descriptor is not None:
+        if descriptor is not None:
+            cleanup_error: BaseException | None = None
+            try:
                 os.close(descriptor)
+            except BaseException as exc:
+                cleanup_error = exc
+            try:
+                capture.close()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            error = R0ReadError("PREPARED_READ_NOT_DISPATCHED")
+            if cleanup_error is not None:
+                raise error from cleanup_error
+            raise error
+        try:
             return capture.capture_after()
         finally:
             capture.close()

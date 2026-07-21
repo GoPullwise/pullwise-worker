@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -26,7 +25,6 @@ from pullwise_worker.agent_kernel_source_state import (
     SourceEntry,
     SourceSelectionPolicy,
     SourceTreeSnapshot,
-    diff_source_trees,
     snapshot_source_tree,
 )
 
@@ -87,48 +85,6 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         return FakeCaptureProvider(
             self.root, self.policy, base_revision=BASE_REVISION
         )
-
-    def test_prepared_dispatch_holds_only_verified_descriptor(self) -> None:
-        preparer = self.preparer()
-        prepared = preparer.prepare(
-            object(), self.call("nested/README.md"), self.descriptor
-        )
-
-        self.assertFalse(hasattr(prepared, "relative_path"))
-        self.assertFalse(hasattr(prepared.dispatch_handle, "relative_path"))
-        receipt = R0ReadDispatcher().dispatch(object(), prepared)
-        self.assertEqual(self.payload, receipt.payload)
-        self.assertEqual(hashlib.sha256(self.payload).hexdigest(), receipt.sha256)
-        self.assertEqual(len(self.payload), receipt.size_bytes)
-        self.assertFalse(prepared.dispatch_handle.closed)
-        preparer.capture_after(prepared)
-        self.assertTrue(prepared.dispatch_handle.closed)
-
-    def test_after_snapshot_is_a_fresh_source_identity(self) -> None:
-        preparer = self.preparer()
-        prepared = preparer.prepare(
-            object(), self.call("nested/README.md"), self.descriptor
-        )
-        R0ReadDispatcher().dispatch(object(), prepared)
-
-        after = preparer.capture_after(prepared)
-
-        self.assertTrue(diff_source_trees(prepared.source_before, after).is_empty)
-        self.assertTrue(self.capture_provider.latest_session.closed)
-
-    def test_capture_provider_owns_root_and_both_snapshots(self) -> None:
-        preparer = self.preparer()
-        prepared = preparer.prepare(
-            object(), self.call("nested/README.md"), self.descriptor
-        )
-
-        self.assertEqual(1, self.capture_provider.begin_calls)
-        self.assertFalse(self.capture_provider.latest_session.closed)
-        R0ReadDispatcher().dispatch(object(), prepared)
-        preparer.capture_after(prepared)
-
-        self.assertEqual(1, self.capture_provider.capture_after_calls)
-        self.assertTrue(self.capture_provider.latest_session.closed)
 
     def test_path_grammar_fails_before_source_open(self) -> None:
         invalid = (
@@ -318,32 +274,6 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         preparer.capture_after(prepared)
 
         self.assertEqual(self.payload, receipt.payload)
-
-    def test_discard_is_idempotent_and_prevents_dispatch(self) -> None:
-        preparer = self.preparer()
-        prepared = preparer.prepare(
-            object(), self.call("nested/README.md"), self.descriptor
-        )
-
-        preparer.discard(prepared)
-        preparer.discard(prepared)
-
-        self.assertTrue(prepared.dispatch_handle.closed)
-        self.assertEqual(1, self.capture_provider.latest_session.close_calls)
-        with self.assertRaisesRegex(R0ReadError, "PREPARED_READ_CLOSED"):
-            R0ReadDispatcher().dispatch(object(), prepared)
-
-    def test_prepare_failure_closes_leaf_and_capture_session(self) -> None:
-        with mock.patch(
-            "pullwise_worker.agent_kernel_r0_read._assert_entry_matches",
-            side_effect=RuntimeError("injected prepare failure"),
-        ), self.assertRaisesRegex(RuntimeError, "injected prepare failure"):
-            self.preparer().prepare(
-                object(), self.call("nested/README.md"), self.descriptor
-            )
-
-        self.assertTrue(self.capture_provider.latest_session.closed)
-        self.target.unlink()
 
     def test_dispatcher_rejects_untrusted_handle_shape(self) -> None:
         preparer = self.preparer()

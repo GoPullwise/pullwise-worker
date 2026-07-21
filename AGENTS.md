@@ -510,13 +510,16 @@ production Agent-First runner or a completed S3 slice.
   are injected current-only boundaries. Do not satisfy them with Slice 2 shadow
   state, legacy Task rows, bare budget_entries.monotonic_ms, or the legacy-FK
   observations table.
-- agent_kernel_r0_read.py prepares one internal R0 source read by binding a
-  full SourceState snapshot to a held regular-file descriptor. The dispatcher
-  receives no unresolved path, shell, network client, approval channel, or
-  secret handle. Excluded, unsafe, and otherwise unselected paths fail before
-  leaf open; reads are capped at the policy/expected extent plus one byte, and
-  every pre-dispatch loss path closes the descriptor. A fresh post-dispatch
-  snapshot with any diff withholds the normal result.
+- agent_kernel_r0_read.py accepts only a closed materialized-source capture
+  provider and obtains both its checkout root and SourceState snapshots from
+  that provider. Its prepared handle owns the verified leaf descriptor and the
+  capture session across Gateway dispatch; after-capture before descriptor
+  dispatch fails closed, and every prepare, discard, dispatch-failure, or
+  cancellation path releases both resources. The dispatcher receives no
+  unresolved path, shell, network client, approval channel, or secret handle.
+  Excluded, unsafe, and otherwise unselected paths fail before leaf open; reads
+  are capped at the policy/expected extent plus one byte. A fresh provider
+  after-capture with any diff withholds the normal result.
 - This tracer deliberately does not construct an Observation, dispatch-intent
   contract, ContentRef, or durable idempotency result. Those require the
   exact-pinned current package plus a current-only journal/CAS transaction

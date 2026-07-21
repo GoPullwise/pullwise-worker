@@ -135,6 +135,17 @@ class _FailingDispatcher:
         raise self.error
 
 
+class _ChangedSourceDispatcher:
+    def __init__(self, target: Path) -> None:
+        self.target = target
+        self.handle: object | None = None
+
+    def dispatch(self, capability: object, prepared: object) -> object:
+        self.handle = prepared.dispatch_handle
+        self.target.write_bytes(b"changed before descriptor read")
+        return R0ReadDispatcher().dispatch(capability, prepared)
+
+
 class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.scratch = tempfile.TemporaryDirectory(prefix="agent-kernel-r0-gateway-")
@@ -222,6 +233,19 @@ class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
     def test_dispatch_failure_closes_descriptor_and_capture_session(self) -> None:
         authorities = _Authorities(self.call)
         dispatcher = _FailingDispatcher(RuntimeError("dispatch failed"))
+
+        result = self._gateway(
+            authorities, self._preparer(), dispatcher
+        ).invoke(b"request")
+
+        self.assertIs(authorities.result, result)
+        self.assertEqual(1, authorities.settlements["dispatch_failure"])
+        self.assertTrue(dispatcher.handle.closed)
+        self.assertTrue(self.capture_provider.latest_session.closed)
+
+    def test_failure_after_descriptor_take_still_releases_capture(self) -> None:
+        authorities = _Authorities(self.call)
+        dispatcher = _ChangedSourceDispatcher(self.target)
 
         result = self._gateway(
             authorities, self._preparer(), dispatcher

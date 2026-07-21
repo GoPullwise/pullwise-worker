@@ -74,16 +74,16 @@ D22_CUSTOM_TEXT = (
 
 
 class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
-    def test_current_register_has_the_user_resolved_decision_prefix(self) -> None:
+    def test_current_register_preserves_resolved_prefix_and_exposes_d28(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
-        self.assertEqual("ready", report["status"])
+        self.assertEqual("valid_pending", report["status"])
         self.assertTrue(report["valid"])
-        self.assertTrue(report["ready"])
+        self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertIsNone(report["active_decision_id"])
-        self.assertEqual(0, report["pending_decision_count"])
+        self.assertEqual("D28", report["active_decision_id"])
+        self.assertEqual(3, report["pending_decision_count"])
         self.assertEqual(26, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
@@ -148,12 +148,72 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
+        expected_order.extend(["D28", "D29", "D30"])
         self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
-            [*[item["id"] for item in REQUIRED_CATALOG], "D27"],
+            [
+                *[item["id"] for item in REQUIRED_CATALOG],
+                "D27", "D28", "D29", "D30",
+            ],
             [item["id"] for item in register["decisions"]],
         )
         self.assertEqual(["D4"], decisions["D27"]["supersedes"])
+
+    def test_current_package_questions_are_pending_append_only_suffix(self) -> None:
+        register = load_register(REGISTER_PATH)
+        decisions = {item["id"]: item for item in register["decisions"]}
+
+        expected = {
+            "D28": {
+                "key": "current-package-artifact",
+                "depends_on": ["D23", "D27"],
+                "recommended": "logical_bundle_generated_wrappers",
+                "options": [
+                    "logical_bundle_generated_wrappers",
+                    "single_language_neutral_archive",
+                    "exact_server_git_tree_pin",
+                ],
+            },
+            "D29": {
+                "key": "current-package-foundation-closure",
+                "depends_on": [
+                    "D3", "D6", "D7", "D15", "D21", "D24", "D25",
+                    "D27", "D28",
+                ],
+                "recommended": "layered_atomic_root",
+                "options": [
+                    "layered_atomic_root",
+                    "single_flat_bundle",
+                    "independent_modules_locked_by_bom",
+                ],
+            },
+            "D30": {
+                "key": "current-dispatch-linearization",
+                "depends_on": ["D7", "D21", "D25", "D29"],
+                "recommended": "worker_journal_server_authority",
+                "options": [
+                    "worker_journal_server_authority",
+                    "server_per_dispatch_authorization",
+                    "worker_cas_event_chain",
+                ],
+            },
+        }
+        for decision_id, frozen in expected.items():
+            with self.subTest(decision_id=decision_id):
+                decision = decisions[decision_id]
+                self.assertEqual("pending", decision["status"])
+                self.assertIsNone(decision["resolution"])
+                self.assertEqual([], decision["supersedes"])
+                self.assertEqual("S3", decision["required_by_slice"])
+                self.assertEqual(frozen["key"], decision["key"])
+                self.assertEqual(frozen["depends_on"], decision["depends_on"])
+                self.assertEqual(
+                    frozen["recommended"], decision["recommended_option_id"]
+                )
+                self.assertEqual(
+                    frozen["options"],
+                    [option["id"] for option in decision["options"]],
+                )
 
     def test_d24_records_the_exact_user_confirmed_custom_resolution(self) -> None:
         register = load_register(REGISTER_PATH)
@@ -287,30 +347,39 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual(expected_resolution, decision["resolution"])
         self.assertEqual([], decision["supersedes"])
 
-    def test_pullwise_scope_resolution_unblocks_slice_two(self) -> None:
+    def test_current_package_questions_do_not_block_slice_two(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(
             register, REPO_ROOT, require_slice="S2", check_document=False
         )
 
-        self.assertEqual("ready", report["status"])
+        self.assertEqual("valid_pending", report["status"])
         self.assertTrue(report["valid"])
-        self.assertTrue(report["ready"])
+        self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertIsNone(report["active_decision_id"])
+        self.assertEqual("D28", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
-    def test_slice_gates_have_no_applicable_pending_decisions(self) -> None:
+    def test_current_package_questions_block_slice_three_and_later(self) -> None:
         register = load_register(REGISTER_PATH)
-        for slice_id in ("S2", "S3", "S4", "S5", "S6", "S7", "S8"):
+        for slice_id in ("S3", "S4", "S5", "S6", "S7", "S8"):
             with self.subTest(slice_id=slice_id):
                 report = verify_register(
                     register, REPO_ROOT, require_slice=slice_id,
                     check_document=False, check_history=False,
                 )
-                self.assertEqual([], report["failures"])
+                self.assertEqual("blocked", report["status"])
+                self.assertEqual(
+                    [{
+                        "code": "slice_blocked_by_pending_decisions",
+                        "slice": slice_id,
+                        "decision_ids": ["D28", "D29", "D30"],
+                    }],
+                    report["failures"],
+                )
                 self.assertTrue(report["valid"])
-                self.assertTrue(report["ready"])
+                self.assertFalse(report["ready"])
+                self.assertEqual("D28", report["active_decision_id"])
 
 
 if __name__ == "__main__":

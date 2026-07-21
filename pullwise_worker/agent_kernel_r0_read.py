@@ -298,10 +298,12 @@ class R0ReadPreparer:
             capture = None
             return prepared
         finally:
-            if descriptor_fd is not None:
-                os.close(descriptor_fd)
-            if capture is not None:
-                capture.close()
+            try:
+                if descriptor_fd is not None:
+                    os.close(descriptor_fd)
+            finally:
+                if capture is not None:
+                    capture.close()
 
     def capture_after(
         self, prepared: PreparedDispatch

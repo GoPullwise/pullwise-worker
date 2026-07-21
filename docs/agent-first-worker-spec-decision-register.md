@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `none`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D28`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -38,6 +38,9 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 | `D25` | `P1.5` | TaskResult/receipt digest DAG | `resolved` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
 | `D26` | `P1.6` | 远期版本规范深度与完成口径 | `resolved` | `active` | `S7` | D1 | `roadmap_separate_designs` |
 | `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `resolved` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
+| `D28` | `P0.3/P1.2` | current package 身份、发布物与 exact pin | `pending` | `active` | `S3` | D23, D27 | `logical_bundle_generated_wrappers` |
+| `D29` | `P0.3/P0.6/P1.2/P1.5` | current package 基础契约的原子闭包 | `pending` | `active` | `S3` | D3, D6, D7, D15, D21, D24, D25, D27, D28 | `layered_atomic_root` |
+| `D30` | `P0.3/P0.6` | grant 至 tool receipt/budget 的 dispatch 线性化 | `pending` | `active` | `S3` | D7, D21, D25, D29 | `worker_journal_server_authority` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -614,4 +617,64 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 **Effects:** `release_ownership`, `external_behavior`
 
 **Sources:** `handoff:P0.11`
+
+### D28 — current package 身份、发布物与 exact pin
+
+**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+
+**Question:** Server-owned current package 应以同一逻辑 bundle 的 Server-generated Python/npm wrappers、单一语言无关 archive，还是 exact Server Git tree 作为跨端发布与 pin 单位？
+
+**Options:**
+
+- `logical_bundle_generated_wrappers` — non-normative recommendation, not selected: Server 维护一份 canonical content bundle/root manifest，并从同一 bytes 生成 Server 发布的 Python 与 npm 薄包装；两种包装共享同一逻辑 package identity/version/content digest。Worker/Web 分别 exact-pin 包版本和逻辑 digest，不复制或重定义 schema。 同时保留跨语言原生依赖体验与单一逻辑权威，wrapper 只是 Server 生成的传输形式。 Consequences: 必须证明两个 wrapper 内 canonical content 与逻辑 digest 完全一致，并验证各 consumer 的 exact lock
+- `single_language_neutral_archive`: Server 发布一个确定性的语言无关 archive；Server、Worker 与 Web 使用各自受控 loader，并 exact-pin release identity 与 archive digest。 只有一个物理发布物，避免 wrapper 内容漂移，但三端都需要自有 loader 和构建集成。 Consequences: 必须冻结 archive canonicalization、分发可用性、离线缓存和三端 loader conformance
+- `exact_server_git_tree_pin`: Worker/Web 直接 pin Server commit 与 contract tree digest，并从该固定 tree 消费 package；不建立独立包注册表。 发布基础设施最少，但 consumer 构建与 Server 仓库历史、布局和可达性强耦合。 Consequences: 必须固定 Git tree 取包、供应链验证、离线构建和 Server 仓库布局演进规则
+
+**Resolution:** No option has been selected.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `compatibility`, `data_model`, `release_ownership`
+
+**Sources:** `AGENTS.md#agent-first-specification-decision-gate`, `docs/agent-first-worker-post-mvp-implementation-design.md:151`, `docs/agent-first-worker-mvp-implementation-design.md:151`
+
+### D29 — current package 基础契约的原子闭包
+
+**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+
+**Question:** Package tuple/canonical/ContentRef、clean Task/Attempt/Owner/fence、register/claim/grant/policy、tool catalog/invocation/R0 read result/dispatch intent/local receipt/Observation、elapsed Budget Ledger、D25 transport receipt/binding/abandonment、stable error/ErrorResponse 与独立 Gate predicate registry 必须作为一个不可部分发布的 foundation closure 时，应采用分层原子 root、单一 flat bundle，还是独立 modules 加 exact BOM？
+
+**Options:**
+
+- `layered_atomic_root` — non-normative recommendation, not selected: 按 authority/control、tool/evidence、budget、receipt/error 等内聚 family 拆分 schema、registry 与 fixtures，但只由一个 root manifest/digest 原子发布 current foundation；任一必需 family 缺失都不可发布。 保持模块可审查性，同时用一个 root 消除部分 package、隐式 placeholder 和组合歧义。 Consequences: root gate 必须穷举 family、引用 DAG、双向 registry 消费、golden/negative/idempotency/fence/crash fixtures
+- `single_flat_bundle`: 把全部 foundation schema、registry 与 fixtures 放入一个平面 bundle，并只整体发布。 原子性直观、组合规则最少，但文件与 ownership 边界更难维护。 Consequences: 必须给出可审查的生成或分段规则，防止单体 registry 超大和职责混杂
+- `independent_modules_locked_by_bom`: 各 foundation family 独立发布和版本化，由一个 current BOM 精确锁定每个 identity/version/digest；只有完整 BOM 可成为 current root。 允许 family 独立演进，但增加模块版本矩阵、依赖解析和组合验证。 Consequences: 必须证明 BOM 闭包、依赖无环、跨模块 schema ref、错误码唯一性和原子 rollout
+
+**Resolution:** No option has been selected.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `compatibility`, `data_model`, `state_semantics`
+
+**Sources:** `AGENTS.md#agent-kernel-slice-1-storage-contracts`, `docs/agent-first-worker-mvp-implementation-design.md:526`, `docs/agent-first-worker-post-mvp-implementation-design.md:151`
+
+### D30 — grant 至 tool receipt/budget 的 dispatch 线性化
+
+**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+
+**Question:** Exact Task/grant/fence 校验、dispatch intent、预算 reserve、真实 tool dispatch、receipt/Observation 与 budget settlement 应由 Worker current-only journal、Server per-dispatch authorization，还是 Worker CAS event chain 形成唯一可恢复线性化路径？
+
+**Options:**
+
+- `worker_journal_server_authority` — non-normative recommendation, not selected: Server 保持 immutable Task/claim/grant 与 transport receipt binding 权威；Worker current-only durable journal 在 begin 时原子重验 exact package/grant/full fence、预算 reserve、持久化 intent 并签发一次性 opaque dispatch capability，settlement 再提交真实 receipt/result、Observation 与预算结算。 本地 R0/R1 不依赖逐调用网络，同时 exact replay、pending ambiguity、资源清理与不重复 dispatch 可由单一 Worker 事务边界证明。 Consequences: 必须冻结 journal begin/settlement/abandon/replay 状态机、one-shot capability、crash points，以及 local tool receipt 与 Server transport receipt 的类型隔离
+- `server_per_dispatch_authorization`: 每个 tool invocation 在执行前由 Server 持久化 intent 并签发一次性 dispatch authorization，Worker 执行后向 Server 提交 receipt 和 budget settlement。 集中授权与审计，但让本地 R0/R1 的可用性、延迟和 ambiguity recovery 依赖控制面网络。 Consequences: 必须定义离线/超时/响应丢失、Server intent 与本地 child start 的双边 crash recovery
+- `worker_cas_event_chain`: Worker 将 invocation、intent、receipt、Observation 与 budget entries 保存为 immutable CAS nodes，并以一个事务性 head CAS 推进 dispatch chain。 提供强内容寻址审计且避免可变 journal rows，但查询、GC 和 incomplete-chain 恢复更复杂。 Consequences: 必须冻结 chain identity、head CAS、fork rejection、pending node recovery 和 Server transport projection
+
+**Resolution:** No option has been selected.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `data_model`, `permission`, `state_semantics`
+
+**Sources:** `AGENTS.md#s3a-internal-read-tracer-boundary`, `docs/agent-first-worker-mvp-implementation-design.md:781`, `docs/agent-first-worker-mvp-implementation-design.md:1778`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->

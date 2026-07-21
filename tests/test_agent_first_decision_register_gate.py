@@ -336,11 +336,14 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         self.assertIn(resolution["resolution_sha256"], rendered)
         self.assertIn("**Supersedes:** none", rendered)
 
-    def test_rendered_ready_register_labels_the_active_question_as_none(self) -> None:
+    def test_rendered_pending_register_exposes_only_d28_as_active(self) -> None:
         rendered = render_document(load_register(REGISTER_PATH))
+        tick = chr(96)
 
-        self.assertIn("Active question: `none`.", rendered)
-        self.assertNotIn("Active question: `None`.", rendered)
+        self.assertIn(f"Active question: {tick}D28{tick}.", rendered)
+        self.assertNotIn(f"Active question: {tick}D29{tick}.", rendered)
+        self.assertNotIn(f"Active question: {tick}D30{tick}.", rendered)
+        self.assertNotIn(f"Active question: {tick}None{tick}.", rendered)
 
     def test_resolved_history_is_immutable(self) -> None:
         prior = _resolved_d1()
