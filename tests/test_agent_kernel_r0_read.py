@@ -222,16 +222,20 @@ class AgentKernelR0ReadTest(unittest.TestCase):
 
         self.assertTrue(prepared.dispatch_handle.closed)
 
-    def test_excluded_control_path_is_rejected_before_any_leaf_open(self) -> None:
-        with mock.patch(
-            "pullwise_worker.agent_kernel_r0_read._open_verified"
-        ) as open_verified:
-            with self.assertRaisesRegex(R0ReadError, "READ_PATH_EXCLUDED"):
-                self.preparer().prepare(
-                    object(), self.call(".git/config"), self.descriptor
-                )
-
-        open_verified.assert_not_called()
+    def test_unselected_paths_are_rejected_before_any_leaf_open(self) -> None:
+        for relative, code in (
+            (".git/config", "READ_PATH_EXCLUDED"),
+            ("missing.txt", "READ_SOURCE_ENTRY_CHANGED"),
+        ):
+            with self.subTest(relative=relative), mock.patch(
+                "pullwise_worker.agent_kernel_r0_read._open_verified",
+                side_effect=AssertionError("unselected path was opened"),
+            ) as open_verified:
+                with self.assertRaisesRegex(R0ReadError, code):
+                    self.preparer().prepare(
+                        object(), self.call(relative), self.descriptor
+                    )
+                open_verified.assert_not_called()
 
     def test_source_change_between_snapshot_and_open_is_rejected(self) -> None:
         changed = False

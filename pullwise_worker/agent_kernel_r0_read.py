@@ -303,15 +303,23 @@ class R0ReadPreparer:
         )
         if self.stage_hook is not None:
             self.stage_hook("after_source_before", self.root)
+        entries = {entry.path: entry for entry in source_before.entries}
+        entry = entries.get(relative)
+        if entry is None:
+            parts = relative.split("/")
+            if any(
+                entries.get("/".join(parts[:index])) is not None
+                for index in range(1, len(parts))
+            ):
+                raise R0ReadError("READ_PATH_UNSAFE")
+            if any(path.startswith(relative + "/") for path in entries):
+                raise R0ReadError("READ_LEAF_NOT_REGULAR")
+            raise R0ReadError("READ_SOURCE_ENTRY_CHANGED")
+        if entry.type != "file":
+            raise R0ReadError("READ_PATH_UNSAFE")
         descriptor_fd: int | None = None
         try:
             descriptor_fd = _open_verified(self.root, relative)
-            entries = {entry.path: entry for entry in source_before.entries}
-            entry = entries.get(relative)
-            if entry is None:
-                raise R0ReadError("READ_SOURCE_ENTRY_CHANGED")
-            if entry.type != "file":
-                raise R0ReadError("READ_LEAF_NOT_REGULAR")
             _assert_entry_matches(descriptor_fd, entry, self.max_bytes)
             handle = PreparedR0ReadHandle(descriptor_fd, entry)
             prepared = PreparedDispatch(

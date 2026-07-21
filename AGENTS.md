@@ -503,10 +503,10 @@ production Agent-First runner or a completed S3 slice.
 - agent_kernel_r0_read.py prepares one internal R0 source read by binding a
   full SourceState snapshot to a held regular-file descriptor. The dispatcher
   receives no unresolved path, shell, network client, approval channel, or
-  secret handle. Excluded roots fail before leaf open, reads are capped at the
-  policy/expected extent plus one byte, and every pre-dispatch loss path closes
-  the descriptor. A fresh post-dispatch snapshot with any diff withholds the
-  normal result.
+  secret handle. Excluded, unsafe, and otherwise unselected paths fail before
+  leaf open; reads are capped at the policy/expected extent plus one byte, and
+  every pre-dispatch loss path closes the descriptor. A fresh post-dispatch
+  snapshot with any diff withholds the normal result.
 - This tracer deliberately does not construct an Observation, dispatch-intent
   contract, ContentRef, or durable idempotency result. Those require the
   exact-pinned current package plus a current-only journal/CAS transaction
