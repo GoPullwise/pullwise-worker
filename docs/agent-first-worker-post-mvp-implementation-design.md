@@ -22,8 +22,11 @@ Post-MVP 从同一套 current Agent-First contract 继续演进，不承担 lega
 兼容迁移。后文的 old/new 三端矩阵、expand/dual-read/backfill、legacy mode、
 旧 DTO alias、shadow/fallback 与关闭 grant 回旧路径等内容均为删除清单，不得实施。
 未来 current contract 自身的显式 major-version 演进、数据保全与安全部署回滚仍需
-版本化，但不能借此复活 pre-Agent-First 协议或第二生产权威。D9-D19 已按 machine
-register 解决；D20 及其后续活动问题仍须按顺序逐项闭合。
+版本化，但不能借此复活 pre-Agent-First 协议或第二生产权威。D9-D20 已按 machine
+register 解决；D20 要求协调切换后新 Gate 立即成为唯一生产权威，旧 QA 不作为
+hard floor，且不保留 production shadow、fallback、downgrade 或双轨共存。D21 及
+其后续活动问题仍须按顺序逐项闭合；D21 与 D24 的 multi-mode/migration 假设不得
+绕过 D27，轮到各自活动时必须取得明确的 D27-compatible custom resolution。
 
 ## 0. 目的与“完全实现”的定义
 
@@ -38,7 +41,7 @@ register 解决；D20 及其后续活动问题仍须按顺序逐项闭合。
 - legacy Worker、Server、Web 路径已经删除；current protocol 的删除/撤销/retention、安全和可观测性均有机器契约。
 - [目标设计](agent-first-worker-design.md) 的每项目标要么由追踪矩阵证明实现，要么作为明确非目标保留；不能用“暂未启用”掩盖未实现的安全路径。
 
-D8 已冻结 lease-loss 的 Task/Attempt 分层，机器 decision register 当前只能询问 `active_decision_id=D20`。D9 已选择内部 TaskResult CAS 为唯一语义终态线性化点，Server ACK 只是可恢复 transport projection；D10 已选择全局 safety-first 穷举矩阵。完整矩阵在受控规范中冻结前，本文既有候选顺序仍不构成实现授权。
+D8 已冻结 lease-loss 的 Task/Attempt 分层，机器 decision register 当前只能询问 `active_decision_id=D21`。D9 已选择内部 TaskResult CAS 为唯一语义终态线性化点，Server ACK 只是可恢复 transport projection；D10 已选择全局 safety-first 穷举矩阵；D20 已冻结新 Gate 在协调切换后立即成为唯一生产权威的边界。完整矩阵在受控规范中冻结前，本文既有候选顺序仍不构成实现授权。
 
 “完全实现”不等于默认开放所有危险能力。R4 的完整实现包括受信审批、Effect Ledger、不可重试/对账语义和默认拒绝；生产没有获批R4 tool profile时保持off是正确目标态。
 

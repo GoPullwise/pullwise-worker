@@ -324,11 +324,8 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
     def test_slice_gate_reports_every_due_active_pending_decision(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(
-            register,
-            REPO_ROOT,
-            require_slice="S5",
-            check_document=False,
-            check_history=False,
+            register, REPO_ROOT, require_slice="S5",
+            check_document=False, check_history=False,
         )
         self.assertEqual([], report["failures"])
         self.assertTrue(report["valid"])
@@ -340,10 +337,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(
-            ["D21", "D22"],
-            blocker["decision_ids"],
-        )
+        self.assertEqual(["D21", "D22"], blocker["decision_ids"])
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
 

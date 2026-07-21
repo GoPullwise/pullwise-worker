@@ -1607,7 +1607,8 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 
 ## 15. 实现切片与文件交付
 
-禁止big-bang替换。每个切片独立通过测试并可关闭feature flag回到现有legacy行为。
+每个切片必须独立通过测试。协调切换前允许非权威 scaffold 留存；切换后只运行
+current contract，不得通过 feature flag 回到旧生产权威。
 
 ### Slice 0：代码地图与契约fixtures
 
@@ -1635,7 +1636,8 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 ### Slice 3：Policy Gateway、Source/ExecutionState、Observation
 
 - 所有工具调用经过Gateway；先接R0，再R1 local/eval，再Pullwise read-only profile。
-- Source manifest在现有inventory integrity旁shadow比较，证明一致后才能成为Gate权威。
+- Source manifest 直接进入 current-contract Gate 的验证路径；不得以 legacy
+  inventory shadow 比较作为 Gate 取得生产权威的前置条件。
 - Secret/path/special-file/adversarial tests。
 
 ### Slice 4：Task Owner、typed tools、checkpoint
@@ -1658,7 +1660,8 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 
 - 保留固定领域pipeline；将claim映射TaskRequest，将领域输出映射内部evidence/result，再构造exact legacy wire。
 - completed/failed/cancelled/partial、artifact、event/outbox、run-once contract tests。
-- feature flag按worker instance canary；rollback不需要DB降级，新store可留作只读诊断。
+- current-contract 发布可分批扩容；安全部署 rollback 只能回到此前的 current-contract
+  build，不得恢复旧 QA、旧协议或第二生产权威，新 store 可留作只读诊断。
 
 ### Slice 7：WorkerDebugFragment
 
@@ -1668,7 +1671,8 @@ Server当前以kind或name任一命中识别；新Worker必须二者同时匹配
 ### Slice 8：Eval与发布
 
 - 冻结ControlPlaneDigest/EvaluationRuntimeDigest/benchmark version。
-- shadow → internal canary → small tenant canary → staged rollout；每级有自动rollback门。
+- offline/pre-production eval → 协调 current-contract cutover → staged capacity rollout；
+  每级可自动回到此前 current-contract build，但所有生产任务始终只有新 Gate 权威。
 
 每个Slice必须同时更新schema/fixture/test/metrics/runbook，并附第3.2节要求的文件行数与模块化报告；只有文档或只有happy-path code不算完成。
 

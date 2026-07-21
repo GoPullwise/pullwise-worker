@@ -233,12 +233,16 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The current resolved prefix is D1, D3-D19, and D27; D2 remains pending but
-  inactive under D1, and D20 is the only active question. The user's
-  2026-07-21 directive selects each subsequent machine recommendation only
-  while it is compatible with D27. It is not a compatibility exception: D20's
-  recommended old-QA/shadow coexistence requires a new option-anchored custom
-  user resolution before D20 or any dependent decision can be recorded.
+- The current resolved prefix is D1, D3-D20, and D27; D2 remains pending but
+  inactive under D1, and D21 is the only active question. D20 is bound to the
+  option-anchored custom `new_gate_immediate_authority` resolution digest
+  `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`:
+  after coordinated cutover the new Gate is immediately the sole production
+  authority, with no old-QA hard floor, production shadow, fallback, downgrade,
+  or dual track. The user's 2026-07-21 recommendation directive remains bounded
+  by D27 and is not a compatibility exception. D21's recommended multi-mode
+  claim and D24's recommended migration path each require their own explicit
+  D27-compatible custom user resolution when they become active.
 
 The generated Markdown view is a generated-file size exception owned by the
 Worker specification owner. It stays atomic because it is one ordered decision
@@ -392,6 +396,11 @@ fail with `TASK_ALREADY_TERMINAL`.
   incarnation; D27 forbids a parallel second controller or old-protocol path.
   D19 keeps that Owner incarnation live through fanout and reserves its fixed
   agent/session slot alongside reviewers and verifiers.
+- D20 makes the new Gate the sole production authority immediately after the
+  coordinated cutover. Old QA cannot veto, alter, shadow, or recover a
+  production result, and no fallback, downgrade, or dual-track mode may retain
+  it as a second authority. Keep current shadow/legacy runtime facts as
+  pre-cutover evidence only; they are not the target contract.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must
