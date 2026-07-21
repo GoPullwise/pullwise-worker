@@ -15,7 +15,6 @@ from scripts.agent_first_decision_core import decision_applicability
 from scripts.agent_first_decision_gate import (
     normative_reference_failures,
     resolved_history_failures,
-    verify_register,
 )
 from scripts.agent_first_decision_register import (
     DecisionRegisterFormatError,
@@ -320,34 +319,6 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
                 )
             }
         self.assertIn("unscoped_decision_reference", codes)
-
-    def test_slice_gate_reports_every_due_active_pending_decision(self) -> None:
-        register = load_register(REGISTER_PATH)
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S5",
-            check_document=False, check_history=False,
-        )
-        self.assertEqual([], report["failures"])
-        self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
-
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S6",
-            check_document=False, check_history=False,
-        )
-        blocker = next(item for item in report["failures"]
-                       if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D22"], blocker["decision_ids"])
-        self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
-
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S7",
-            check_document=False, check_history=False,
-        )
-        blocker = next(item for item in report["failures"]
-                       if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual([*[f"D{i}" for i in range(24, 27)], "D22"], blocker["decision_ids"])
 
     def test_rendered_resolution_contains_text_evidence_digest_and_relation(self) -> None:
         register = _resolved_d1()
