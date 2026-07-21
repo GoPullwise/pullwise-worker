@@ -89,9 +89,9 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D23", report["active_decision_id"])
-        self.assertEqual(5, report["pending_decision_count"])
-        self.assertEqual(21, report["resolved_decision_count"])
+        self.assertEqual("D24", report["active_decision_id"])
+        self.assertEqual(4, report["pending_decision_count"])
+        self.assertEqual(22, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -116,6 +116,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
             "D19": ("owner_remains_live", "0fb4d7e749fb873ccb7691ff2a87c30f2792969534311903ce439a5ac86c2796"),
             "D20": ("new_gate_immediate_authority", "3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a"),
             "D21": ("server_claim_bound_mode", "ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282"),
+            "D23": ("server_owned_package", "cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2"),
             "D27": ("clean_break_no_legacy", "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
@@ -319,7 +320,7 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D23", report["active_decision_id"])
+        self.assertEqual("D24", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_machine_entrypoint_is_documented(self) -> None:

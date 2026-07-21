@@ -400,9 +400,8 @@ fail with `TASK_ALREADY_TERMINAL`.
   D21 makes Agent Kernel authority intrinsic to that sole current contract, not a
   selectable mode. Server claim/grant immutably binds contract identity/version,
   job/run scope, and authorization; Worker only validates/executes and fails closed.
-  Config/deployment/job cannot change tracks. Authorization loss stops, fences, or
-  rejects; staged same-contract rollout and rollback to an earlier same-contract
-  build remain allowed, but fallback, downgrade, or different-authority tracks do not.
+  Config/deployment/job cannot change tracks; authorization loss stops, fences, or rejects.
+  Staged same-contract rollout and earlier same-contract build rollback remain allowed, but fallback, downgrade, or different-authority tracks do not.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must
