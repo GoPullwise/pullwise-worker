@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D24",
+  "active_decision_id": "D25",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -380,7 +380,7 @@
     {
       "id": "D24", "key": "task-bootstrap", "scope": "P1.2", "title": "Server TaskRecord v2 bootstrap 策略",
       "question": "C0 应只为新任务建立 v2、在 eligible claim 时惰性迁移，还是批量 backfill？",
-      "status": "pending", "depends_on": ["D8", "D23"], "activation": null, "required_by_slice": "S7",
+      "status": "resolved", "depends_on": ["D8", "D23"], "activation": null, "required_by_slice": "S7",
       "effects": ["data_model", "compatibility"], "source_refs": ["handoff:P1.2"],
       "affected_units": ["post-closure"],
       "options": [
@@ -388,7 +388,7 @@
         {"id": "new_tasks_only", "summary": "只有新 agent_task_v1 任务创建 v2；所有旧任务走完 v1。", "rationale": "迁移最简单，但旧 queued 任务无法采用新能力。", "consequences": ["需明确 v1 drain 与保留期限"]},
         {"id": "batch_backfill", "summary": "部署时批量 backfill eligible v1 TaskRecord。", "rationale": "切换集中，但放大 migration 与 rollback 风险。", "consequences": ["需要全量锁、resume、tombstone 和 rollback 方案"]}
       ],
-      "recommended_option_id": "lazy_eligible_claim_migration", "resolution": null, "supersedes": []
+      "recommended_option_id": "lazy_eligible_claim_migration", "resolution": {"kind":"custom","selected_option_id":"new_tasks_only","custom_text":"该 option 采用 D27-compatible 单值特化。`new_tasks_only` 仅表示以 Server 受审计的协调切换屏障为线性化边界：只有 Task acceptance/TaskRecord creation 事务在该屏障生效后、按唯一 current TaskRecord schema 和 current Agent-First contract 成功提交的任务，才可创建并执行；不采纳原 option 中“所有旧任务走完 v1”以及 v1 drain/保留期限的语义。屏障生效前必须暂停 intake；所有 pre-cutover Task 必须在屏障生效前完成权威终态或 tombstone/delete 处置，或者撤销执行授权并被 stop、fence 或 reject 后隔离为不可执行状态。stop、fence 或 reject 只撤销 authorization/Attempt ownership，不得冒充 Task terminalization 或 TaskResult；屏障生效后，任何 pre-cutover Task 均不得再被 claim、grant、resume、replay、drain、写入、发布或执行，任何迟到的旧 lease、event、result 或 replay 必须 fail closed。pre-cutover submission_idempotency_key 的重放不得被重新创建或归类为新任务。不得为 pre-Agent-First/旧 TaskRecord 到 current contract 实施 lazy migration、batch backfill、dual read/write、compatibility reader 或运行时 schema/protocol negotiation；不保留 legacy Adapter/shim、production shadow、legacy fallback、protocol downgrade、compatibility rollback 或 old/new schema/contract 双轨。D24 本身不授予旧数据留存例外；只有另行获得明确的审计或合规留存授权时，旧数据才可隔离为与 current control plane、operational tables/readers 和 DTO projection 分离的 immutable、read-only、non-executable 审计归档，并且不得成为 current TaskRecord 的输入、授权、恢复或执行来源。任何任务、TaskRecord 或 claim/grant 的 schema/contract identity/version 缺失、未知、旧版或与唯一 current schema/contract 不匹配时，create、claim、grant、resume、replay、写入、发布和执行均必须 fail closed。安全回滚仅可回到 exact-pin 同一 current package identity/version/digest、实现同一 current TaskRecord schema、storage semantics 和 current Agent-First contract 的先前 build，不得重新开放旧任务、旧数据形状、旧协议、旧入口或第二生产权威。本决议不禁止同一 current contract 的 clean initialization/rebuild、current-version upgrade、分批部署，或未来经独立决议协调切换的 current-contract 演进；这些路径不得引入 pre-Agent-First 兼容层、运行时协商或并行生产轨道。","decision_text":"确认选择 new_tasks_only：该 option 采用 D27-compatible 单值特化。`new_tasks_only` 仅表示以 Server 受审计的协调切换屏障为线性化边界：只有 Task acceptance/TaskRecord creation 事务在该屏障生效后、按唯一 current TaskRecord schema 和 current Agent-First contract 成功提交的任务，才可创建并执行；不采纳原 option 中“所有旧任务走完 v1”以及 v1 drain/保留期限的语义。屏障生效前必须暂停 intake；所有 pre-cutover Task 必须在屏障生效前完成权威终态或 tombstone/delete 处置，或者撤销执行授权并被 stop、fence 或 reject 后隔离为不可执行状态。stop、fence 或 reject 只撤销 authorization/Attempt ownership，不得冒充 Task terminalization 或 TaskResult；屏障生效后，任何 pre-cutover Task 均不得再被 claim、grant、resume、replay、drain、写入、发布或执行，任何迟到的旧 lease、event、result 或 replay 必须 fail closed。pre-cutover submission_idempotency_key 的重放不得被重新创建或归类为新任务。不得为 pre-Agent-First/旧 TaskRecord 到 current contract 实施 lazy migration、batch backfill、dual read/write、compatibility reader 或运行时 schema/protocol negotiation；不保留 legacy Adapter/shim、production shadow、legacy fallback、protocol downgrade、compatibility rollback 或 old/new schema/contract 双轨。D24 本身不授予旧数据留存例外；只有另行获得明确的审计或合规留存授权时，旧数据才可隔离为与 current control plane、operational tables/readers 和 DTO projection 分离的 immutable、read-only、non-executable 审计归档，并且不得成为 current TaskRecord 的输入、授权、恢复或执行来源。任何任务、TaskRecord 或 claim/grant 的 schema/contract identity/version 缺失、未知、旧版或与唯一 current schema/contract 不匹配时，create、claim、grant、resume、replay、写入、发布和执行均必须 fail closed。安全回滚仅可回到 exact-pin 同一 current package identity/version/digest、实现同一 current TaskRecord schema、storage semantics 和 current Agent-First contract 的先前 build，不得重新开放旧任务、旧数据形状、旧协议、旧入口或第二生产权威。本决议不禁止同一 current contract 的 clean initialization/rebuild、current-version upgrade、分批部署，或未来经独立决议协调切换的 current-contract 演进；这些路径不得引入 pre-Agent-First 兼容层、运行时协商或并行生产轨道。","authority":"user","decided_at":"2026-07-21","evidence_refs":["conversation:user-confirmation:2026-07-21:D24:new_tasks_only"],"resolution_sha256":"8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806"}, "supersedes": []
     },
     {
       "id": "D25", "key": "receipt-dag", "scope": "P1.5", "title": "TaskResult/receipt digest DAG",

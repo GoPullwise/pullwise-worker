@@ -233,15 +233,23 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The current resolved set is D1, D3-D21, D23, and D27; D2 remains pending but
-  inactive under D1, and D24 is the only active question. D20 remains bound to
+- The current resolved set is D1, D3-D21, D23-D24, and D27; D2 remains pending
+  but inactive under D1, and D25 is the only active question. The register has
+  23 resolved records and three applicable pending records in order D25, D26,
+  D22. D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
   bound to custom `server_claim_bound_mode` digest
   `ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282`; D23 is
   bound to recommended `server_owned_package` digest `cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2`.
   D23 means one Server-published current package with exact Worker/Web pins, not legacy coexistence or negotiation.
-  The recommendation directive remains bounded by D27; D24 requires an explicit D27-compatible custom resolution.
+  D24 is bound to custom `new_tasks_only` digest
+  `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
+  its audited Server-side acceptance/TaskRecord-creation barrier admits only
+  post-cutover tasks, isolates every pre-cutover task as non-executable, forbids
+  legacy migration or coexistence, and permits rollback only to an exact-pinned
+  build implementing the same current package, schema, storage semantics, and contract.
+  The recommendation directive remains bounded by D27.
 
 The generated Markdown view is a generated-file size exception owned by the
 Worker specification owner. It stays atomic because it is one ordered decision
@@ -402,6 +410,18 @@ fail with `TASK_ALREADY_TERMINAL`.
   Config/deployment/job cannot change tracks; authorization loss stops, fences, or rejects.
   Staged same-contract rollout and earlier same-contract build rollback remain allowed, but fallback, downgrade, or different-authority tracks do not.
 - D23 makes the Server repository the sole cross-end current-package source; Worker/Web exact-pin it and may not redefine its schemas.
+- D24 makes the audited Server-side Task acceptance/TaskRecord creation barrier
+  the cutover linearization point. Pause intake before the barrier; every
+  pre-cutover Task must first reach an authoritative terminal state or
+  tombstone/delete disposition, or lose authorization and be stopped, fenced,
+  or rejected into non-executable isolation. Stop/fence/reject does not invent
+  Task terminalization or TaskResult, and no pre-cutover Task or late legacy
+  lease/event/result/replay may execute or re-enter after the barrier.
+- Do not migrate, backfill, dual-read/write, negotiate, or add compatibility for
+  pre-Agent-First Tasks or data. Safe rollback is limited to an exact-pinned
+  prior build with the same current package identity/version/digest, TaskRecord
+  schema, storage semantics, and Agent-First contract; it must not reopen old
+  tasks, data shapes, protocols, or entry points.
 - SQLite migration 2 upgrades a Slice 1 database in place and transactionally
   adds event digest, terminalization reason, and complete Attempt control
   fields. Preserve migration 1 bytes/digest; crash before migration commit must

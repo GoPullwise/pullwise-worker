@@ -94,8 +94,13 @@ D7 已由用户选择 `persist_elapsed_consumption`，resolution digest 为
 `5d7916e9389c0203185fb7e2e64be49df0ea52557d875f661f5d0180e093f5ea`；
 D8 已由用户选择 `task_active_attempt_fenced`，resolution digest 为
 `e895f73c3a0962937cbab61b4c8037f9ccba9daa6e6de89d5004005dd830b98a`。
-当前 register 有 5 个 pending（其中 D2 inactive）、22 个 resolved，唯一 active decision 为 D24；
-S2-S5 的 decision gate 已无 pending blocker，S6 仅由 D22 阻断，S7/S8 由 D24-D26 与 D22 阻断；对应实现与验证仍须分别完成。
+D24 已由用户以 custom 选择 `new_tasks_only`，resolution digest 为
+`8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`；受审计的
+Task acceptance/TaskRecord creation 屏障只允许 post-cutover Task，pre-cutover Task
+必须先终态/tombstone 或撤权后隔离为不可执行，且不得加入 legacy migration、双读写、
+协商或兼容路径。当前 register 有 4 个 pending（其中 D2 inactive）、23 个 resolved，
+唯一 active decision 为 D25；S2-S5 的 decision gate 已无 pending blocker，S6 仅由
+D22 阻断，S7/S8 由 D25、D26、D22 阻断；对应实现与验证仍须分别完成。
 后续仍须按各 Slice 的 decision gate 执行，不得以当前代码或推荐项代替尚未作出的选择。
 
 ## 指标
