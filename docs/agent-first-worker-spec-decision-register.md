@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D20`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D21`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -31,7 +31,7 @@ Active question: `D20`. Questions are asked one at a time. User silence, existin
 | `D17` | `P0.9` | Q2 concern/slot 规划算法 | `resolved` | `active` | `S3` | D16 | `versioned_concern_table` |
 | `D18` | `P0.10` | 现有 root coordinator 与 Task Owner 关系 | `resolved` | `active` | `S5` | D1, D6 | `coordinator_is_owner` |
 | `D19` | `P0.10` | reviewer fanout 期间 Owner liveness | `resolved` | `active` | `S5` | D4, D18 | `owner_remains_live` |
-| `D20` | `P0.10` | 旧 QA 与新 Gate 权威切换 | `pending` | `active` | `S5` | D10, D17, D18 | `shadow_floor_then_gate_cutover` |
+| `D20` | `P0.10` | 旧 QA 与新 Gate 权威切换 | `resolved` | `active` | `S5` | D10, D17, D18 | `shadow_floor_then_gate_cutover` |
 | `D21` | `P0.11` | outer job 执行模式配置权威 | `pending` | `active` | `S6` | D9, D20 | `server_claim_bound_mode` |
 | `D23` | `P1.2` | C0 contract package 真源归属 | `pending` | `active` | `S7` | D1, D2 | `server_owned_package` |
 | `D24` | `P1.2` | Server TaskRecord v2 bootstrap 策略 | `pending` | `active` | `S7` | D8, D23 | `lazy_eligible_claim_migration` |
@@ -465,7 +465,7 @@ Active question: `D20`. Questions are asked one at a time. User silence, existin
 
 ### D20 — 旧 QA 与新 Gate 权威切换
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S5`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S5`.
 
 **Question:** 旧 QA 与新 Gate 分歧时，shadow、cutover 和终态化采用何种 precedence？
 
@@ -473,9 +473,11 @@ Active question: `D20`. Questions are asked one at a time. User silence, existin
 
 - `shadow_floor_then_gate_cutover` — non-normative recommendation, not selected: shadow 期旧 QA 是 hard floor；显式 cutover 后新 Gate 成为唯一权威。 兼容期不放宽当前安全门，同时给出终止双权威的明确时点。 Consequences: cutover 前置条件、divergence 阈值和 rollback 必须版本化
 - `legacy_qa_permanent_floor`: 旧 QA 永久作为新 Gate 的 hard floor。 最保守，但内核永远无法独立成为权威。 Consequences: 旧 pipeline 债务成为永久依赖
-- `new_gate_immediate_authority`: 新 Gate 从首次启用即为唯一权威。 迁移快速，但没有 shadow 证据保护。 Consequences: 首次 divergence 即可能改变用户结果
+- `new_gate_immediate_authority` — selected by resolution: 新 Gate 从首次启用即为唯一权威。 迁移快速，但没有 shadow 证据保护。 Consequences: 首次 divergence 即可能改变用户结果
 
-**Resolution:** No option has been selected.
+**Resolution:** `new_gate_immediate_authority` (`custom`). 确认选择 new_gate_immediate_authority：协调切换后，新 Gate 立即成为唯一生产权威；旧 QA 不作为 hard floor，不保留 production shadow、fallback、downgrade 或双轨共存。 Custom text: 协调切换后，新 Gate 立即成为唯一生产权威；旧 QA 不作为 hard floor，不保留 production shadow、fallback、downgrade 或双轨共存。
+
+**Authority/evidence:** `user` on `2026-07-21`; `conversation:user-confirmation:2026-07-21:D20:new_gate_immediate_authority`; digest `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`.
 
 **Supersedes:** none
 

@@ -330,13 +330,18 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
             check_document=False,
             check_history=False,
         )
-        blocker = next(
-            item
-            for item in report["failures"]
-            if item["code"] == "slice_blocked_by_pending_decisions"
+        self.assertEqual([], report["failures"])
+        self.assertTrue(report["valid"])
+        self.assertFalse(report["ready"])
+
+        report = verify_register(
+            register, REPO_ROOT, require_slice="S6",
+            check_document=False, check_history=False,
         )
+        blocker = next(item for item in report["failures"]
+                       if item["code"] == "slice_blocked_by_pending_decisions")
         self.assertEqual(
-            ["D20"],
+            ["D21", "D22"],
             blocker["decision_ids"],
         )
         self.assertTrue(report["valid"])
@@ -348,7 +353,7 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         )
         blocker = next(item for item in report["failures"]
                        if item["code"] == "slice_blocked_by_pending_decisions")
-        self.assertEqual(["D20", "D21", *[f"D{i}" for i in range(23, 27)], "D22"],
+        self.assertEqual(["D21", *[f"D{i}" for i in range(23, 27)], "D22"],
                          blocker["decision_ids"])
 
     def test_rendered_resolution_contains_text_evidence_digest_and_relation(self) -> None:

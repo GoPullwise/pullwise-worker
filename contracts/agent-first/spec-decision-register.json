@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D20",
+  "active_decision_id": "D21",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -329,7 +329,7 @@
     {
       "id": "D20", "key": "legacy-qa-gate", "scope": "P0.10", "title": "旧 QA 与新 Gate 权威切换",
       "question": "旧 QA 与新 Gate 分歧时，shadow、cutover 和终态化采用何种 precedence？",
-      "status": "pending", "depends_on": ["D10", "D17", "D18"], "activation": null, "required_by_slice": "S5",
+      "status": "resolved", "depends_on": ["D10", "D17", "D18"], "activation": null, "required_by_slice": "S5",
       "effects": ["authority", "compatibility", "state_semantics"], "source_refs": ["handoff:P0.10"],
       "affected_units": ["mvp-legacy-mapping", "mvp-executable-gates"],
       "options": [
@@ -337,7 +337,7 @@
         {"id": "legacy_qa_permanent_floor", "summary": "旧 QA 永久作为新 Gate 的 hard floor。", "rationale": "最保守，但内核永远无法独立成为权威。", "consequences": ["旧 pipeline 债务成为永久依赖"]},
         {"id": "new_gate_immediate_authority", "summary": "新 Gate 从首次启用即为唯一权威。", "rationale": "迁移快速，但没有 shadow 证据保护。", "consequences": ["首次 divergence 即可能改变用户结果"]}
       ],
-      "recommended_option_id": "shadow_floor_then_gate_cutover", "resolution": null, "supersedes": []
+      "recommended_option_id": "shadow_floor_then_gate_cutover", "resolution": {"kind":"custom","selected_option_id":"new_gate_immediate_authority","custom_text":"协调切换后，新 Gate 立即成为唯一生产权威；旧 QA 不作为 hard floor，不保留 production shadow、fallback、downgrade 或双轨共存。","decision_text":"确认选择 new_gate_immediate_authority：协调切换后，新 Gate 立即成为唯一生产权威；旧 QA 不作为 hard floor，不保留 production shadow、fallback、downgrade 或双轨共存。","authority":"user","decided_at":"2026-07-21","evidence_refs":["conversation:user-confirmation:2026-07-21:D20:new_gate_immediate_authority"],"resolution_sha256":"3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a"}, "supersedes": []
     },
     {
       "id": "D21", "key": "run-mode-owner", "scope": "P0.11", "title": "outer job 执行模式配置权威",
