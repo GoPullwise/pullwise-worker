@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -7,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from pullwise_worker import agent_kernel_gitlinks as gitlinks
 from pullwise_worker.agent_kernel_gitlinks import inspect_gitlinks
 from pullwise_worker.agent_kernel_source_state import (
     SourceSelectionPolicy,
@@ -155,9 +157,189 @@ class AgentKernelGitlinkCatalogTest(unittest.TestCase):
                 git_executable=self.git,
             )
 
-        environment = run.call_args.kwargs["env"]
+        self.assertEqual(3, run.call_count)
+        calls = run.call_args_list
+        self.assertEqual([str(self.git), "--version"], calls[0].args[0])
+        self.assertIn("rev-parse", calls[1].args[0])
+        self.assertIn("ls-tree", calls[2].args[0])
+        self.assertTrue(all(call.args[0][0] == str(self.git) for call in calls))
+        self.assertTrue(all(call.kwargs["timeout"] == 30 for call in calls))
+        self.assertTrue(all(call.kwargs["env"] is calls[0].kwargs["env"] for call in calls))
+        environment = calls[0].kwargs["env"]
         self.assertEqual("1", environment["GIT_NO_REPLACE_OBJECTS"])
         self.assertEqual("1", environment["GIT_NO_LAZY_FETCH"])
+
+    def test_git_version_probe_fails_closed(self) -> None:
+        cases = (
+            (0, b"git version 2.44.9\n", b"", "SOURCE_GIT_VERSION_UNSUPPORTED"),
+            (0, b"git version 2.45\n", b"", "SOURCE_GIT_VERSION_INVALID"),
+            (0, b"git version 2.45.0 extra\n", b"", "SOURCE_GIT_VERSION_INVALID"),
+            (1, b"git version 2.45.0\n", b"", "SOURCE_GIT_VERSION_UNAVAILABLE"),
+            (0, b"git version 2.45.0\n", b"warning", "SOURCE_GIT_VERSION_UNAVAILABLE"),
+        )
+        for code, stdout, stderr, expected in cases:
+            with self.subTest(expected=expected, stdout=stdout, stderr=stderr):
+                result = subprocess.CompletedProcess([], code, stdout, stderr)
+                with mock.patch(
+                    "pullwise_worker.agent_kernel_gitlinks.subprocess.run",
+                    return_value=result,
+                ):
+                    with self.assertRaisesRegex(SourceStateError, expected):
+                        inspect_gitlinks(
+                            self.root,
+                            base_revision=self.base_revision,
+                            git_executable=self.git,
+                        )
+
+    def test_git_executable_must_be_absolute_and_regular(self) -> None:
+        for executable in (Path(self.git.name), self.root):
+            with self.subTest(executable=executable):
+                with self.assertRaisesRegex(
+                    SourceStateError, "SOURCE_GIT_EXECUTABLE_INVALID"
+                ):
+                    inspect_gitlinks(
+                        self.root,
+                        base_revision=self.base_revision,
+                        git_executable=executable,
+                    )
+
+    def test_version_probe_rejects_executable_identity_drift(self) -> None:
+        stable = gitlinks._git_executable_identity(self.git)
+        changed = (*stable[:-1], stable[-1] + 1)
+        result = subprocess.CompletedProcess(
+            [], 0, b"git version 2.45.0\n", b""
+        )
+        with mock.patch(
+            "pullwise_worker.agent_kernel_gitlinks._git_executable_identity",
+            side_effect=(stable, stable, changed),
+        ), mock.patch(
+            "pullwise_worker.agent_kernel_gitlinks.subprocess.run",
+            return_value=result,
+        ):
+            with self.assertRaisesRegex(
+                SourceStateError, "SOURCE_GIT_EXECUTABLE_CHANGED"
+            ):
+                inspect_gitlinks(
+                    self.root,
+                    base_revision=self.base_revision,
+                    git_executable=self.git,
+                )
+
+    def test_ls_tree_rejects_executable_identity_drift(self) -> None:
+        stable = gitlinks._git_executable_identity(self.git)
+        changed = (*stable[:-1], stable[-1] + 1)
+        results = (
+            subprocess.CompletedProcess([], 0, b"git version 2.45.0\n", b""),
+            subprocess.CompletedProcess(
+                [], 0, os.fsencode(self.root) + b"\n", b""
+            ),
+            subprocess.CompletedProcess([], 0, b"", b""),
+        )
+        with mock.patch(
+            "pullwise_worker.agent_kernel_gitlinks._git_executable_identity",
+            side_effect=(*((stable,) * 6), changed),
+        ), mock.patch(
+            "pullwise_worker.agent_kernel_gitlinks.subprocess.run",
+            side_effect=results,
+        ):
+            with self.assertRaisesRegex(
+                SourceStateError, "SOURCE_GIT_EXECUTABLE_CHANGED"
+            ):
+                inspect_gitlinks(
+                    self.root,
+                    base_revision=self.base_revision,
+                    git_executable=self.git,
+                )
+
+    def test_nested_path_cannot_discover_parent_repository(self) -> None:
+        nested = self.root / "nested"
+        nested.mkdir()
+
+        with self.assertRaisesRegex(
+            SourceStateError, "SOURCE_GIT_REPOSITORY_MISMATCH"
+        ):
+            inspect_gitlinks(
+                nested,
+                base_revision=self.base_revision,
+                git_executable=self.git,
+            )
+
+    def test_linked_worktree_git_file_is_a_valid_exact_repository_root(self) -> None:
+        worktree = Path(self.scratch.name) / "linked-worktree"
+        self._git("worktree", "add", "--detach", str(worktree), self.base_revision)
+        try:
+            self.assertTrue((worktree / ".git").is_file())
+            catalog = inspect_gitlinks(
+                worktree,
+                base_revision=self.base_revision,
+                git_executable=self.git,
+            )
+
+            self.assertEqual(["vendor"], [entry.path for entry in catalog.entries])
+        finally:
+            self._git("worktree", "remove", "--force", str(worktree))
+
+    def test_catalog_rejects_non_directory_checkout_ancestor(self) -> None:
+        self._git("update-index", "--force-remove", "vendor")
+        self._git(
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{self.gitlink_commit},vendor/sub",
+        )
+        self._git("commit", "-m", "nested gitlink")
+        nested_revision = self._git("rev-parse", "HEAD").stdout.strip()
+        shutil.rmtree(self.root / "vendor")
+        (self.root / "vendor").write_text("not a directory", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            SourceStateError, "SOURCE_GITLINK_TOPOLOGY_INVALID"
+        ):
+            inspect_gitlinks(
+                self.root,
+                base_revision=nested_revision,
+                git_executable=self.git,
+            )
+
+    def test_snapshot_rejects_prefix_conflict_created_after_inspection(self) -> None:
+        self._git("update-index", "--force-remove", "vendor")
+        self._git(
+            "update-index", "--add", "--cacheinfo",
+            f"160000,{self.gitlink_commit},vendor/sub",
+        )
+        self._git("commit", "-m", "nested gitlink")
+        revision = self._git("rev-parse", "HEAD").stdout.strip()
+        (self.root / "vendor" / "sub").mkdir()
+        catalog = inspect_gitlinks(
+            self.root, base_revision=revision, git_executable=self.git
+        )
+
+        def replace_ancestor(stage: str, _path: Path) -> None:
+            if stage == "before_root_open":
+                shutil.rmtree(self.root / "vendor")
+                (self.root / "vendor").write_text("file", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            SourceStateError, "SOURCE_ENTRY_TOPOLOGY_INVALID"
+        ):
+            snapshot_source_tree(
+                self.root,
+                policy=self.policy,
+                base_revision=revision,
+                gitlink_catalog=catalog,
+                stage_hook=replace_ancestor,
+            )
+
+    def test_catalog_rejects_gitlink_prefix_coexistence(self) -> None:
+        payload = (
+            f"160000 commit {self.gitlink_commit}\tvendor\0"
+            f"160000 commit {self.gitlink_commit}\tvendor/sub\0"
+        ).encode("ascii")
+
+        with self.assertRaisesRegex(
+            SourceStateError, "SOURCE_GITLINK_TOPOLOGY_INVALID"
+        ):
+            gitlinks._parse_tree(payload)
 
     def test_catalog_rejects_root_identity_change_during_git_inspection(self) -> None:
         metadata = self.root.lstat()

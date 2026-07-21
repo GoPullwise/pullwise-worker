@@ -254,9 +254,18 @@ class SourceTreeSnapshot:
             raise SourceStateError("SOURCE_BASE_REVISION_INVALID")
         if not DIGEST_PATTERN.fullmatch(self.selection_policy_digest):
             raise SourceStateError("SOURCE_POLICY_DIGEST_INVALID")
-        ordered = _ordered_paths(tuple(entry.path for entry in self.entries))
-        if ordered != tuple(entry.path for entry in self.entries):
+        paths = tuple(entry.path for entry in self.entries)
+        ordered = _ordered_paths(paths)
+        if ordered != paths:
             raise SourceStateError("SOURCE_ENTRY_ORDER_INVALID")
+        selected = set(paths)
+        for path in paths:
+            parts = path.split("/")
+            if any(
+                "/".join(parts[:length]) in selected
+                for length in range(1, len(parts))
+            ):
+                raise SourceStateError("SOURCE_ENTRY_TOPOLOGY_INVALID", path)
 
     @property
     def entry_count(self) -> int:
