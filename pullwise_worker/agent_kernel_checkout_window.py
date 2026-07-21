@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import stat
 import threading
+from typing import Callable
 
 from .agent_kernel_checkout_lock import (
     _HeldPosixLock,
@@ -52,7 +53,7 @@ def _assert_checkout_directory(metadata: os.stat_result) -> None:
 
 def _cleanup_steps(
     primary_error: BaseException | None,
-    *steps: object,
+    *steps: Callable[[], object],
 ) -> BaseException | None:
     error = primary_error
     for step in steps:

@@ -156,10 +156,18 @@ ratchet pass. This remains a deletion inventory, not a compatibility baseline.
   while no new occurrence exists, exit `1` reports an unregistered legacy
   occurrence or a registered signature above its frozen ceiling, and exit `2`
   is indeterminate input or environment evidence.
-- `--require-absent` is the final-cutover mode: every high-signal inventory
-  surface and every frozen baseline semantic surface must be absent or it exits
-  `1`. Keep it tested but do not add it to required CI until the coordinated
-  switch is authorized.
+- `--require-absent` is the intended final-cutover mode: every high-signal
+  inventory surface and every frozen baseline semantic surface must be absent
+  or it exits `1`. The current production catalog cannot yet use that mode as
+  completion evidence: the verifier requires its exact frozen baseline file to
+  remain present while that same file is explicit high-signal surface
+  `worker.004-frozen-contract-baseline`. Retaining it reports legacy present
+  and exits `1`; deleting or changing it makes the observation indeterminate
+  and exits `2`. Treat only the default ratchet as current evidence. Before
+  cutover, record an explicit decision/ADR and correct the final gate so
+  immutable historical catalog evidence is separate from live forbidden
+  surfaces. Do not refresh the baseline or claim clean break from the current
+  strict command.
 - Current CI checks out both frozen Server and Web siblings and runs only the
   default ratchet. The retired candidate-refresh path remains forbidden.
 - The CLI requires the fixed production inventory ID and catalog digest in every
@@ -504,20 +512,34 @@ production Agent-First runner or a completed S3 slice.
   composition must require Git 2.45 or newer and a materializer-enforced
   single-writer catalog/scan window. The Windows path scanner remains
   development-only.
-- agent_kernel_checkout_window.py keeps that package-independent POSIX window
-  open from the exact-revision gitlink inspection and before snapshot through
-  the fresh inspection and after snapshot, or until explicit close. Its fixed
-  lock lives under a canonical Worker-owned control root disjoint from the
-  canonical checkout, combines a process mutex with a private no-follow flock,
-  and bounds both acquisition stages with one monotonic deadline. Every
-  cooperating checkout writer must use the same coordinator writer window.
-  This fences cooperating materializers only; arbitrary host mutation must
-  still fail the descriptor/root identity and SourceState checks. Windows
-  explicitly rejects this POSIX-only internal coordinator rather than emulating
-  the guarantee. Its lock timeout is only an internal bounded upper limit, not
-  authoritative invocation budget. Production composition must clamp it to
-  the current absolute deadline started before checkout and poll the same
-  cancellation throughout acquisition.
+- agent_kernel_checkout_lifecycle.py defines required
+  CheckoutAcquisitionBounds: one finite process-local monotonic caller deadline
+  plus an exact-bool, nonblocking local cancellation callback. It derives no
+  wall time, persists no authority, and defines no schema. Each acquire computes
+  one effective deadline from the caller bound and local lock cap, then passes
+  the same value through both the process mutex and private no-follow flock;
+  callback polling is at most 50 ms and never runs under the process-mutex
+  condition lock. There is no zero-argument or unbounded acquisition path.
+- agent_kernel_checkout_window.py keeps the package-independent POSIX capture
+  open from exact-revision gitlink inspection and before snapshot through fresh
+  inspection and after snapshot, or until explicit close.
+  agent_kernel_checkout_writer.py is the separate materializer entry point and
+  can acquire before a checkout root exists. Capture and every cooperating
+  writer must construct their coordinators with the same canonical existing
+  Worker-owned control root and required acquisition bounds; symlink aliases
+  share that lock domain, and the old capture-owned writer entry point must not
+  return. Successful writer exit reports observed lock/root integrity drift
+  before cancellation or deadline failure. A writer-body error remains primary
+  and every cleanup step is still attempted.
+- These bounds cover lock acquisition and the successful writer-exit checkpoint
+  only. They do not interrupt Git subprocesses, source scanning, capture work,
+  or a writer body already in flight; a long writer body must cooperatively
+  poll the yielded bounds. This fences cooperating materializers only;
+  arbitrary host mutation must still fail descriptor/root identity and
+  SourceState checks. Windows explicitly rejects the POSIX-only coordinators.
+  Production composition must derive the bound from the current invocation
+  before checkout and extend the same lifecycle through checkout/Git/scans
+  after the current package decisions close.
 - agent_kernel_gateway.py is only the fixed-order orchestration kernel. Journal
   begin must atomically revalidate the authority ticket and bind one opaque
   dispatch capability consumed by the dispatcher and every settlement path.

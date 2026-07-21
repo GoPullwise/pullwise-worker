@@ -195,6 +195,29 @@ class CheckoutWriterCoordinatorTest(unittest.TestCase):
         thread.join(timeout=1.0)
         self.assertFalse(thread.is_alive())
 
+    def test_symlink_alias_shares_the_canonical_lock_domain(self) -> None:
+        alias = self.base / "control-alias"
+        alias.symlink_to(self.control, target_is_directory=True)
+        errors: list[BaseException] = []
+
+        def contend() -> None:
+            try:
+                with self.writer(
+                    self.bounds(seconds=0.15), control_root=alias
+                ).writer():
+                    self.fail("alias writer must not enter")
+            except BaseException as exc:
+                errors.append(exc)
+
+        with self.writer(self.bounds()).writer():
+            thread = threading.Thread(target=contend, daemon=True)
+            thread.start()
+            thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(1, len(errors))
+        self.assertIsInstance(errors[0], SourceStateError)
+
     def test_mutex_wait_is_clamped_by_external_deadline(self) -> None:
         errors: list[BaseException] = []
         entered = threading.Event()

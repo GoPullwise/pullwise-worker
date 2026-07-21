@@ -181,6 +181,41 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
         self.assertIsInstance(errors[0], SourceStateError)
         self.assertEqual("CHECKOUT_LOCK_TIMEOUT", errors[0].code)
 
+    def test_one_effective_deadline_is_shared_across_acquisition(self) -> None:
+        class RecordingBounds(CheckoutAcquisitionBounds):
+            def __init__(self) -> None:
+                super().__init__(
+                    deadline_monotonic=time.monotonic() + 30,
+                    cancellation_requested=lambda: False,
+                )
+                self.effective_calls = 0
+                self.seen_deadlines: list[float] = []
+
+            def _effective_deadline(self, timeout: int | float) -> float:
+                self.effective_calls += 1
+                return super()._effective_deadline(timeout)
+
+            def _checkpoint(self, deadline: float) -> float:
+                self.seen_deadlines.append(deadline)
+                return super()._checkpoint(deadline)
+
+            def _wait_seconds(self, deadline: float) -> float:
+                self.seen_deadlines.append(deadline)
+                return super()._wait_seconds(deadline)
+
+        bounds = RecordingBounds()
+        writer = CheckoutWriterCoordinator(
+            control_root=self.control,
+            acquisition_bounds=bounds,
+        )
+
+        with writer.writer():
+            pass
+
+        self.assertEqual(1, bounds.effective_calls)
+        self.assertGreater(len(bounds.seen_deadlines), 1)
+        self.assertEqual(1, len(set(bounds.seen_deadlines)))
+
     def test_flock_contention_uses_the_same_bounded_deadline(self) -> None:
         with mock.patch(
             "pullwise_worker.agent_kernel_checkout_lock._fcntl.flock",
@@ -220,6 +255,68 @@ class AgentKernelCheckoutLockTest(unittest.TestCase):
                 self.control.rename(original)
                 replacement.rename(self.control)
                 raise RuntimeError("writer body failed")
+
+    def test_acquire_cleanup_preserves_primary_and_releases_mutex(self) -> None:
+        import fcntl
+
+        original_flock = fcntl.flock
+
+        def fail_unlock(descriptor: int, operation: int) -> None:
+            if operation == fcntl.LOCK_UN:
+                raise OSError("unlock failed")
+            original_flock(descriptor, operation)
+
+        with mock.patch(
+            "pullwise_worker.agent_kernel_checkout_lock."
+            "_HeldPosixLock.assert_current",
+            side_effect=RuntimeError("acquire integrity failed"),
+        ), mock.patch(
+            "pullwise_worker.agent_kernel_checkout_lock._fcntl.flock",
+            side_effect=fail_unlock,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "acquire integrity failed"
+            ):
+                with self.writer(lock_timeout_seconds=1).writer():
+                    self.fail("writer body must not run")
+
+        with self.writer(lock_timeout_seconds=1).writer():
+            pass
+
+    def test_post_flock_integrity_wins_over_simultaneous_cancel(self) -> None:
+        import fcntl
+
+        cancelled = threading.Event()
+        original = self.base / "original-control"
+        replacement = self.base / "replacement-control"
+        replacement.mkdir(mode=0o700)
+        original_flock = fcntl.flock
+
+        def acquire_then_drift(descriptor: int, operation: int) -> None:
+            original_flock(descriptor, operation)
+            if operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+                self.control.rename(original)
+                replacement.rename(self.control)
+                cancelled.set()
+
+        bounds = CheckoutAcquisitionBounds(
+            deadline_monotonic=time.monotonic() + 5,
+            cancellation_requested=cancelled.is_set,
+        )
+        writer = CheckoutWriterCoordinator(
+            control_root=self.control,
+            acquisition_bounds=bounds,
+        )
+
+        with mock.patch(
+            "pullwise_worker.agent_kernel_checkout_lock._fcntl.flock",
+            side_effect=acquire_then_drift,
+        ):
+            with self.assertRaisesRegex(
+                SourceStateError, "CHECKOUT_CONTROL_ROOT_CHANGED"
+            ):
+                with writer.writer():
+                    self.fail("writer body must not run")
 
 
 if __name__ == "__main__":

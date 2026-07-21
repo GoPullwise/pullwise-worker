@@ -10,8 +10,9 @@
 2. Ubuntu 上 descriptor-rooted、no-follow、nonblocking 的源码扫描。
 3. 与 checkout top-level、Git 版本、object mode/OID 和物理 gitlink topology 绑定的
    exact-revision catalog。
-4. POSIX cooperating-writer checkout lock，以及覆盖 fresh catalog/scan before/after 的
-   capture window。
+4. 必填 CheckoutAcquisitionBounds、独立的 CheckoutWriterCoordinator、共享 canonical
+   lock domain 的 POSIX cooperating-writer lock，以及覆盖 fresh catalog/scan
+   before/after 的 capture window。
 5. 固定顺序的 Gateway orchestration kernel。
 6. 由同一个 materialized-source capture provider 提供 checkout root 与 before/after
    SourceState、并跨 dispatch 持有 lease 的内部 R0 read tracer。
@@ -54,24 +55,34 @@ S3 decision gate 明确 blocked；本文中的 injected interfaces 和内部 tra
 
 ### Checkout capture window
 
-- `CheckoutCaptureCoordinator` 仅在 POSIX 可用；Windows 显式 fail closed。checkout
-  root 与 control root 都先 strict-resolve 为现存 canonical directory，并拒绝相等、
-  嵌套或 symlink-alias 后的物理重叠，防止 lock file 进入 SourceState/read surface。
+- CheckoutCaptureCoordinator 与独立 CheckoutWriterCoordinator 都只在 POSIX 可用；
+  Windows 显式 fail closed。capture 的 checkout root 与二者的 control root 都先
+  strict-resolve 为现存 canonical directory，并拒绝 checkout/control 相等、嵌套或
+  symlink-alias 后的物理重叠。writer 可在 checkout root 尚未 materialize 时先取得锁。
+  使用同一 canonical control root 的 capture/writer（包括 symlink alias）共享唯一
+  process mutex 与 flock lock domain；旧的 capture-owned writer API 已删除。
 - control root 必须由当前 uid 拥有且 group/world 不可写。lock leaf 使用
   O_NOFOLLOW/O_NONBLOCK 打开，必须是当前 uid 拥有、0600、single-link regular file；
   control/lock identity 与 metadata 在 acquire 以及 capture/writer 边界重复检查。
-- 同进程 mutex 与 POSIX `flock(LOCK_EX|LOCK_NB)` 共用一个 monotonic acquisition
-  deadline；竞争超时 fail closed，不会让一个遗留 holder 无限占住调用方。capture
-  session 在同一锁内重新生成 before catalog/snapshot，跨真实 dispatch 持有 lease，
-  再重新生成 after catalog/snapshot；catalog 不会逃出该 window。writer body 前后也
-  重验 lock，且清理错误不能覆盖 writer body 的原始异常。
+- 每个 coordinator 必须收到 CheckoutAcquisitionBounds：finite process-local monotonic
+  caller deadline，加上 trusted、nonblocking 且返回 exact bool 的 cancellation callback。
+  它不解释 wall time、不持久化 authority、也不定义 schema。每次 acquire 只计算一次
+  min(caller deadline, local lock cap)，同一 effective deadline 贯穿 process mutex 与
+  POSIX flock；以不超过 50 ms 的间隔轮询 callback，且 callback 不在 process-mutex
+  condition lock 内执行。不存在零参数或无界 acquire fallback。
+- capture session 在同一锁内重新生成 before catalog/snapshot，跨真实 dispatch 持有
+  lease，再重新生成 after catalog/snapshot；catalog 不会逃出该 window。writer 成功
+  body 的退出顺序是 lock/control integrity、cancellation/caller deadline、local cap；
+  body 原始错误始终优先于取消、完整性或 release 故障，所有清理步骤仍会被尝试。
+  cancellation callback 自身失败也会 fail closed 并释放 lease。
 - 这只是 cooperating-writer primitive：advisory flock 不会阻止绕过 coordinator 的
   写者。生产 materializer 必须保证同一 checkout 的所有 clone/copy/reset/cleanup/
   mutation writer 都经由同一锁协议，并提供多进程、崩溃恢复和部署证明。
-- `lock_timeout_seconds` 只是内部 bounded 上限，不是 Worker invocation 的权威预算。
-  生产 composition 必须用 checkout 前已开始的 current invocation 剩余
-  `absolute_deadline_at` 收紧等待，并轮询同一 cancellation；在 D7 与 current package
-  未闭合前不得接线。
+- 当前 bounds 只约束 lock acquisition，并在 writer body 正常返回后再 checkpoint；
+  不会强制中断已在运行的 Git、scanner、capture 或 writer body。长 writer body 必须
+  主动轮询 yielded bounds。生产 composition 仍须从 checkout 前已启动的唯一 current
+  invocation 派生 bounds，并把同一 deadline/cancellation 贯穿 checkout/Git/scans；
+  D7 与 current package 未闭合前不得接线。
 
 ### Gateway
 
@@ -132,15 +143,20 @@ grant/intent/receipt/budget 的唯一 durable linearization；该 seam 不是 D3
   observation 等 schema 的权威 validator/codec。
 - production materializer/composition 对 Git >=2.45 部署身份、exact-revision catalog、
   canonical checkout/control roots、all-writers cooperating window 与跨进程行为的接线和
-  强制证明。内部 `lock_timeout_seconds` 还必须受 current invocation 的剩余 absolute
-  deadline/cancellation 收紧。
+  强制证明。内部 acquisition primitive 已接受 caller deadline/cancellation，但还没有
+  production composition 从权威 current invocation 派生它，也没有把它贯穿
+  copy/clone/Git/scanner/capture/运行中的 writer body。
 - current-only Task/Attempt/session/lease authority store。
 - D7 elapsed-consumption budget ledger。
 - crash-safe dispatch journal、two-phase unbound CAS publish/bind 和 automatic Observation。
 - ExecutionState、R1、Agent session runtime、Completion/Verifier/Gate、S4-S8 与 D22 gate。
 - D27 default ratchet 只证明本切片没有增加未登记 legacy surface；当前仓库仍有
-  inventoried legacy_v1，`legacy_absent=false`，最终 clean-break cutover 尚未通过
-  `--require-absent`。
+  inventoried legacy_v1，`legacy_absent=false`。当前 strict gate 不能作为最终完成
+  证据：verifier 必须保留并 exact-load frozen baseline 才能枚举 semantic surfaces，
+  但同一文件又是显式 high-signal surface
+  `worker.004-frozen-contract-baseline`；保留时 exit 1，删除或修改时 exit 2。
+  cutover 前必须以显式 decision/ADR 修正 historical evidence 与 live forbidden
+  surfaces 的分离，不能刷新 baseline 或宣称当前 `--require-absent` 已可达。
 
 现有 AgentKernelDatabase 初始化 legacy_v1 Task schema，现有 observations 表也外键到
 该 Task；它们不得被本 tracer 当成 current production journal。上述阻断关闭前，
@@ -154,6 +170,9 @@ grant/intent/receipt/budget 的唯一 durable linearization；该 seam 不是 D3
       tests.test_agent_kernel_source_state \
       tests.test_agent_kernel_gitlinks \
       tests.test_agent_kernel_gateway \
+      tests.test_agent_kernel_checkout_lifecycle \
+      tests.test_agent_kernel_checkout_writer_lifecycle \
+      tests.test_agent_kernel_checkout_writer \
       tests.test_agent_kernel_checkout_lock \
       tests.test_agent_kernel_checkout_window \
       tests.test_agent_kernel_r0_capture \
@@ -178,8 +197,10 @@ D27 ratchet 可单独复核：
 
     python scripts/verify_agent_first_legacy_absence.py --workspace-root ..
 
-默认结果应为 `ratchet_clean=true` 且 `legacy_absent=false`；它证明没有意外扩张，不是
-clean-break 完成证据。最终 cutover 仍必须通过同一命令的 `--require-absent`。
+默认结果应为 `ratchet_clean=true` 且 `legacy_absent=false`；它证明没有意外扩张，
+不是 clean-break 完成证据。当前 `--require-absent` 会因上述 frozen-baseline
+self-surface 阻断而 exit 1；删除或修改 baseline 会 indeterminate/exit 2。修正后的
+最终门必须先由显式 decision/ADR 定义并增加 production-catalog regression tests。
 
 ## 文件尺寸证据
 

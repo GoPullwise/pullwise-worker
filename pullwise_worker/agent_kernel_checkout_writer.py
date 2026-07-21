@@ -51,15 +51,15 @@ class CheckoutWriterCoordinator:
         except BaseException as exc:
             primary_error = exc
         finally:
-            if primary_error is None:
-                try:
-                    self._acquisition_bounds.checkpoint()
-                except BaseException as exc:
-                    primary_error = exc
             try:
                 held_lock.assert_current()
             except BaseException as exc:
                 if primary_error is None:
+                    primary_error = exc
+            if primary_error is None:
+                try:
+                    self._acquisition_bounds.checkpoint()
+                except BaseException as exc:
                     primary_error = exc
             try:
                 held_lock.release()

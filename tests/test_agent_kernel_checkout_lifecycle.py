@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import time
 import unittest
 
 from pullwise_worker.agent_kernel_checkout_lifecycle import (
@@ -40,6 +41,8 @@ class CheckoutAcquisitionBoundsContractTest(unittest.TestCase):
         )
 
         self.assertIsInstance(bounds, CheckoutAcquisitionBounds)
+        with self.assertRaises(AttributeError):
+            bounds.deadline_monotonic = 456.0  # type: ignore[misc]
 
     def test_cancellation_source_must_be_callable(self) -> None:
         with self.assertRaises(SourceStateError):
@@ -47,6 +50,32 @@ class CheckoutAcquisitionBoundsContractTest(unittest.TestCase):
                 deadline_monotonic=123.5,
                 cancellation_requested=False,  # type: ignore[arg-type]
             )
+
+    def test_cancellation_result_must_be_exact_bool(self) -> None:
+        bounds = CheckoutAcquisitionBounds(
+            deadline_monotonic=time.monotonic() + 5,
+            cancellation_requested=lambda: 1,  # type: ignore[return-value]
+        )
+
+        with self.assertRaisesRegex(
+            SourceStateError, "CHECKOUT_CANCELLATION_RESULT_INVALID"
+        ):
+            bounds.checkpoint()
+
+    def test_cancellation_failure_is_not_treated_as_normal_cancel(self) -> None:
+        def fail() -> bool:
+            raise RuntimeError("probe failed")
+
+        bounds = CheckoutAcquisitionBounds(
+            deadline_monotonic=time.monotonic() + 5,
+            cancellation_requested=fail,
+        )
+
+        with self.assertRaisesRegex(
+            SourceStateError, "CHECKOUT_CANCELLATION_CHECK_FAILED"
+        ) as raised:
+            bounds.checkpoint()
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
 
     def test_capture_coordinator_requires_keyword_acquisition_bounds(self) -> None:
         parameter = inspect.signature(CheckoutCaptureCoordinator).parameters[

@@ -311,7 +311,6 @@ class _PosixCheckoutLock:
                             "CHECKOUT_LOCK_UNAVAILABLE"
                         ) from exc
                     time.sleep(bounds._wait_seconds(deadline))
-            bounds._checkpoint(deadline)
             held = _HeldPosixLock(
                 control_root=self._control_root,
                 control_descriptor=control_descriptor,
@@ -325,15 +324,25 @@ class _PosixCheckoutLock:
             return held
         except BaseException:
             if lock_descriptor is not None:
-                try:
-                    if locked:
+                if locked:
+                    try:
                         assert _fcntl is not None
                         _fcntl.flock(lock_descriptor, _fcntl.LOCK_UN)
-                finally:
+                    except BaseException:
+                        pass
+                try:
                     os.close(lock_descriptor)
+                except BaseException:
+                    pass
             if control_descriptor is not None:
-                os.close(control_descriptor)
-            self._mutex.release()
+                try:
+                    os.close(control_descriptor)
+                except BaseException:
+                    pass
+            try:
+                self._mutex.release()
+            except BaseException:
+                pass
             raise
 
 
