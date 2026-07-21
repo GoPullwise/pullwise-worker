@@ -155,19 +155,21 @@ ratchet pass. This remains a deletion inventory, not a compatibility baseline.
   for the current CI gate. Exit `0` reports inventoried legacy without blocking
   while no new occurrence exists, exit `1` reports an unregistered legacy
   occurrence or a registered signature above its frozen ceiling, and exit `2`
-  is indeterminate input or environment evidence.
+  is indeterminate input, environment, or strict completion-definition evidence.
 - `--require-absent` is the intended final-cutover mode: every high-signal
   inventory surface and every frozen baseline semantic surface must be absent
   or it exits `1`. The current production catalog cannot yet use that mode as
   completion evidence: the verifier requires its exact frozen baseline file to
   remain present while that same file is explicit high-signal surface
-  `worker.004-frozen-contract-baseline`. Retaining it reports legacy present
-  and exits `1`; deleting or changing it makes the observation indeterminate
-  and exits `2`. Treat only the default ratchet as current evidence. Before
-  cutover, record an explicit decision/ADR and correct the final gate so
-  immutable historical catalog evidence is separate from live forbidden
-  surfaces. Do not refresh the baseline or claim clean break from the current
-  strict command.
+  `worker.004-frozen-contract-baseline`. Strict mode now observes all surfaces,
+  retains that live evidence, and fails closed with `status=indeterminate`,
+  reason `strict_catalog_self_reference`, and exit `2`; deleting or changing
+  the baseline also exits `2` because its exact frozen input is invalid. Treat
+  only the default ratchet as current evidence. Before cutover, record an
+  explicit decision/ADR and correct the final gate so immutable historical
+  catalog evidence is separate from live forbidden surfaces. This diagnostic
+  does not define that correction. Do not refresh the baseline or claim clean
+  break from the current strict command.
 - Current CI checks out both frozen Server and Web siblings and runs only the
   default ratchet. The retired candidate-refresh path remains forbidden.
 - The CLI requires the fixed production inventory ID and catalog digest in every

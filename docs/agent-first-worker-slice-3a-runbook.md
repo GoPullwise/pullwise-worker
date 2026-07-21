@@ -156,9 +156,12 @@ grant/intent/receipt/budget 的唯一 durable linearization；该 seam 不是 D3
   inventoried legacy_v1，`legacy_absent=false`。当前 strict gate 不能作为最终完成
   证据：verifier 必须保留并 exact-load frozen baseline 才能枚举 semantic surfaces，
   但同一文件又是显式 high-signal surface
-  `worker.004-frozen-contract-baseline`；保留时 exit 1，删除或修改时 exit 2。
+  `worker.004-frozen-contract-baseline`。当前 verifier 会保留完整 surface 观测，
+  并以 `status=indeterminate`、`strict_catalog_self_reference`、exit 2
+  fail closed；删除或修改 baseline 也因 exact frozen input 无效而 exit 2。
   cutover 前必须以显式 decision/ADR 修正 historical evidence 与 live forbidden
-  surfaces 的分离，不能刷新 baseline 或宣称当前 `--require-absent` 已可达。
+  surfaces 的分离；这项诊断不定义修正方案，不能刷新 baseline 或宣称当前
+  `--require-absent` 已可达。
 
 现有 AgentKernelDatabase 初始化 legacy_v1 Task schema，现有 observations 表也外键到
 该 Task；它们不得被本 tracer 当成 current production journal。上述阻断关闭前，
@@ -205,9 +208,11 @@ D27 ratchet 可单独复核：
     python scripts/verify_agent_first_legacy_absence.py --workspace-root ..
 
 默认结果应为 `ratchet_clean=true` 且 `legacy_absent=false`；它证明没有意外扩张，
-不是 clean-break 完成证据。当前 `--require-absent` 会因上述 frozen-baseline
-self-surface 阻断而 exit 1；删除或修改 baseline 会 indeterminate/exit 2。修正后的
-最终门必须先由显式 decision/ADR 定义并增加 production-catalog regression tests。
+不是 clean-break 完成证据。当前 `--require-absent` 会在完成 live observation 后，
+因上述 frozen-baseline self-surface 返回 `strict_catalog_self_reference`、
+`status=indeterminate` 并 exit 2；删除或修改 baseline 同样 exit 2。修正后的最终门
+必须先由显式 decision/ADR 定义；现有 production-catalog regression tests 只锁定
+fail-closed 诊断和 default ratchet，不锁定尚未决策的最终 gate 语义。
 
 ## 文件尺寸证据
 
@@ -235,6 +240,10 @@ self-surface 阻断而 exit 1；删除或修改 baseline 会 indeterminate/exit 
 - test_agent_kernel_r0_capture.py：222 行。
 - test_agent_kernel_r0_read.py：381 行。
 - test_agent_kernel_r0_gateway.py：274 行。
+- scripts/verify_agent_first_legacy_absence.py：261 行，D27 default/strict verdict。
+- test_agent_first_legacy_absence.py：296 行，一般 ratchet/strict 语义。
+- test_agent_first_legacy_absence_hardening.py：343 行，production catalog fail-closed。
+- tests/legacy_absence_test_support.py：198 行，隔离 workspace fixture。
 
 AGENTS.md 与 MVP implementation design 都是已有 oversized 文档；它们承载 durable
 boundary/status，不计作本切片新增实现模块的尺寸豁免。

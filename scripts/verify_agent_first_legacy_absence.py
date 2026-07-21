@@ -97,6 +97,28 @@ def _validate_d27(
     )
 
 
+def _strict_catalog_indeterminate_reasons(
+    inventory: dict[str, Any],
+    reports: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    baseline_path = inventory["frozen_baseline"]["path"]
+    return [
+        {
+            "code": "strict_catalog_self_reference",
+            "surface_id": item["id"],
+            "repo": item["repo"],
+            "path": item["path"],
+        }
+        for item in reports
+        if (
+            item["source"] == "high_signal_inventory"
+            and item["repo"] == "worker"
+            and item["path"] == baseline_path
+            and item["status"] == "present"
+        )
+    ]
+
+
 def verify_legacy_absence(
     inventory: dict[str, Any],
     workspace_root: Path,
@@ -130,15 +152,22 @@ def verify_legacy_absence(
         item["status"] == "absent" for item in reports
     )
     ratchet_clean = not unexpected
+    indeterminate_reasons = (
+        _strict_catalog_indeterminate_reasons(inventory, reports)
+        if require_absent
+        else []
+    )
     status = (
-        "unexpected_legacy"
+        "indeterminate"
+        if indeterminate_reasons
+        else "unexpected_legacy"
         if unexpected
         else "absent" if legacy_absent else "legacy_present"
     )
     failures: list[dict[str, Any]] = [
         {"code": "unexpected_legacy_surface", **item} for item in unexpected
     ]
-    if require_absent:
+    if require_absent and not indeterminate_reasons:
         failures.extend(
             {
                 "code": "legacy_surface_present",
@@ -158,7 +187,7 @@ def verify_legacy_absence(
         "surfaces": reports,
         "unexpected_surfaces": unexpected,
         "failures": failures,
-        "indeterminate_reasons": [],
+        "indeterminate_reasons": indeterminate_reasons,
     }
 
 
@@ -211,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
             inventory_raw=inventory_raw,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        if report["indeterminate_reasons"]:
+            return 2
         return 0 if not report["failures"] else 1
     except (
         InventoryError,

@@ -157,8 +157,10 @@ D28-D30 也不得从这些旧段落推断答案：
 
 当前 D27 default ratchet 只证明 inventory 没有扩张；现有 strict
 --require-absent 还不能形成最终 cutover 证据，因为它必须保留并 exact-load 的 frozen
-baseline 同时是 inventoried live surface。修正 final gate 前需要显式 decision/ADR，
-不得刷新 baseline、跳过 observation 或据此宣称 clean break。
+baseline 同时是 inventoried live surface。当前 verifier 会完成 live observation 后以
+`status=indeterminate`、`strict_catalog_self_reference`、exit 2 fail closed；
+这只是诚实诊断，不定义最终 gate。修正 final gate 前需要显式 decision/ADR，不得刷新
+baseline、跳过 observation 或据此宣称 clean break。
 
 因此“当前 legacy Worker 已有的 review 能力”不能冒充 Agent Kernel S3-S8；MVP
 Definition of Done 仍未满足。每完成一个 Slice，必须更新本表、对应 runbook、机器

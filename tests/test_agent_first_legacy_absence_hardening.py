@@ -272,6 +272,55 @@ class AgentFirstLegacyAbsenceHardeningTest(LegacyAbsenceTestCase):
         self.assertEqual(2, exit_code)
         self.assertEqual("inventory_invalid", report["error_kind"])
 
+    def test_production_default_mode_keeps_reporting_the_frozen_baseline(self) -> None:
+        payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke(production_catalog=True)
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("legacy_present", report["status"])
+        self.assertTrue(report["ratchet_clean"])
+        self.assertEqual([], report["indeterminate_reasons"])
+
+    def test_production_strict_mode_rejects_frozen_baseline_self_reference(
+        self,
+    ) -> None:
+        payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
+        self._write_inventory(payload)
+
+        exit_code, report = self._invoke(
+            "--require-absent", production_catalog=True
+        )
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("indeterminate", report["status"])
+        self.assertFalse(report["legacy_absent"])
+        self.assertTrue(report["require_absent"])
+        self.assertTrue(report["ratchet_clean"])
+        self.assertEqual([], report["failures"])
+        self.assertEqual(
+            [
+                {
+                    "code": "strict_catalog_self_reference",
+                    "surface_id": "worker.004-frozen-contract-baseline",
+                    "repo": "worker",
+                    "path": (
+                        "contracts/agent-first/"
+                        "legacy-v1-contract-baseline.json"
+                    ),
+                }
+            ],
+            report["indeterminate_reasons"],
+        )
+        self.assertEqual(
+            "present",
+            next(
+                item for item in report["surfaces"]
+                if item["id"] == "worker.004-frozen-contract-baseline"
+            )["status"],
+        )
+
     def test_default_catalog_ceiling_rejects_a_recomputed_expansion(self) -> None:
         payload = deepcopy(load_inventory(absence.DEFAULT_INVENTORY))
         payload["surfaces"].append(deepcopy(payload["surfaces"][-1]))
