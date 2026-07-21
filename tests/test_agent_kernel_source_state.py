@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from pullwise_worker.agent_kernel_canonical import canonical_bytes
+from pullwise_worker.agent_kernel_canonical import canonical_sha256
 from pullwise_worker.agent_kernel_source_state import (
     SourceEntry,
     SourceSelectionPolicy,
@@ -27,8 +27,7 @@ class AgentKernelSourceStateTest(unittest.TestCase):
         self.root = Path(self.scratch.name) / "repository"
         self.root.mkdir()
         self.policy = SourceSelectionPolicy.pullwise_full_scan(
-            root_identity="repository:test-fixture",
-            excluded_control_roots=(".codex-review", ".git"),
+            root_identity="repository:test-fixture"
         )
 
     def tearDown(self) -> None:
@@ -142,52 +141,66 @@ class AgentKernelSourceStateTest(unittest.TestCase):
                 entries=entries,
             )
 
-    def test_gitlink_is_recorded_without_scanning_its_worktree(self) -> None:
+    def test_snapshot_rejects_case_colliding_directory_components(self) -> None:
+        (self.root / "Folder").mkdir()
+        (self.root / "Folder" / "one.txt").write_text("one", encoding="utf-8")
+        try:
+            (self.root / "folder").mkdir()
+        except FileExistsError:
+            self.skipTest("host filesystem is case-insensitive")
+        (self.root / "folder" / "two.txt").write_text("two", encoding="utf-8")
+
+        with self.assertRaisesRegex(SourceStateError, "SOURCE_PATH_CASE_COLLISION"):
+            snapshot_source_tree(
+                self.root, policy=self.policy, base_revision=BASE_REVISION
+            )
+
+    def test_policy_fails_closed_for_unimplemented_ephemeral_patterns(self) -> None:
+        with self.assertRaisesRegex(
+            SourceStateError, "SOURCE_EPHEMERAL_PATTERN_UNSUPPORTED"
+        ):
+            SourceSelectionPolicy(
+                root_identity="repository:test-fixture",
+                include="all_repository_regular_files",
+                excluded_control_roots=(".codex-review", ".git"),
+                ephemeral_patterns=("*.tmp",),
+            )
+
+    def test_pullwise_policy_rejects_caller_selected_exclusions(self) -> None:
+        with self.assertRaisesRegex(SourceStateError, "SOURCE_CONTROL_ROOTS_UNTRUSTED"):
+            SourceSelectionPolicy(
+                root_identity="repository:test-fixture",
+                include="all_repository_regular_files",
+                excluded_control_roots=(".git", "src"),
+            )
+
+    def test_entry_rejects_non_utf8_path_identity(self) -> None:
+        with self.assertRaisesRegex(SourceStateError, "SOURCE_PATH_NOT_UTF8"):
+            SourceEntry.file(
+                "bad-" + chr(0xDCFF),
+                size_bytes=1,
+                sha256=hashlib.sha256(b"x").hexdigest(),
+            )
+
+    def test_unverified_gitlink_catalog_cannot_hide_a_subtree(self) -> None:
         vendor = self.root / "vendor"
         vendor.mkdir()
-        (vendor / "untrusted.txt").write_text("not part of parent", encoding="utf-8")
+        (vendor / "source.txt").write_text("must not be hidden", encoding="utf-8")
 
-        snapshot = snapshot_source_tree(
-            self.root,
-            policy=self.policy,
-            base_revision=BASE_REVISION,
-            gitlinks={"vendor": "b" * 40},
-        )
+        with self.assertRaisesRegex(
+            SourceStateError, "SOURCE_GITLINK_CATALOG_UNVERIFIED"
+        ):
+            snapshot_source_tree(
+                self.root,
+                policy=self.policy,
+                base_revision=BASE_REVISION,
+                gitlink_catalog={"vendor": "b" * 40},
+            )
 
-        self.assertEqual(["vendor"], [entry.path for entry in snapshot.entries])
-        self.assertEqual("gitlink", snapshot.entries[0].type)
-        self.assertEqual("b" * 40, snapshot.entries[0].commit_sha)
-
-    def test_manifest_requires_exact_policy_content_reference(self) -> None:
-        (self.root / "README.md").write_text("hello", encoding="utf-8")
-        snapshot = snapshot_source_tree(
-            self.root, policy=self.policy, base_revision=BASE_REVISION
-        )
-        policy_bytes = canonical_bytes(self.policy.as_dict())
-        policy_ref = {
-            "schema_id": "content-ref/v1",
-            "artifact_id": "art_" + "1" * 32,
-            "sha256": hashlib.sha256(policy_bytes).hexdigest(),
-            "size_bytes": len(policy_bytes),
-            "media_type": "application/json",
-            "content_schema_id": "source-selection-policy/v1",
-            "encoding": "utf-8",
-        }
-
-        manifest = snapshot.to_manifest(policy_ref)
-        self.assertEqual(snapshot.entry_count, manifest["entry_count"])
-        self.assertEqual(snapshot.total_bytes, manifest["total_bytes"])
-        self.assertEqual(
-            manifest["manifest_digest"],
-            hashlib.sha256(canonical_bytes(
-                {key: value for key, value in manifest.items() if key != "manifest_digest"}
-            )).hexdigest(),
-        )
-
-        forged = dict(policy_ref)
-        forged["sha256"] = "0" * 64
-        with self.assertRaisesRegex(SourceStateError, "SOURCE_POLICY_REF_MISMATCH"):
-            snapshot.to_manifest(forged)
+    def test_internal_policy_facts_do_not_claim_a_versioned_server_schema(self) -> None:
+        facts = self.policy.identity_facts()
+        self.assertNotIn("schema_id", facts)
+        self.assertEqual(canonical_sha256(facts), self.policy.digest)
 
     def test_changeset_is_deterministic_and_pullwise_rejects_every_change(self) -> None:
         path = self.root / "tracked.txt"
@@ -202,18 +215,26 @@ class AgentKernelSourceStateTest(unittest.TestCase):
         )
 
         changes = diff_source_trees(original, final)
-        self.assertEqual(["added.txt"], [item["path"] for item in changes["added"]])
+        self.assertEqual(["added.txt"], [item.path for item in changes.added])
         self.assertEqual(
-            ["tracked.txt"], [item["path"] for item in changes["modified"]]
+            ["tracked.txt"], [item.path for item in changes.modified]
         )
-        self.assertEqual([], changes["deleted"])
-        self.assertEqual([], changes["type_changed"])
+        self.assertEqual((), changes.deleted)
+        self.assertEqual((), changes.type_changed)
         with self.assertRaisesRegex(SourceStateError, "SOURCE_MUTATION_FORBIDDEN"):
             assert_pullwise_source_unchanged(original, final)
 
         unchanged = diff_source_trees(final, final)
-        self.assertIsNone(unchanged["change_set_ref"])
+        self.assertTrue(unchanged.is_empty)
         assert_pullwise_source_unchanged(final, final)
+
+        incompatible = SourceTreeSnapshot(
+            base_revision="b" * 40,
+            selection_policy_digest=final.selection_policy_digest,
+            entries=final.entries,
+        )
+        with self.assertRaisesRegex(SourceStateError, "SOURCE_DIFF_IDENTITY_MISMATCH"):
+            diff_source_trees(final, incompatible)
 
 
 if __name__ == "__main__":
