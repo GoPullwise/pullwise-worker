@@ -15,6 +15,8 @@ D27 是本文跨章节的高优先级约束：目标态只允许一套 current A
 contract。后文凡要求 Pullwise Compatibility Adapter、旧协议/路由、DTO alias、
 双读写、shadow、fallback、protocol downgrade、旧数据 migration/backfill 或
 old/new 共存矩阵的内容，均为待删除的历史设计清单，不是实现目标或发布回滚路径。
+该覆盖同样适用于第 3 节架构图、第 17 节路线、第 18 节完成判据和第 19 节 ADR；
+其中的兼容接入、旧 API fallback 或 old/new 验收不得作为 implementation authority。
 协调切换仍必须保持安全、权限、租约、fencing、持久化、幂等、审计和正确性
 不变量；尚未 resolved 的决策继续阻断相应实现，不能由 clean break 推断答案。
 
