@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests.agent_kernel_capture_fakes import FakeCaptureProvider
 from pullwise_worker.agent_kernel_gateway import (
     AgentKernelGateway,
     CheckedInvocation,
@@ -22,7 +23,9 @@ from pullwise_worker.agent_kernel_r0_read import (
     ReadSourceFileInput,
 )
 from pullwise_worker.agent_kernel_source_state import (
+    SourceEntry,
     SourceSelectionPolicy,
+    SourceTreeSnapshot,
     diff_source_trees,
     snapshot_source_tree,
 )
@@ -43,6 +46,7 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         self.policy = SourceSelectionPolicy.pullwise_full_scan(
             root_identity="repository:r0-test"
         )
+        self.capture_provider = self.new_capture_provider()
         self.descriptor = ToolDescriptor(
             tool_key="internal.read_source",
             tool_version="test",
@@ -71,16 +75,22 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         )
 
     def preparer(self, **values: object) -> R0ReadPreparer:
+        provider = values.pop("capture_provider", self.capture_provider)
         return R0ReadPreparer(
-            root=self.root,
-            policy=self.policy,
+            capture_provider=provider,
             base_revision=BASE_REVISION,
             max_bytes=1024,
             **values,
         )
 
+    def new_capture_provider(self) -> FakeCaptureProvider:
+        return FakeCaptureProvider(
+            self.root, self.policy, base_revision=BASE_REVISION
+        )
+
     def test_prepared_dispatch_holds_only_verified_descriptor(self) -> None:
-        prepared = self.preparer().prepare(
+        preparer = self.preparer()
+        prepared = preparer.prepare(
             object(), self.call("nested/README.md"), self.descriptor
         )
 
@@ -90,6 +100,8 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         self.assertEqual(self.payload, receipt.payload)
         self.assertEqual(hashlib.sha256(self.payload).hexdigest(), receipt.sha256)
         self.assertEqual(len(self.payload), receipt.size_bytes)
+        self.assertFalse(prepared.dispatch_handle.closed)
+        preparer.capture_after(prepared)
         self.assertTrue(prepared.dispatch_handle.closed)
 
     def test_after_snapshot_is_a_fresh_source_identity(self) -> None:
@@ -102,32 +114,21 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         after = preparer.capture_after(prepared)
 
         self.assertTrue(diff_source_trees(prepared.source_before, after).is_empty)
+        self.assertTrue(self.capture_provider.latest_session.closed)
 
-    def test_verified_gitlink_catalog_is_used_for_both_snapshots(self) -> None:
-        catalog = object()
-        source = snapshot_source_tree(
-            self.root,
-            policy=self.policy,
-            base_revision=BASE_REVISION,
+    def test_capture_provider_owns_root_and_both_snapshots(self) -> None:
+        preparer = self.preparer()
+        prepared = preparer.prepare(
+            object(), self.call("nested/README.md"), self.descriptor
         )
-        preparer = self.preparer(gitlink_catalog=catalog)
-        with mock.patch(
-            "pullwise_worker.agent_kernel_r0_read.snapshot_source_tree",
-            return_value=source,
-        ) as snapshot:
-            prepared = preparer.prepare(
-                object(), self.call("nested/README.md"), self.descriptor
-            )
-            R0ReadDispatcher().dispatch(object(), prepared)
-            preparer.capture_after(prepared)
 
-        self.assertEqual(2, snapshot.call_count)
-        self.assertTrue(
-            all(
-                call.kwargs["gitlink_catalog"] is catalog
-                for call in snapshot.call_args_list
-            )
-        )
+        self.assertEqual(1, self.capture_provider.begin_calls)
+        self.assertFalse(self.capture_provider.latest_session.closed)
+        R0ReadDispatcher().dispatch(object(), prepared)
+        preparer.capture_after(prepared)
+
+        self.assertEqual(1, self.capture_provider.capture_after_calls)
+        self.assertTrue(self.capture_provider.latest_session.closed)
 
     def test_path_grammar_fails_before_source_open(self) -> None:
         invalid = (
@@ -156,11 +157,53 @@ class AgentKernelR0ReadTest(unittest.TestCase):
             self.skipTest(f"symlink creation unavailable: {exc}")
 
         for relative in ("component/secret.txt", "leaf"):
-            with self.subTest(relative=relative):
+            provider = self.new_capture_provider()
+            with self.subTest(relative=relative), mock.patch(
+                "pullwise_worker.agent_kernel_r0_read._open_verified",
+                side_effect=AssertionError("unsafe path was opened"),
+            ) as open_verified:
                 with self.assertRaisesRegex(R0ReadError, "READ_PATH_UNSAFE"):
-                    self.preparer().prepare(
+                    self.preparer(capture_provider=provider).prepare(
                         object(), self.call(relative), self.descriptor
                     )
+                open_verified.assert_not_called()
+                self.assertTrue(provider.latest_session.closed)
+
+    def test_gitlink_ancestor_is_rejected_before_any_leaf_open(self) -> None:
+        gitlink = self.root / "submodule"
+        gitlink.mkdir()
+        (gitlink / "secret.txt").write_text("secret", encoding="utf-8")
+        scanned = snapshot_source_tree(
+            self.root, policy=self.policy, base_revision=BASE_REVISION
+        )
+        entries = tuple(
+            sorted(
+                (
+                    SourceEntry.gitlink(
+                        "submodule", commit_sha="b" * 40
+                    ),
+                    *(entry for entry in scanned.entries if not entry.path.startswith("submodule/")),
+                ),
+                key=lambda entry: entry.path.encode("utf-8"),
+            )
+        )
+        provider = self.new_capture_provider()
+        provider.before_snapshot = SourceTreeSnapshot(
+            BASE_REVISION, self.policy.digest, entries
+        )
+
+        with mock.patch(
+            "pullwise_worker.agent_kernel_r0_read._open_verified",
+            side_effect=AssertionError("gitlink descendant was opened"),
+        ) as open_verified, self.assertRaisesRegex(
+            R0ReadError, "READ_PATH_UNSAFE"
+        ):
+            self.preparer(capture_provider=provider).prepare(
+                object(), self.call("submodule/secret.txt"), self.descriptor
+            )
+
+        open_verified.assert_not_called()
+        self.assertTrue(provider.latest_session.closed)
 
     def test_directory_and_oversized_leaf_are_rejected(self) -> None:
         with self.assertRaisesRegex(R0ReadError, "READ_LEAF_NOT_REGULAR"):
@@ -203,16 +246,19 @@ class AgentKernelR0ReadTest(unittest.TestCase):
             "pullwise_worker.agent_kernel_r0_read.os.fdopen",
             side_effect=guarded_fdopen,
         ):
-            prepared = self.preparer().prepare(
+            preparer = self.preparer()
+            prepared = preparer.prepare(
                 object(), self.call("nested/README.md"), self.descriptor
             )
             receipt = R0ReadDispatcher().dispatch(object(), prepared)
+            preparer.capture_after(prepared)
 
         self.assertEqual(self.payload, receipt.payload)
         self.assertTrue(read_sizes)
 
     def test_in_place_growth_after_prepare_is_bounded_and_rejected(self) -> None:
-        prepared = self.preparer().prepare(
+        preparer = self.preparer()
+        prepared = preparer.prepare(
             object(), self.call("nested/README.md"), self.descriptor
         )
         self.target.write_bytes(b"x" * 4096)
@@ -220,6 +266,8 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         with self.assertRaisesRegex(R0ReadError, "READ_SOURCE_ENTRY_CHANGED"):
             R0ReadDispatcher().dispatch(object(), prepared)
 
+        self.assertFalse(prepared.dispatch_handle.closed)
+        preparer.discard(prepared)
         self.assertTrue(prepared.dispatch_handle.closed)
 
     def test_unselected_paths_are_rejected_before_any_leaf_open(self) -> None:
@@ -227,32 +275,34 @@ class AgentKernelR0ReadTest(unittest.TestCase):
             (".git/config", "READ_PATH_EXCLUDED"),
             ("missing.txt", "READ_SOURCE_ENTRY_CHANGED"),
         ):
+            provider = self.new_capture_provider()
             with self.subTest(relative=relative), mock.patch(
                 "pullwise_worker.agent_kernel_r0_read._open_verified",
                 side_effect=AssertionError("unselected path was opened"),
             ) as open_verified:
                 with self.assertRaisesRegex(R0ReadError, code):
-                    self.preparer().prepare(
+                    self.preparer(capture_provider=provider).prepare(
                         object(), self.call(relative), self.descriptor
                     )
                 open_verified.assert_not_called()
+                if provider.sessions:
+                    self.assertTrue(provider.latest_session.closed)
 
     def test_source_change_between_snapshot_and_open_is_rejected(self) -> None:
-        changed = False
-
-        def mutate(stage: str, path: Path) -> None:
-            nonlocal changed
-            if stage == "after_source_before" and not changed:
-                changed = True
-                self.target.write_bytes(b"different")
+        provider = self.new_capture_provider()
+        provider.after_begin = lambda session: self.target.write_bytes(
+            b"different"
+        )
 
         with self.assertRaisesRegex(R0ReadError, "READ_SOURCE_ENTRY_CHANGED"):
-            self.preparer(stage_hook=mutate).prepare(
+            self.preparer(capture_provider=provider).prepare(
                 object(), self.call("nested/README.md"), self.descriptor
             )
+        self.assertTrue(provider.latest_session.closed)
 
     def test_replacing_path_after_prepare_cannot_redirect_held_descriptor(self) -> None:
-        prepared = self.preparer().prepare(
+        preparer = self.preparer()
+        prepared = preparer.prepare(
             object(), self.call("nested/README.md"), self.descriptor
         )
         replacement = self.root / "replacement"
@@ -261,10 +311,11 @@ class AgentKernelR0ReadTest(unittest.TestCase):
             self.target.unlink()
             replacement.rename(self.target)
         except OSError as exc:
-            prepared.dispatch_handle.discard()
+            preparer.discard(prepared)
             self.skipTest(f"host does not permit replacing an open file: {exc}")
 
         receipt = R0ReadDispatcher().dispatch(object(), prepared)
+        preparer.capture_after(prepared)
 
         self.assertEqual(self.payload, receipt.payload)
 
@@ -278,19 +329,20 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         preparer.discard(prepared)
 
         self.assertTrue(prepared.dispatch_handle.closed)
+        self.assertEqual(1, self.capture_provider.latest_session.close_calls)
         with self.assertRaisesRegex(R0ReadError, "PREPARED_READ_CLOSED"):
             R0ReadDispatcher().dispatch(object(), prepared)
 
-    def test_prepare_hook_failure_does_not_leak_the_leaf_descriptor(self) -> None:
-        def fail(stage: str, path: Path) -> None:
-            if stage == "after_file_prepared":
-                raise RuntimeError("injected hook failure")
-
-        with self.assertRaisesRegex(RuntimeError, "injected hook failure"):
-            self.preparer(stage_hook=fail).prepare(
+    def test_prepare_failure_closes_leaf_and_capture_session(self) -> None:
+        with mock.patch(
+            "pullwise_worker.agent_kernel_r0_read._assert_entry_matches",
+            side_effect=RuntimeError("injected prepare failure"),
+        ), self.assertRaisesRegex(RuntimeError, "injected prepare failure"):
+            self.preparer().prepare(
                 object(), self.call("nested/README.md"), self.descriptor
             )
 
+        self.assertTrue(self.capture_provider.latest_session.closed)
         self.target.unlink()
 
     def test_dispatcher_rejects_untrusted_handle_shape(self) -> None:

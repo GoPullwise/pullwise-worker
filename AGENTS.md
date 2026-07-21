@@ -491,6 +491,16 @@ production Agent-First runner or a completed S3 slice.
   device/inode and the scanner-opened root. Production composition must require
   Git 2.45 or newer and a materializer-enforced single-writer catalog/scan
   window. The Windows path scanner remains development-only.
+- agent_kernel_checkout_window.py keeps that package-independent POSIX window
+  open from the exact-revision gitlink inspection and before snapshot through
+  the fresh inspection and after snapshot, or until explicit close. Its fixed
+  lock lives under a canonical Worker-owned control root disjoint from the
+  canonical checkout, combines a process mutex with a private no-follow flock,
+  and bounds both acquisition stages with one monotonic deadline. Every
+  cooperating checkout writer must use the same coordinator writer window.
+  This fences cooperating materializers only; arbitrary host mutation must
+  still fail the descriptor/root identity and SourceState checks. Windows
+  rejects this production coordinator rather than emulating the guarantee.
 - agent_kernel_gateway.py is only the fixed-order orchestration kernel. Journal
   begin must atomically revalidate the authority ticket and bind one opaque
   dispatch capability consumed by the dispatcher and every settlement path.

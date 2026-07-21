@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from tests.agent_kernel_capture_fakes import FakeCaptureProvider
 from pullwise_worker.agent_kernel_gateway import (
     AgentKernelGateway,
     CheckedInvocation,
@@ -102,33 +103,36 @@ class _Authorities:
 
 
 class _CapturingDispatcher:
-    def __init__(self, mutate: Path | None = None) -> None:
+    def __init__(
+        self,
+        provider: FakeCaptureProvider,
+        mutate: Path | None = None,
+    ) -> None:
+        self.provider = provider
         self.mutate = mutate
         self.handle: object | None = None
 
     def dispatch(self, capability: object, prepared: object) -> object:
         self.handle = prepared.dispatch_handle
+        if self.provider.latest_session.closed:
+            raise AssertionError("capture lease released before dispatch")
         receipt = R0ReadDispatcher().dispatch(capability, prepared)
+        if self.provider.latest_session.closed:
+            raise AssertionError("capture lease released during dispatch")
         if self.mutate is not None:
             self.mutate.write_bytes(b"changed after read")
         return receipt
 
 
-class _UnavailableAfterPreparer:
-    def __init__(self, delegate: R0ReadPreparer) -> None:
-        self.delegate = delegate
+class _FailingDispatcher:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
         self.handle: object | None = None
 
-    def prepare(self, *args: object) -> object:
-        prepared = self.delegate.prepare(*args)
+    def dispatch(self, capability: object, prepared: object) -> object:
+        del capability
         self.handle = prepared.dispatch_handle
-        return prepared
-
-    def capture_after(self, prepared: object) -> object:
-        raise SourceStateError("SOURCE_AFTER_UNAVAILABLE")
-
-    def discard(self, prepared: object) -> None:
-        self.delegate.discard(prepared)
+        raise self.error
 
 
 class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
@@ -153,14 +157,16 @@ class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
         self.policy = SourceSelectionPolicy.pullwise_full_scan(
             root_identity="repository:r0-gateway-test"
         )
+        self.capture_provider = FakeCaptureProvider(
+            self.root, self.policy, base_revision=BASE_REVISION
+        )
 
     def tearDown(self) -> None:
         self.scratch.cleanup()
 
     def _preparer(self) -> R0ReadPreparer:
         return R0ReadPreparer(
-            root=self.root,
-            policy=self.policy,
+            capture_provider=self.capture_provider,
             base_revision=BASE_REVISION,
             max_bytes=1024,
         )
@@ -182,7 +188,7 @@ class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
 
     def test_real_read_mutation_withholds_payload_and_settles_once(self) -> None:
         authorities = _Authorities(self.call)
-        dispatcher = _CapturingDispatcher(self.target)
+        dispatcher = _CapturingDispatcher(self.capture_provider, self.target)
 
         result = self._gateway(
             authorities, self._preparer(), dispatcher
@@ -193,21 +199,51 @@ class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
         self.assertEqual(1, authorities.settlements["violation"])
         self.assertEqual(1, sum(authorities.settlements.values()))
         self.assertTrue(dispatcher.handle.closed)
+        self.assertTrue(self.capture_provider.latest_session.closed)
 
     def test_real_read_after_snapshot_failure_settles_once(self) -> None:
         authorities = _Authorities(self.call)
-        dispatcher = _CapturingDispatcher()
-        preparer = _UnavailableAfterPreparer(self._preparer())
+        dispatcher = _CapturingDispatcher(self.capture_provider)
+        self.capture_provider.after_error = SourceStateError(
+            "SOURCE_AFTER_UNAVAILABLE"
+        )
 
         result = self._gateway(
-            authorities, preparer, dispatcher
+            authorities, self._preparer(), dispatcher
         ).invoke(b"request")
 
         self.assertIs(authorities.result, result)
         self.assertNotEqual(self.payload, result)
         self.assertEqual(1, authorities.settlements["unavailable"])
         self.assertEqual(1, sum(authorities.settlements.values()))
-        self.assertTrue(preparer.handle.closed)
+        self.assertTrue(dispatcher.handle.closed)
+        self.assertTrue(self.capture_provider.latest_session.closed)
+
+    def test_dispatch_failure_closes_descriptor_and_capture_session(self) -> None:
+        authorities = _Authorities(self.call)
+        dispatcher = _FailingDispatcher(RuntimeError("dispatch failed"))
+
+        result = self._gateway(
+            authorities, self._preparer(), dispatcher
+        ).invoke(b"request")
+
+        self.assertIs(authorities.result, result)
+        self.assertEqual(1, authorities.settlements["dispatch_failure"])
+        self.assertTrue(dispatcher.handle.closed)
+        self.assertTrue(self.capture_provider.latest_session.closed)
+
+    def test_cancellation_closes_descriptor_and_capture_session(self) -> None:
+        authorities = _Authorities(self.call)
+        dispatcher = _FailingDispatcher(KeyboardInterrupt("cancelled"))
+
+        with self.assertRaisesRegex(KeyboardInterrupt, "cancelled"):
+            self._gateway(
+                authorities, self._preparer(), dispatcher
+            ).invoke(b"request")
+
+        self.assertEqual(0, sum(authorities.settlements.values()))
+        self.assertTrue(dispatcher.handle.closed)
+        self.assertTrue(self.capture_provider.latest_session.closed)
 
 
 if __name__ == "__main__":

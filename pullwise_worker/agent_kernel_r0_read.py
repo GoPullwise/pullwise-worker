@@ -7,16 +7,19 @@ import hashlib
 import os
 from pathlib import Path
 import stat
-import threading
 
 from .agent_kernel_gateway import (
     CheckedInvocation,
-    GatewayError,
     PreparedDispatch,
     ToolDescriptor,
 )
+from .agent_kernel_r0_capture import (
+    MaterializedSourceCapture,
+    MaterializedSourceCaptureProvider,
+    PreparedR0ReadHandle,
+    R0ReadError,
+)
 from .agent_kernel_source_scan import (
-    StageHook,
     _DIRECTORY_FLAGS,
     _FILE_FLAGS,
     _HAS_DIRFD,
@@ -25,21 +28,16 @@ from .agent_kernel_source_scan import (
     _same_identity,
 )
 from .agent_kernel_source_state import (
+    PULLWISE_EXCLUDED_CONTROL_ROOTS,
     SourceEntry,
-    SourceSelectionPolicy,
     SourceStateError,
     SourceTreeSnapshot,
     _canonical_path,
     _is_excluded,
-    snapshot_source_tree,
 )
 
 
 READ_TOOL_KEY = "internal.read_source"
-
-
-class R0ReadError(GatewayError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -51,38 +49,6 @@ class ReadSourceFileInput:
             _canonical_path(self.relative_path)
         except SourceStateError as exc:
             raise R0ReadError("READ_PATH_INVALID", exc.code) from exc
-
-
-class PreparedR0ReadHandle:
-    __slots__ = ("_descriptor", "_expected_sha256", "_expected_size", "_lock")
-
-    def __init__(self, descriptor: int, entry: SourceEntry) -> None:
-        self._descriptor: int | None = descriptor
-        self._expected_sha256 = entry.sha256
-        self._expected_size = entry.size_bytes
-        self._lock = threading.Lock()
-
-    @property
-    def closed(self) -> bool:
-        with self._lock:
-            return self._descriptor is None
-
-    def take(self) -> tuple[int, str, int]:
-        with self._lock:
-            if self._descriptor is None:
-                raise R0ReadError("PREPARED_READ_CLOSED")
-            descriptor = self._descriptor
-            self._descriptor = None
-        assert self._expected_sha256 is not None
-        assert self._expected_size is not None
-        return descriptor, self._expected_sha256, self._expected_size
-
-    def discard(self) -> None:
-        with self._lock:
-            descriptor = self._descriptor
-            self._descriptor = None
-        if descriptor is not None:
-            os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -261,12 +227,9 @@ class R0ReadPreparer:
     def __init__(
         self,
         *,
-        root: Path,
-        policy: SourceSelectionPolicy,
+        capture_provider: MaterializedSourceCaptureProvider,
         base_revision: str,
         max_bytes: int,
-        gitlink_catalog: object | None = None,
-        stage_hook: StageHook | None = None,
     ) -> None:
         if (
             isinstance(max_bytes, bool)
@@ -274,12 +237,16 @@ class R0ReadPreparer:
             or max_bytes < 1
         ):
             raise R0ReadError("READ_SIZE_LIMIT_INVALID")
-        self.root = Path(root)
-        self.policy = policy
+        try:
+            root = Path(capture_provider.checkout_root)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise R0ReadError("READ_CAPTURE_PROVIDER_INVALID") from exc
+        if not root.is_absolute():
+            raise R0ReadError("READ_CAPTURE_PROVIDER_INVALID")
+        self.capture_provider = capture_provider
+        self.root = root
         self.base_revision = base_revision
         self.max_bytes = max_bytes
-        self.gitlink_catalog = gitlink_catalog
-        self.stage_hook = stage_hook
 
     def prepare(
         self,
@@ -293,59 +260,53 @@ class R0ReadPreparer:
         if not isinstance(call.tool_input, ReadSourceFileInput):
             raise R0ReadError("READ_INPUT_INVALID")
         relative = call.tool_input.relative_path
-        if _is_excluded(relative, self.policy.excluded_control_roots):
+        if _is_excluded(relative, PULLWISE_EXCLUDED_CONTROL_ROOTS):
             raise R0ReadError("READ_PATH_EXCLUDED")
-        source_before = snapshot_source_tree(
-            self.root,
-            policy=self.policy,
-            base_revision=self.base_revision,
-            gitlink_catalog=self.gitlink_catalog,
-        )
-        if self.stage_hook is not None:
-            self.stage_hook("after_source_before", self.root)
-        entries = {entry.path: entry for entry in source_before.entries}
-        entry = entries.get(relative)
-        if entry is None:
-            parts = relative.split("/")
-            if any(
-                entries.get("/".join(parts[:index])) is not None
-                for index in range(1, len(parts))
-            ):
-                raise R0ReadError("READ_PATH_UNSAFE")
-            if any(path.startswith(relative + "/") for path in entries):
-                raise R0ReadError("READ_LEAF_NOT_REGULAR")
-            raise R0ReadError("READ_SOURCE_ENTRY_CHANGED")
-        if entry.type != "file":
-            raise R0ReadError("READ_PATH_UNSAFE")
+        capture: MaterializedSourceCapture | None = None
         descriptor_fd: int | None = None
         try:
+            capture = self.capture_provider.begin_capture(
+                base_revision=self.base_revision
+            )
+            source_before = capture.source_before
+            if not isinstance(source_before, SourceTreeSnapshot):
+                raise R0ReadError("READ_SOURCE_CAPTURE_INVALID")
+            entries = {entry.path: entry for entry in source_before.entries}
+            entry = entries.get(relative)
+            if entry is None:
+                parts = relative.split("/")
+                if any(
+                    entries.get("/".join(parts[:index])) is not None
+                    for index in range(1, len(parts))
+                ):
+                    raise R0ReadError("READ_PATH_UNSAFE")
+                if any(path.startswith(relative + "/") for path in entries):
+                    raise R0ReadError("READ_LEAF_NOT_REGULAR")
+                raise R0ReadError("READ_SOURCE_ENTRY_CHANGED")
+            if entry.type != "file":
+                raise R0ReadError("READ_PATH_UNSAFE")
             descriptor_fd = _open_verified(self.root, relative)
             _assert_entry_matches(descriptor_fd, entry, self.max_bytes)
-            handle = PreparedR0ReadHandle(descriptor_fd, entry)
+            handle = PreparedR0ReadHandle(descriptor_fd, entry, capture)
             prepared = PreparedDispatch(
                 tool_key=descriptor.tool_key,
                 tool_version=descriptor.tool_version,
                 source_before=source_before,
                 dispatch_handle=handle,
             )
-            if self.stage_hook is not None:
-                self.stage_hook("after_file_prepared", self.root)
             descriptor_fd = None
+            capture = None
             return prepared
         finally:
             if descriptor_fd is not None:
                 os.close(descriptor_fd)
+            if capture is not None:
+                capture.close()
 
     def capture_after(
         self, prepared: PreparedDispatch
     ) -> SourceTreeSnapshot:
-        self._handle(prepared)
-        return snapshot_source_tree(
-            self.root,
-            policy=self.policy,
-            base_revision=self.base_revision,
-            gitlink_catalog=self.gitlink_catalog,
-        )
+        return self._handle(prepared).capture_after()
 
     def discard(self, prepared: PreparedDispatch) -> None:
         self._handle(prepared).discard()
@@ -388,6 +349,8 @@ class R0ReadDispatcher:
 
 
 __all__ = [
+    "MaterializedSourceCapture",
+    "MaterializedSourceCaptureProvider",
     "R0ReadDispatcher",
     "R0ReadError",
     "R0ReadPreparer",

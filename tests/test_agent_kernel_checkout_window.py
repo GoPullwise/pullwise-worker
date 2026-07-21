@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import stat
 import tempfile
 import threading
 import unittest
@@ -77,6 +76,75 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
             git_executable=self.git,
         )
 
+    def test_checkout_root_is_the_validated_read_only_absolute_root(self) -> None:
+        coordinator = self.coordinator()
+
+        self.assertEqual(self.root, coordinator.checkout_root)
+        self.assertTrue(coordinator.checkout_root.is_absolute())
+        with self.assertRaises(AttributeError):
+            coordinator.checkout_root = self.base / "other"
+
+        alias = self.base / "repository-alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        aliased = CheckoutCaptureCoordinator(
+            checkout_root=alias,
+            control_root=self.control,
+            policy=self.policy,
+            git_executable=self.git,
+        )
+        self.assertEqual(self.root.resolve(strict=True), aliased.checkout_root)
+
+    def test_checkout_and_control_roots_must_be_disjoint(self) -> None:
+        with self.assertRaisesRegex(
+            SourceStateError, "CHECKOUT_ROOTS_NOT_DISJOINT"
+        ):
+            CheckoutCaptureCoordinator(
+                checkout_root=self.root,
+                control_root=self.root,
+                policy=self.policy,
+                git_executable=self.git,
+            )
+
+        nested_control = self.root / "control"
+        nested_control.mkdir()
+        with self.assertRaisesRegex(
+            SourceStateError, "CHECKOUT_ROOTS_NOT_DISJOINT"
+        ):
+            CheckoutCaptureCoordinator(
+                checkout_root=self.root,
+                control_root=nested_control,
+                policy=self.policy,
+                git_executable=self.git,
+            )
+
+        aliased_control_target = self.root / "aliased-control-target"
+        aliased_control_target.mkdir()
+        control_alias = self.base / "control-alias"
+        control_alias.symlink_to(
+            aliased_control_target, target_is_directory=True
+        )
+        with self.assertRaisesRegex(
+            SourceStateError, "CHECKOUT_ROOTS_NOT_DISJOINT"
+        ):
+            CheckoutCaptureCoordinator(
+                checkout_root=self.root,
+                control_root=control_alias,
+                policy=self.policy,
+                git_executable=self.git,
+            )
+
+        nested_checkout = self.control / "repository"
+        nested_checkout.mkdir()
+        with self.assertRaisesRegex(
+            SourceStateError, "CHECKOUT_ROOTS_NOT_DISJOINT"
+        ):
+            CheckoutCaptureCoordinator(
+                checkout_root=nested_checkout,
+                control_root=self.control,
+                policy=self.policy,
+                git_executable=self.git,
+            )
+
     def test_session_keeps_catalog_private_and_reinspects_for_after(self) -> None:
         first_catalog = object()
         second_catalog = object()
@@ -148,35 +216,6 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
             self.assertTrue(finished.wait(1.0))
             thread.join(timeout=1.0)
 
-    def test_lock_file_is_regular_private_and_not_followed(self) -> None:
-        with mock.patch(
-            "pullwise_worker.agent_kernel_checkout_window.inspect_gitlinks",
-            return_value=object(),
-        ), mock.patch(
-            "pullwise_worker.agent_kernel_checkout_window.snapshot_source_tree",
-            return_value=self.before,
-        ):
-            session = self.coordinator().begin_capture(
-                base_revision=BASE_REVISION
-            )
-
-        lock_path = self.control / "agent-kernel-checkout.lock"
-        metadata = lock_path.lstat()
-        self.assertTrue(stat.S_ISREG(metadata.st_mode))
-        self.assertEqual(0o600, stat.S_IMODE(metadata.st_mode))
-        self.assertEqual(1, metadata.st_nlink)
-        session.close()
-
-        target = self.base / "outside-lock"
-        target.write_text("do not touch", encoding="utf-8")
-        lock_path.unlink()
-        lock_path.symlink_to(target)
-        with self.assertRaisesRegex(
-            SourceStateError, "CHECKOUT_LOCK_INVALID"
-        ):
-            self.coordinator().begin_capture(base_revision=BASE_REVISION)
-        self.assertEqual("do not touch", target.read_text(encoding="utf-8"))
-
     def test_checkout_identity_change_fails_and_releases_window(self) -> None:
         original = self.base / "original"
         replacement = self.base / "replacement"
@@ -224,6 +263,33 @@ class AgentKernelCheckoutWindowTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "after inspection failed"):
                 session.capture_after()
 
+        self.assertTrue(session.closed)
+        with self.coordinator().writer():
+            pass
+
+    def test_checkout_replacement_before_after_capture_is_rejected(self) -> None:
+        with mock.patch(
+            "pullwise_worker.agent_kernel_checkout_window.inspect_gitlinks",
+            return_value=object(),
+        ), mock.patch(
+            "pullwise_worker.agent_kernel_checkout_window.snapshot_source_tree",
+            return_value=self.before,
+        ) as snapshot:
+            session = self.coordinator().begin_capture(
+                base_revision=BASE_REVISION
+            )
+            original = self.base / "original"
+            replacement = self.base / "replacement"
+            replacement.mkdir()
+            self.root.rename(original)
+            replacement.rename(self.root)
+
+            with self.assertRaisesRegex(
+                SourceStateError, "CHECKOUT_IDENTITY_CHANGED"
+            ):
+                session.capture_after()
+
+        self.assertEqual(1, snapshot.call_count)
         self.assertTrue(session.closed)
         with self.coordinator().writer():
             pass

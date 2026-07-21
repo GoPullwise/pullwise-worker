@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 import stat
 import threading
+import time
 
 from .agent_kernel_source_state import SourceStateError
 
@@ -26,9 +28,11 @@ _DIRECTORY_FLAGS = (
 _LOCK_FLAGS = (
     os.O_RDWR
     | os.O_CREAT
+    | getattr(os, "O_NONBLOCK", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
+_LOCK_POLL_SECONDS = 0.05
 
 
 def _require_absolute(value: Path, code: str) -> Path:
@@ -36,9 +40,21 @@ def _require_absolute(value: Path, code: str) -> Path:
         path = Path(value)
     except (TypeError, ValueError) as exc:
         raise SourceStateError(code) from exc
-    if not path.is_absolute() or "\x00" in os.fspath(path):
+    raw_path = os.fspath(path)
+    if not path.is_absolute() or "\x00" in raw_path:
         raise SourceStateError(code)
-    return path
+    return Path(os.path.abspath(raw_path))
+
+
+def _canonical_existing_directory(value: Path, code: str) -> Path:
+    path = _require_absolute(value, code)
+    try:
+        canonical = path.resolve(strict=True)
+        metadata = canonical.lstat()
+    except OSError as exc:
+        raise SourceStateError(code) from exc
+    _assert_directory(metadata, code)
+    return canonical
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, int]:
@@ -97,13 +113,16 @@ class _ProcessMutex:
         self._condition = threading.Condition()
         self._owner: int | None = None
 
-    def acquire(self) -> None:
+    def acquire(self, deadline: float) -> None:
         identity = threading.get_ident()
         with self._condition:
             if self._owner == identity:
                 raise SourceStateError("CHECKOUT_WINDOW_REENTRANT")
             while self._owner is not None:
-                self._condition.wait()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SourceStateError("CHECKOUT_LOCK_TIMEOUT")
+                self._condition.wait(timeout=remaining)
             self._owner = identity
 
     def release(self) -> None:
@@ -152,6 +171,7 @@ class _HeldPosixLock:
             "CHECKOUT_CONTROL_ROOT_CHANGED",
         )
         try:
+            control_opened = os.fstat(self._control_descriptor)
             lock_path = os.stat(
                 _LOCK_FILE_NAME,
                 dir_fd=self._control_descriptor,
@@ -161,9 +181,21 @@ class _HeldPosixLock:
         except OSError as exc:
             raise SourceStateError("CHECKOUT_LOCK_INVALID") from exc
         if (
+            control_opened.st_uid != os.geteuid()
+            or stat.S_IMODE(control_opened.st_mode) & 0o022
+        ):
+            raise SourceStateError("CHECKOUT_CONTROL_ROOT_UNTRUSTED")
+        if (
             not stat.S_ISREG(lock_path.st_mode)
+            or not stat.S_ISREG(lock_opened.st_mode)
             or _identity(lock_path) != self._lock_identity
             or _identity(lock_opened) != self._lock_identity
+            or lock_path.st_uid != os.geteuid()
+            or lock_opened.st_uid != os.geteuid()
+            or lock_path.st_nlink != 1
+            or lock_opened.st_nlink != 1
+            or stat.S_IMODE(lock_path.st_mode) != 0o600
+            or stat.S_IMODE(lock_opened.st_mode) != 0o600
         ):
             raise SourceStateError("CHECKOUT_LOCK_INVALID")
 
@@ -186,7 +218,9 @@ class _HeldPosixLock:
 
 
 class _PosixCheckoutLock:
-    def __init__(self, control_root: Path) -> None:
+    def __init__(
+        self, control_root: Path, *, lock_timeout_seconds: int = 30
+    ) -> None:
         if (
             os.name != "posix"
             or _fcntl is None
@@ -194,13 +228,25 @@ class _PosixCheckoutLock:
             or os.open not in os.supports_dir_fd
         ):
             raise SourceStateError("CHECKOUT_CAPTURE_POSIX_REQUIRED")
-        self._control_root = _require_absolute(
+        if (
+            isinstance(lock_timeout_seconds, bool)
+            or not isinstance(lock_timeout_seconds, int)
+            or not 1 <= lock_timeout_seconds <= 300
+        ):
+            raise SourceStateError("CHECKOUT_LOCK_TIMEOUT_INVALID")
+        self._control_root = _canonical_existing_directory(
             control_root, "CHECKOUT_CONTROL_ROOT_INVALID"
         )
+        self._lock_timeout_seconds = lock_timeout_seconds
         self._mutex = _process_mutex(self._control_root)
 
+    @property
+    def control_root(self) -> Path:
+        return self._control_root
+
     def acquire(self) -> _HeldPosixLock:
-        self._mutex.acquire()
+        deadline = time.monotonic() + self._lock_timeout_seconds
+        self._mutex.acquire(deadline)
         control_descriptor: int | None = None
         lock_descriptor: int | None = None
         locked = False
@@ -234,9 +280,28 @@ class _PosixCheckoutLock:
             lock_metadata = os.fstat(lock_descriptor)
             if stat.S_IMODE(lock_metadata.st_mode) != 0o600:
                 raise SourceStateError("CHECKOUT_LOCK_INVALID")
-            assert _fcntl is not None
-            _fcntl.flock(lock_descriptor, _fcntl.LOCK_EX)
-            locked = True
+            while True:
+                if deadline - time.monotonic() <= 0:
+                    raise SourceStateError("CHECKOUT_LOCK_TIMEOUT")
+                try:
+                    assert _fcntl is not None
+                    _fcntl.flock(
+                        lock_descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB
+                    )
+                    locked = True
+                    break
+                except OSError as exc:
+                    if not isinstance(exc, BlockingIOError) and exc.errno not in {
+                        errno.EACCES,
+                        errno.EAGAIN,
+                    }:
+                        raise SourceStateError(
+                            "CHECKOUT_LOCK_UNAVAILABLE"
+                        ) from exc
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SourceStateError("CHECKOUT_LOCK_TIMEOUT") from exc
+                    time.sleep(min(_LOCK_POLL_SECONDS, remaining))
             held = _HeldPosixLock(
                 control_root=self._control_root,
                 control_descriptor=control_descriptor,

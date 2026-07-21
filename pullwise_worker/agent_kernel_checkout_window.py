@@ -13,6 +13,7 @@ from typing import Iterator
 from .agent_kernel_checkout_lock import (
     _HeldPosixLock,
     _PosixCheckoutLock,
+    _canonical_existing_directory,
     _require_absolute,
 )
 from .agent_kernel_gitlinks import inspect_gitlinks
@@ -35,6 +36,14 @@ _DIRECTORY_FLAGS = (
 
 def _identity(metadata: os.stat_result) -> tuple[int, int]:
     return metadata.st_dev, metadata.st_ino
+
+
+def _contains(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _assert_checkout_directory(metadata: os.stat_result) -> None:
@@ -189,8 +198,11 @@ class CheckoutCaptureCoordinator:
         policy: SourceSelectionPolicy,
         git_executable: Path,
         git_timeout_seconds: int = 30,
+        lock_timeout_seconds: int = 30,
     ) -> None:
-        self._lock = _PosixCheckoutLock(control_root)
+        self._lock = _PosixCheckoutLock(
+            control_root, lock_timeout_seconds=lock_timeout_seconds
+        )
         if not isinstance(policy, SourceSelectionPolicy):
             raise SourceStateError("SOURCE_POLICY_INVALID")
         if (
@@ -199,9 +211,13 @@ class CheckoutCaptureCoordinator:
             or not 1 <= git_timeout_seconds <= 300
         ):
             raise SourceStateError("SOURCE_GIT_TIMEOUT_INVALID")
-        self._checkout_root = _require_absolute(
+        self._checkout_root = _canonical_existing_directory(
             checkout_root, "CHECKOUT_ROOT_INVALID"
         )
+        if _contains(self._checkout_root, self._lock.control_root) or _contains(
+            self._lock.control_root, self._checkout_root
+        ):
+            raise SourceStateError("CHECKOUT_ROOTS_NOT_DISJOINT")
         self._policy = policy
         self._git_executable = _require_absolute(
             git_executable, "SOURCE_GIT_EXECUTABLE_INVALID"
@@ -256,10 +272,25 @@ class CheckoutCaptureCoordinator:
     @contextmanager
     def writer(self) -> Iterator[None]:
         held_lock = self._lock.acquire()
+        primary_error: BaseException | None = None
         try:
+            held_lock.assert_current()
             yield
+        except BaseException as exc:
+            primary_error = exc
         finally:
-            held_lock.release()
+            try:
+                held_lock.assert_current()
+            except BaseException as exc:
+                if primary_error is None:
+                    primary_error = exc
+            try:
+                held_lock.release()
+            except BaseException as exc:
+                if primary_error is None:
+                    primary_error = exc
+        if primary_error is not None:
+            raise primary_error.with_traceback(primary_error.__traceback__)
 
 
 __all__ = ["CheckoutCaptureCoordinator", "CheckoutCaptureSession"]
