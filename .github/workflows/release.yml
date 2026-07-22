@@ -31,11 +31,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check out frozen Server contract producer
+      - name: Check out current Server contract producer
         uses: actions/checkout@v4
         with:
           repository: GoPullwise/pullwise-server
-          ref: d68487a283bbc28e526ffac623cb3dd1f06cd4e9
+          ref: 48023e68b5bb04c7d5effd0a07d2c213deb7ea71
           path: current-contract-server
 
       - name: Validate release tag ancestry
