@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 
+from pullwise_worker.agent_kernel_current_gc import collect_current_orphans
 from pullwise_worker.agent_kernel_current_package import (
     verify_current_document_digest,
 )
@@ -9,6 +12,7 @@ from pullwise_worker.agent_kernel_dispatch_journal import (
     CurrentDispatchJournal,
     CurrentJournalError,
 )
+from pullwise_worker.agent_kernel_r0_read import R0ReadReceipt
 
 from tests.current_journal_support import CurrentJournalTestCase
 
@@ -153,6 +157,15 @@ class CurrentJournalRecoveryTest(CurrentJournalTestCase):
         capability = self.begin().dispatch_capability
         self.journal.consume_capability(capability)
         outcome = self.outcome(capability)
+        with self.assertRaisesRegex(
+            CurrentJournalError, "CURRENT_OBJECT_COLLECTION_NOT_IDLE"
+        ):
+            collect_current_orphans(
+                self.database,
+                self.objects,
+                min_age_seconds=60,
+                now=120,
+            )
         fenced = self.make_fenced_head(self.authority)
 
         with self.assertRaisesRegex(CurrentJournalError, "DISPATCH_AMBIGUOUS"):
@@ -179,7 +192,56 @@ class CurrentJournalRecoveryTest(CurrentJournalTestCase):
             settlements = connection.execute(
                 "SELECT count(*) FROM dispatch_settlements"
             ).fetchone()[0]
+            objects = connection.execute(
+                "SELECT count(*) FROM content_objects"
+            ).fetchone()[0]
+            bindings = connection.execute(
+                "SELECT count(*) FROM content_bindings"
+            ).fetchone()[0]
         self.assertEqual(("DISPATCHED", 0), (intent, settlements))
+        self.assertEqual((0, 0), (objects, bindings))
+        orphan_files = [
+            path for path in self.objects.objects.rglob("*") if path.is_file()
+        ]
+        self.assertEqual(3, len(orphan_files))
+        for path in orphan_files:
+            os.utime(path, (0, 0))
+        removed = collect_current_orphans(
+            self.database,
+            self.objects,
+            min_age_seconds=60,
+            now=120,
+        )
+        self.assertEqual(3, len(removed))
+        self.assertFalse(
+            any(path.is_file() for path in self.objects.objects.rglob("*"))
+        )
+
+    def test_fence_after_dispatch_blocks_payload_publication(self) -> None:
+        capability = self.begin().dispatch_capability
+        self.journal.consume_capability(capability)
+        payload = b"dispatcher already returned"
+        raw = R0ReadReceipt(
+            payload=payload,
+            sha256=hashlib.sha256(payload).hexdigest(),
+            size_bytes=len(payload),
+        )
+        fenced = self.make_fenced_head(self.authority)
+
+        with self.assertRaisesRegex(CurrentJournalError, "DISPATCH_AMBIGUOUS"):
+            self.journal.recover_abandon(
+                self.call.task_id,
+                self.call.idempotency_key,
+                self.call.invocation_digest,
+                fenced,
+            )
+        with self.assertRaisesRegex(CurrentJournalError, "AUTHORITY_FENCED"):
+            self.journal.publish_payload(capability, raw)
+
+        self.assertEqual((0, 60_000, 0, 1), self.budget())
+        self.assertFalse(
+            any(path.is_file() for path in self.objects.objects.rglob("*"))
+        )
 
     def test_recovery_rejects_unrelated_fenced_projection(self) -> None:
         self.begin()

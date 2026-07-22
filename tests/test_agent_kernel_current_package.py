@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, FrozenInstanceError
 import os
 from pathlib import Path
 import unittest
@@ -212,6 +212,10 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(GatewayError, 'TOOL_NOT_FOUND'):
             CURRENT_TOOL_CATALOG.resolve('unknown.tool')
+        with self.assertRaises(FrozenInstanceError):
+            setattr(CURRENT_TOOL_CATALOG, 'catalog_digest', '0' * 64)
+        with self.assertRaises(TypeError):
+            CURRENT_TOOL_CATALOG._descriptors['unknown.tool'] = descriptor
 
     def test_authority_projection_preserves_exact_canonical_bytes_and_grant(self) -> None:
         complete = authority_document()

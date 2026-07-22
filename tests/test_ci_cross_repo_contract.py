@@ -85,6 +85,8 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
         self.assertIn("python scripts/check_agent_kernel_wheel.py", workflow)
         self.assertIn("TaskStore", wheel_check)
         self.assertIn("TaskEventKind.ATTEMPT_CLAIMED", wheel_check)
+        self.assertIn("verify_current_package", wheel_check)
+        self.assertIn("CURRENT_PACKAGE", wheel_check)
 
     def test_ci_runs_default_legacy_absence_ratchet(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")

@@ -138,6 +138,11 @@ class CurrentR0ExecutionAdapter:
         prepared: PreparedDispatch,
         error: Exception,
     ) -> bytes:
+        if (
+            isinstance(error, CurrentJournalError)
+            and error.code == "AUTHORITY_FENCED"
+        ):
+            raise error
         return self.journal.commit_dispatch_failure(
             capability, call, prepared, error
         )

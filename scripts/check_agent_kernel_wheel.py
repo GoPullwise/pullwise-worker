@@ -22,6 +22,10 @@ PROBE = textwrap.dedent(
     import tempfile
 
     from pullwise_worker.agent_kernel_database import AgentKernelDatabase
+    from pullwise_worker.agent_kernel_current_package import (
+        CURRENT_PACKAGE,
+        verify_current_package,
+    )
     from pullwise_worker.agent_kernel_object_store import ObjectStore
     from pullwise_worker.agent_kernel_schema_registry import SchemaRegistry
     from pullwise_worker.agent_kernel_state import (
@@ -30,6 +34,11 @@ PROBE = textwrap.dedent(
         TransitionFacts,
     )
     from pullwise_worker.agent_kernel_task_store import TaskStore
+
+    verified_package = verify_current_package()
+    assert verified_package is CURRENT_PACKAGE
+    assert verified_package.package_identity == "@pullwise/agent-task-contract"
+    assert verified_package.package_version == "0.1.0"
 
     expected_schema_ids = {
         "actor/v1",
@@ -114,6 +123,8 @@ PROBE = textwrap.dedent(
         json.dumps(
             {
                 "cas_roundtrip": "ok",
+                "current_package_content_sha256": verified_package.content_sha256,
+                "current_package_root_sha256": verified_package.root_sha256,
                 "fixture_count": len(fixture_names),
                 "schema_count": len(registry.schema_ids),
                 "schema_root": str(registry.root),
