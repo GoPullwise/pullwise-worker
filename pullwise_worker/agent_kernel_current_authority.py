@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from .agent_kernel_current_budget import initialize_budget
 from .agent_kernel_current_database import CurrentAgentKernelDatabase
-from .agent_kernel_current_package import ServerAuthorityEnvelope
+from .agent_kernel_current_package import (
+    CURRENT_TOOL_CATALOG,
+    ServerAuthorityEnvelope,
+)
 
 
 class CurrentAuthorityProjectionError(RuntimeError):
@@ -49,34 +53,18 @@ class CurrentAuthorityProjection:
                     "UPDATE authority_heads SET authority_digest = ? WHERE task_id = ?",
                     (parsed.digest, parsed.task_id),
                 )
-            connection.execute(
-                "INSERT OR IGNORE INTO tool_call_budgets"
-                "(task_id, grant_digest, elapsed_limit_ms, consumed_ms, reserved_ms, "
-                "tool_call_limit, calls_consumed, calls_reserved) "
-                "VALUES (?, ?, ?, 0, 0, ?, 0, 0)",
-                (
-                    parsed.task_id, parsed.grant_digest,
-                    parsed.grant.elapsed_limit_ms, parsed.grant.tool_call_limit,
-                ),
-            )
-            limits = connection.execute(
-                "SELECT elapsed_limit_ms, tool_call_limit FROM tool_call_budgets "
-                "WHERE task_id = ? AND grant_digest = ?",
-                (parsed.task_id, parsed.grant_digest),
-            ).fetchone()
-            if tuple(limits) != (
-                parsed.grant.elapsed_limit_ms, parsed.grant.tool_call_limit
-            ):
-                self._fail("AUTHORITY_BUDGET_CONFLICT")
+            initialize_budget(connection, parsed)
         return parsed
 
-    def resolve_intent(self, idempotency_key: str) -> ServerAuthorityEnvelope | None:
+    def resolve_intent(
+        self, task_id: str, idempotency_key: str
+    ) -> ServerAuthorityEnvelope | None:
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT h.authority_bytes, h.grant_bytes FROM dispatch_intents i "
                 "JOIN authority_history h ON h.authority_digest = i.authority_digest "
-                "WHERE i.idempotency_key = ?",
-                (idempotency_key,),
+                "WHERE i.task_id = ? AND i.idempotency_key = ?",
+                (task_id, idempotency_key),
             ).fetchone()
         return None if row is None else self._parse(bytes(row[0]), bytes(row[1]))
 
@@ -125,17 +113,14 @@ class CurrentAuthorityProjection:
         self.assert_call(persisted, call)
 
     def assert_descriptor(self, envelope: ServerAuthorityEnvelope, descriptor: object) -> None:
-        controls = (
-            getattr(descriptor, "uses_command", None),
-            getattr(descriptor, "uses_network", None),
-            getattr(descriptor, "uses_secret", None),
-            getattr(descriptor, "requests_approval", None),
-        )
+        try:
+            expected = CURRENT_TOOL_CATALOG.resolve(getattr(descriptor, "tool_key", ""))
+        except Exception as exc:
+            raise CurrentAuthorityProjectionError("DISPATCH_NOT_AUTHORIZED") from exc
         if (
-            getattr(descriptor, "tool_key", None) not in envelope.grant.tool_keys
+            descriptor != expected
+            or getattr(descriptor, "tool_key", None) not in envelope.grant.tool_keys
             or getattr(descriptor, "capability", None) not in envelope.grant.capability_ids
-            or getattr(descriptor, "risk", None) != "R0"
-            or controls != (False, False, False, False)
         ):
             self._fail("DISPATCH_NOT_AUTHORIZED")
 
@@ -186,12 +171,18 @@ class CurrentAuthorityProjection:
         old: ServerAuthorityEnvelope, new: ServerAuthorityEnvelope
     ) -> None:
         monotonic = (
-            new.task_id == old.task_id
+            new.package.as_tuple() == old.package.as_tuple()
+            and new.task_id == old.task_id
+            and new.owner_id == old.owner_id
             and new.task_version > old.task_version
             and new.deletion_version >= old.deletion_version
-            and new.owner_epoch >= old.owner_epoch
-            and new.native_epoch >= old.native_epoch
-            and new.transport_epoch >= old.transport_epoch
+            and new.attempt_id != old.attempt_id
+            and new.session_id != old.session_id
+            and new.lease_id != old.lease_id
+            and new.grant.grant_id != old.grant.grant_id
+            and new.owner_epoch > old.owner_epoch
+            and new.native_epoch > old.native_epoch
+            and new.transport_epoch > old.transport_epoch
         )
         if not monotonic:
             raise CurrentAuthorityProjectionError("AUTHORITY_SUCCESSOR_INVALID")

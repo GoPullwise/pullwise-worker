@@ -33,6 +33,7 @@ class GatewayRig:
         self.failures: set[str] = set()
         self.cancel_at: str | None = None
         self.replay = ReplayState.new()
+        self.probes: list[tuple[str, str, str]] = []
         self.authority_ticket = object()
         self.dispatch_capability = object()
         self.begin_decision = DispatchDecision.winner(self.dispatch_capability)
@@ -91,8 +92,9 @@ class GatewayRig:
             tool_key="internal.read_source",
         )
 
-    def probe(self, key: str, digest: str) -> ReplayState:
+    def probe(self, task_id: str, key: str, digest: str) -> ReplayState:
         self._stage("probe")
+        self.probes.append((task_id, key, digest))
         return self.replay
 
     def assert_actor_current(self, call: CheckedInvocation) -> object:
@@ -246,6 +248,16 @@ class AgentKernelGatewayTest(unittest.TestCase):
                 "commit",
             ],
             rig.stages,
+        )
+        self.assertEqual(
+            [
+                (
+                    "task-" + "2" * 32,
+                    "idem-" + "1" * 32,
+                    hashlib.sha256(b"request").hexdigest(),
+                )
+            ],
+            rig.probes,
         )
 
     def test_completed_replay_skips_all_authority_and_dispatch(self) -> None:

@@ -332,7 +332,7 @@ class _TracerAuthorities:
     def validate(self, raw: bytes) -> CheckedInvocation:
         return self.call
 
-    def probe(self, key: str, digest: str) -> ReplayState:
+    def probe(self, task_id: str, key: str, digest: str) -> ReplayState:
         return ReplayState.new()
 
     def assert_actor_current(self, call: CheckedInvocation) -> object:

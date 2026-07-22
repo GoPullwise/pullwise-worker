@@ -64,7 +64,11 @@ class AgentKernelGateway:
     def invoke(self, raw: bytes) -> object:
         call = self.codec.validate(raw)
         replayed = _replay_value(
-            self.journal.probe(call.idempotency_key, call.invocation_digest)
+            self.journal.probe(
+                call.task_id,
+                call.idempotency_key,
+                call.invocation_digest,
+            )
         )
         if replayed is not _NOT_REPLAY:
             return replayed

@@ -160,7 +160,7 @@ class InvocationCodec(Protocol):
 class DispatchJournal(Protocol):
     """Sole durable begin owner: revalidate, reserve, persist, and bind."""
 
-    def probe(self, key: str, digest: str) -> ReplayState: ...
+    def probe(self, task_id: str, key: str, digest: str) -> ReplayState: ...
 
     def begin(
         self,

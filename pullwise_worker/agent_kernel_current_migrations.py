@@ -68,6 +68,8 @@ MIGRATION_1 = (
         tool_call_limit INTEGER NOT NULL CHECK (tool_call_limit >= 1),
         calls_consumed INTEGER NOT NULL DEFAULT 0 CHECK (calls_consumed >= 0),
         calls_reserved INTEGER NOT NULL DEFAULT 0 CHECK (calls_reserved >= 0),
+        ledger_bytes BLOB NOT NULL,
+        ledger_digest TEXT NOT NULL CHECK (length(ledger_digest) = 64),
         PRIMARY KEY (task_id, grant_digest),
         CHECK (consumed_ms + reserved_ms <= elapsed_limit_ms),
         CHECK (calls_consumed + calls_reserved <= tool_call_limit)
