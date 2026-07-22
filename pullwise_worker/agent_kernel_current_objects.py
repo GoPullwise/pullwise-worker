@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 import stat
 
@@ -25,7 +26,7 @@ class PublishedCurrentObject:
 
 
 @dataclass(frozen=True)
-class PublishedCurrentPayload:
+class PublishedCurrentReference:
     object: PublishedCurrentObject
     content_ref: dict[str, object]
     content_ref_bytes: bytes
@@ -37,6 +38,24 @@ class PublishedCurrentPayload:
     @property
     def size_bytes(self) -> int:
         return self.object.size_bytes
+
+
+@dataclass(frozen=True)
+class PublishedCurrentPayload:
+    payload: PublishedCurrentReference
+    source: PublishedCurrentReference
+
+    @property
+    def object(self) -> PublishedCurrentObject:
+        return self.payload.object
+
+    @property
+    def content_ref(self) -> dict[str, object]:
+        return self.payload.content_ref
+
+    @property
+    def content_ref_bytes(self) -> bytes:
+        return self.payload.content_ref_bytes
 
 
 class CurrentObjectStore:
@@ -104,11 +123,17 @@ class CurrentObjectStore:
     def path_for(self, published: PublishedCurrentObject) -> Path:
         if not isinstance(published, PublishedCurrentObject):
             raise CurrentObjectError("CURRENT_OBJECT_IDENTITY_INVALID")
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", published.sha256) is None
+            or isinstance(published.size_bytes, bool)
+            or not isinstance(published.size_bytes, int)
+            or published.size_bytes < 0
+        ):
+            raise CurrentObjectError("CURRENT_OBJECT_IDENTITY_INVALID")
         expected = f"objects/{published.sha256[:2]}/{published.sha256}"
         if (
             published.relative_path != expected
             or PurePosixPath(expected).as_posix() != expected
-            or len(published.sha256) != 64
         ):
             raise CurrentObjectError("CURRENT_OBJECT_IDENTITY_INVALID")
         return self.root.joinpath(*PurePosixPath(expected).parts)
@@ -138,7 +163,7 @@ class CurrentObjectStore:
                 chunks.append(chunk)
             payload = b"".join(chunks)
             after = os.fstat(descriptor)
-            if before != after:
+            if self._stable_file_identity(before) != self._stable_file_identity(after):
                 raise CurrentObjectError("CURRENT_OBJECT_UNSAFE")
             if (
                 len(payload) != published.size_bytes
@@ -170,6 +195,18 @@ class CurrentObjectStore:
         return bool(attributes & marker)
 
     @staticmethod
+    def _stable_file_identity(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    @staticmethod
     def _fsync_directory(path: Path) -> None:
         if os.name != "posix":
             return
@@ -185,4 +222,5 @@ __all__ = [
     "CurrentObjectStore",
     "PublishedCurrentObject",
     "PublishedCurrentPayload",
+    "PublishedCurrentReference",
 ]

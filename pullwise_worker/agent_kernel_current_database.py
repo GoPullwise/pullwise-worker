@@ -15,6 +15,8 @@ from .agent_kernel_current_migrations import (
     CURRENT_TABLES,
     MIGRATION_1,
     MIGRATION_1_SHA256,
+    MIGRATION_1_SCHEMA_SHA256,
+    schema_fingerprint,
 )
 
 
@@ -199,6 +201,8 @@ class CurrentAgentKernelDatabase:
     def _validate_schema(self, connection: sqlite3.Connection) -> None:
         if self._table_names(connection) != set(CURRENT_TABLES):
             raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "table set")
+        if schema_fingerprint(connection) != MIGRATION_1_SCHEMA_SHA256:
+            raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "schema fingerprint")
         row = connection.execute(
             "SELECT schema_version, migration_sha256 FROM current_schema WHERE singleton = 1"
         ).fetchone()

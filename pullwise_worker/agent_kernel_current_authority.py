@@ -51,16 +51,22 @@ class CurrentAuthorityProjection:
                 )
             connection.execute(
                 "INSERT OR IGNORE INTO tool_call_budgets"
-                "(task_id, grant_digest, hard_limit, consumed, active_reserved) "
-                "VALUES (?, ?, ?, 0, 0)",
-                (parsed.task_id, parsed.grant_digest, parsed.grant.tool_call_limit),
+                "(task_id, grant_digest, elapsed_limit_ms, consumed_ms, reserved_ms, "
+                "tool_call_limit, calls_consumed, calls_reserved) "
+                "VALUES (?, ?, ?, 0, 0, ?, 0, 0)",
+                (
+                    parsed.task_id, parsed.grant_digest,
+                    parsed.grant.elapsed_limit_ms, parsed.grant.tool_call_limit,
+                ),
             )
-            limit = connection.execute(
-                "SELECT hard_limit FROM tool_call_budgets "
+            limits = connection.execute(
+                "SELECT elapsed_limit_ms, tool_call_limit FROM tool_call_budgets "
                 "WHERE task_id = ? AND grant_digest = ?",
                 (parsed.task_id, parsed.grant_digest),
-            ).fetchone()[0]
-            if limit != parsed.grant.tool_call_limit:
+            ).fetchone()
+            if tuple(limits) != (
+                parsed.grant.elapsed_limit_ms, parsed.grant.tool_call_limit
+            ):
                 self._fail("AUTHORITY_BUDGET_CONFLICT")
         return parsed
 
@@ -194,7 +200,7 @@ class CurrentAuthorityProjection:
     def _insert_history(connection: object, item: ServerAuthorityEnvelope) -> None:
         connection.execute(
             "INSERT INTO authority_history VALUES "
-            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 item.digest, item.task_id, item.canonical_bytes,
                 item.grant.canonical_bytes, item.grant_digest,
@@ -203,7 +209,8 @@ class CurrentAuthorityProjection:
                 item.attempt_id, item.session_id, item.owner_id, item.lease_id,
                 item.task_version, item.deletion_version, item.owner_epoch,
                 item.native_epoch, item.transport_epoch, item.lifecycle,
-                item.desired_state, item.grant.tool_call_limit,
+                item.desired_state, item.grant.elapsed_limit_ms,
+                item.grant.tool_call_limit,
             ),
         )
 

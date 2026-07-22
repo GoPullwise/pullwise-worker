@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
+import os
 from pathlib import Path
 import unittest
 from unittest.mock import Mock
@@ -8,6 +9,7 @@ from unittest.mock import Mock
 from pullwise_worker import _generated_agent_task_contract as generated_contract
 from pullwise_worker.agent_kernel_current_package import (
     CURRENT_PACKAGE,
+    CURRENT_TOOL_CATALOG,
     CurrentInvocationCodec,
     ServerAuthorityEnvelope,
     canonical_current_document_bytes,
@@ -21,7 +23,12 @@ from pullwise_worker.agent_kernel_r0_read import ReadSourceFileInput
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SERVER_ROOT = REPO_ROOT.parent / "pullwise-server"
+CONFIGURED_SERVER_ROOT = os.environ.get('PULLWISE_CURRENT_SERVER_ROOT')
+SERVER_ROOT = (
+    Path(CONFIGURED_SERVER_ROOT)
+    if CONFIGURED_SERVER_ROOT is not None
+    else REPO_ROOT.parent / 'pullwise-server'
+)
 WORKER_WRAPPER = REPO_ROOT / "pullwise_worker" / "_generated_agent_task_contract.py"
 SERVER_WRAPPER = (
     SERVER_ROOT / "pullwise_server" / "_generated_agent_task_contract.py"
@@ -70,7 +77,7 @@ def grant_document(
             'policy_digest': '7' * 64,
             'capability_ids': ['source.read'],
             'tool_keys': ['internal.read_source'],
-            'elapsed_ms_limit': 60_000,
+            'elapsed_limit_ms': 60_000,
             'tool_call_limit': 3,
         },
     )
@@ -145,6 +152,31 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
         self.assertTrue(SERVER_BUNDLE.is_file(), "Server bundle artifact is required")
         self.assertEqual(SERVER_WRAPPER.read_bytes(), WORKER_WRAPPER.read_bytes())
         self.assertEqual(SERVER_BUNDLE.read_bytes(), generated_contract.bundle_bytes())
+
+    def test_current_tool_catalog_is_package_owned_and_gateway_ready(self) -> None:
+        descriptor = CURRENT_TOOL_CATALOG.resolve('internal.read_source')
+        self.assertEqual('1.0.0', descriptor.tool_version)
+        self.assertEqual('R0', descriptor.risk)
+        self.assertEqual('source.read', descriptor.capability)
+        self.assertEqual(
+            (False, False, False, False),
+            (
+                descriptor.uses_command,
+                descriptor.uses_network,
+                descriptor.uses_secret,
+                descriptor.requests_approval,
+            ),
+        )
+        document = verify_current_document_digest(
+            'tool-catalog/v1', CURRENT_TOOL_CATALOG.as_document()
+        )
+        self.assertEqual(document['catalog_digest'], CURRENT_TOOL_CATALOG.catalog_digest)
+        self.assertEqual(
+            canonical_validated_current_bytes('tool-catalog/v1', document),
+            CURRENT_TOOL_CATALOG.canonical_bytes,
+        )
+        with self.assertRaisesRegex(GatewayError, 'TOOL_NOT_FOUND'):
+            CURRENT_TOOL_CATALOG.resolve('unknown.tool')
 
     def test_authority_projection_preserves_exact_canonical_bytes_and_grant(self) -> None:
         complete = authority_document()
@@ -235,6 +267,7 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
             'package': CURRENT_PACKAGE.as_document(),
             'grant_digest': '1' * 64,
             'authority_digest': '2' * 64,
+            'task_id': 'task_' + '9' * 32,
             'owner_epoch': 999,
             'status': 'succeeded',
             'observation_id': 'obs_' + '3' * 32,
@@ -267,7 +300,7 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
 
         replay = CurrentInvocationCodec(successor, resolver).validate(request_bytes())
 
-        resolver.assert_called_once_with('invoke:one')
+        resolver.assert_called_once_with(successor.task_id, 'invoke:one')
         self.assertEqual(original.authority_digest, replay.authority_digest)
         self.assertEqual(original.task_version, replay.task_version)
 

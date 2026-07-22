@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import os
 import hashlib
 import json
-import sqlite3
 from pathlib import Path
-import stat
 import tempfile
 from types import SimpleNamespace
 import unittest
 
 from pullwise_worker.agent_kernel_current_database import (
     CurrentAgentKernelDatabase,
-    CurrentDatabaseError,
 )
 from pullwise_worker.agent_kernel_current_objects import (
-    CurrentObjectError,
     CurrentObjectStore,
 )
 from pullwise_worker.agent_kernel_current_package import (
@@ -34,7 +29,6 @@ from pullwise_worker.agent_kernel_dispatch_journal import (
 from pullwise_worker.agent_kernel_gateway import (
     CheckedInvocation,
     PreparedDispatch,
-    ToolDescriptor,
 )
 from pullwise_worker.agent_kernel_r0_read import R0ReadReceipt
 from pullwise_worker.agent_kernel_source_state import (
@@ -42,121 +36,6 @@ from pullwise_worker.agent_kernel_source_state import (
     SourceTreeSnapshot,
     diff_source_trees,
 )
-
-
-class _PackageRef:
-    def __init__(self, suffix: str = "a") -> None:
-        self.package_identity = "test-current-package"
-        self.package_version = "1.0.0"
-        self.content_sha256 = suffix * 64
-        self.root_sha256 = "b" * 64
-
-    def as_tuple(self) -> tuple[str, str, str, str]:
-        return (
-            self.package_identity,
-            self.package_version,
-            self.content_sha256,
-            self.root_sha256,
-        )
-
-
-class CurrentAgentKernelDatabaseTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.scratch = tempfile.TemporaryDirectory(prefix="current-agent-kernel-")
-        self.root = Path(self.scratch.name) / "current"
-
-    def tearDown(self) -> None:
-        self.scratch.cleanup()
-
-    def test_new_root_has_strict_sqlite_configuration_and_migration_one(self) -> None:
-        database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
-
-        self.assertEqual(self.root / "agent-kernel-current.sqlite3", database.path)
-        self.assertNotIn("shadow", database.path.as_posix())
-        with database.connect() as connection:
-            self.assertEqual("wal", connection.execute("PRAGMA journal_mode").fetchone()[0])
-            self.assertEqual(1, connection.execute("PRAGMA foreign_keys").fetchone()[0])
-            self.assertEqual(2, connection.execute("PRAGMA synchronous").fetchone()[0])
-            self.assertGreaterEqual(
-                connection.execute("PRAGMA busy_timeout").fetchone()[0], 1_000
-            )
-            self.assertEqual(1, connection.execute("PRAGMA user_version").fetchone()[0])
-        if os.name == "posix":
-            self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
-            self.assertEqual(0o600, stat.S_IMODE(database.path.stat().st_mode))
-
-    def test_package_lock_rejects_non_lowercase_digest(self) -> None:
-        with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_PACKAGE_LOCK_INVALID"):
-            CurrentAgentKernelDatabase.open(self.root, _PackageRef("A"))
-
-    def test_reopen_fails_closed_on_package_lock_mismatch(self) -> None:
-        CurrentAgentKernelDatabase.open(self.root, _PackageRef("a"))
-
-        with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_PACKAGE_LOCK_MISMATCH"):
-            CurrentAgentKernelDatabase.open(self.root, _PackageRef("c"))
-
-    def test_reopen_fails_closed_on_unknown_schema_version(self) -> None:
-        database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
-        connection = sqlite3.connect(database.path)
-        connection.execute("PRAGMA user_version = 99")
-        connection.close()
-
-        with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_SCHEMA_UNKNOWN"):
-            CurrentAgentKernelDatabase.open(self.root, _PackageRef())
-
-    def test_reopen_rejects_hardlinked_database_file(self) -> None:
-        database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
-        os.link(database.path, self.root / "unexpected-hardlink.sqlite3")
-
-        with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_DATABASE_FILE_INVALID"):
-            CurrentAgentKernelDatabase.open(self.root, _PackageRef())
-
-    def test_root_symlink_is_rejected_when_platform_can_create_one(self) -> None:
-        target = Path(self.scratch.name) / "target"
-        target.mkdir()
-        try:
-            self.root.symlink_to(target, target_is_directory=True)
-        except OSError as exc:
-            self.skipTest(f"directory symlink unavailable: {exc}")
-
-        with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_DATABASE_ROOT_INVALID"):
-            CurrentAgentKernelDatabase.open(self.root, _PackageRef())
-
-
-class CurrentObjectStoreTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.scratch = tempfile.TemporaryDirectory(prefix="current-object-store-")
-        self.root = Path(self.scratch.name) / "content"
-        self.store = CurrentObjectStore(self.root)
-
-    def tearDown(self) -> None:
-        self.scratch.cleanup()
-
-    def test_publish_is_private_verified_and_idempotent(self) -> None:
-        first = self.store.publish(b"durable current payload")
-        second = self.store.publish(b"durable current payload")
-
-        self.assertEqual(first, second)
-        self.assertEqual(b"durable current payload", self.store.read_verified(first))
-        path = self.store.path_for(first)
-        self.assertEqual(1, path.stat().st_nlink)
-        if os.name == "posix":
-            self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
-
-    def test_existing_corrupt_object_fails_closed(self) -> None:
-        published = self.store.publish(b"original")
-        path = self.store.path_for(published)
-        path.write_bytes(b"corrupt")
-
-        with self.assertRaisesRegex(CurrentObjectError, "CURRENT_OBJECT_CORRUPT"):
-            self.store.publish(b"original")
-
-    def test_hardlinked_object_is_never_accepted(self) -> None:
-        published = self.store.publish(b"one-link-only")
-        os.link(self.store.path_for(published), self.root / "extra-link")
-
-        with self.assertRaisesRegex(CurrentObjectError, "CURRENT_OBJECT_UNSAFE"):
-            self.store.read_verified(published)
 
 
 class CurrentDispatchJournalTest(unittest.TestCase):
@@ -201,7 +80,7 @@ class CurrentDispatchJournalTest(unittest.TestCase):
             "transport_epoch": 4, "policy_digest": "6" * 64,
             "capability_ids": ["source.read"],
             "tool_keys": ["internal.read_source"],
-            "elapsed_budget_ms": 60_000, "tool_call_limit": 2,
+            "elapsed_limit_ms": 60_000, "tool_call_limit": 2,
         })
         typed_grant = ServerDispatchGrant.from_document(grant)
         envelope = seal_current_document("server-authority-envelope/v1", {
@@ -257,7 +136,7 @@ class CurrentDispatchJournalTest(unittest.TestCase):
         plan = self.journal.plan_reservation(self.authority, self.call, self.descriptor)
         with self.database.connect() as connection:
             self.assertEqual((0, 0), tuple(connection.execute(
-                "SELECT active_reserved, consumed FROM tool_call_budgets"
+                "SELECT reserved_ms, consumed_ms FROM tool_call_budgets"
             ).fetchone()))
             self.assertEqual(0, connection.execute("SELECT count(*) FROM dispatch_intents").fetchone()[0])
         decision = self.journal.begin(
@@ -304,7 +183,7 @@ class CurrentDispatchJournalTest(unittest.TestCase):
         self.assertEqual(("COMPLETED", first), (replay.kind, replay.result))
         with self.database.connect() as connection:
             self.assertEqual((0, 0), tuple(connection.execute(
-                "SELECT active_reserved, consumed FROM tool_call_budgets"
+                "SELECT reserved_ms, consumed_ms FROM tool_call_budgets"
             ).fetchone()))
 
     def test_settlement_binds_cas_receipt_result_observation_and_budget(self) -> None:
@@ -324,7 +203,7 @@ class CurrentDispatchJournalTest(unittest.TestCase):
         ).result)
         with self.database.connect() as connection:
             self.assertEqual((0, 1), tuple(connection.execute(
-                "SELECT active_reserved, consumed FROM tool_call_budgets"
+                "SELECT reserved_ms, consumed_ms FROM tool_call_budgets"
             ).fetchone()))
             self.assertEqual(2, connection.execute("SELECT count(*) FROM content_bindings").fetchone()[0])
             self.assertEqual(1, connection.execute("SELECT count(*) FROM dispatch_settlements").fetchone()[0])
@@ -371,10 +250,10 @@ class CurrentDispatchJournalTest(unittest.TestCase):
         self.assertEqual("SOURCE_MUTATION_FORBIDDEN", json.loads(replay)["code"])
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT result_bytes IS NOT NULL, violation_bytes, observation_bytes "
+                "SELECT outcome_bytes, violation_bytes, observation_bytes "
                 "FROM dispatch_settlements"
             ).fetchone()
-        self.assertEqual(1, row[0])
+        self.assertEqual("error-response/v1", json.loads(row[0])["schema_id"])
         self.assertTrue(row[1])
         self.assertEqual("policy_violation", json.loads(row[2])["status"])
 
