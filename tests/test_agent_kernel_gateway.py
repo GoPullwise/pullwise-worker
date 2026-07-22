@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from dataclasses import fields, replace
 import hashlib
 import unittest
 
@@ -51,11 +51,7 @@ class GatewayRig:
         policy = SourceSelectionPolicy.pullwise_full_scan(
             root_identity="repository:gateway-test"
         )
-        self.before = SourceTreeSnapshot(
-            base_revision=BASE_REVISION,
-            selection_policy_digest=policy.digest,
-            entries=(),
-        )
+        self.before = SourceTreeSnapshot(BASE_REVISION, policy.digest, ())
         self.after = self.before
         self.receipt = object()
         self.result = object()
@@ -287,15 +283,11 @@ class AgentKernelGatewayTest(unittest.TestCase):
 
     def test_non_r0_descriptor_is_denied_before_prepare_or_budget(self) -> None:
         rig = GatewayRig()
-        rig.descriptor = ToolDescriptor(
-            tool_key="internal.read_source",
-            tool_version="test",
+        rig.descriptor = replace(
+            rig.descriptor,
             risk="R2",
             capability="network.read",
-            uses_command=False,
             uses_network=True,
-            uses_secret=False,
-            requests_approval=False,
         )
 
         with self.assertRaisesRegex(GatewayError, "CAPABILITY_NOT_IMPLEMENTED"):
@@ -305,7 +297,8 @@ class AgentKernelGatewayTest(unittest.TestCase):
 
     def test_lost_intent_race_discards_only_and_does_not_dispatch(self) -> None:
         replayed = object()
-        for decision in (DispatchDecision.pending(), DispatchDecision.completed(replayed)):
+        decisions = (DispatchDecision.pending(), DispatchDecision.completed(replayed))
+        for decision in decisions:
             with self.subTest(decision=decision.kind):
                 rig = GatewayRig()
                 rig.begin_decision = decision
