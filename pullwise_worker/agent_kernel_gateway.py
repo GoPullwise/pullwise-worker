@@ -11,6 +11,11 @@ from .agent_kernel_source_state import SourceDiff, SourceTreeSnapshot, diff_sour
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 RISK_LEVELS = frozenset({"R0", "R1", "R2", "R3", "R4"})
 
+
+def _valid_int(value: object, minimum: int) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= minimum
+
+
 class GatewayError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
@@ -20,35 +25,48 @@ class GatewayError(RuntimeError):
 
 @dataclass(frozen=True)
 class CheckedInvocation:
-    """Facts validated by the exact-pinned package codec."""
+    """Package-codec output whose digest covers all canonical invocation facts."""
 
     idempotency_key: str
     invocation_digest: str
+    authority_digest: str
+    package_content_sha256: str
+    package_root_sha256: str
+    grant_digest: str
     task_id: str
     attempt_id: str
+    owner_id: str
     session_id: str
+    lease_id: str
+    task_version: int
+    deletion_version: int
     owner_epoch: int
     native_epoch: int
+    transport_epoch: int
     tool_key: str
     tool_input: object = None
 
     def __post_init__(self) -> None:
-        text = (
-            self.idempotency_key,
-            self.task_id,
-            self.attempt_id,
-            self.session_id,
-            self.tool_key,
-        )
+        text = (self.idempotency_key, self.task_id, self.attempt_id, self.owner_id,
+                self.session_id, self.lease_id, self.tool_key)
         if any(not isinstance(value, str) or not value for value in text):
             raise GatewayError("INVOCATION_FACTS_INVALID")
-        if not DIGEST_PATTERN.fullmatch(self.invocation_digest):
-            raise GatewayError("INVOCATION_DIGEST_INVALID")
-        epochs = (self.owner_epoch, self.native_epoch)
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 1
-            for value in epochs
-        ):
+        digests = (
+            (self.invocation_digest, "INVOCATION_DIGEST_INVALID"),
+            (self.authority_digest, "AUTHORITY_DIGEST_INVALID"),
+            (self.package_content_sha256, "PACKAGE_DIGEST_INVALID"),
+            (self.package_root_sha256, "PACKAGE_DIGEST_INVALID"),
+            (self.grant_digest, "GRANT_DIGEST_INVALID"),
+        )
+        for value, code in digests:
+            if not isinstance(value, str) or not DIGEST_PATTERN.fullmatch(value):
+                raise GatewayError(code)
+        if not _valid_int(self.task_version, 1):
+            raise GatewayError("TASK_VERSION_INVALID")
+        if not _valid_int(self.deletion_version, 0):
+            raise GatewayError("DELETION_VERSION_INVALID")
+        epochs = (self.owner_epoch, self.native_epoch, self.transport_epoch)
+        if any(not _valid_int(value, 1) for value in epochs):
             raise GatewayError("INVOCATION_EPOCH_INVALID")
 
 
@@ -64,19 +82,12 @@ class ToolDescriptor:
     requests_approval: bool
 
     def __post_init__(self) -> None:
-        if (
-            not self.tool_key
-            or not self.tool_version
-            or not self.capability
-            or self.risk not in RISK_LEVELS
+        if not all((self.tool_key, self.tool_version, self.capability)) or (
+            self.risk not in RISK_LEVELS
         ):
             raise GatewayError("TOOL_DESCRIPTOR_INVALID")
-        controls = (
-            self.uses_command,
-            self.uses_network,
-            self.uses_secret,
-            self.requests_approval,
-        )
+        controls = (self.uses_command, self.uses_network, self.uses_secret,
+                    self.requests_approval)
         if any(not isinstance(value, bool) for value in controls):
             raise GatewayError("TOOL_DESCRIPTOR_INVALID")
 
@@ -129,11 +140,13 @@ class DispatchDecision:
 
 
 class InvocationCodec(Protocol):
+    """Validate package bytes and derive trusted facts, never from tool input."""
+
     def validate(self, raw: bytes) -> CheckedInvocation: ...
 
 
 class DispatchJournal(Protocol):
-    """Atomically revalidate authority and bind a winning dispatch capability."""
+    """Sole durable begin owner: revalidate, reserve, persist, and bind."""
 
     def probe(self, key: str, digest: str) -> ReplayState: ...
 
@@ -143,11 +156,13 @@ class DispatchJournal(Protocol):
         call: CheckedInvocation,
         descriptor: ToolDescriptor,
         prepared: PreparedDispatch,
-        reservation: object,
+        reservation_plan: object,
     ) -> DispatchDecision: ...
 
 
 class CurrentAuthority(Protocol):
+    """Preflight checks only; journal begin must durably revalidate all facts."""
+
     def assert_actor_current(self, call: CheckedInvocation) -> object: ...
 
     def assert_lease_current(self, ticket: object, call: CheckedInvocation) -> None: ...
@@ -160,6 +175,8 @@ class ToolCatalog(Protocol):
 
 
 class PolicyAuthority(Protocol):
+    """Pure preflight policy checks; this seam owns no durable transaction."""
+
     def assert_capability(
         self,
         ticket: object,
@@ -191,15 +208,15 @@ class InvocationPreparer(Protocol):
     def discard(self, prepared: PreparedDispatch) -> None: ...
 
 
-class BudgetAuthority(Protocol):
-    def reserve(
+class BudgetPlanner(Protocol):
+    """Pure proposal builder; it never durably reserves or releases budget."""
+
+    def plan_reservation(
         self,
         ticket: object,
         call: CheckedInvocation,
         descriptor: ToolDescriptor,
     ) -> object: ...
-
-    def release_before_dispatch(self, reservation: object) -> None: ...
 
 
 class Dispatcher(Protocol):
@@ -207,43 +224,30 @@ class Dispatcher(Protocol):
 
 
 class ExecutionCommitter(Protocol):
+    """Settle only the winner identified by a journal-issued capability."""
+
     def commit(
-        self,
-        dispatch_capability: object,
-        call: CheckedInvocation,
-        prepared: PreparedDispatch,
-        receipt: object,
+        self, dispatch_capability: object, call: CheckedInvocation,
+        prepared: PreparedDispatch, receipt: object,
         source_after: SourceTreeSnapshot,
-        reservation: object,
     ) -> object: ...
 
     def commit_source_violation(
-        self,
-        dispatch_capability: object,
-        call: CheckedInvocation,
-        prepared: PreparedDispatch,
-        receipt: object,
+        self, dispatch_capability: object, call: CheckedInvocation,
+        prepared: PreparedDispatch, receipt: object,
         source_after: SourceTreeSnapshot,
-        reservation: object,
         changes: SourceDiff,
     ) -> object: ...
 
     def commit_source_unavailable(
-        self,
-        dispatch_capability: object,
-        call: CheckedInvocation,
-        prepared: PreparedDispatch,
-        receipt: object,
-        reservation: object,
+        self, dispatch_capability: object, call: CheckedInvocation,
+        prepared: PreparedDispatch, receipt: object,
         error: Exception,
     ) -> object: ...
 
     def commit_dispatch_failure(
-        self,
-        dispatch_capability: object,
-        call: CheckedInvocation,
+        self, dispatch_capability: object, call: CheckedInvocation,
         prepared: PreparedDispatch,
-        reservation: object,
         error: Exception,
     ) -> object: ...
 
@@ -262,6 +266,8 @@ def _replay_value(replay: ReplayState) -> object:
 
 
 class AgentKernelGateway:
+    """Fixed-order composition; durable begin and settlement stay journal-owned."""
+
     def __init__(
         self,
         *,
@@ -271,7 +277,7 @@ class AgentKernelGateway:
         catalog: ToolCatalog,
         policy: PolicyAuthority,
         preparer: InvocationPreparer,
-        budget: BudgetAuthority,
+        budget: BudgetPlanner,
         dispatcher: Dispatcher,
         committer: ExecutionCommitter,
     ) -> None:
@@ -312,20 +318,22 @@ class AgentKernelGateway:
             self.policy.assert_execution_controls(
                 authority_ticket, call, descriptor, prepared
             )
-            reservation = self.budget.reserve(authority_ticket, call, descriptor)
+            reservation_plan = self.budget.plan_reservation(
+                authority_ticket, call, descriptor
+            )
         except BaseException:
             self.preparer.discard(prepared)
             raise
 
         try:
             decision = self.journal.begin(
-                authority_ticket, call, descriptor, prepared, reservation
+                authority_ticket, call, descriptor, prepared, reservation_plan
             )
         except BaseException:
-            self._abandon_pre_dispatch(prepared, reservation)
+            self.preparer.discard(prepared)
             raise
         if decision.kind != "WINNER":
-            self._abandon_pre_dispatch(prepared, reservation)
+            self.preparer.discard(prepared)
             replayed = _replay_value(
                 ReplayState(decision.kind, decision.result)
             )
@@ -333,7 +341,7 @@ class AgentKernelGateway:
                 return replayed
             raise GatewayError("JOURNAL_STATE_INVALID")
         if decision.dispatch_capability is None:
-            self._abandon_pre_dispatch(prepared, reservation)
+            self.preparer.discard(prepared)
             raise GatewayError("DISPATCH_CAPABILITY_MISSING")
 
         try:
@@ -346,7 +354,6 @@ class AgentKernelGateway:
                 decision.dispatch_capability,
                 call,
                 prepared,
-                reservation,
                 exc,
             )
         try:
@@ -358,7 +365,6 @@ class AgentKernelGateway:
                 call,
                 prepared,
                 receipt,
-                reservation,
                 exc,
             )
         if not changes.is_empty:
@@ -368,7 +374,6 @@ class AgentKernelGateway:
                 prepared,
                 receipt,
                 source_after,
-                reservation,
                 changes,
             )
         return self.committer.commit(
@@ -377,16 +382,7 @@ class AgentKernelGateway:
             prepared,
             receipt,
             source_after,
-            reservation,
         )
-
-    def _abandon_pre_dispatch(
-        self, prepared: PreparedDispatch, reservation: object
-    ) -> None:
-        try:
-            self.preparer.discard(prepared)
-        finally:
-            self.budget.release_before_dispatch(reservation)
 
 
 __all__ = [

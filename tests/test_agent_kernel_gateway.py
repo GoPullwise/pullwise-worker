@@ -59,8 +59,7 @@ class GatewayRig:
         self.after = self.before
         self.receipt = object()
         self.result = object()
-        self.reservation = object()
-        self.released: list[object] = []
+        self.reservation_plan = object()
         self.discarded: list[PreparedDispatch] = []
 
     def _stage(self, name: str) -> None:
@@ -75,11 +74,20 @@ class GatewayRig:
         return CheckedInvocation(
             idempotency_key="idem-" + "1" * 32,
             invocation_digest=hashlib.sha256(raw).hexdigest(),
+            authority_digest="a" * 64,
+            package_content_sha256="b" * 64,
+            package_root_sha256="c" * 64,
+            grant_digest="d" * 64,
             task_id="task-" + "2" * 32,
             attempt_id="attempt-" + "3" * 32,
+            owner_id="owner-" + "4" * 32,
             session_id="session-" + "4" * 32,
+            lease_id="lease-" + "5" * 32,
+            task_version=13,
+            deletion_version=0,
             owner_epoch=7,
             native_epoch=11,
+            transport_epoch=5,
             tool_key="internal.read_source",
         )
 
@@ -128,17 +136,13 @@ class GatewayRig:
     ) -> None:
         self._stage("controls")
 
-    def reserve(
+    def plan_reservation(
         self, ticket: object, call: CheckedInvocation, descriptor: ToolDescriptor
     ) -> object:
-        self._stage("reserve")
-        if self.fence_after_reserve:
+        self._stage("plan_reservation")
+        if self.fence_after_plan:
             self.authority_fenced = True
-        return self.reservation
-
-    def release_before_dispatch(self, reservation: object) -> None:
-        self.stages.append("release")
-        self.released.append(reservation)
+        return self.reservation_plan
 
     def begin(
         self,
@@ -146,11 +150,13 @@ class GatewayRig:
         call: CheckedInvocation,
         descriptor: ToolDescriptor,
         prepared: PreparedDispatch,
-        reservation: object,
+        reservation_plan: object,
     ) -> DispatchDecision:
         self._stage("begin")
         if authority_ticket is not self.authority_ticket:
             raise GatewayError("AUTHORITY_TICKET_MISMATCH")
+        if reservation_plan is not self.reservation_plan:
+            raise GatewayError("RESERVATION_PLAN_MISMATCH")
         if self.authority_fenced:
             raise GatewayError("AUTHORITY_FENCED")
         return self.begin_decision
@@ -185,7 +191,6 @@ class GatewayRig:
         prepared: PreparedDispatch,
         receipt: object,
         source_after: SourceTreeSnapshot,
-        reservation: object,
     ) -> object:
         self._stage("commit")
         return self.result
@@ -234,7 +239,7 @@ class AgentKernelGatewayTest(unittest.TestCase):
                 "capability",
                 "prepare",
                 "controls",
-                "reserve",
+                "plan_reservation",
                 "begin",
                 "dispatch",
                 "after",
@@ -268,7 +273,7 @@ class AgentKernelGatewayTest(unittest.TestCase):
             "capability",
             "prepare",
             "controls",
-            "reserve",
+            "plan_reservation",
         )
         for expected_index, expected in enumerate(ordered):
             with self.subTest(expected=expected):
@@ -296,54 +301,53 @@ class AgentKernelGatewayTest(unittest.TestCase):
         with self.assertRaisesRegex(GatewayError, "CAPABILITY_NOT_IMPLEMENTED"):
             rig.gateway().invoke(b"request")
         self.assertNotIn("prepare", rig.stages)
-        self.assertNotIn("reserve", rig.stages)
+        self.assertNotIn("plan_reservation", rig.stages)
 
-    def test_lost_intent_race_releases_budget_and_does_not_dispatch(self) -> None:
-        rig = GatewayRig()
+    def test_lost_intent_race_discards_only_and_does_not_dispatch(self) -> None:
         replayed = object()
-        rig.begin_decision = DispatchDecision.completed(replayed)
-
-        self.assertIs(replayed, rig.gateway().invoke(b"request"))
-        self.assertEqual([rig.reservation], rig.released)
-        self.assertEqual(1, len(rig.discarded))
-        self.assertNotIn("dispatch", rig.stages)
+        for decision in (DispatchDecision.pending(), DispatchDecision.completed(replayed)):
+            with self.subTest(decision=decision.kind):
+                rig = GatewayRig()
+                rig.begin_decision = decision
+                if decision.kind == "PENDING":
+                    with self.assertRaisesRegex(GatewayError, "INVOCATION_PENDING"):
+                        rig.gateway().invoke(b"request")
+                else:
+                    self.assertIs(replayed, rig.gateway().invoke(b"request"))
+                self.assertEqual(1, len(rig.discarded))
+                self.assertNotIn("dispatch", rig.stages)
+                self.assertFalse(hasattr(rig, "release_before_dispatch"))
 
     def test_fenced_authority_cannot_win_intent_or_dispatch(self) -> None:
         rig = GatewayRig()
-        rig.fence_after_reserve = True
+        rig.fence_after_plan = True
 
         with self.assertRaisesRegex(GatewayError, "AUTHORITY_FENCED"):
             rig.gateway().invoke(b"request")
 
-        self.assertEqual([rig.reservation], rig.released)
         self.assertEqual(1, len(rig.discarded))
-        self.assertEqual(["begin", "discard", "release"], rig.stages[-3:])
+        self.assertEqual(["begin", "discard"], rig.stages[-2:])
         self.assertNotIn("dispatch", rig.stages)
 
-    def test_intent_failure_releases_budget_before_propagating(self) -> None:
+    def test_intent_failure_discards_only_before_propagating(self) -> None:
         rig = GatewayRig()
         rig.failures = {"begin"}
 
         with self.assertRaisesRegex(GatewayError, "BEGIN"):
             rig.gateway().invoke(b"request")
-        self.assertEqual([rig.reservation], rig.released)
         self.assertEqual(1, len(rig.discarded))
+        self.assertFalse(hasattr(rig, "release_before_dispatch"))
         self.assertNotIn("dispatch", rig.stages)
 
     def test_cancellation_discards_prepared_state_without_false_settlement(self) -> None:
-        for stage, releases in (
-            ("controls", 0),
-            ("reserve", 0),
-            ("begin", 1),
-            ("dispatch", 0),
-        ):
+        for stage in ("controls", "plan_reservation", "begin", "dispatch"):
             with self.subTest(stage=stage):
                 rig = GatewayRig()
                 rig.cancel_at = stage
                 with self.assertRaises(_InjectedCancellation):
                     rig.gateway().invoke(b"request")
                 self.assertEqual(1, len(rig.discarded))
-                self.assertEqual(releases, len(rig.released))
+                self.assertFalse(hasattr(rig, "release_before_dispatch"))
                 self.assertTrue(
                     {"commit", "violation", "unavailable", "dispatch_failure"}
                     .isdisjoint(rig.stages)

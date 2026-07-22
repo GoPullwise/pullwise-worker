@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields, replace
 import hashlib
 from pathlib import Path
 import tempfile
@@ -10,6 +11,7 @@ from pullwise_worker.agent_kernel_gateway import (
     AgentKernelGateway,
     CheckedInvocation,
     DispatchDecision,
+    GatewayError,
     ReplayState,
     ToolDescriptor,
 )
@@ -32,7 +34,7 @@ class _Authorities:
         self.call = call
         self.ticket = object()
         self.capability = object()
-        self.reservation = object()
+        self.reservation_plan = object()
         self.result = object()
         self.settlements = {
             "success": 0,
@@ -74,11 +76,8 @@ class _Authorities:
     def assert_execution_controls(self, *args: object) -> None:
         return None
 
-    def reserve(self, *args: object) -> object:
-        return self.reservation
-
-    def release_before_dispatch(self, reservation: object) -> None:
-        raise AssertionError("winner must not release before dispatch")
+    def plan_reservation(self, *args: object) -> object:
+        return self.reservation_plan
 
     def begin(self, ticket: object, *args: object) -> DispatchDecision:
         if ticket is not self.ticket:
@@ -157,11 +156,20 @@ class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
         self.call = CheckedInvocation(
             idempotency_key="idem-" + "1" * 32,
             invocation_digest=hashlib.sha256(b"request").hexdigest(),
+            authority_digest="a" * 64,
+            package_content_sha256="b" * 64,
+            package_root_sha256="c" * 64,
+            grant_digest="d" * 64,
             task_id="task-" + "2" * 32,
             attempt_id="attempt-" + "3" * 32,
+            owner_id="owner-" + "4" * 32,
             session_id="session-" + "4" * 32,
+            lease_id="lease-" + "5" * 32,
+            task_version=1,
+            deletion_version=0,
             owner_epoch=1,
             native_epoch=1,
+            transport_epoch=1,
             tool_key="internal.read_source",
             tool_input=ReadSourceFileInput("README.md"),
         )
@@ -196,6 +204,36 @@ class AgentKernelR0GatewayIntegrationTest(unittest.TestCase):
             dispatcher=dispatcher,
             committer=authorities,
         )
+
+    def test_checked_invocation_carries_codec_derived_d30_facts(self) -> None:
+        names = {item.name for item in fields(CheckedInvocation)}
+        trusted_facts = {
+            "authority_digest", "package_content_sha256", "package_root_sha256",
+            "grant_digest", "owner_id", "lease_id", "task_version",
+            "deletion_version", "transport_epoch",
+        }
+        self.assertTrue(trusted_facts.issubset(names))
+
+    def test_checked_invocation_rejects_invalid_d30_facts(self) -> None:
+        cases = (
+            ("invocation_digest", "A" * 64, "INVOCATION_DIGEST_INVALID"),
+            ("authority_digest", "A" * 64, "AUTHORITY_DIGEST_INVALID"),
+            ("package_content_sha256", "A" * 64, "PACKAGE_DIGEST_INVALID"),
+            ("package_root_sha256", "A" * 64, "PACKAGE_DIGEST_INVALID"),
+            ("grant_digest", "A" * 64, "GRANT_DIGEST_INVALID"),
+            ("owner_id", "", "INVOCATION_FACTS_INVALID"),
+            ("lease_id", "", "INVOCATION_FACTS_INVALID"),
+            ("task_version", 0, "TASK_VERSION_INVALID"),
+            ("task_version", True, "TASK_VERSION_INVALID"),
+            ("deletion_version", -1, "DELETION_VERSION_INVALID"),
+            ("deletion_version", True, "DELETION_VERSION_INVALID"),
+            ("transport_epoch", 0, "INVOCATION_EPOCH_INVALID"),
+            ("transport_epoch", True, "INVOCATION_EPOCH_INVALID"),
+        )
+        for name, value, code in cases:
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(GatewayError, code):
+                    replace(self.call, **{name: value})
 
     def test_real_read_mutation_withholds_payload_and_settles_once(self) -> None:
         authorities = _Authorities(self.call)

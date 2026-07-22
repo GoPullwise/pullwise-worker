@@ -63,11 +63,20 @@ class AgentKernelR0ReadTest(unittest.TestCase):
         return CheckedInvocation(
             idempotency_key="idem-" + "1" * 32,
             invocation_digest="2" * 64,
+            authority_digest="a" * 64,
+            package_content_sha256="b" * 64,
+            package_root_sha256="c" * 64,
+            grant_digest="d" * 64,
             task_id="task-" + "3" * 32,
             attempt_id="attempt-" + "4" * 32,
+            owner_id="owner-" + "5" * 32,
             session_id="session-" + "5" * 32,
+            lease_id="lease-" + "6" * 32,
+            task_version=1,
+            deletion_version=0,
             owner_epoch=1,
             native_epoch=1,
+            transport_epoch=1,
             tool_key="internal.read_source",
             tool_input=ReadSourceFileInput(relative_path),
         )
@@ -317,7 +326,7 @@ class AgentKernelR0ReadTest(unittest.TestCase):
 class _TracerAuthorities:
     def __init__(self, call: CheckedInvocation) -> None:
         self.call = call
-        self.reservation = object()
+        self.reservation_plan = object()
         self.commit_count = 0
 
     def validate(self, raw: bytes) -> CheckedInvocation:
@@ -353,11 +362,8 @@ class _TracerAuthorities:
     def assert_execution_controls(self, *args: object) -> None:
         return None
 
-    def reserve(self, *args: object) -> object:
-        return self.reservation
-
-    def release_before_dispatch(self, reservation: object) -> None:
-        raise AssertionError("winning dispatch must not release before dispatch")
+    def plan_reservation(self, *args: object) -> object:
+        return self.reservation_plan
 
     def begin(self, *args: object) -> DispatchDecision:
         return DispatchDecision.winner(object())
