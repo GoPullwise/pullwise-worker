@@ -9,9 +9,11 @@ import sqlite3
 from typing import Callable
 
 from .agent_kernel_current_authority import (
+    AuthorityProjection,
     CurrentAuthorityProjection,
     CurrentAuthorityProjectionError,
 )
+from .agent_kernel_current_admission import assert_prepared_dispatch
 from .agent_kernel_current_budget import (
     CurrentBudgetError,
     ReservationPlan,
@@ -38,6 +40,7 @@ from .agent_kernel_current_package import (
     seal_current_document,
 )
 from .agent_kernel_current_replay import probe_current_replay, replay_state
+from .agent_kernel_current_recovery import recover_abandon_current_intent
 from .agent_kernel_gateway import (
     CheckedInvocation,
     DispatchDecision,
@@ -69,12 +72,12 @@ class CurrentDispatchJournal:
 
     def record_authority(
         self,
-        envelope: ServerAuthorityEnvelope,
+        envelope: AuthorityProjection,
         *,
         expected_previous_digest: str | None = None,
-    ) -> ServerAuthorityEnvelope:
+    ) -> AuthorityProjection:
         try:
-            return self.authority.record(
+            return self.authority.record_projection(
                 envelope,
                 expected_previous_digest=expected_previous_digest,
             )
@@ -175,7 +178,7 @@ class CurrentDispatchJournal:
                 self.authority.assert_ticket(persisted, authority_ticket, call)
                 self.authority.assert_runnable(persisted)
                 self.authority.assert_descriptor(persisted, descriptor)
-                relative_path = self._assert_prepared(call, descriptor, prepared)
+                relative_path = assert_prepared_dispatch(call, descriptor, prepared)
                 reserve_budget(
                     connection,
                     envelope=persisted,
@@ -334,28 +337,22 @@ class CurrentDispatchJournal:
     def abandon_intent(self, capability: object, reason: str) -> bytes:
         return abandon_current_intent(self, capability, reason)
 
-    @staticmethod
-    def _assert_prepared(
-        call: CheckedInvocation,
-        descriptor: ToolDescriptor,
-        prepared: PreparedDispatch,
-    ) -> str:
-        if (
-            not isinstance(prepared, PreparedDispatch)
-            or prepared.tool_key != descriptor.tool_key
-            or prepared.tool_version != descriptor.tool_version
-            or not isinstance(prepared.source_before, SourceTreeSnapshot)
-        ):
-            raise CurrentJournalError("PREPARED_DISPATCH_INVALID")
-        value = call.tool_input
-        relative_path = (
-            value.get("relative_path")
-            if isinstance(value, dict)
-            else getattr(value, "relative_path", None)
+    def recover_abandon(
+        self,
+        task_id: str,
+        idempotency_key: str,
+        invocation_digest: str,
+        fenced_head: object,
+        reason: str = "recovery_timeout",
+    ) -> bytes:
+        return recover_abandon_current_intent(
+            self,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            invocation_digest=invocation_digest,
+            fenced_head=fenced_head,
+            reason=reason,
         )
-        if not isinstance(relative_path, str) or not relative_path:
-            raise CurrentJournalError("R0_READ_PATH_INVALID")
-        return relative_path
 
     @staticmethod
     def _capability_sha256(capability: object) -> str:

@@ -27,9 +27,10 @@ MIGRATION_1 = (
     """,
     """
     CREATE TABLE authority_history (
-        authority_digest TEXT PRIMARY KEY CHECK (length(authority_digest) = 64),
+        projection_digest TEXT PRIMARY KEY CHECK (length(projection_digest) = 64),
+        projection_kind TEXT NOT NULL CHECK (projection_kind IN ('ACTIVE','FENCED')),
         task_id TEXT NOT NULL,
-        authority_bytes BLOB NOT NULL,
+        projection_bytes BLOB NOT NULL,
         grant_bytes BLOB NOT NULL,
         grant_digest TEXT NOT NULL CHECK (length(grant_digest) = 64),
         package_identity TEXT NOT NULL,
@@ -39,23 +40,53 @@ MIGRATION_1 = (
         attempt_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
         owner_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL,
         lease_id TEXT NOT NULL,
+        previous_task_version INTEGER CHECK (previous_task_version >= 1),
         task_version INTEGER NOT NULL CHECK (task_version >= 1),
         deletion_version INTEGER NOT NULL CHECK (deletion_version >= 0),
         owner_epoch INTEGER NOT NULL CHECK (owner_epoch >= 1),
         native_epoch INTEGER NOT NULL CHECK (native_epoch >= 1),
         transport_epoch INTEGER NOT NULL CHECK (transport_epoch >= 1),
-        lifecycle TEXT NOT NULL,
-        desired_state TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('ACTIVE','FENCED')),
+        lifecycle TEXT,
+        desired_state TEXT,
+        superseded_authority_digest TEXT CHECK (
+            superseded_authority_digest IS NULL
+            OR length(superseded_authority_digest) = 64
+        ),
+        reason TEXT CHECK (
+            reason IS NULL
+            OR reason IN ('outer_lease_lost','authority_revoked','worker_shutdown')
+        ),
         elapsed_limit_ms INTEGER NOT NULL CHECK (elapsed_limit_ms >= 1),
-        tool_call_limit INTEGER NOT NULL CHECK (tool_call_limit >= 1)
+        tool_call_limit INTEGER NOT NULL CHECK (tool_call_limit >= 1),
+        CHECK (
+            (
+                projection_kind = 'ACTIVE'
+                AND state = 'ACTIVE'
+                AND previous_task_version IS NULL
+                AND lifecycle IS NOT NULL
+                AND desired_state IS NOT NULL
+                AND superseded_authority_digest IS NULL
+                AND reason IS NULL
+            ) OR (
+                projection_kind = 'FENCED'
+                AND state = 'FENCED'
+                AND previous_task_version IS NOT NULL
+                AND lifecycle IS NULL
+                AND desired_state IS NULL
+                AND superseded_authority_digest IS NOT NULL
+                AND reason IS NOT NULL
+            )
+        )
     ) STRICT
     """,
     """
     CREATE TABLE authority_heads (
         task_id TEXT PRIMARY KEY,
-        authority_digest TEXT NOT NULL UNIQUE
-            REFERENCES authority_history(authority_digest)
+        projection_digest TEXT NOT NULL UNIQUE
+            REFERENCES authority_history(projection_digest)
     ) STRICT
     """,
     """
@@ -81,7 +112,7 @@ MIGRATION_1 = (
         invocation_digest TEXT NOT NULL CHECK (length(invocation_digest) = 64),
         intent_id TEXT NOT NULL UNIQUE,
         task_id TEXT NOT NULL REFERENCES authority_heads(task_id),
-        authority_digest TEXT NOT NULL REFERENCES authority_history(authority_digest),
+        authority_digest TEXT NOT NULL REFERENCES authority_history(projection_digest),
         grant_digest TEXT NOT NULL CHECK (length(grant_digest) = 64),
         tool_key TEXT NOT NULL,
         relative_path TEXT NOT NULL,

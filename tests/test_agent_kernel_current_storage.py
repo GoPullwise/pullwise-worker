@@ -263,9 +263,10 @@ def _seed_intent(
     authority_digest = capability
     connection.execute(
         "INSERT INTO authority_history VALUES "
-        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             authority_digest,
+            "ACTIVE",
             task_id,
             b"authority",
             b"grant",
@@ -277,14 +278,19 @@ def _seed_intent(
             "attempt",
             "session",
             "owner",
+            "grant",
             "lease",
+            None,
             1,
             0,
             1,
             1,
             1,
             "ACTIVE",
+            "ACTIVE",
             "RUN",
+            None,
+            None,
             1_000,
             2,
         ),

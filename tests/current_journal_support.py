@@ -9,6 +9,7 @@ import unittest
 from pullwise_worker.agent_kernel_current_database import CurrentAgentKernelDatabase
 from pullwise_worker.agent_kernel_current_objects import CurrentObjectStore
 from pullwise_worker.agent_kernel_current_package import (
+    AgentClaimAbandonResponse,
     CURRENT_PACKAGE,
     CURRENT_TOOL_CATALOG,
     ServerAuthorityEnvelope,
@@ -132,6 +133,41 @@ class CurrentJournalTestCase(unittest.TestCase):
             tool_key="internal.read_source",
             tool_input={"relative_path": "README.md"},
         )
+
+    @staticmethod
+    def make_fenced_head(
+        authority: ServerAuthorityEnvelope,
+        *,
+        reason: str = "authority_revoked",
+    ) -> AgentClaimAbandonResponse:
+        document = seal_current_document(
+            "agent-claim-abandon-response/v1",
+            {
+                "schema_id": "agent-claim-abandon-response/v1",
+                "package": authority.package.as_document(),
+                "task_id": authority.task_id,
+                "attempt_id": authority.attempt_id,
+                "session_id": authority.session_id,
+                "owner_id": authority.owner_id,
+                "grant_id": authority.grant.grant_id,
+                "lease_id": authority.lease_id,
+                "previous_task_version": authority.task_version,
+                "task_version": authority.task_version + 1,
+                "deletion_version": authority.deletion_version,
+                "owner_epoch": authority.owner_epoch,
+                "native_epoch": authority.native_epoch,
+                "transport_epoch": authority.transport_epoch,
+                "state": "FENCED",
+                "grant": authority.grant.as_document(),
+                "superseded_authority_digest": authority.digest,
+                "reason": reason,
+                "abandoned_at": "2026-07-22T12:34:56.000Z",
+            },
+        )
+        encoded = canonical_validated_current_bytes(
+            "agent-claim-abandon-response/v1", document
+        )
+        return AgentClaimAbandonResponse.from_canonical_bytes(encoded)
 
     def begin(self, call: CheckedInvocation | None = None):
         selected = call or self.call
