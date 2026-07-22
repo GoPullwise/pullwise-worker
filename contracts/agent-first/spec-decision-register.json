@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D28",
+  "active_decision_id": "D29",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -453,7 +453,7 @@
     {
       "id": "D28", "key": "current-package-artifact", "scope": "P0.3/P1.2", "title": "current package 身份、发布物与 exact pin",
       "question": "Server-owned current package 应以同一逻辑 bundle 的 Server-generated Python/npm wrappers、单一语言无关 archive，还是 exact Server Git tree 作为跨端发布与 pin 单位？",
-      "status": "pending", "depends_on": ["D23", "D27"], "activation": null, "required_by_slice": "S3",
+      "status": "resolved", "depends_on": ["D23", "D27"], "activation": null, "required_by_slice": "S3",
       "effects": ["authority", "compatibility", "data_model", "release_ownership"],
       "source_refs": ["AGENTS.md#agent-first-specification-decision-gate", "docs/agent-first-worker-post-mvp-implementation-design.md:151", "docs/agent-first-worker-mvp-implementation-design.md:151"],
       "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
@@ -477,7 +477,15 @@
           "consequences": ["必须固定 Git tree 取包、供应链验证、离线构建和 Server 仓库布局演进规则"]
         }
       ],
-      "recommended_option_id": "logical_bundle_generated_wrappers", "resolution": null, "supersedes": []
+      "recommended_option_id": "logical_bundle_generated_wrappers",
+      "resolution": {
+        "kind": "option", "selected_option_id": "logical_bundle_generated_wrappers", "custom_text": null,
+        "decision_text": "我确认 D28 采用 logical_bundle_generated_wrappers。",
+        "authority": "user", "decided_at": "2026-07-22",
+        "evidence_refs": ["conversation:user-confirmation:2026-07-22:D28:logical_bundle_generated_wrappers"],
+        "resolution_sha256": "0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204"
+      },
+      "supersedes": []
     },
     {
       "id": "D29", "key": "current-package-foundation-closure", "scope": "P0.3/P0.6/P1.2/P1.5", "title": "current package 基础契约的原子闭包",

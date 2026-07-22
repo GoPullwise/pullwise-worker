@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from scripts.agent_first_decision_core import canonical_resolution_sha256
 from scripts.agent_first_decision_register import load_register
 
 
@@ -19,10 +18,10 @@ D28_RESOLUTION = {
     "evidence_refs": [
         "conversation:user-confirmation:2026-07-22:D28:logical_bundle_generated_wrappers"
     ],
+    "resolution_sha256": (
+        "0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204"
+    ),
 }
-D28_RESOLUTION["resolution_sha256"] = canonical_resolution_sha256(
-    "D28", D28_RESOLUTION
-)
 
 
 class AgentFirstDecisionRegisterD28Test(unittest.TestCase):

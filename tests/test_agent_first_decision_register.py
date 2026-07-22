@@ -262,8 +262,8 @@ class AgentFirstDecisionRegisterTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual("valid_pending", report["status"])
-        self.assertEqual("D28", report["active_decision_id"])
-        self.assertEqual(3, report["pending_decision_count"])
+        self.assertEqual("D29", report["active_decision_id"])
+        self.assertEqual(2, report["pending_decision_count"])
         with self.assertRaisesRegex(
             DecisionRegisterFormatError, "manifest:canonical_path"
         ):

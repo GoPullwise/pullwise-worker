@@ -245,14 +245,13 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D27; D2 remains pending but inactive
-  under D1. D28-D30 are append-only applicable pending records required by S3.
-  The register is `valid_pending` with 26 resolved records, three applicable
-  pending records, and D28 as the only active question. Ask only D28; D29 and
-  D30 remain dependency-blocked and must not be selected or inferred. S2 has
-  no slice blocker, while S3-S8 are blocked by D28-D30 until explicit
-  option-anchored resolutions exist. D28 freezes current-package artifact
-  identity/distribution/pinning, D29 freezes the atomic foundation contract
+- The resolved prefix remains D1 and D3-D28; D2 remains pending but inactive
+  under D1. D29-D30 are append-only applicable pending records required by S3.
+  The register is `valid_pending` with 27 resolved records, two applicable
+  pending records, and D29 as the only active question. Ask only D29; D30
+  remains dependency-blocked and must not be selected or inferred. S2 has
+  no slice blocker, while S3-S8 are blocked by D29-D30 until explicit
+  option-anchored resolutions exist. D29 freezes the atomic foundation contract
   closure, and D30 freezes dispatch-intent/receipt/budget linearization.
   Recommendations remain non-normative; do not author the Server package
   schemas or connect production Gateway/Observation state from these pending
@@ -264,6 +263,13 @@ inference never select an option or authorize production implementation.
   `ddfd221626d5677def6472f59e6fa002c56fd1f6ca6602188ebb7c23735a0282`; D23 is
   bound to recommended `server_owned_package` digest `cecd60a0f27d18240d3222eb6aa117dc588b06ba3f9581c83af3d292dd4254e2`.
   D23 means one Server-published current package with exact Worker/Web pins, not legacy coexistence or negotiation.
+  D28 is bound to `logical_bundle_generated_wrappers` digest
+  `0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204`:
+  Server maintains one canonical content bundle/root manifest and generates thin
+  Python/npm wrappers from identical canonical bytes. Both wrappers share one
+  logical package identity/version/content digest; Worker/Web exact-pin their
+  wrapper version plus that logical digest and never copy or redefine schema.
+  Conformance must prove wrapper content/digest identity and both consumer locks.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only
