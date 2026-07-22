@@ -35,19 +35,35 @@ class AgentFirstSlice0BaselineTest(unittest.TestCase):
         baseline = load_baseline(BASELINE_PATH)
         generated_exception = baseline["generated_file_exceptions"][0]
         changed = copy.deepcopy(baseline)
+        changed["generated_file_exceptions"][0]["physical_lines"] = 500
         changed["generated_file_exceptions"][0]["sha256"] = "0" * 64
 
         report = verify_baseline(changed, REPO_ROOT, check_document=False)
 
-        self.assertEqual(
-            [
-                {
-                    "code": "generated_exception_digest_mismatch",
-                    "path": generated_exception["path"],
-                }
-            ],
+        self.assertIn(
+            {
+                "code": "generated_exception_line_count_mismatch",
+                "path": generated_exception["path"],
+                "expected": 500,
+                "actual": generated_exception["physical_lines"],
+            },
             report["failures"],
         )
+        self.assertIn(
+            {
+                "code": "generated_exception_digest_mismatch",
+                "path": generated_exception["path"],
+            },
+            report["failures"],
+        )
+
+        changed = copy.deepcopy(baseline)
+        changed["generated_file_exceptions"][0]["physical_lines"] = 400
+        with self.assertRaisesRegex(
+            BaselineFormatError,
+            r"generated_file_exceptions\[0\]\.physical_lines",
+        ):
+            verify_baseline(changed, REPO_ROOT, check_document=False)
 
         for field, value in (
             ("path", "pullwise_worker/another_generated.py"),

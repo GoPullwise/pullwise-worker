@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .agent_kernel_current_budget import CurrentBudgetError
+
 
 @dataclass(frozen=True)
 class RebuiltExecutionWindow:
@@ -15,11 +17,21 @@ def rebuild_execution_window(
     *,
     absolute_deadline_ms: int,
     trusted_wall_ms: int,
+    durable_control_wall_ms: int,
     hard_wall_ms: int,
     durable_consumed_ms: int,
     active_reserved_ms: int,
     local_monotonic_now_ms: int,
 ) -> RebuiltExecutionWindow:
+    if (
+        isinstance(trusted_wall_ms, bool)
+        or not isinstance(trusted_wall_ms, int)
+        or trusted_wall_ms < 0
+    ):
+        raise CurrentBudgetError("CONTRACT_INVALID")
+
+    if trusted_wall_ms < durable_control_wall_ms:
+        raise CurrentBudgetError("CONTRACT_INVALID")
     absolute_remaining_ms = max(0, absolute_deadline_ms - trusted_wall_ms)
     budget_remaining_ms = max(
         0,
