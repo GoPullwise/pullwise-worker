@@ -35,7 +35,11 @@ claim/grant 绑定，Agent Kernel 权威是固有语义而非可选择 mode；Wo
 不得换轨，授权失效只能 stop、fence 或 reject；同 contract 分批发布及旧 build
 安全回滚仍允许。D23 冻结 Server 仓库为跨端 current contract package 唯一发布真源，
 Worker/Web 只消费精确 pin；其 compatibility matrix 仅证明同一 current package 的
-协调发布组合，不授权旧协议共存、运行时多 major 协商、fallback 或 downgrade。D24 已将
+协调发布组合，不授权旧协议共存、运行时多 major 协商、fallback 或 downgrade。D28 进一步
+选择 `logical_bundle_generated_wrappers`：Server 维护一份 canonical content bundle/root
+manifest，并从相同 canonical bytes 生成 Python/npm 薄包装；两个 wrapper 共享一个逻辑
+package identity/version/content digest，Worker/Web 分别 exact-pin wrapper version 与逻辑
+digest，不得复制或重定义 schema。D24 已将
 `new_tasks_only` 单值特化为 D27-compatible 的受审计协调切换屏障：屏障生效后只有按唯一
 current TaskRecord schema 与 current Agent-First contract 新提交的 Task 可以创建和执行；
 pre-cutover Task、旧数据形状、旧协议与旧生产权威均不得越过屏障。D25 冻结
@@ -52,8 +56,8 @@ D26 已选择 `roadmap_separate_designs`（resolution digest
 `absolute_plus_baseline` current-contract 单值特化解决（resolution digest
 `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`）。D22/D26
 原始闭合点上的机器 decision register 无 active decision，规范状态为 ready；当前
-append-only register 已新增 D28-D30，状态为 `valid_pending`，D28 是唯一 active
-question，D29/D30 仍 dependency-blocked，S3-S8 因而 blocked。D2 仍是 inactive pending，
+append-only register 中 D28 已 resolved，D29-D30 仍 pending，状态为 `valid_pending`，
+D29 是唯一 active question，D30 仍 dependency-blocked，S3-S8 因而 blocked。D2 仍是 inactive pending，
 不适用且不得据此恢复旧生产权威。D26 只确定文档成熟度与开工边界，不授权 runtime、
 schema、protocol 或 deployment 变更。
 
@@ -88,8 +92,8 @@ package 真源与 Worker/Web exact pin；D24 已冻结受审计 cutover barrier 
 fail-closed 隔离边界；D25 已冻结 immutable receipt、独立 mutable binding/index 与
 core/transport 双 digest 的无环关系；D26 已冻结上述 maturity 分流；D22 已冻结签名
 release-gate 制品、职责分离、绝对与 stable-relative 门、三态 CI、baseline/bootstrap 规则，
-以及 D24 barrier 后的 capacity-only canary。原始决策前缀 D1 与 D3-D27 已 resolved，D2
-保持 inactive，不得被实现或发布流程激活；当前 append-only D28-D30 仍 pending，D28
+以及 D24 barrier 后的 capacity-only canary。当前决策前缀 D1 与 D3-D28 已 resolved，D2
+保持 inactive，不得被实现或发布流程激活；append-only D29-D30 仍 pending，D29
 active，S3-S8 blocked。当前 `valid_pending` 只证明登记结构有效，不表示规范完整，也不表示
 实现、评测或部署证据已存在。
 
@@ -184,6 +188,14 @@ D23 冻结 Server 仓库为该 package 的唯一发布真源；Worker/Web 必须
 version/digest pin，不得另行生成、分叉或重打包权威 schema。D23 所称 compatibility
 matrix 只验证三端在一次协调发布中使用同一 current package tuple。未知或不匹配必须
 fail closed；major 演进必须协调切换，不得形成运行时旧包 fallback、多 major 协商或双轨。
+
+D28 冻结该发布物为 `logical_bundle_generated_wrappers`（resolution digest
+`0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204`）：Server
+只维护一份 canonical content bundle/root manifest，并从相同 canonical bytes 生成 Python
+与 npm 薄包装。两个 wrapper 必须共享同一逻辑 package identity/version/content digest；
+Worker/Web 分别 exact-pin wrapper version 与逻辑 digest，且不得复制或重定义 schema。
+package conformance 必须证明两个 wrapper 的 canonical content/digest 完全一致，并验证两个
+consumer 的 exact lock。该决议只冻结发布物与 pin 语义，不代表 package 已实现或获准发布。
 
 ### 4.2 版本规则
 

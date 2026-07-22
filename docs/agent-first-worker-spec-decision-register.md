@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D28`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D29`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -38,7 +38,7 @@ Active question: `D28`. Questions are asked one at a time. User silence, existin
 | `D25` | `P1.5` | TaskResult/receipt digest DAG | `resolved` | `active` | `S7` | D9, D23 | `immutable_receipt_mutable_binding` |
 | `D26` | `P1.6` | 远期版本规范深度与完成口径 | `resolved` | `active` | `S7` | D1 | `roadmap_separate_designs` |
 | `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `resolved` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
-| `D28` | `P0.3/P1.2` | current package 身份、发布物与 exact pin | `pending` | `active` | `S3` | D23, D27 | `logical_bundle_generated_wrappers` |
+| `D28` | `P0.3/P1.2` | current package 身份、发布物与 exact pin | `resolved` | `active` | `S3` | D23, D27 | `logical_bundle_generated_wrappers` |
 | `D29` | `P0.3/P0.6/P1.2/P1.5` | current package 基础契约的原子闭包 | `pending` | `active` | `S3` | D3, D6, D7, D15, D21, D24, D25, D27, D28 | `layered_atomic_root` |
 | `D30` | `P0.3/P0.6` | grant 至 tool receipt/budget 的 dispatch 线性化 | `pending` | `active` | `S3` | D7, D21, D25, D29 | `worker_journal_server_authority` |
 
@@ -620,17 +620,19 @@ Active question: `D28`. Questions are asked one at a time. User silence, existin
 
 ### D28 — current package 身份、发布物与 exact pin
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** Server-owned current package 应以同一逻辑 bundle 的 Server-generated Python/npm wrappers、单一语言无关 archive，还是 exact Server Git tree 作为跨端发布与 pin 单位？
 
 **Options:**
 
-- `logical_bundle_generated_wrappers` — non-normative recommendation, not selected: Server 维护一份 canonical content bundle/root manifest，并从同一 bytes 生成 Server 发布的 Python 与 npm 薄包装；两种包装共享同一逻辑 package identity/version/content digest。Worker/Web 分别 exact-pin 包版本和逻辑 digest，不复制或重定义 schema。 同时保留跨语言原生依赖体验与单一逻辑权威，wrapper 只是 Server 生成的传输形式。 Consequences: 必须证明两个 wrapper 内 canonical content 与逻辑 digest 完全一致，并验证各 consumer 的 exact lock
+- `logical_bundle_generated_wrappers` — selected by resolution: Server 维护一份 canonical content bundle/root manifest，并从同一 bytes 生成 Server 发布的 Python 与 npm 薄包装；两种包装共享同一逻辑 package identity/version/content digest。Worker/Web 分别 exact-pin 包版本和逻辑 digest，不复制或重定义 schema。 同时保留跨语言原生依赖体验与单一逻辑权威，wrapper 只是 Server 生成的传输形式。 Consequences: 必须证明两个 wrapper 内 canonical content 与逻辑 digest 完全一致，并验证各 consumer 的 exact lock
 - `single_language_neutral_archive`: Server 发布一个确定性的语言无关 archive；Server、Worker 与 Web 使用各自受控 loader，并 exact-pin release identity 与 archive digest。 只有一个物理发布物，避免 wrapper 内容漂移，但三端都需要自有 loader 和构建集成。 Consequences: 必须冻结 archive canonicalization、分发可用性、离线缓存和三端 loader conformance
 - `exact_server_git_tree_pin`: Worker/Web 直接 pin Server commit 与 contract tree digest，并从该固定 tree 消费 package；不建立独立包注册表。 发布基础设施最少，但 consumer 构建与 Server 仓库历史、布局和可达性强耦合。 Consequences: 必须固定 Git tree 取包、供应链验证、离线构建和 Server 仓库布局演进规则
 
-**Resolution:** No option has been selected.
+**Resolution:** `logical_bundle_generated_wrappers` (`option`). 我确认 D28 采用 logical_bundle_generated_wrappers。
+
+**Authority/evidence:** `user` on `2026-07-22`; `conversation:user-confirmation:2026-07-22:D28:logical_bundle_generated_wrappers`; digest `0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204`.
 
 **Supersedes:** none
 

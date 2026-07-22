@@ -42,8 +42,9 @@ custom `absolute_plus_baseline` 解决，resolution digest 为
 签名 absolute/relative gate、三态 CI、D24 barrier 前置检查和 capacity-only canary，
 不得回到旧权威。该 Slice 原始取证时 register 为 `ready`：仅 D2 stored pending 但
 inactive，26 个 resolved、0 个 applicable pending。当前 append-only register 已新增
-D28-D30：状态为 `valid_pending`，D28 是唯一 active question，S2 无 blocker，
-S3-S8 被 D28-D30 阻断；本文不把已决选项当成实现完成证据。
+D28-D30：D28 已选择 `logical_bundle_generated_wrappers`，D29-D30 仍 pending；状态为
+`valid_pending`，共有 27 个 resolved、2 个 applicable pending，D29 是唯一 active
+question，S2 无 blocker，S3-S8 被 D29-D30 阻断；本文不把已决选项当成实现完成证据。
 
 ## 已实现范围
 
@@ -187,8 +188,9 @@ python3 scripts/check_agent_kernel_wheel.py
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
 - 该证据提交上的 decision register 为 `ready`，仅 D2 stored pending but inactive、
   26 个 resolved、0 个 applicable pending；此项保留为历史取证结果。当前 append-only
-  register 已新增 D28-D30，状态为 `valid_pending`，D28 active，S2 无 blocker，
-  S3-S8 blocked。任何决策状态都不代表对应 Slice 实现或验证已完成。
+  register 的 D28 已 resolved，D29-D30 仍 pending，状态为 `valid_pending`，D29 active，
+  共有 27 个 resolved、2 个 applicable pending；S2 无 blocker，S3-S8 被 D29-D30
+  blocked。任何决策状态都不代表对应 Slice 实现或验证已完成。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions
