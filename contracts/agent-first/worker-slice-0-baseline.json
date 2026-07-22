@@ -1,5 +1,5 @@
 {
-  "schema_id": "pullwise-agent-first-slice-0-baseline/v1",
+  "schema_id": "pullwise-agent-first-slice-0-baseline/v2",
   "baseline_id": "worker-current-implementation-2026-07-17",
   "captured_head": "c707003960b853ec87fd4dfc7323b0d3d1d63528",
   "line_count_profile": "physical-lf/v1",
@@ -121,6 +121,19 @@
       "current_responsibilities": "Estimate whole-scan remaining time from the current run dependency graph and publish sanitized progress snapshots.",
       "boundary": "Uses current-run monotonic observations only and does not own phase semantics or cross-run forecasting.",
       "candidate_extraction_seam": "Keep the estimator independent; move only orchestration-specific work-unit wiring behind an adapter if the phase registry is extracted."
+    }
+  ],
+  "generated_file_exceptions": [
+    {
+      "path": "pullwise_worker/_generated_agent_task_contract.py",
+      "physical_lines": 6140,
+      "sha256": "dd6818e6f22631aa2ca840f9fc93e02a160d88e7e457c0256bfec857590edef6",
+      "marker": "\"\"\"Generated from the Server-owned Agent-First bundle; do not edit.\"\"\"",
+      "provenance": "pullwise-server@48023e68b5bb04c7d5effd0a07d2c213deb7ea71:pullwise_server/agent_first_contract_bundle_python.py",
+      "reason": "D28 requires immutable Server-generated Python wrapper and Worker cannot hand-edit it.",
+      "considered_split_seam": "Server generator owns partitioning and Worker must preserve exact bytes.",
+      "owner": "Pullwise Server current-contract package owner",
+      "removal_condition": "Remove when Worker no longer checks in this wrapper or it falls to <=400 physical lines."
     }
   ],
   "file_baselines": [

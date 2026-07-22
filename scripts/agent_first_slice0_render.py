@@ -43,4 +43,18 @@ def render_document(baseline: dict[str, Any]) -> str:
         lines.append(
             f"| `{entry['path']}` | `{entry['kind']}` | `{entry['classification']}` | {entry['physical_lines']} | {_markdown(entry['current_responsibilities'])} | {_markdown(entry['candidate_extraction_seam'])} |"
         )
+    if baseline.get("generated_file_exceptions"):
+        lines.extend(
+            [
+                "",
+                "### Generated file exceptions",
+                "",
+                "| Path | Physical lines | Digest | Provenance | Reason | Considered split seam | Owner | Removal condition |",
+                "|---|---:|---|---|---|---|---|---|",
+            ]
+        )
+        for entry in baseline["generated_file_exceptions"]:
+            lines.append(
+                f"| `{entry['path']}` | {entry['physical_lines']} | `{entry['sha256']}` | `{entry['provenance']}` | {_markdown(entry['reason'])} | {_markdown(entry['considered_split_seam'])} | {_markdown(entry['owner'])} | {_markdown(entry['removal_condition'])} |"
+            )
     return "\n".join(lines)

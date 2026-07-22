@@ -37,14 +37,26 @@ except ModuleNotFoundError:
     from agent_first_slice0_render import render_document  # type: ignore[no-redef]
 
 
-SCHEMA_ID = "pullwise-agent-first-slice-0-baseline/v1"
+LEGACY_SCHEMA_ID = "pullwise-agent-first-slice-0-baseline/v1"
+SCHEMA_ID = "pullwise-agent-first-slice-0-baseline/v2"
 REPORT_SCHEMA_ID = "pullwise-agent-first-slice-0-baseline-report/v1"
 LINE_COUNT_PROFILE = "physical-lf/v1"
 REVIEW_TRIGGER = 400
 OVERSIZED_LIMIT = 600
-TOP_LEVEL_KEYS = {
+LEGACY_TOP_LEVEL_KEYS = {
     "schema_id", "baseline_id", "captured_head", "line_count_profile",
     "document", "pipeline", "code_map", "file_baselines",
+}
+TOP_LEVEL_KEYS = LEGACY_TOP_LEVEL_KEYS | {"generated_file_exceptions"}
+GENERATED_FILE_CATALOG = {
+    "pullwise_worker/_generated_agent_task_contract.py": {
+        "marker": "\"\"\"Generated from the Server-owned Agent-First bundle; do not edit.\"\"\"",
+        "provenance": "pullwise-server@48023e68b5bb04c7d5effd0a07d2c213deb7ea71:pullwise_server/agent_first_contract_bundle_python.py",
+    },
+}
+GENERATED_EXCEPTION_KEYS = {
+    "path", "physical_lines", "sha256", "marker", "provenance", "reason",
+    "considered_split_seam", "owner", "removal_condition",
 }
 
 
@@ -93,8 +105,14 @@ def _relative_path(value: object, label: str) -> str:
 
 
 def validate_baseline(baseline: object) -> dict[str, Any]:
-    root = _exact_keys(baseline, TOP_LEVEL_KEYS, "baseline")
-    if root["schema_id"] != SCHEMA_ID or root["line_count_profile"] != LINE_COUNT_PROFILE:
+    if not isinstance(baseline, dict):
+        raise BaselineFormatError("baseline:keys")
+    if baseline.get("schema_id") == LEGACY_SCHEMA_ID:
+        root = dict(_exact_keys(baseline, LEGACY_TOP_LEVEL_KEYS, "baseline"))
+        root["generated_file_exceptions"] = []
+    else:
+        root = _exact_keys(baseline, TOP_LEVEL_KEYS, "baseline")
+    if root["schema_id"] not in {LEGACY_SCHEMA_ID, SCHEMA_ID} or root["line_count_profile"] != LINE_COUNT_PROFILE:
         raise BaselineFormatError("baseline:profile")
     _text(root["baseline_id"], "baseline_id")
     head = _text(root["captured_head"], "captured_head")
@@ -170,6 +188,35 @@ def validate_baseline(baseline: object) -> dict[str, Any]:
     expected_order = sorted(root["file_baselines"], key=lambda item: (-item["physical_lines"], item["path"]))
     if root["file_baselines"] != expected_order:
         raise BaselineFormatError("file_baselines:order")
+    exceptions = root["generated_file_exceptions"]
+    if not isinstance(exceptions, list):
+        raise BaselineFormatError("generated_file_exceptions:list")
+    exception_paths: list[str] = []
+    for index, entry in enumerate(exceptions):
+        item = _exact_keys(entry, GENERATED_EXCEPTION_KEYS, f"generated_file_exceptions[{index}]")
+        path = _relative_path(item["path"], f"generated_file_exceptions[{index}].path")
+        exception_paths.append(path)
+        catalog = GENERATED_FILE_CATALOG.get(path)
+        if catalog is None:
+            raise BaselineFormatError(f"generated_file_exceptions[{index}].path")
+        if item["marker"] != catalog["marker"]:
+            raise BaselineFormatError(f"generated_file_exceptions[{index}].marker")
+        if item["provenance"] != catalog["provenance"]:
+            raise BaselineFormatError(f"generated_file_exceptions[{index}].provenance")
+        lines = item["physical_lines"]
+        if not isinstance(lines, int) or isinstance(lines, bool) or lines <= OVERSIZED_LIMIT:
+            raise BaselineFormatError(f"generated_file_exceptions[{index}].physical_lines")
+        digest = item["sha256"]
+        if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise BaselineFormatError(f"generated_file_exceptions[{index}].sha256")
+        for field in ("reason", "considered_split_seam", "owner", "removal_condition"):
+            _text(item[field], f"generated_file_exceptions[{index}].{field}")
+    if len(exception_paths) != len(set(exception_paths)):
+        raise BaselineFormatError("generated_file_exceptions:duplicate_path")
+    if exception_paths != sorted(exception_paths):
+        raise BaselineFormatError("generated_file_exceptions:order")
+    if set(exception_paths) & set(paths):
+        raise BaselineFormatError("generated_file_exceptions:file_baseline_overlap")
     return root
 
 
@@ -291,8 +338,28 @@ def verify_baseline(
         failures.append({"code": "pipeline_registry_drift", "path": pipeline["path"], "symbol": pipeline["symbol"]})
 
     actual_trigger: dict[str, int] = {}
+    generated_paths = {entry["path"] for entry in baseline["generated_file_exceptions"]}
+    for entry in baseline["generated_file_exceptions"]:
+        path = entry["path"]
+        if path not in tracked:
+            failures.append({"code": "generated_exception_path_untracked", "path": path})
+            continue
+        try:
+            data = _regular_bytes(root, path)
+        except BaselineObservationError:
+            failures.append({"code": "generated_exception_path_untracked", "path": path})
+            continue
+        actual = physical_line_count(data)
+        if actual != entry["physical_lines"]:
+            failures.append({"code": "generated_exception_line_count_mismatch", "path": path, "expected": entry["physical_lines"], "actual": actual})
+        if not data.startswith((entry["marker"] + "\n").encode("utf-8")):
+            failures.append({"code": "generated_exception_marker_mismatch", "path": path})
+        if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            failures.append({"code": "generated_exception_digest_mismatch", "path": path})
     for path in tracked:
         normalized = path
+        if normalized in generated_paths:
+            continue
         if not is_handwritten(normalized, executable=normalized in executable_paths):
             continue
         try:
@@ -352,6 +419,7 @@ def verify_baseline(
         "pipeline_phase_count": len(actual_pipeline or []),
         "oversized_legacy_count": sum(count > OVERSIZED_LIMIT for count in actual_trigger.values()),
         "review_trigger_count": sum(REVIEW_TRIGGER < count <= OVERSIZED_LIMIT for count in actual_trigger.values()),
+        "generated_exception_count": len(baseline["generated_file_exceptions"]),
         "ratchet_history_count": len(history),
         "failures": failures,
         "indeterminate_reasons": [],
