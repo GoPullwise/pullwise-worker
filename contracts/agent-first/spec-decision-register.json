@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D29",
+  "active_decision_id": "D30",
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -490,7 +490,7 @@
     {
       "id": "D29", "key": "current-package-foundation-closure", "scope": "P0.3/P0.6/P1.2/P1.5", "title": "current package 基础契约的原子闭包",
       "question": "Package tuple/canonical/ContentRef、clean Task/Attempt/Owner/fence、register/claim/grant/policy、tool catalog/invocation/R0 read result/dispatch intent/local receipt/Observation、elapsed Budget Ledger、D25 transport receipt/binding/abandonment、stable error/ErrorResponse 与独立 Gate predicate registry 必须作为一个不可部分发布的 foundation closure 时，应采用分层原子 root、单一 flat bundle，还是独立 modules 加 exact BOM？",
-      "status": "pending", "depends_on": ["D3", "D6", "D7", "D15", "D21", "D24", "D25", "D27", "D28"], "activation": null, "required_by_slice": "S3",
+      "status": "resolved", "depends_on": ["D3", "D6", "D7", "D15", "D21", "D24", "D25", "D27", "D28"], "activation": null, "required_by_slice": "S3",
       "effects": ["authority", "compatibility", "data_model", "state_semantics"],
       "source_refs": ["AGENTS.md#agent-kernel-slice-1-storage-contracts", "docs/agent-first-worker-mvp-implementation-design.md:526", "docs/agent-first-worker-post-mvp-implementation-design.md:151"],
       "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
@@ -514,7 +514,15 @@
           "consequences": ["必须证明 BOM 闭包、依赖无环、跨模块 schema ref、错误码唯一性和原子 rollout"]
         }
       ],
-      "recommended_option_id": "layered_atomic_root", "resolution": null, "supersedes": []
+      "recommended_option_id": "layered_atomic_root",
+      "resolution": {
+        "kind": "option", "selected_option_id": "layered_atomic_root", "custom_text": null,
+        "decision_text": "确认 D29 采用 layered_atomic_root",
+        "authority": "user", "decided_at": "2026-07-22",
+        "evidence_refs": ["conversation:user-confirmation:2026-07-22:D29:layered_atomic_root"],
+        "resolution_sha256": "dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da"
+      },
+      "supersedes": []
     },
     {
       "id": "D30", "key": "current-dispatch-linearization", "scope": "P0.3/P0.6", "title": "grant 至 tool receipt/budget 的 dispatch 线性化",

@@ -74,7 +74,7 @@ D22_CUSTOM_TEXT = (
 
 
 class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
-    def test_current_register_preserves_resolved_prefix_and_exposes_d29(self) -> None:
+    def test_current_register_preserves_resolved_prefix_and_exposes_d30(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
@@ -82,9 +82,9 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D29", report["active_decision_id"])
-        self.assertEqual(2, report["pending_decision_count"])
-        self.assertEqual(27, report["resolved_decision_count"])
+        self.assertEqual("D30", report["active_decision_id"])
+        self.assertEqual(1, report["pending_decision_count"])
+        self.assertEqual(28, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -116,6 +116,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D26": ("roadmap_separate_designs", "ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f"),
             "D27": ("clean_break_no_legacy", "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e"),
             "D28": ("logical_bundle_generated_wrappers", "0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204"),
+            "D29": ("layered_atomic_root", "dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():
@@ -202,7 +203,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         for decision_id, frozen in expected.items():
             with self.subTest(decision_id=decision_id):
                 decision = decisions[decision_id]
-                if decision_id == "D28":
+                if decision_id in {"D28", "D29"}:
                     self.assertEqual("resolved", decision["status"])
                     self.assertIsNotNone(decision["resolution"])
                 else:
@@ -362,7 +363,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D29", report["active_decision_id"])
+        self.assertEqual("D30", report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
     def test_current_package_questions_block_slice_three_and_later(self) -> None:
@@ -378,13 +379,13 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                     [{
                         "code": "slice_blocked_by_pending_decisions",
                         "slice": slice_id,
-                        "decision_ids": ["D29", "D30"],
+                        "decision_ids": ["D30"],
                     }],
                     report["failures"],
                 )
                 self.assertTrue(report["valid"])
                 self.assertFalse(report["ready"])
-                self.assertEqual("D29", report["active_decision_id"])
+                self.assertEqual("D30", report["active_decision_id"])
 
 
 if __name__ == "__main__":

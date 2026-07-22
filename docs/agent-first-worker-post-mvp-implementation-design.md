@@ -19,6 +19,7 @@
 <!-- D26@sha256:ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74c86602f -->
 <!-- D27@sha256:f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e -->
 <!-- D28@sha256:0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204 -->
+<!-- D29@sha256:dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da -->
 <!-- END AGENT-FIRST DECISION REFS: POST_CLOSURE -->
 
 ## D27 clean-break override（Normative）
@@ -39,13 +40,15 @@ Worker/Web 只消费精确 pin；其 compatibility matrix 仅证明同一 curren
 选择 `logical_bundle_generated_wrappers`：Server 维护一份 canonical content bundle/root
 manifest，并从相同 canonical bytes 生成 Python/npm 薄包装；两个 wrapper 共享一个逻辑
 package identity/version/content digest，Worker/Web 分别 exact-pin wrapper version 与逻辑
-digest，不得复制或重定义 schema。D24 已将
+digest，不得复制或重定义 schema。D29 选择 `layered_atomic_root`：foundation schema、
+registry 与 fixtures 按内聚 family 分层，但只能通过一个 root manifest/digest 原子发布完整
+closure，缺失任何 required family 都不可发布。D24 已将
 `new_tasks_only` 单值特化为 D27-compatible 的受审计协调切换屏障：屏障生效后只有按唯一
 current TaskRecord schema 与 current Agent-First contract 新提交的 Task 可以创建和执行；
 pre-cutover Task、旧数据形状、旧协议与旧生产权威均不得越过屏障。D25 冻结
 `immutable_receipt_mutable_binding`：terminal upload/transport receipt 的 bytes 与 ContentRef
 始终不可变；Server 以独立 binding/index row 一次性绑定 exact `transport_envelope_digest`，
-不得回写 receipt、重绑或清空。D24/D25 只冻结规范决策，不授权任何 runtime、schema、
+不得回写 receipt、重绑或清空。D24/D25/D28/D29 只冻结规范决策，不授权任何 runtime、schema、
 protocol 或 deployment 实现变更。
 
 ## D26 roadmap maturity overlay（Normative）
@@ -56,8 +59,8 @@ D26 已选择 `roadmap_separate_designs`（resolution digest
 `absolute_plus_baseline` current-contract 单值特化解决（resolution digest
 `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`）。D22/D26
 原始闭合点上的机器 decision register 无 active decision，规范状态为 ready；当前
-append-only register 中 D28 已 resolved，D29-D30 仍 pending，状态为 `valid_pending`，
-D29 是唯一 active question，D30 仍 dependency-blocked，S3-S8 因而 blocked。D2 仍是 inactive pending，
+append-only register 中 D28-D29 已 resolved，仅 D30 仍 pending，状态为 `valid_pending`，
+D30 是唯一 active question，S3-S8 因而 blocked。D2 仍是 inactive pending，
 不适用且不得据此恢复旧生产权威。D26 只确定文档成熟度与开工边界，不授权 runtime、
 schema、protocol 或 deployment 变更。
 
@@ -88,13 +91,14 @@ D8 已冻结 lease-loss 的 Task/Attempt 分层。D9 已选择内部 TaskResult 
 线性化点，Server ACK 只是可恢复 transport projection；D10 已选择全局 safety-first 穷举矩阵；
 D20 已冻结新 Gate 在协调切换后立即成为唯一生产权威的边界；D21 已冻结唯一 current contract
 的不可变 Server claim/grant 绑定与 Worker fail-closed 验证；D23 已冻结 Server-owned contract
-package 真源与 Worker/Web exact pin；D24 已冻结受审计 cutover barrier 与 pre-cutover Task 的
+package 真源与 Worker/Web exact pin；D28 已冻结 generated-wrapper 发布物与逻辑 digest pin；
+D29 已冻结 foundation 的 layered atomic root；D24 已冻结受审计 cutover barrier 与 pre-cutover Task 的
 fail-closed 隔离边界；D25 已冻结 immutable receipt、独立 mutable binding/index 与
 core/transport 双 digest 的无环关系；D26 已冻结上述 maturity 分流；D22 已冻结签名
 release-gate 制品、职责分离、绝对与 stable-relative 门、三态 CI、baseline/bootstrap 规则，
-以及 D24 barrier 后的 capacity-only canary。当前决策前缀 D1 与 D3-D28 已 resolved，D2
-保持 inactive，不得被实现或发布流程激活；append-only D29-D30 仍 pending，D29
-active，S3-S8 blocked。当前 `valid_pending` 只证明登记结构有效，不表示规范完整，也不表示
+以及 D24 barrier 后的 capacity-only canary。当前决策前缀 D1 与 D3-D29 已 resolved，D2
+保持 inactive，不得被实现或发布流程激活；append-only D30 仍 pending 且 active，
+S3-S8 blocked。当前 `valid_pending` 只证明登记结构有效，不表示规范完整，也不表示
 实现、评测或部署证据已存在。
 
 R4 roadmap 的目标包括受信审批、Effect Ledger、不可重试/对账语义和默认拒绝；生产没有获批
@@ -196,6 +200,14 @@ D28 冻结该发布物为 `logical_bundle_generated_wrappers`（resolution diges
 Worker/Web 分别 exact-pin wrapper version 与逻辑 digest，且不得复制或重定义 schema。
 package conformance 必须证明两个 wrapper 的 canonical content/digest 完全一致，并验证两个
 consumer 的 exact lock。该决议只冻结发布物与 pin 语义，不代表 package 已实现或获准发布。
+
+D29 冻结 foundation closure 为 `layered_atomic_root`（resolution digest
+`dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da`）：authority/control、
+tool/evidence、budget、receipt/error 等内聚 family 分别维护 schema、registry 与 fixtures，
+但只有一个 root manifest/digest 可以原子发布完整 current foundation。任何 required family
+缺失都使 package 不可发布；root gate 必须穷举 family、引用 DAG、双向 registry consumer
+及 golden/negative/idempotency/fence/crash fixtures。该决议不表示 package 已实现或已获发布授权，
+D30 未关闭前 S3-S8 仍由 decision gate 阻断。
 
 ### 4.2 版本规则
 

@@ -109,9 +109,10 @@ resolution digest 为 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74
 签名 absolute/relative gate、三态 CI、D24 barrier 前置检查和 capacity-only canary，
 不得回到旧权威。该 Slice 原始取证时 register 为 `ready`：仅 D2 stored pending 但
 inactive，26 个 resolved、0 个 applicable pending。当前 append-only register 已新增
-D28-D30：D28 已选择 `logical_bundle_generated_wrappers`，D29-D30 仍 pending；状态为
-`valid_pending`，共有 27 个 resolved、2 个 applicable pending，D29 是唯一 active
-question，S2 无 blocker，S3-S8 被 D29-D30 阻断。决策状态不代表对应实现或验证已经完成，后续仍须逐 Slice
+D28-D30：D28 已选择 `logical_bundle_generated_wrappers`，D29 已选择
+`layered_atomic_root`，仅 D30 仍 pending；状态为 `valid_pending`，共有 28 个 resolved、
+1 个 applicable pending，D30 是唯一 active question，S2 无 blocker，S3-S8 被 D30 阻断。
+决策状态不代表对应实现或验证已经完成，后续仍须逐 Slice
 取得独立证据。
 
 ## 指标

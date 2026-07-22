@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D29`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D30`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -39,7 +39,7 @@ Active question: `D29`. Questions are asked one at a time. User silence, existin
 | `D26` | `P1.6` | 远期版本规范深度与完成口径 | `resolved` | `active` | `S7` | D1 | `roadmap_separate_designs` |
 | `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `resolved` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
 | `D28` | `P0.3/P1.2` | current package 身份、发布物与 exact pin | `resolved` | `active` | `S3` | D23, D27 | `logical_bundle_generated_wrappers` |
-| `D29` | `P0.3/P0.6/P1.2/P1.5` | current package 基础契约的原子闭包 | `pending` | `active` | `S3` | D3, D6, D7, D15, D21, D24, D25, D27, D28 | `layered_atomic_root` |
+| `D29` | `P0.3/P0.6/P1.2/P1.5` | current package 基础契约的原子闭包 | `resolved` | `active` | `S3` | D3, D6, D7, D15, D21, D24, D25, D27, D28 | `layered_atomic_root` |
 | `D30` | `P0.3/P0.6` | grant 至 tool receipt/budget 的 dispatch 线性化 | `pending` | `active` | `S3` | D7, D21, D25, D29 | `worker_journal_server_authority` |
 
 ### D1 — MVP/Post-MVP 产品范围
@@ -642,17 +642,19 @@ Active question: `D29`. Questions are asked one at a time. User silence, existin
 
 ### D29 — current package 基础契约的原子闭包
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** Package tuple/canonical/ContentRef、clean Task/Attempt/Owner/fence、register/claim/grant/policy、tool catalog/invocation/R0 read result/dispatch intent/local receipt/Observation、elapsed Budget Ledger、D25 transport receipt/binding/abandonment、stable error/ErrorResponse 与独立 Gate predicate registry 必须作为一个不可部分发布的 foundation closure 时，应采用分层原子 root、单一 flat bundle，还是独立 modules 加 exact BOM？
 
 **Options:**
 
-- `layered_atomic_root` — non-normative recommendation, not selected: 按 authority/control、tool/evidence、budget、receipt/error 等内聚 family 拆分 schema、registry 与 fixtures，但只由一个 root manifest/digest 原子发布 current foundation；任一必需 family 缺失都不可发布。 保持模块可审查性，同时用一个 root 消除部分 package、隐式 placeholder 和组合歧义。 Consequences: root gate 必须穷举 family、引用 DAG、双向 registry 消费、golden/negative/idempotency/fence/crash fixtures
+- `layered_atomic_root` — selected by resolution: 按 authority/control、tool/evidence、budget、receipt/error 等内聚 family 拆分 schema、registry 与 fixtures，但只由一个 root manifest/digest 原子发布 current foundation；任一必需 family 缺失都不可发布。 保持模块可审查性，同时用一个 root 消除部分 package、隐式 placeholder 和组合歧义。 Consequences: root gate 必须穷举 family、引用 DAG、双向 registry 消费、golden/negative/idempotency/fence/crash fixtures
 - `single_flat_bundle`: 把全部 foundation schema、registry 与 fixtures 放入一个平面 bundle，并只整体发布。 原子性直观、组合规则最少，但文件与 ownership 边界更难维护。 Consequences: 必须给出可审查的生成或分段规则，防止单体 registry 超大和职责混杂
 - `independent_modules_locked_by_bom`: 各 foundation family 独立发布和版本化，由一个 current BOM 精确锁定每个 identity/version/digest；只有完整 BOM 可成为 current root。 允许 family 独立演进，但增加模块版本矩阵、依赖解析和组合验证。 Consequences: 必须证明 BOM 闭包、依赖无环、跨模块 schema ref、错误码唯一性和原子 rollout
 
-**Resolution:** No option has been selected.
+**Resolution:** `layered_atomic_root` (`option`). 确认 D29 采用 layered_atomic_root
+
+**Authority/evidence:** `user` on `2026-07-22`; `conversation:user-confirmation:2026-07-22:D29:layered_atomic_root`; digest `dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da`.
 
 **Supersedes:** none
 

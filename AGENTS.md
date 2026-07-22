@@ -245,17 +245,15 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D28; D2 remains pending but inactive
-  under D1. D29-D30 are append-only applicable pending records required by S3.
-  The register is `valid_pending` with 27 resolved records, two applicable
-  pending records, and D29 as the only active question. Ask only D29; D30
-  remains dependency-blocked and must not be selected or inferred. S2 has
-  no slice blocker, while S3-S8 are blocked by D29-D30 until explicit
-  option-anchored resolutions exist. D29 freezes the atomic foundation contract
-  closure, and D30 freezes dispatch-intent/receipt/budget linearization.
-  Recommendations remain non-normative; do not author the Server package
-  schemas or connect production Gateway/Observation state from these pending
-  records.
+- The resolved prefix remains D1 and D3-D29; D2 remains pending but inactive
+  under D1. D30 is the sole append-only applicable pending record required by S3.
+  The register is `valid_pending` with 28 resolved records, one applicable
+  pending record, and D30 as the only active question. Ask only D30; S2 has no
+  slice blocker, while S3-S8 are blocked by D30 until an explicit option-anchored
+  resolution exists. D30 freezes dispatch-intent/receipt/budget linearization.
+  D29 is a specification resolution, not package implementation evidence: do not
+  author Server package schemas in Worker. D30 also remains unresolved, so do not
+  connect production Gateway/Observation state.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -270,6 +268,14 @@ inference never select an option or authorize production implementation.
   logical package identity/version/content digest; Worker/Web exact-pin their
   wrapper version plus that logical digest and never copy or redefine schema.
   Conformance must prove wrapper content/digest identity and both consumer locks.
+  D29 is bound to `layered_atomic_root` digest
+  `dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da`:
+  authority/control, tool/evidence, budget, receipt/error, and the other required
+  foundation families remain internally separated for review, but one root
+  manifest/digest atomically publishes their complete current closure. Any
+  missing required family makes the package unpublishable. The root gate must
+  enumerate every family, reference DAG, bidirectional registry consumer, and
+  golden/negative/idempotency/fence/crash fixture.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only

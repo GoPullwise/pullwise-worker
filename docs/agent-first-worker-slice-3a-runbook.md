@@ -19,9 +19,9 @@
 
 这不是生产 S3 完成证据，也没有接管 legacy Worker。它不生成任何 Server-owned
 versioned contract，不写 Observation，不使用现有 Slice 2 shadow Task/Attempt/budget/
-observations 表，也没有 production composition-root 接线。D28 已 resolved，D29-D30
+observations 表，也没有 production composition-root 接线。D28-D29 已 resolved，仅 D30
 仍为 pending，S3 decision gate 明确 blocked；本文中的 injected interfaces 和内部 tracer
-不选择或替代这些未决生产决议，也不把 D28 的决议状态当作 package 实现证据。
+不选择或替代 D30，也不把 D28/D29 的决议状态当作 package 实现证据。
 
 ## 已实现边界
 
@@ -139,12 +139,17 @@ grant/intent/receipt/budget 的唯一 durable linearization；该 seam 不是 D3
   必须从同一 canonical bundle bytes 生成共享逻辑 package identity/version/content digest
   的 Python/npm 薄包装，Worker/Web 分别 exact-pin wrapper version 与逻辑 digest；这只冻结
   发布物与 pin 语义，不代表 package 已实现。
-- D29-D30 仍是 pending questions，当前只有 D29 active；它们分别覆盖 foundation closure
-  和 grant-to-receipt/budget durable linearization，并 required before S3，当前 decision gate
-  因而 blocked。recommendation 不是 resolution，必须由用户依次决定。
+- D29 已选择 `layered_atomic_root`（resolution digest
+  `dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da`）：foundation
+  schema、registry 与 fixtures 按 authority/control、tool/evidence、budget、receipt/error 等
+  family 分层，但只由一个 root manifest/digest 原子发布完整 closure；任何 required family
+  缺失都不可发布。该决议不代表 package 已实现。
+- D30 是唯一 pending/active question，覆盖 grant-to-receipt/budget durable linearization，
+  required before S3，当前 decision gate 因而 blocked。recommendation 不是 resolution，
+  必须由用户明确决定。
 - D23 已决定 package 必须由 Server 拥有，但 Server-owned current package 发布物、
   package manifest/version/digest、consumer exact pin 与双向 conformance 尚未实现；
-  D29 关闭前不得由 Worker 自造替代 package/schema。
+  D28/D29 已关闭也不得由 Worker 自造替代 package/schema。
 - source-selection-policy、source-tree-manifest、change-set、tool-dispatch-intent、
   observation 等 schema 的权威 validator/codec。
 - production materializer/composition 对 Git >=2.45 部署身份、exact-revision catalog、
@@ -203,8 +208,8 @@ Decision gate：
     python scripts/agent_first_decision_register.py check \
       --repo-root . --require-slice S3
 
-当前结果为 blocked：register 本身 valid，27 resolved、2 pending、D2 inactive，active
-question 为 D29；D29-D30 均 required before S3。只有用户依次作出 resolution 并更新
+当前结果为 blocked：register 本身 valid，28 resolved、1 pending、D2 inactive，active
+question 为 D30；D30 required before S3。只有用户作出 resolution 并更新
 generated register/document/tests 后才能恢复 S3 ready。
 
 D27 ratchet 可单独复核：
