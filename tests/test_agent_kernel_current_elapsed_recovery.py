@@ -10,6 +10,48 @@ from pullwise_worker.agent_kernel_current_elapsed_recovery import (
 
 
 class CurrentElapsedRecoveryTest(unittest.TestCase):
+    def test_rebuild_rejects_boolean_local_monotonic_now(self) -> None:
+        with self.assertRaises(CurrentBudgetError) as raised:
+            rebuild_execution_window(
+                absolute_deadline_ms=80_000,
+                trusted_wall_ms=20_000,
+                durable_control_wall_ms=19_000,
+                hard_wall_ms=55_000,
+                durable_consumed_ms=17_000,
+                active_reserved_ms=8_000,
+                local_monotonic_now_ms=True,
+            )
+
+        self.assertEqual("CONTRACT_INVALID", raised.exception.code)
+
+    def test_rebuild_rejects_boolean_active_reserved(self) -> None:
+        with self.assertRaises(CurrentBudgetError) as raised:
+            rebuild_execution_window(
+                absolute_deadline_ms=80_000,
+                trusted_wall_ms=20_000,
+                durable_control_wall_ms=19_000,
+                hard_wall_ms=55_000,
+                durable_consumed_ms=17_000,
+                active_reserved_ms=True,
+                local_monotonic_now_ms=250,
+            )
+
+        self.assertEqual("CONTRACT_INVALID", raised.exception.code)
+
+    def test_rebuild_rejects_boolean_durable_consumed(self) -> None:
+        with self.assertRaises(CurrentBudgetError) as raised:
+            rebuild_execution_window(
+                absolute_deadline_ms=80_000,
+                trusted_wall_ms=20_000,
+                durable_control_wall_ms=19_000,
+                hard_wall_ms=55_000,
+                durable_consumed_ms=True,
+                active_reserved_ms=8_000,
+                local_monotonic_now_ms=250,
+            )
+
+        self.assertEqual("CONTRACT_INVALID", raised.exception.code)
+
     def test_rebuild_rejects_boolean_hard_wall(self) -> None:
         with self.assertRaises(CurrentBudgetError) as raised:
             rebuild_execution_window(
