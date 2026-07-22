@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -199,6 +200,8 @@ class CurrentJournalTestCase(unittest.TestCase):
             size_bytes=len(payload_bytes),
         )
         payload = self.journal.publish_payload(capability, raw)
+        completed_at = datetime(2026, 7, 22, 12, 34, 56, tzinfo=timezone.utc)
+        started_at = completed_at - timedelta(milliseconds=elapsed_ms)
         receipt = seal_current_document(
             "local-tool-receipt/v1",
             {
@@ -208,8 +211,12 @@ class CurrentJournalTestCase(unittest.TestCase):
                 "invocation_digest": selected.invocation_digest,
                 "status": "succeeded",
                 "payload_ref": payload.content_ref,
-                "started_at": "2026-07-22T12:34:55.000Z",
-                "completed_at": "2026-07-22T12:34:56.000Z",
+                "started_at": started_at.isoformat(timespec="milliseconds").replace(
+                    "+00:00", "Z"
+                ),
+                "completed_at": completed_at.isoformat(timespec="milliseconds").replace(
+                    "+00:00", "Z"
+                ),
                 "elapsed_ms": elapsed_ms,
             },
         )

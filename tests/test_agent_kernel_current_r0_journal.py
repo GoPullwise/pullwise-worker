@@ -4,6 +4,7 @@ import base64
 import json
 
 from pullwise_worker.agent_kernel_current_package import (
+    validate_current_document,
     verify_current_document_digest,
 )
 from pullwise_worker.agent_kernel_dispatch_journal import (
@@ -382,7 +383,7 @@ class CurrentDispatchJournalTest(CurrentJournalTestCase):
             diff_source_trees(self.before, after),
         )
 
-        response = verify_current_document_digest(
+        response = validate_current_document(
             "error-response/v1", json.loads(replay)
         )
         self.assertEqual("SOURCE_STATE_CHANGED", response["error"]["code"])
