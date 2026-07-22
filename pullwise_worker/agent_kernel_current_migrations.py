@@ -125,6 +125,8 @@ MIGRATION_1 = (
         intent_id TEXT PRIMARY KEY REFERENCES dispatch_intents(intent_id),
         abandonment_bytes BLOB NOT NULL,
         abandonment_sha256 TEXT NOT NULL CHECK (length(abandonment_sha256) = 64),
+        budget_settlement_bytes BLOB NOT NULL,
+        budget_settlement_digest TEXT NOT NULL CHECK (length(budget_settlement_digest) = 64),
         replay_bytes BLOB NOT NULL,
         replay_sha256 TEXT NOT NULL CHECK (length(replay_sha256) = 64)
     ) STRICT

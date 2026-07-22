@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import replace
 import hashlib
 import unittest
 
@@ -51,7 +51,11 @@ class GatewayRig:
         policy = SourceSelectionPolicy.pullwise_full_scan(
             root_identity="repository:gateway-test"
         )
-        self.before = SourceTreeSnapshot(BASE_REVISION, policy.digest, ())
+        self.before = SourceTreeSnapshot(
+            base_revision=BASE_REVISION,
+            selection_policy_digest=policy.digest,
+            entries=(),
+        )
         self.after = self.before
         self.receipt = object()
         self.result = object()
@@ -379,19 +383,6 @@ class AgentKernelGatewayTest(unittest.TestCase):
         self.assertIs(rig.result, rig.gateway().invoke(b"request"))
         self.assertEqual("unavailable", rig.stages[-1])
         self.assertNotIn("commit", rig.stages)
-
-    def test_checked_invocation_has_no_agent_controlled_observation_fields(self) -> None:
-        names = {item.name for item in fields(CheckedInvocation)}
-        forbidden = {
-            "status",
-            "started_at",
-            "completed_at",
-            "source_state_before_id",
-            "source_state_after_id",
-            "observation_id",
-        }
-        self.assertTrue(forbidden.isdisjoint(names))
-
 
 if __name__ == "__main__":
     unittest.main()

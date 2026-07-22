@@ -70,7 +70,7 @@ def grant_document(
             'policy_digest': '7' * 64,
             'capability_ids': ['source.read'],
             'tool_keys': ['internal.read_source'],
-            'elapsed_budget_ms': 60_000,
+            'elapsed_ms_limit': 60_000,
             'tool_call_limit': 3,
         },
     )
