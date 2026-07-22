@@ -18,13 +18,19 @@ RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
 WHEEL_CHECK_PATH = REPO_ROOT / "scripts" / "check_agent_kernel_wheel.py"
 
 
+CURRENT_PACKAGE_SERVER_COMMIT = "48023e68b5bb04c7d5effd0a07d2c213deb7ea71"
+
+
 class CrossRepositoryCiContractTest(unittest.TestCase):
-    def test_todo_pin_the_final_current_package_server_commit(self) -> None:
-        self.fail(
-            "TODO_CURRENT_PACKAGE_FINAL_SERVER_PIN: replace the Server ref in "
-            "the cross-repository baseline, CI, and release workflow with the "
-            "single final wrapper-producing commit; verify its exact root/content "
-            "tuple, then remove this deliberate red gate"
+    def test_current_package_server_commit_differs_from_legacy_baseline(self) -> None:
+        baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+        legacy_server = next(
+            item for item in baseline["repositories"] if item["id"] == "server"
+        )
+
+        self.assertNotEqual(
+            legacy_server["frozen_head"],
+            CURRENT_PACKAGE_SERVER_COMMIT,
         )
 
     def test_ci_checks_out_the_frozen_server_as_a_sibling(self) -> None:
@@ -100,7 +106,7 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
 
     def test_ci_and_release_gate_the_exact_current_package_lock(self) -> None:
         baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
-        server = next(
+        legacy_server = next(
             item for item in baseline["repositories"] if item["id"] == "server"
         )
         ci = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -112,16 +118,27 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
 
         for workflow in (ci, release):
             self.assertIn("repository: GoPullwise/pullwise-server", workflow)
-            self.assertIn(f"ref: {server['frozen_head']}", workflow)
+            self.assertIn(f"ref: {CURRENT_PACKAGE_SERVER_COMMIT}", workflow)
+            self.assertIn("path: current-contract-server", workflow)
             self.assertIn("Check current Agent-First package exact lock", workflow)
             for test_name in lock_tests:
                 self.assertIn(test_name, workflow)
-        self.assertIn(
-            "PULLWISE_CURRENT_SERVER_ROOT: ../pullwise-server", ci
+
+        self.assertEqual(
+            2,
+            ci.count(
+                "PULLWISE_CURRENT_SERVER_ROOT: ../current-contract-server"
+            ),
         )
-        self.assertIn(
-            "PULLWISE_CURRENT_SERVER_ROOT: current-contract-server", release
+        self.assertEqual(
+            2,
+            release.count(
+                "PULLWISE_CURRENT_SERVER_ROOT: current-contract-server"
+            ),
         )
+        self.assertEqual(2, ci.count("repository: GoPullwise/pullwise-server"))
+        self.assertIn(f"ref: {legacy_server['frozen_head']}", ci)
+        self.assertNotIn(f"ref: {legacy_server['frozen_head']}", release)
 
 
 if __name__ == "__main__":
