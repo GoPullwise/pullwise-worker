@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import os
 from pathlib import Path
+import re
 import sqlite3
+import stat
 from typing import Iterator
 
 from .agent_kernel_current_migrations import (
@@ -17,6 +20,7 @@ from .agent_kernel_current_migrations import (
 
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
 DATABASE_NAME = "agent-kernel-current.sqlite3"
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class CurrentDatabaseError(RuntimeError):
@@ -45,9 +49,12 @@ class CurrentAgentKernelDatabase:
             not isinstance(item, str) or not item for item in package_tuple
         ):
             raise CurrentDatabaseError("CURRENT_PACKAGE_LOCK_INVALID")
-        if root.exists() and (root.is_symlink() or not root.is_dir()):
+        if not all(DIGEST_RE.fullmatch(item) for item in package_tuple[2:]):
+            raise CurrentDatabaseError("CURRENT_PACKAGE_LOCK_INVALID")
+        if root.exists() and not self._is_private_directory(root):
             raise CurrentDatabaseError("CURRENT_DATABASE_ROOT_INVALID")
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
         self.root = root
         self.path = root / DATABASE_NAME
         self.package_tuple = package_tuple
@@ -71,16 +78,20 @@ class CurrentAgentKernelDatabase:
         return cls(root, package_tuple, busy_timeout_ms=busy_timeout_ms)
 
     def connect(self) -> sqlite3.Connection:
+        self._verify_database_file()
         connection = sqlite3.connect(
             self.path,
             isolation_level=None,
             timeout=self.busy_timeout_ms / 1_000,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA synchronous = FULL")
-        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            self._configure(connection)
+            self._verify_database_file()
+            return connection
+        except BaseException:
+            connection.close()
+            raise
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -96,18 +107,15 @@ class CurrentAgentKernelDatabase:
             connection.close()
 
     def _initialize(self) -> None:
+        self._create_database_file()
         connection = sqlite3.connect(
             self.path,
             isolation_level=None,
             timeout=self.busy_timeout_ms / 1_000,
         )
         try:
-            connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
-            mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
-            if str(mode).lower() != "wal":
-                raise CurrentDatabaseError("CURRENT_DATABASE_WAL_REQUIRED")
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA synchronous = FULL")
+            self._configure(connection)
+            self._verify_database_file()
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             tables = self._table_names(connection)
@@ -129,6 +137,56 @@ class CurrentAgentKernelDatabase:
             raise
         finally:
             connection.close()
+
+    def _create_database_file(self) -> None:
+        if not self.path.exists():
+            flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
+            descriptor = os.open(self.path, flags, 0o600)
+            os.close(descriptor)
+        self._verify_database_file()
+        os.chmod(self.path, 0o600)
+
+    def _verify_database_file(self) -> None:
+        try:
+            info = self.path.lstat()
+        except OSError as exc:
+            raise CurrentDatabaseError("CURRENT_DATABASE_FILE_INVALID") from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or self._is_reparse(info)
+        ):
+            raise CurrentDatabaseError("CURRENT_DATABASE_FILE_INVALID")
+
+    def _configure(self, connection: sqlite3.Connection) -> None:
+        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA synchronous = FULL")
+        actual = (
+            str(mode).lower(),
+            connection.execute("PRAGMA foreign_keys").fetchone()[0],
+            connection.execute("PRAGMA synchronous").fetchone()[0],
+            connection.execute("PRAGMA busy_timeout").fetchone()[0],
+        )
+        if actual != ("wal", 1, 2, self.busy_timeout_ms):
+            raise CurrentDatabaseError("CURRENT_DATABASE_PRAGMA_INVALID", repr(actual))
+
+    @classmethod
+    def _is_private_directory(cls, path: Path) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        return stat.S_ISDIR(info.st_mode) and not cls._is_reparse(info)
+
+    @staticmethod
+    def _is_reparse(info: os.stat_result) -> bool:
+        attributes = getattr(info, "st_file_attributes", 0)
+        marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return bool(attributes & marker)
 
     @staticmethod
     def _table_names(connection: sqlite3.Connection) -> set[str]:

@@ -25,10 +25,10 @@ MIGRATION_1 = (
     ) STRICT
     """,
     """
-    CREATE TABLE authority_projections (
-        task_id TEXT PRIMARY KEY,
+    CREATE TABLE authority_history (
+        authority_digest TEXT PRIMARY KEY CHECK (length(authority_digest) = 64),
+        task_id TEXT NOT NULL,
         authority_bytes BLOB NOT NULL,
-        authority_digest TEXT NOT NULL UNIQUE CHECK (length(authority_digest) = 64),
         grant_bytes BLOB NOT NULL,
         grant_digest TEXT NOT NULL CHECK (length(grant_digest) = 64),
         package_identity TEXT NOT NULL,
@@ -50,8 +50,15 @@ MIGRATION_1 = (
     ) STRICT
     """,
     """
+    CREATE TABLE authority_heads (
+        task_id TEXT PRIMARY KEY,
+        authority_digest TEXT NOT NULL UNIQUE
+            REFERENCES authority_history(authority_digest)
+    ) STRICT
+    """,
+    """
     CREATE TABLE tool_call_budgets (
-        task_id TEXT NOT NULL REFERENCES authority_projections(task_id),
+        task_id TEXT NOT NULL REFERENCES authority_heads(task_id),
         grant_digest TEXT NOT NULL,
         hard_limit INTEGER NOT NULL CHECK (hard_limit >= 1),
         consumed INTEGER NOT NULL DEFAULT 0 CHECK (consumed >= 0),
@@ -65,8 +72,8 @@ MIGRATION_1 = (
         idempotency_key TEXT PRIMARY KEY,
         invocation_digest TEXT NOT NULL CHECK (length(invocation_digest) = 64),
         intent_id TEXT NOT NULL UNIQUE,
-        task_id TEXT NOT NULL REFERENCES authority_projections(task_id),
-        authority_digest TEXT NOT NULL CHECK (length(authority_digest) = 64),
+        task_id TEXT NOT NULL REFERENCES authority_heads(task_id),
+        authority_digest TEXT NOT NULL REFERENCES authority_history(authority_digest),
         grant_digest TEXT NOT NULL CHECK (length(grant_digest) = 64),
         reservation_id TEXT NOT NULL,
         reservation_bytes BLOB NOT NULL,
@@ -76,6 +83,23 @@ MIGRATION_1 = (
         capability_sha256 TEXT NOT NULL UNIQUE CHECK (length(capability_sha256) = 64),
         state TEXT NOT NULL CHECK (state IN ('INTENT','DISPATCHED','SETTLED','ABANDONED')),
         created_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE content_objects (
+        sha256 TEXT PRIMARY KEY CHECK (length(sha256) = 64),
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        relative_path TEXT NOT NULL UNIQUE
+    ) STRICT
+    """,
+    """
+    CREATE TABLE content_bindings (
+        intent_id TEXT NOT NULL REFERENCES dispatch_intents(intent_id),
+        artifact_id TEXT NOT NULL,
+        content_schema_id TEXT NOT NULL,
+        sha256 TEXT NOT NULL REFERENCES content_objects(sha256),
+        content_ref_bytes BLOB NOT NULL,
+        PRIMARY KEY (intent_id, artifact_id)
     ) STRICT
     """,
     """
@@ -96,6 +120,15 @@ MIGRATION_1 = (
         CHECK (result_digest IS NULL OR length(result_digest) = 64)
     ) STRICT
     """,
+    """
+    CREATE TABLE dispatch_abandonments (
+        intent_id TEXT PRIMARY KEY REFERENCES dispatch_intents(intent_id),
+        abandonment_bytes BLOB NOT NULL,
+        abandonment_sha256 TEXT NOT NULL CHECK (length(abandonment_sha256) = 64),
+        replay_bytes BLOB NOT NULL,
+        replay_sha256 TEXT NOT NULL CHECK (length(replay_sha256) = 64)
+    ) STRICT
+    """,
     "CREATE INDEX dispatch_intents_task_state ON dispatch_intents(task_id, state)",
 )
 
@@ -107,10 +140,14 @@ CURRENT_TABLES = frozenset(
     {
         "current_schema",
         "current_package_lock",
-        "authority_projections",
+        "authority_history",
+        "authority_heads",
         "tool_call_budgets",
         "dispatch_intents",
+        "content_objects",
+        "content_bindings",
         "dispatch_settlements",
+        "dispatch_abandonments",
     }
 )
 
