@@ -149,6 +149,38 @@ class CurrentJournalRecoveryTest(CurrentJournalTestCase):
             ).fetchone()[0]
         self.assertEqual(0, count)
 
+    def test_fenced_dispatched_predecessor_cannot_late_commit_success(self) -> None:
+        capability = self.begin().dispatch_capability
+        self.journal.consume_capability(capability)
+        outcome = self.outcome(capability)
+        fenced = self.make_fenced_head(self.authority)
+
+        with self.assertRaisesRegex(CurrentJournalError, "DISPATCH_AMBIGUOUS"):
+            self.journal.recover_abandon(
+                self.call.task_id,
+                self.call.idempotency_key,
+                self.call.invocation_digest,
+                fenced,
+            )
+        with self.assertRaisesRegex(CurrentJournalError, "AUTHORITY_FENCED"):
+            self.journal.commit(
+                capability,
+                self.call,
+                self.prepared,
+                outcome,
+                self.before,
+            )
+
+        self.assertEqual((0, 60_000, 0, 1), self.budget())
+        with self.database.connect() as connection:
+            intent = connection.execute(
+                "SELECT state FROM dispatch_intents"
+            ).fetchone()[0]
+            settlements = connection.execute(
+                "SELECT count(*) FROM dispatch_settlements"
+            ).fetchone()[0]
+        self.assertEqual(("DISPATCHED", 0), (intent, settlements))
+
     def test_recovery_rejects_unrelated_fenced_projection(self) -> None:
         self.begin()
         unrelated = self.make_authority(identity_char="2", grant_char="d")

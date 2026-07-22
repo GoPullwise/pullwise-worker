@@ -155,6 +155,7 @@ MIGRATION_1 = (
         outcome_schema_id TEXT NOT NULL,
         observation_bytes BLOB NOT NULL,
         observation_digest TEXT NOT NULL CHECK (length(observation_digest) = 64),
+        observation_seq INTEGER NOT NULL UNIQUE CHECK (observation_seq >= 1),
         budget_settlement_bytes BLOB NOT NULL,
         budget_settlement_digest TEXT NOT NULL CHECK (length(budget_settlement_digest) = 64),
         replay_bytes BLOB NOT NULL,

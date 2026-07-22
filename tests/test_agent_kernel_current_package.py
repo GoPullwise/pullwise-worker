@@ -112,7 +112,9 @@ def authority_document(
             'attempt_id': 'attempt_' + '3' * 32,
             'session_id': 'sess_' + '4' * 32,
             'owner_id': 'owner_' + '5' * 32,
+            'grant_id': selected_grant['grant_id'],
             'lease_id': 'lease_' + '6' * 32,
+            'previous_task_version': selected_grant['task_version'],
             'task_version': task_version,
             'deletion_version': deletion_version,
             'owner_epoch': owner_epoch,
@@ -271,20 +273,22 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
         with self.assertRaisesRegex(GatewayError, 'ABANDON_RESPONSE_NONCANONICAL'):
             AgentClaimAbandonResponse.from_canonical_bytes(canonical + b'\n')
 
-        stale = abandonment_document(task_version=17)
+        stale = abandonment_document()
+        stale['task_version'] = 17
         with self.assertRaisesRegex(
             GatewayError, 'ABANDON_RESPONSE_GRANT_BINDING_MISMATCH'
         ):
             AgentClaimAbandonResponse.from_canonical_bytes(
-                canonical_validated_current_bytes(ABANDON_RESPONSE_SCHEMA_ID, stale)
+                canonical_current_document_bytes(stale)
             )
 
-        mismatched = abandonment_document(owner_epoch=8)
+        mismatched = abandonment_document()
+        mismatched['owner_epoch'] = 8
         with self.assertRaisesRegex(
             GatewayError, 'ABANDON_RESPONSE_GRANT_BINDING_MISMATCH'
         ):
             AgentClaimAbandonResponse.from_canonical_bytes(
-                canonical_validated_current_bytes(ABANDON_RESPONSE_SCHEMA_ID, mismatched)
+                canonical_current_document_bytes(mismatched)
             )
 
     def test_codec_derives_a_fully_bound_canonical_invocation(self) -> None:

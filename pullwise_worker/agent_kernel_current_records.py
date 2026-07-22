@@ -16,7 +16,10 @@ from .agent_kernel_current_package import (
     seal_current_document,
     verify_current_document_digest,
 )
-from .agent_kernel_current_settlement import SettlementDocuments
+from .agent_kernel_current_settlement import (
+    SettlementDocuments,
+    finalize_observation,
+)
 
 
 class CurrentRecordError(RuntimeError):
@@ -44,6 +47,11 @@ def commit_documents(
             raise CurrentRecordError("SETTLEMENT_AFTER_ABANDONMENT")
         if intent["state"] != "DISPATCHED":
             raise CurrentRecordError("CURRENT_INTENT_STATE_INVALID")
+        _assert_current_authority(connection, intent)
+        observation_seq = _next_observation_seq(connection)
+        observation, observation_bytes = finalize_observation(
+            documents, observation_seq
+        )
 
         elapsed_ms = documents.receipt.get("elapsed_ms")
         budget = settle_budget(
@@ -61,7 +69,7 @@ def commit_documents(
             _bind_reference(connection, intent["intent_id"], reference)
         connection.execute(
             "INSERT INTO dispatch_settlements VALUES "
-            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 intent["intent_id"],
                 documents.receipt_bytes,
@@ -69,8 +77,9 @@ def commit_documents(
                 documents.outcome_bytes,
                 documents.outcome_object.sha256,
                 documents.outcome_schema_id,
-                documents.observation_bytes,
-                documents.observation["observation_digest"],
+                observation_bytes,
+                observation["observation_digest"],
+                observation_seq,
                 budget.canonical_bytes,
                 budget.digest,
                 documents.replay_bytes,
@@ -207,21 +216,32 @@ def _settled_replay(
     documents: SettlementDocuments,
 ) -> bytes:
     row = connection.execute(
-        "SELECT receipt_bytes, outcome_bytes, observation_bytes, replay_bytes, "
-        "replay_sha256, violation_bytes FROM dispatch_settlements WHERE intent_id = ?",
+        "SELECT receipt_bytes, outcome_bytes, observation_bytes, observation_seq, "
+        "replay_bytes, replay_sha256, violation_bytes "
+        "FROM dispatch_settlements WHERE intent_id = ?",
         (intent["intent_id"],),
     ).fetchone()
     if row is None:
         raise CurrentRecordError("SETTLEMENT_RECORD_MISSING")
-    stored_violation = None if row[5] is None else bytes(row[5])
+    stored_violation = None if row[6] is None else bytes(row[6])
+    _, expected_observation_bytes = finalize_observation(documents, int(row[3]))
     if (
         bytes(row[0]) != documents.receipt_bytes
         or bytes(row[1]) != documents.outcome_bytes
-        or bytes(row[2]) != documents.observation_bytes
+        or bytes(row[2]) != expected_observation_bytes
         or stored_violation != documents.violation_bytes
     ):
         raise CurrentRecordError("SETTLEMENT_REPLAY_CONFLICT")
-    return _verified_replay(bytes(row[3]), str(row[4]))
+    return _verified_replay(bytes(row[4]), str(row[5]))
+
+
+def _next_observation_seq(connection: sqlite3.Connection) -> int:
+    return int(
+        connection.execute(
+            "SELECT COALESCE(MAX(observation_seq), 0) + 1 "
+            "FROM dispatch_settlements"
+        ).fetchone()[0]
+    )
 
 
 def _bind_reference(
@@ -280,6 +300,21 @@ def _assert_call(intent: sqlite3.Row, call: object) -> None:
         or intent["tool_key"] != getattr(call, "tool_key", None)
     ):
         raise CurrentRecordError("SETTLEMENT_INVOCATION_CONFLICT")
+
+
+def _assert_current_authority(
+    connection: sqlite3.Connection, intent: sqlite3.Row
+) -> None:
+    head = connection.execute(
+        "SELECT heads.projection_digest, history.state "
+        "FROM authority_heads AS heads "
+        "JOIN authority_history AS history "
+        "ON history.projection_digest = heads.projection_digest "
+        "WHERE heads.task_id = ?",
+        (intent["task_id"],),
+    ).fetchone()
+    if head is None or tuple(head) != (intent["authority_digest"], "ACTIVE"):
+        raise CurrentRecordError("AUTHORITY_FENCED")
 
 
 def _transition(

@@ -71,6 +71,9 @@ def commit_current_execution(
             ):
                 raise CurrentJournalError("SETTLEMENT_INVOCATION_CONFLICT")
             observation_id = journal._identifier("obs", intent["intent_id"])
+            tool_invocation_id = journal._identifier(
+                "toolinv", intent["intent_id"]
+            )
         documents = prepare_settlement(
             object_store=journal.object_store,
             call=call,
@@ -78,6 +81,7 @@ def commit_current_execution(
             outcome=outcome,
             source_after=source_after,
             observation_id=observation_id,
+            tool_invocation_id=tool_invocation_id,
             changes=changes,
         )
         return commit_documents(

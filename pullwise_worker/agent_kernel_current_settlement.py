@@ -41,8 +41,7 @@ class SettlementDocuments:
     outcome: dict[str, object]
     outcome_bytes: bytes
     outcome_schema_id: str
-    observation: dict[str, object]
-    observation_bytes: bytes
+    observation_seed: dict[str, object]
     payload: PublishedCurrentPayload
     outcome_object: PublishedCurrentReference
     replay_bytes: bytes
@@ -154,6 +153,7 @@ def prepare_settlement(
     outcome: object,
     source_after: SourceTreeSnapshot,
     observation_id: str,
+    tool_invocation_id: str,
     changes: SourceDiff | None = None,
 ) -> SettlementDocuments:
     if not isinstance(source_after, SourceTreeSnapshot):
@@ -225,39 +225,78 @@ def prepare_settlement(
         media_type="application/json",
         encoding="utf-8",
     )
-    observation = seal_current_document(
-        "observation/v1",
-        {
-            "schema_id": "observation/v1",
-            "observation_id": observation_id,
-            "task_id": getattr(call, "task_id", None),
-            "attempt_id": getattr(call, "attempt_id", None),
-            "native_epoch": getattr(call, "native_epoch", None),
-            "tool_key": getattr(call, "tool_key", None),
-            "invocation_digest": getattr(call, "invocation_digest", None),
-            "local_receipt_digest": receipt["receipt_digest"],
-            "status": "policy_violation" if violation else receipt["status"],
-            "source_state_before_id": before.source_state_id,
-            "source_state_after_id": source_after.source_state_id,
-            "result_ref": outcome_ref.content_ref,
+    observation_seed = {
+        "schema_id": "observation/v1",
+        "observation_id": observation_id,
+        "task_id": getattr(call, "task_id", None),
+        "attempt_id": getattr(call, "attempt_id", None),
+        "native_epoch": getattr(call, "native_epoch", None),
+        "actor": {
+            "schema_id": "actor/v1",
+            "kind": "task_owner",
+            "id": getattr(call, "owner_id", None),
+            "session_id": getattr(call, "session_id", None),
         },
-    )
-    observation_bytes = canonical_validated_current_bytes(
-        "observation/v1", observation
-    )
+        "tool_id": getattr(call, "tool_key", None),
+        "tool_version": getattr(prepared, "tool_version", None),
+        "tool_invocation_id": tool_invocation_id,
+        "idempotency_key": getattr(call, "idempotency_key", None),
+        "input_digest": getattr(call, "invocation_digest", None),
+        "status": "policy_violation" if violation else receipt["status"],
+        "started_at": receipt["started_at"],
+        "completed_at": receipt["completed_at"],
+        "duration_ms": receipt["elapsed_ms"],
+        "exit_code": None,
+        "source_state_before_id": before.source_state_id,
+        "source_state_after_id": source_after.source_state_id,
+        "execution_state_id": None,
+        "stdout_ref": {
+            "availability": "not_applicable",
+            "reason_code": "IN_PROCESS_TOOL",
+        },
+        "stderr_ref": {
+            "availability": "not_applicable",
+            "reason_code": "IN_PROCESS_TOOL",
+        },
+        "result_ref": {
+            "availability": "available",
+            "ref": outcome_ref.content_ref,
+        },
+        "redaction_report_ref": {
+            "availability": "not_applicable",
+            "reason_code": "REDACTION_NOT_REQUIRED",
+        },
+        "partial_side_effect": False,
+    }
     return SettlementDocuments(
         receipt=receipt,
         receipt_bytes=receipt_bytes,
         outcome=outcome_document,
         outcome_bytes=outcome_bytes,
         outcome_schema_id=outcome_schema_id,
-        observation=observation,
-        observation_bytes=observation_bytes,
+        observation_seed=observation_seed,
         payload=payload,
         outcome_object=outcome_ref,
         replay_bytes=outcome_bytes,
         violation_bytes=violation_bytes,
     )
+
+
+def finalize_observation(
+    documents: SettlementDocuments, observation_seq: int
+) -> tuple[dict[str, object], bytes]:
+    if (
+        isinstance(observation_seq, bool)
+        or not isinstance(observation_seq, int)
+        or observation_seq < 1
+    ):
+        raise CurrentSettlementError("OBSERVATION_SEQUENCE_INVALID")
+    observation = seal_current_document(
+        "observation/v1",
+        {**documents.observation_seed, "observation_seq": observation_seq},
+    )
+    encoded = canonical_validated_current_bytes("observation/v1", observation)
+    return observation, encoded
 
 
 def _verify_payload(
@@ -362,6 +401,7 @@ __all__ = [
     "CurrentSettlementError",
     "SettlementDocuments",
     "content_ref_for",
+    "finalize_observation",
     "prepare_settlement",
     "publish_r0_payload",
 ]
