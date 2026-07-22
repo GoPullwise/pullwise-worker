@@ -96,6 +96,19 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
         with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_DATABASE_ROOT_INVALID"):
             CurrentAgentKernelDatabase.open(self.root, _PackageRef())
 
+    def test_dangling_database_symlink_is_rejected_without_following(self) -> None:
+        self.root.mkdir()
+        database_path = self.root / "agent-kernel-current.sqlite3"
+        missing_target = Path(self.scratch.name) / "must-not-be-created.sqlite3"
+        try:
+            database_path.symlink_to(missing_target)
+        except OSError as exc:
+            self.skipTest(f"file symlink unavailable: {exc}")
+
+        with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_DATABASE_FILE_INVALID"):
+            CurrentAgentKernelDatabase.open(self.root, _PackageRef())
+        self.assertFalse(missing_target.exists())
+
     def test_reopen_rejects_any_schema_inventory_change(self) -> None:
         mutations = {
             "dropped index": "DROP INDEX dispatch_intents_task_state",
@@ -199,6 +212,35 @@ class CurrentObjectStoreTest(unittest.TestCase):
 
         with self.assertRaisesRegex(CurrentObjectError, "CURRENT_OBJECT_UNSAFE"):
             self.store.read_verified(published)
+
+    def test_symlinked_object_is_never_followed(self) -> None:
+        published = self.store.publish(b"original object")
+        outside = Path(self.scratch.name) / "outside-object"
+        outside.write_bytes(b"original object")
+        path = self.store.path_for(published)
+        path.unlink()
+        try:
+            path.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"file symlink unavailable: {exc}")
+
+        with self.assertRaisesRegex(CurrentObjectError, "CURRENT_OBJECT_UNSAFE"):
+            self.store.read_verified(published)
+
+    def test_replaced_staging_directory_is_rejected_before_write(self) -> None:
+        original = self.root / "staging-original"
+        self.store.staging.rename(original)
+        outside = Path(self.scratch.name) / "outside-staging"
+        outside.mkdir()
+        try:
+            self.store.staging.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            original.rename(self.store.staging)
+            self.skipTest(f"directory symlink unavailable: {exc}")
+
+        with self.assertRaisesRegex(CurrentObjectError, "CURRENT_OBJECT_ROOT_INVALID"):
+            self.store.publish(b"must not escape")
+        self.assertEqual([], list(outside.iterdir()))
 
     def test_forged_object_identity_cannot_escape_or_weaken_cas_checks(self) -> None:
         forged = (

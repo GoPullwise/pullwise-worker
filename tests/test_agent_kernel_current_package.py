@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 from pullwise_worker import _generated_agent_task_contract as generated_contract
 from pullwise_worker.agent_kernel_current_package import (
+    AgentClaimAbandonResponse,
     CURRENT_PACKAGE,
     CURRENT_TOOL_CATALOG,
     CurrentInvocationCodec,
@@ -47,6 +48,7 @@ GRANT_SCHEMA_ID = 'agent-worker-grant/v1'
 AUTHORITY_SCHEMA_ID = 'server-authority-envelope/v1'
 REQUEST_SCHEMA_ID = 'agent-tool-request/v1'
 INVOCATION_SCHEMA_ID = 'tool-invocation/v1'
+ABANDON_RESPONSE_SCHEMA_ID = 'agent-claim-abandon-response/v1'
 
 
 def grant_document(
@@ -142,6 +144,37 @@ def request_bytes(
     return canonical_current_document_bytes(document)
 
 
+def abandonment_document(
+    *,
+    grant: dict[str, object] | None = None,
+    task_version: int = 18,
+    owner_epoch: int = 7,
+) -> dict[str, object]:
+    selected_grant = grant or grant_document(owner_epoch=owner_epoch)
+    return seal_current_document(
+        ABANDON_RESPONSE_SCHEMA_ID,
+        {
+            'schema_id': ABANDON_RESPONSE_SCHEMA_ID,
+            'package': CURRENT_PACKAGE.as_document(),
+            'superseded_authority_digest': '8' * 64,
+            'grant': selected_grant,
+            'task_id': 'task_' + '2' * 32,
+            'attempt_id': 'attempt_' + '3' * 32,
+            'session_id': 'sess_' + '4' * 32,
+            'owner_id': 'owner_' + '5' * 32,
+            'lease_id': 'lease_' + '6' * 32,
+            'task_version': task_version,
+            'deletion_version': 2,
+            'owner_epoch': owner_epoch,
+            'native_epoch': 11,
+            'transport_epoch': 13,
+            'reason': 'authority_revoked',
+            'state': 'FENCED',
+            'abandoned_at': '2026-07-22T12:00:00Z',
+        },
+    )
+
+
 class AgentKernelCurrentPackageTest(unittest.TestCase):
     def test_worker_pin_is_the_generated_package_tuple(self) -> None:
         self.assertEqual(generated_contract.PACKAGE_TUPLE, CURRENT_PACKAGE.as_tuple())
@@ -209,6 +242,48 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(GatewayError, 'AUTHORITY_GRANT_BINDING_MISMATCH'):
             ServerAuthorityEnvelope.from_canonical_bytes(mismatched_bytes)
+
+    def test_abandonment_response_preserves_successor_and_nested_old_grant(self) -> None:
+        complete = abandonment_document()
+        raw = canonical_validated_current_bytes(ABANDON_RESPONSE_SCHEMA_ID, complete)
+
+        parsed = AgentClaimAbandonResponse.from_canonical_bytes(raw)
+
+        self.assertEqual(raw, parsed.canonical_bytes)
+        self.assertEqual(CURRENT_PACKAGE, parsed.package)
+        self.assertEqual(complete['response_digest'], parsed.digest)
+        self.assertEqual(
+            complete['superseded_authority_digest'],
+            parsed.superseded_authority_digest,
+        )
+        self.assertEqual(17, parsed.grant.task_version)
+        self.assertEqual(18, parsed.task_version)
+        self.assertEqual('authority_revoked', parsed.reason)
+        self.assertEqual('FENCED', parsed.state)
+        self.assertEqual(complete, parsed.as_document())
+
+    def test_abandonment_response_rejects_noncanonical_or_wrong_successor_fence(self) -> None:
+        canonical = canonical_validated_current_bytes(
+            ABANDON_RESPONSE_SCHEMA_ID, abandonment_document()
+        )
+        with self.assertRaisesRegex(GatewayError, 'ABANDON_RESPONSE_NONCANONICAL'):
+            AgentClaimAbandonResponse.from_canonical_bytes(canonical + b'\n')
+
+        stale = abandonment_document(task_version=17)
+        with self.assertRaisesRegex(
+            GatewayError, 'ABANDON_RESPONSE_GRANT_BINDING_MISMATCH'
+        ):
+            AgentClaimAbandonResponse.from_canonical_bytes(
+                canonical_validated_current_bytes(ABANDON_RESPONSE_SCHEMA_ID, stale)
+            )
+
+        mismatched = abandonment_document(owner_epoch=8)
+        with self.assertRaisesRegex(
+            GatewayError, 'ABANDON_RESPONSE_GRANT_BINDING_MISMATCH'
+        ):
+            AgentClaimAbandonResponse.from_canonical_bytes(
+                canonical_validated_current_bytes(ABANDON_RESPONSE_SCHEMA_ID, mismatched)
+            )
 
     def test_codec_derives_a_fully_bound_canonical_invocation(self) -> None:
         trusted = authority()

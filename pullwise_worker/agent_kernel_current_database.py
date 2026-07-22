@@ -141,7 +141,9 @@ class CurrentAgentKernelDatabase:
             connection.close()
 
     def _create_database_file(self) -> None:
-        if not self.path.exists():
+        if os.path.lexists(self.path):
+            self._verify_database_file()
+        else:
             flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
             if hasattr(os, "O_BINARY"):
                 flags |= os.O_BINARY

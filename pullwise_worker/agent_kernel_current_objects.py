@@ -75,6 +75,8 @@ class CurrentObjectStore:
     def publish(self, payload: bytes) -> PublishedCurrentObject:
         if not isinstance(payload, bytes):
             raise CurrentObjectError("CURRENT_OBJECT_BYTES_INVALID")
+        self._ensure_directory(self.objects)
+        self._ensure_directory(self.staging)
         digest = hashlib.sha256(payload).hexdigest()
         relative = f"objects/{digest[:2]}/{digest}"
         published = PublishedCurrentObject(digest, len(payload), relative)
@@ -144,6 +146,14 @@ class CurrentObjectStore:
         path = self.path_for(published)
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
+            path_before = path.lstat()
+            if (
+                not stat.S_ISREG(path_before.st_mode)
+                or stat.S_ISLNK(path_before.st_mode)
+                or path_before.st_nlink != 1
+                or self._is_reparse(path_before)
+            ):
+                raise CurrentObjectError("CURRENT_OBJECT_UNSAFE")
             descriptor = os.open(path, flags)
         except OSError as exc:
             raise CurrentObjectError("CURRENT_OBJECT_UNSAFE", str(exc)) from exc
@@ -153,6 +163,8 @@ class CurrentObjectStore:
                 not stat.S_ISREG(before.st_mode)
                 or before.st_nlink != 1
                 or self._is_reparse(before)
+                or self._stable_file_identity(path_before)
+                != self._stable_file_identity(before)
             ):
                 raise CurrentObjectError("CURRENT_OBJECT_UNSAFE")
             chunks: list[bytes] = []
@@ -163,7 +175,13 @@ class CurrentObjectStore:
                 chunks.append(chunk)
             payload = b"".join(chunks)
             after = os.fstat(descriptor)
-            if self._stable_file_identity(before) != self._stable_file_identity(after):
+            path_after = path.lstat()
+            if (
+                self._stable_file_identity(before)
+                != self._stable_file_identity(after)
+                or self._stable_file_identity(path_before)
+                != self._stable_file_identity(path_after)
+            ):
                 raise CurrentObjectError("CURRENT_OBJECT_UNSAFE")
             if (
                 len(payload) != published.size_bytes

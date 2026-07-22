@@ -37,6 +37,7 @@ from .agent_kernel_current_package import (
     canonical_validated_current_bytes,
     seal_current_document,
 )
+from .agent_kernel_current_replay import probe_current_replay, replay_state
 from .agent_kernel_gateway import (
     CheckedInvocation,
     DispatchDecision,
@@ -138,17 +139,12 @@ class CurrentDispatchJournal:
         idempotency_key: str,
         invocation_digest: str,
     ) -> ReplayState:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT intent_id, invocation_digest, state FROM dispatch_intents "
-                "WHERE task_id = ? AND idempotency_key = ?",
-                (task_id, idempotency_key),
-            ).fetchone()
-            if row is None:
-                return ReplayState.new()
-            if row["invocation_digest"] != invocation_digest:
-                raise CurrentJournalError("IDEMPOTENCY_CONFLICT")
-            return self._replay_state(connection, row["intent_id"], row["state"])
+        return probe_current_replay(
+            self.database,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            invocation_digest=invocation_digest,
+        )
 
     def begin(
         self,
@@ -168,7 +164,7 @@ class CurrentDispatchJournal:
                 if existing is not None:
                     if existing["invocation_digest"] != call.invocation_digest:
                         raise CurrentJournalError("IDEMPOTENCY_CONFLICT")
-                    replay = self._replay_state(
+                    replay = replay_state(
                         connection, existing["intent_id"], existing["state"]
                     )
                     if replay.kind == "COMPLETED":
@@ -380,29 +376,6 @@ class CurrentDispatchJournal:
         if row is None:
             raise CurrentJournalError("DISPATCH_CAPABILITY_INVALID")
         return row
-
-    @staticmethod
-    def _replay_state(
-        connection: sqlite3.Connection, intent_id: str, state: str
-    ) -> ReplayState:
-        if state in {"INTENT", "DISPATCHED"}:
-            return ReplayState.pending()
-        table = (
-            "dispatch_settlements" if state == "SETTLED" else
-            "dispatch_abandonments" if state == "ABANDONED" else None
-        )
-        if table is None:
-            raise CurrentJournalError("CURRENT_INTENT_STATE_INVALID")
-        row = connection.execute(
-            f"SELECT replay_bytes, replay_sha256 FROM {table} WHERE intent_id = ?",
-            (intent_id,),
-        ).fetchone()
-        if row is None:
-            raise CurrentJournalError("CURRENT_REPLAY_MISSING")
-        payload = bytes(row[0])
-        if hashlib.sha256(payload).hexdigest() != row[1]:
-            raise CurrentJournalError("CURRENT_REPLAY_CORRUPT")
-        return ReplayState.completed(payload)
 
 def _identifier(prefix: str, *parts: str) -> str:
     payload = b"pullwise:current-journal:v1"

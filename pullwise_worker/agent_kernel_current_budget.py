@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
 import sqlite3
 
+from .agent_kernel_current_budget_documents import (
+    budget_identifier,
+    make_budget_ledger,
+    make_budget_reservation,
+)
 from .agent_kernel_current_package import (
     canonical_validated_current_bytes,
     seal_current_document,
@@ -65,7 +69,7 @@ def initialize_budget(connection: sqlite3.Connection, envelope: object) -> None:
     task_id = getattr(envelope, "task_id")
     grant_digest = getattr(envelope, "grant_digest")
     grant = getattr(envelope, "grant")
-    ledger, ledger_bytes = _ledger(
+    ledger, ledger_bytes = make_budget_ledger(
         task_id=task_id,
         grant_digest=grant_digest,
         elapsed_limit_ms=grant.elapsed_limit_ms,
@@ -121,10 +125,10 @@ def plan_reservation(
     if remaining_ms < 1 or remaining_calls < 1:
         raise CurrentBudgetError("BUDGET_EXHAUSTED")
     invocation_digest = getattr(call, "invocation_digest")
-    reservation_id = _identifier(
+    reservation_id = budget_identifier(
         "reserve", state.task_id, state.grant_digest, invocation_digest
     )
-    document, encoded = _reservation(
+    document, encoded = make_budget_reservation(
         reservation_id=reservation_id,
         state=state,
         attempt_id=getattr(call, "attempt_id"),
@@ -158,8 +162,10 @@ def reserve_budget(
     remaining_calls = (
         state.tool_call_limit - state.calls_consumed - state.calls_reserved
     )
-    expected_document, expected_bytes = _reservation(
-        reservation_id=_identifier(
+    if remaining_ms < 1 or remaining_calls < 1:
+        raise CurrentBudgetError("BUDGET_RESERVATION_STALE")
+    expected_document, expected_bytes = make_budget_reservation(
+        reservation_id=budget_identifier(
             "reserve", state.task_id, state.grant_digest,
             getattr(call, "invocation_digest"),
         ),
@@ -170,9 +176,7 @@ def reserve_budget(
         started_at=plan.started_at,
     )
     if (
-        remaining_ms < 1
-        or remaining_calls < 1
-        or plan.task_id != getattr(envelope, "task_id")
+        plan.task_id != getattr(envelope, "task_id")
         or plan.grant_digest != getattr(envelope, "grant_digest")
         or plan.invocation_digest != getattr(call, "invocation_digest")
         or plan.reserved_ms != remaining_ms
@@ -301,7 +305,7 @@ def _write_state(
         or calls_consumed + calls_reserved > old.tool_call_limit
     ):
         raise CurrentBudgetError("BUDGET_EXHAUSTED")
-    document, encoded = _ledger(
+    document, encoded = make_budget_ledger(
         task_id=old.task_id,
         grant_digest=old.grant_digest,
         elapsed_limit_ms=old.elapsed_limit_ms,
@@ -346,54 +350,6 @@ def _write_state(
         encoded,
         str(document["ledger_digest"]),
     )
-
-
-def _ledger(**values: object) -> tuple[dict[str, object], bytes]:
-    document = seal_current_document(
-        "elapsed-budget-ledger/v1",
-        {"schema_id": "elapsed-budget-ledger/v1", **values},
-    )
-    return document, canonical_validated_current_bytes(
-        "elapsed-budget-ledger/v1", document
-    )
-
-
-def _reservation(
-    *,
-    reservation_id: str,
-    state: BudgetState,
-    attempt_id: str,
-    invocation_digest: str,
-    reserved_ms: int,
-    started_at: str,
-) -> tuple[dict[str, object], bytes]:
-    document = seal_current_document(
-        "elapsed-budget-reservation/v1",
-        {
-            "schema_id": "elapsed-budget-reservation/v1",
-            "reservation_id": reservation_id,
-            "task_id": state.task_id,
-            "attempt_id": attempt_id,
-            "invocation_digest": invocation_digest,
-            "reserved_ms": reserved_ms,
-            "reserved_calls": 1,
-            "previous_consumed_ms": state.consumed_ms,
-            "previous_reserved_ms": state.reserved_ms,
-            "previous_calls_consumed": state.calls_consumed,
-            "previous_calls_reserved": state.calls_reserved,
-            "started_at": started_at,
-        },
-    )
-    return document, canonical_validated_current_bytes(
-        "elapsed-budget-reservation/v1", document
-    )
-
-
-def _identifier(prefix: str, *parts: str) -> str:
-    digest = hashlib.sha256(
-        ("pullwise:current-budget:" + "\x00".join(parts)).encode("utf-8")
-    ).hexdigest()
-    return f"{prefix}_{digest[:32]}"
 
 
 __all__ = [
