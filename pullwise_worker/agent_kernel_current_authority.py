@@ -39,7 +39,7 @@ class CurrentAuthorityProjection:
             if old is not None:
                 if expected_previous_digest != old.digest:
                     self._fail("AUTHORITY_SUCCESSOR_CONFLICT")
-                self._assert_successor(old, parsed)
+                self._fail("ACTIVE_AUTHORITY_SUCCESSOR_FORBIDDEN")
             elif expected_previous_digest is not None:
                 self._fail("AUTHORITY_SUCCESSOR_CONFLICT")
             self._insert_history(connection, parsed)
@@ -165,27 +165,6 @@ class CurrentAuthorityProjection:
         if envelope.grant.canonical_bytes != grant_bytes:
             self._fail("AUTHORITY_HISTORY_CORRUPT")
         return envelope
-
-    @staticmethod
-    def _assert_successor(
-        old: ServerAuthorityEnvelope, new: ServerAuthorityEnvelope
-    ) -> None:
-        monotonic = (
-            new.package.as_tuple() == old.package.as_tuple()
-            and new.task_id == old.task_id
-            and new.owner_id == old.owner_id
-            and new.task_version > old.task_version
-            and new.deletion_version >= old.deletion_version
-            and new.attempt_id != old.attempt_id
-            and new.session_id != old.session_id
-            and new.lease_id != old.lease_id
-            and new.grant.grant_id != old.grant.grant_id
-            and new.owner_epoch > old.owner_epoch
-            and new.native_epoch > old.native_epoch
-            and new.transport_epoch > old.transport_epoch
-        )
-        if not monotonic:
-            raise CurrentAuthorityProjectionError("AUTHORITY_SUCCESSOR_INVALID")
 
     @staticmethod
     def _insert_history(connection: object, item: ServerAuthorityEnvelope) -> None:

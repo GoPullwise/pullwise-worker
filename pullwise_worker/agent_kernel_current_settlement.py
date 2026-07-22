@@ -59,7 +59,7 @@ def content_ref_for(
         "content-ref/v1",
         {
             "schema_id": "content-ref/v1",
-            "artifact_id": f"artifact_{published.sha256[:32]}",
+            "artifact_id": f"art_{published.sha256[:32]}",
             "content_schema_id": content_schema_id,
             "sha256": published.sha256,
             "size_bytes": published.size_bytes,
