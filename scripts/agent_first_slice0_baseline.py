@@ -287,7 +287,7 @@ def verify_baseline(
     ratchet_source_counts: dict[str, Iterable[int | None]] | None = None,
     check_document: bool = True,
 ) -> dict[str, Any]:
-    validate_baseline(baseline)
+    baseline = validate_baseline(baseline)
     root = repo_root.resolve()
     failures: list[dict[str, Any]] = []
     try:
