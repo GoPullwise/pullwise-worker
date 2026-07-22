@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D30`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `none`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -40,7 +40,7 @@ Active question: `D30`. Questions are asked one at a time. User silence, existin
 | `D22` | `P0.11` | Release/Operations 数值门与签发 owner | `resolved` | `active` | `S6` | D1, D20, D21 | `absolute_plus_baseline` |
 | `D28` | `P0.3/P1.2` | current package 身份、发布物与 exact pin | `resolved` | `active` | `S3` | D23, D27 | `logical_bundle_generated_wrappers` |
 | `D29` | `P0.3/P0.6/P1.2/P1.5` | current package 基础契约的原子闭包 | `resolved` | `active` | `S3` | D3, D6, D7, D15, D21, D24, D25, D27, D28 | `layered_atomic_root` |
-| `D30` | `P0.3/P0.6` | grant 至 tool receipt/budget 的 dispatch 线性化 | `pending` | `active` | `S3` | D7, D21, D25, D29 | `worker_journal_server_authority` |
+| `D30` | `P0.3/P0.6` | grant 至 tool receipt/budget 的 dispatch 线性化 | `resolved` | `active` | `S3` | D7, D21, D25, D29 | `worker_journal_server_authority` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -664,17 +664,19 @@ Active question: `D30`. Questions are asked one at a time. User silence, existin
 
 ### D30 — grant 至 tool receipt/budget 的 dispatch 线性化
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S3`.
 
 **Question:** Exact Task/grant/fence 校验、dispatch intent、预算 reserve、真实 tool dispatch、receipt/Observation 与 budget settlement 应由 Worker current-only journal、Server per-dispatch authorization，还是 Worker CAS event chain 形成唯一可恢复线性化路径？
 
 **Options:**
 
-- `worker_journal_server_authority` — non-normative recommendation, not selected: Server 保持 immutable Task/claim/grant 与 transport receipt binding 权威；Worker current-only durable journal 在 begin 时原子重验 exact package/grant/full fence、预算 reserve、持久化 intent 并签发一次性 opaque dispatch capability，settlement 再提交真实 receipt/result、Observation 与预算结算。 本地 R0/R1 不依赖逐调用网络，同时 exact replay、pending ambiguity、资源清理与不重复 dispatch 可由单一 Worker 事务边界证明。 Consequences: 必须冻结 journal begin/settlement/abandon/replay 状态机、one-shot capability、crash points，以及 local tool receipt 与 Server transport receipt 的类型隔离
+- `worker_journal_server_authority` — selected by resolution: Server 保持 immutable Task/claim/grant 与 transport receipt binding 权威；Worker current-only durable journal 在 begin 时原子重验 exact package/grant/full fence、预算 reserve、持久化 intent 并签发一次性 opaque dispatch capability，settlement 再提交真实 receipt/result、Observation 与预算结算。 本地 R0/R1 不依赖逐调用网络，同时 exact replay、pending ambiguity、资源清理与不重复 dispatch 可由单一 Worker 事务边界证明。 Consequences: 必须冻结 journal begin/settlement/abandon/replay 状态机、one-shot capability、crash points，以及 local tool receipt 与 Server transport receipt 的类型隔离
 - `server_per_dispatch_authorization`: 每个 tool invocation 在执行前由 Server 持久化 intent 并签发一次性 dispatch authorization，Worker 执行后向 Server 提交 receipt 和 budget settlement。 集中授权与审计，但让本地 R0/R1 的可用性、延迟和 ambiguity recovery 依赖控制面网络。 Consequences: 必须定义离线/超时/响应丢失、Server intent 与本地 child start 的双边 crash recovery
 - `worker_cas_event_chain`: Worker 将 invocation、intent、receipt、Observation 与 budget entries 保存为 immutable CAS nodes，并以一个事务性 head CAS 推进 dispatch chain。 提供强内容寻址审计且避免可变 journal rows，但查询、GC 和 incomplete-chain 恢复更复杂。 Consequences: 必须冻结 chain identity、head CAS、fork rejection、pending node recovery 和 Server transport projection
 
-**Resolution:** No option has been selected.
+**Resolution:** `worker_journal_server_authority` (`option`). 推荐 worker_journal_server_authority   按照推荐来
+
+**Authority/evidence:** `user` on `2026-07-22`; `conversation:user-confirmation:2026-07-22:D30:worker_journal_server_authority`; digest `4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf`.
 
 **Supersedes:** none
 
