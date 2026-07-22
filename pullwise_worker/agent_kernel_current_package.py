@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
-from typing import Callable
+from types import MappingProxyType
+from typing import Callable, Mapping
 
 from . import _generated_agent_task_contract as _contract
 from .agent_kernel_gateway_contracts import (
@@ -397,13 +398,20 @@ class AgentClaimAbandonResponse:
         )
 
 
+@dataclass(frozen=True, init=False)
 class CurrentToolCatalog:
+    canonical_bytes: bytes
+    catalog_digest: str
+    _descriptors: Mapping[str, ToolDescriptor] = field(repr=False)
+
     def __init__(self, document: object) -> None:
         complete = verify_current_document_digest(TOOL_CATALOG_SCHEMA_ID, document)
-        self.canonical_bytes = canonical_validated_current_bytes(
-            TOOL_CATALOG_SCHEMA_ID, complete
+        object.__setattr__(
+            self,
+            "canonical_bytes",
+            canonical_validated_current_bytes(TOOL_CATALOG_SCHEMA_ID, complete),
         )
-        self.catalog_digest = complete["catalog_digest"]
+        object.__setattr__(self, "catalog_digest", complete["catalog_digest"])
         descriptors: dict[str, ToolDescriptor] = {}
         for item in complete["tools"]:
             descriptor = ToolDescriptor(
@@ -419,7 +427,7 @@ class CurrentToolCatalog:
             if descriptor.tool_key in descriptors:
                 raise GatewayError("TOOL_CATALOG_INVALID")
             descriptors[descriptor.tool_key] = descriptor
-        self._descriptors = descriptors
+        object.__setattr__(self, "_descriptors", MappingProxyType(descriptors))
 
     def as_document(self) -> dict[str, object]:
         return _detached_document(self.canonical_bytes)

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
 import stat
+import time
 
 
 class CurrentObjectError(RuntimeError):
@@ -121,6 +123,73 @@ class CurrentObjectStore:
 
     def read_verified(self, published: PublishedCurrentObject) -> bytes:
         return self._verify(published, return_bytes=True)
+
+    def collect_orphans(
+        self,
+        reachable_sha256: set[str] | frozenset[str],
+        *,
+        min_age_seconds: int,
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        if (
+            not isinstance(reachable_sha256, (set, frozenset))
+            or any(
+                not isinstance(item, str)
+                or re.fullmatch(r"[0-9a-f]{64}", item) is None
+                for item in reachable_sha256
+            )
+            or isinstance(min_age_seconds, bool)
+            or not isinstance(min_age_seconds, int)
+            or min_age_seconds < 1
+        ):
+            raise CurrentObjectError("CURRENT_OBJECT_COLLECTION_INVALID")
+        selected_now = time.time() if now is None else now
+        if (
+            isinstance(selected_now, bool)
+            or not isinstance(selected_now, (int, float))
+            or not math.isfinite(selected_now)
+        ):
+            raise CurrentObjectError("CURRENT_OBJECT_COLLECTION_INVALID")
+        cutoff = float(selected_now) - min_age_seconds
+        self._ensure_directory(self.objects)
+        removed: list[str] = []
+        for prefix in sorted(self.objects.iterdir(), key=lambda item: item.name):
+            if re.fullmatch(r"[0-9a-f]{2}", prefix.name) is None:
+                raise CurrentObjectError("CURRENT_OBJECT_LAYOUT_INVALID")
+            if not self._safe_directory(prefix):
+                raise CurrentObjectError("CURRENT_OBJECT_UNSAFE")
+            for path in sorted(prefix.iterdir(), key=lambda item: item.name):
+                digest = path.name
+                try:
+                    info = path.lstat()
+                except OSError as exc:
+                    raise CurrentObjectError("CURRENT_OBJECT_UNSAFE") from exc
+                if (
+                    re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                    or digest[:2] != prefix.name
+                    or not stat.S_ISREG(info.st_mode)
+                    or stat.S_ISLNK(info.st_mode)
+                    or info.st_nlink != 1
+                    or self._is_reparse(info)
+                ):
+                    raise CurrentObjectError("CURRENT_OBJECT_UNSAFE")
+                if digest in reachable_sha256 or info.st_mtime > cutoff:
+                    continue
+                published = PublishedCurrentObject(
+                    digest,
+                    info.st_size,
+                    f"objects/{prefix.name}/{digest}",
+                )
+                self._verify(published, return_bytes=False)
+                current = path.lstat()
+                if self._stable_file_identity(info) != self._stable_file_identity(
+                    current
+                ):
+                    raise CurrentObjectError("CURRENT_OBJECT_UNSAFE")
+                path.unlink()
+                self._fsync_directory(prefix)
+                removed.append(published.relative_path)
+        return tuple(removed)
 
     def path_for(self, published: PublishedCurrentObject) -> Path:
         if not isinstance(published, PublishedCurrentObject):

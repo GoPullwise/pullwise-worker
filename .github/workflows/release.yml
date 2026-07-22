@@ -31,6 +31,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check out frozen Server contract producer
+        uses: actions/checkout@v4
+        with:
+          repository: GoPullwise/pullwise-server
+          ref: d68487a283bbc28e526ffac623cb3dd1f06cd4e9
+          path: current-contract-server
+
       - name: Validate release tag ancestry
         if: github.ref_type == 'tag'
         run: |
@@ -157,7 +164,17 @@ jobs:
       - name: Check semantic output contracts
         run: python scripts/check_output_contracts.py
 
+      - name: Check current Agent-First package exact lock
+        env:
+          PULLWISE_CURRENT_SERVER_ROOT: current-contract-server
+        run: |
+          python -m unittest \
+            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_worker_pin_is_the_generated_package_tuple \
+            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_worker_wrapper_is_exact_server_artifact
+
       - name: Run tests
+        env:
+          PULLWISE_CURRENT_SERVER_ROOT: current-contract-server
         run: python -m unittest discover -s tests -p "test_*.py"
 
       - name: Build distributions

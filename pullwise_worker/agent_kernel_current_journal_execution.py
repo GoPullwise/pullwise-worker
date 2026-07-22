@@ -31,6 +31,16 @@ def publish_current_payload(
         intent = journal._intent_by_capability(connection, digest)
         if intent["state"] != "DISPATCHED":
             raise CurrentJournalError("CAPABILITY_NOT_CONSUMED")
+        head = connection.execute(
+            "SELECT heads.projection_digest, history.state "
+            "FROM authority_heads AS heads "
+            "JOIN authority_history AS history "
+            "ON history.projection_digest = heads.projection_digest "
+            "WHERE heads.task_id = ?",
+            (intent["task_id"],),
+        ).fetchone()
+        if head is None or tuple(head) != (intent["authority_digest"], "ACTIVE"):
+            raise CurrentJournalError("AUTHORITY_FENCED")
     try:
         return publish_r0_payload(
             journal.object_store,
