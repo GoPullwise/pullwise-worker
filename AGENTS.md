@@ -245,15 +245,13 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D29; D2 remains pending but inactive
-  under D1. D30 is the sole append-only applicable pending record required by S3.
-  The register is `valid_pending` with 28 resolved records, one applicable
-  pending record, and D30 as the only active question. Ask only D30; S2 has no
-  slice blocker, while S3-S8 are blocked by D30 until an explicit option-anchored
-  resolution exists. D30 freezes dispatch-intent/receipt/budget linearization.
-  D29 is a specification resolution, not package implementation evidence: do not
-  author Server package schemas in Worker. D30 also remains unresolved, so do not
-  connect production Gateway/Observation state.
+- The resolved prefix remains D1 and D3-D30; D2 remains pending but inactive
+  under D1. All applicable decisions are resolved: the register is `ready` with
+  29 resolved records, zero applicable pending records, and no active question.
+  S2-S8 have no pending-decision blocker. This closes only the specification
+  decision gate; it is not package/runtime implementation or release evidence.
+  Do not author Server package schemas in Worker or connect production
+  Gateway/Observation state before the corresponding implementation slices close.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -276,6 +274,16 @@ inference never select an option or authorize production implementation.
   missing required family makes the package unpublishable. The root gate must
   enumerate every family, reference DAG, bidirectional registry consumer, and
   golden/negative/idempotency/fence/crash fixture.
+  D30 is bound to `worker_journal_server_authority` digest
+  `4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf`:
+  Server remains authoritative for immutable Task/claim/grant and transport
+  receipt binding. Worker uses one current-only durable journal; begin atomically
+  revalidates the exact package/grant/full fence, reserves budget, persists the
+  dispatch intent, and issues one one-shot opaque dispatch capability. Settlement
+  commits the real receipt/result, Observation, and budget consumption. The
+  contract must freeze begin/settlement/abandon/replay transitions and crash
+  fixtures, and must keep local tool receipts type-distinct from Server transport
+  receipts. This decision is not evidence that the journal or package exists.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only

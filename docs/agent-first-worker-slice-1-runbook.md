@@ -62,7 +62,7 @@ waiver；通用 signed-waiver acceptance 仍需后续明确 keyring 契约。
 `policy-source-snapshot/v1` 以及 Effective Policy 引用的 command/secret/redaction
 policy artifact 由 S3 的 claim adapter 与 Policy Gateway 消费；当前没有足以安全
 注册全部字段级 schema 的独立规范，也没有 claim→TaskRequest/Ledger ingest。
-它们不属于本 Slice 的 13-schema 完成声明，且不得在 S3 decision gate 前猜造。
+它们不属于本 Slice 的 13-schema 完成声明；decision gate ready 也不授权猜造或宣称实现。
 
 `D7-SHADOW-CLOCK-BOUNDARY`：当前已注册的 `budget-entry/v1.monotonic_ms` 与
 migration 1 `budget_entries.monotonic_ms` 是没有生产 writer/reader 的 Slice 1
@@ -110,8 +110,9 @@ resolution digest 为 `ce8a907836b3b8209f12f7c48f66878e9534d7cac667532c2899f3d74
 不得回到旧权威。该 Slice 原始取证时 register 为 `ready`：仅 D2 stored pending 但
 inactive，26 个 resolved、0 个 applicable pending。当前 append-only register 已新增
 D28-D30：D28 已选择 `logical_bundle_generated_wrappers`，D29 已选择
-`layered_atomic_root`，仅 D30 仍 pending；状态为 `valid_pending`，共有 28 个 resolved、
-1 个 applicable pending，D30 是唯一 active question，S2 无 blocker，S3-S8 被 D30 阻断。
+`layered_atomic_root`，D30 已选择 `worker_journal_server_authority`；状态为 `ready`，共有
+29 个 resolved、0 个 applicable pending，D2 inactive 且无 active question。S2-S8 不再有
+pending-decision blocker，但 package/runtime 仍未实现。
 决策状态不代表对应实现或验证已经完成，后续仍须逐 Slice
 取得独立证据。
 
@@ -175,7 +176,7 @@ python3 scripts/check_agent_kernel_wheel.py
 
 最后一条会构建 wheel、无依赖安装到临时隔离 venv，并从源码树外验证默认 schema
 发现和 CAS round-trip；它不安装到生产环境或发布制品。
-decision check 的 pending/blocked 是规范状态证据，不应伪装成测试故障。
+decision check 的 `ready` 只是规范状态证据，不应伪装成 Slice/package/runtime 完成证明。
 
 ## 最近验证结果
 

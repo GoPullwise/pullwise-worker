@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D30",
+  "active_decision_id": null,
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -527,7 +527,7 @@
     {
       "id": "D30", "key": "current-dispatch-linearization", "scope": "P0.3/P0.6", "title": "grant 至 tool receipt/budget 的 dispatch 线性化",
       "question": "Exact Task/grant/fence 校验、dispatch intent、预算 reserve、真实 tool dispatch、receipt/Observation 与 budget settlement 应由 Worker current-only journal、Server per-dispatch authorization，还是 Worker CAS event chain 形成唯一可恢复线性化路径？",
-      "status": "pending", "depends_on": ["D7", "D21", "D25", "D29"], "activation": null, "required_by_slice": "S3",
+      "status": "resolved", "depends_on": ["D7", "D21", "D25", "D29"], "activation": null, "required_by_slice": "S3",
       "effects": ["authority", "data_model", "permission", "state_semantics"],
       "source_refs": ["AGENTS.md#s3a-internal-read-tracer-boundary", "docs/agent-first-worker-mvp-implementation-design.md:781", "docs/agent-first-worker-mvp-implementation-design.md:1778"],
       "affected_units": ["mvp-state-semantics", "mvp-executable-gates", "post-closure"],
@@ -551,7 +551,15 @@
           "consequences": ["必须冻结 chain identity、head CAS、fork rejection、pending node recovery 和 Server transport projection"]
         }
       ],
-      "recommended_option_id": "worker_journal_server_authority", "resolution": null, "supersedes": []
+      "recommended_option_id": "worker_journal_server_authority",
+      "resolution": {
+        "kind": "option", "selected_option_id": "worker_journal_server_authority", "custom_text": null,
+        "decision_text": "推荐 worker_journal_server_authority   按照推荐来",
+        "authority": "user", "decided_at": "2026-07-22",
+        "evidence_refs": ["conversation:user-confirmation:2026-07-22:D30:worker_journal_server_authority"],
+        "resolution_sha256": "4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf"
+      },
+      "supersedes": []
     }
   ]
 }

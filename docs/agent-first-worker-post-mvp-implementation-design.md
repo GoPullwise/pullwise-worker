@@ -20,6 +20,7 @@
 <!-- D27@sha256:f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e -->
 <!-- D28@sha256:0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204 -->
 <!-- D29@sha256:dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da -->
+<!-- D30@sha256:4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf -->
 <!-- END AGENT-FIRST DECISION REFS: POST_CLOSURE -->
 
 ## D27 clean-break override（Normative）
@@ -42,13 +43,15 @@ manifest，并从相同 canonical bytes 生成 Python/npm 薄包装；两个 wra
 package identity/version/content digest，Worker/Web 分别 exact-pin wrapper version 与逻辑
 digest，不得复制或重定义 schema。D29 选择 `layered_atomic_root`：foundation schema、
 registry 与 fixtures 按内聚 family 分层，但只能通过一个 root manifest/digest 原子发布完整
-closure，缺失任何 required family 都不可发布。D24 已将
+closure，缺失任何 required family 都不可发布。D30 选择
+`worker_journal_server_authority`：Server 保持 Task/claim/grant 与 transport receipt binding
+权威，Worker current-only journal 原子线性化 dispatch begin 与 settlement。D24 已将
 `new_tasks_only` 单值特化为 D27-compatible 的受审计协调切换屏障：屏障生效后只有按唯一
 current TaskRecord schema 与 current Agent-First contract 新提交的 Task 可以创建和执行；
 pre-cutover Task、旧数据形状、旧协议与旧生产权威均不得越过屏障。D25 冻结
 `immutable_receipt_mutable_binding`：terminal upload/transport receipt 的 bytes 与 ContentRef
 始终不可变；Server 以独立 binding/index row 一次性绑定 exact `transport_envelope_digest`，
-不得回写 receipt、重绑或清空。D24/D25/D28/D29 只冻结规范决策，不授权任何 runtime、schema、
+不得回写 receipt、重绑或清空。D24/D25/D28/D29/D30 只冻结规范决策，不授权任何 runtime、schema、
 protocol 或 deployment 实现变更。
 
 ## D26 roadmap maturity overlay（Normative）
@@ -59,8 +62,9 @@ D26 已选择 `roadmap_separate_designs`（resolution digest
 `absolute_plus_baseline` current-contract 单值特化解决（resolution digest
 `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`）。D22/D26
 原始闭合点上的机器 decision register 无 active decision，规范状态为 ready；当前
-append-only register 中 D28-D29 已 resolved，仅 D30 仍 pending，状态为 `valid_pending`，
-D30 是唯一 active question，S3-S8 因而 blocked。D2 仍是 inactive pending，
+append-only register 中 D28-D30 均 resolved；所有 applicable decisions 已关闭，状态为
+`ready`，共有 29 个 resolved、0 个 applicable pending，无 active question，S3-S8 不再有
+pending-decision blocker。D2 仍是 inactive pending，
 不适用且不得据此恢复旧生产权威。D26 只确定文档成熟度与开工边界，不授权 runtime、
 schema、protocol 或 deployment 变更。
 
@@ -92,14 +96,15 @@ D8 已冻结 lease-loss 的 Task/Attempt 分层。D9 已选择内部 TaskResult 
 D20 已冻结新 Gate 在协调切换后立即成为唯一生产权威的边界；D21 已冻结唯一 current contract
 的不可变 Server claim/grant 绑定与 Worker fail-closed 验证；D23 已冻结 Server-owned contract
 package 真源与 Worker/Web exact pin；D28 已冻结 generated-wrapper 发布物与逻辑 digest pin；
-D29 已冻结 foundation 的 layered atomic root；D24 已冻结受审计 cutover barrier 与 pre-cutover Task 的
+D29 已冻结 foundation 的 layered atomic root；D30 已冻结 Worker journal/Server authority 的
+dispatch 线性化；D24 已冻结受审计 cutover barrier 与 pre-cutover Task 的
 fail-closed 隔离边界；D25 已冻结 immutable receipt、独立 mutable binding/index 与
 core/transport 双 digest 的无环关系；D26 已冻结上述 maturity 分流；D22 已冻结签名
 release-gate 制品、职责分离、绝对与 stable-relative 门、三态 CI、baseline/bootstrap 规则，
-以及 D24 barrier 后的 capacity-only canary。当前决策前缀 D1 与 D3-D29 已 resolved，D2
-保持 inactive，不得被实现或发布流程激活；append-only D30 仍 pending 且 active，
-S3-S8 blocked。当前 `valid_pending` 只证明登记结构有效，不表示规范完整，也不表示
-实现、评测或部署证据已存在。
+以及 D24 barrier 后的 capacity-only canary。当前决策前缀 D1 与 D3-D30 已 resolved，D2
+保持 inactive，不得被实现或发布流程激活；register 为 `ready`，S3-S8 没有 pending-decision
+blocker。该 ready 状态只证明 applicable specification decisions 已关闭，不表示 package、
+runtime、评测或部署证据已存在。
 
 R4 roadmap 的目标包括受信审批、Effect Ledger、不可重试/对账语义和默认拒绝；生产没有获批
 R4 tool profile 时保持 off。该目标是未来独立 implementation design 的约束，不是当前能力或
@@ -206,8 +211,16 @@ D29 冻结 foundation closure 为 `layered_atomic_root`（resolution digest
 tool/evidence、budget、receipt/error 等内聚 family 分别维护 schema、registry 与 fixtures，
 但只有一个 root manifest/digest 可以原子发布完整 current foundation。任何 required family
 缺失都使 package 不可发布；root gate 必须穷举 family、引用 DAG、双向 registry consumer
-及 golden/negative/idempotency/fence/crash fixtures。该决议不表示 package 已实现或已获发布授权，
-D30 未关闭前 S3-S8 仍由 decision gate 阻断。
+及 golden/negative/idempotency/fence/crash fixtures。该决议不表示 package 已实现或已获发布授权。
+
+D30 冻结 dispatch 线性化为 `worker_journal_server_authority`（resolution digest
+`4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf`）：Server 保持
+immutable Task/claim/grant 与 transport receipt binding 权威。Worker current-only durable
+journal 的 begin 必须在一个原子边界内重验 exact package/grant/full fence、reserve budget、
+持久化 dispatch intent，并签发一次性 opaque dispatch capability；settlement 再提交真实
+receipt/result、Observation 与 budget consumption。契约必须冻结 begin/settlement/abandon/replay
+状态机、one-shot capability 与全部 crash fixtures，并把 local tool receipt 与 Server transport
+receipt 分型隔离。decision gate 已 ready，但该决议不表示 journal、package 或 runtime 已实现。
 
 ### 4.2 版本规则
 

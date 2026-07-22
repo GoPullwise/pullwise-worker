@@ -40,6 +40,7 @@
 <!-- D27@sha256:f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e -->
 <!-- D28@sha256:0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204 -->
 <!-- D29@sha256:dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da -->
+<!-- D30@sha256:4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf -->
 <!-- END AGENT-FIRST DECISION REFS: MVP_STATE_SEMANTICS -->
 
 <!-- BEGIN AGENT-FIRST DECISION REFS: MVP_LEGACY_MAPPING -->
@@ -61,6 +62,7 @@
 <!-- D27@sha256:f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e -->
 <!-- D28@sha256:0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204 -->
 <!-- D29@sha256:dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da -->
+<!-- D30@sha256:4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf -->
 <!-- END AGENT-FIRST DECISION REFS: MVP_EXECUTABLE_GATES -->
 
 ## D27 clean-break override（Normative）
@@ -91,14 +93,15 @@ baseline 生命周期、分阶段 canary 和同契约回滚；legacy baseline、
 任务或第二生产权威均不得参与发布、hard floor 或回滚。D22/D25/D26 均不授权提前修改
 runtime/schema/protocol/deployment。
 
-## D9-D29 resolution overlay（Normative）
+## D9-D30 resolution overlay（Normative）
 
 机器注册表的冻结前缀已按用户授权解决 D9-D26；在该前缀原始闭合点上，D2 是唯一
 inactive 决策且没有 applicable pending decision。当前 append-only register 中 D28 已选择
-`logical_bundle_generated_wrappers`，D29 已选择 `layered_atomic_root`，仅 D30 仍 pending；
-状态为 `valid_pending`，D30 是唯一 active question，S3-S8 blocked。以下已决前缀仍优先于
-后文以“候选”或“待决”表述的旧段落，但不代表对应生产代码已经实现；未决 D30 也不得
-从这些旧段落推断答案：
+`logical_bundle_generated_wrappers`，D29 已选择 `layered_atomic_root`，D30 已选择
+`worker_journal_server_authority`。所有 applicable decisions 均 resolved；register 状态为
+`ready`，共有 29 个 resolved、0 个 applicable pending，D2 inactive 且无 active question，
+S3-S8 不再有 pending-decision blocker。以下已决结论仍优先于后文以“候选”或“待决”
+表述的旧段落，但不代表对应 production package/runtime 已经实现：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
   transport projection，不能创建、替换或改写已提交 outcome。D10 要求以一张全局
@@ -159,6 +162,13 @@ inactive 决策且没有 applicable pending decision。当前 append-only regist
   registry 与 fixtures，但只由一个 root manifest/digest 原子发布完整 current foundation。
   任一必需 family 缺失都不可发布；root gate 必须穷举 family、引用 DAG、双向 registry
   consumer 与 golden/negative/idempotency/fence/crash fixtures。该决议不表示 package 已实现。
+- D30 选择 `worker_journal_server_authority`（resolution digest
+  `4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf`）：Server 保持
+  immutable Task/claim/grant 与 transport receipt binding 权威；Worker current-only durable
+  journal 的 begin 原子重验 exact package/grant/full fence、reserve budget、持久化 intent，
+  并签发一次性 opaque dispatch capability。settlement 提交真实 receipt/result、Observation
+  与 budget consumption。契约必须冻结 begin/settlement/abandon/replay 状态机与 crash fixtures，
+  并把 local tool receipt 与 Server transport receipt 分型隔离。该决议不表示 journal/runtime 已实现。
 
 ## 当前实施状态（非规范证据）
 
@@ -169,8 +179,8 @@ inactive 决策且没有 applicable pending decision。当前 append-only regist
 | S0 | 历史基线已冻结 | `worker-slice-0-baseline.json`、当前代码地图、legacy fixture baseline 仅用于定位待删除 surface，不构成 clean-break 验收 |
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
-| S3-S4 | S3a package-independent 内部安全 primitives 已实现且本地 focused tests 通过；exact-SHA CI 仍是发布证据门，生产 S3/S4 未开始 | [S3a runbook](agent-first-worker-slice-3a-runbook.md)：SourceState/SourceDiff、repo-root/version/topology verified gitlink catalog、必填 finite process-local acquisition bounds、独立 pre-materialization writer、共享 canonical POSIX lock domain、provider-bound descriptor R0 read 与固定顺序 Gateway；它们不生成 versioned contract、Observation 或 durable journal。D30 decision gate 当前 blocked；D28/D29 已冻结但尚未实现的 Server-owned generated-wrapper package/layered atomic root/exact pin、权威 invocation 派生、Git/copy/clone/scanner/body lifecycle 贯穿、current-only authority/budget/journal/CAS transaction 仍阻断生产接线 |
-| S5-S8 | 未开始；决策门 blocked | 机器 decision register 为 `valid_pending`，含 28 个 resolved、1 个 applicable pending，D2 inactive，D30 是唯一 active question；D30 required before S3，因此 S3-S8 均有 pending-decision blocker，且仍须逐切片实现和验证 |
+| S3-S4 | S3a package-independent 内部安全 primitives 已实现且本地 focused tests 通过；decision gate 已 ready，exact-SHA CI 仍是发布证据门，生产 S3/S4 未开始 | [S3a runbook](agent-first-worker-slice-3a-runbook.md)：SourceState/SourceDiff、repo-root/version/topology verified gitlink catalog、必填 finite process-local acquisition bounds、独立 pre-materialization writer、共享 canonical POSIX lock domain、provider-bound descriptor R0 read 与固定顺序 Gateway；它们不生成 versioned contract、Observation 或 durable journal。D28-D30 已冻结但尚未实现的 Server-owned generated-wrapper package/layered atomic root、current-only Worker journal/Server authority、exact pin、权威 invocation 派生、Git/copy/clone/scanner/body lifecycle 贯穿与 authority/budget/journal/CAS transaction 仍阻断生产接线 |
+| S5-S8 | 未开始；decision gate ready，但无实现证据 | 机器 decision register 为 `ready`，含 29 个 resolved、0 个 applicable pending，D2 inactive 且无 active question；S3-S8 没有 pending-decision blocker，但仍须逐切片实现、验证与取得发布证据 |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |
 

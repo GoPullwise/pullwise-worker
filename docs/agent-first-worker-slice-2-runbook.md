@@ -43,9 +43,9 @@ custom `absolute_plus_baseline` 解决，resolution digest 为
 不得回到旧权威。该 Slice 原始取证时 register 为 `ready`：仅 D2 stored pending 但
 inactive，26 个 resolved、0 个 applicable pending。当前 append-only register 已新增
 D28-D30：D28 已选择 `logical_bundle_generated_wrappers`，D29 已选择
-`layered_atomic_root`，仅 D30 仍 pending；状态为 `valid_pending`，共有 28 个 resolved、
-1 个 applicable pending，D30 是唯一 active question，S2 无 blocker，S3-S8 被 D30
-阻断；本文不把已决选项当成实现完成证据。
+`layered_atomic_root`，D30 已选择 `worker_journal_server_authority`；状态为 `ready`，共有
+29 个 resolved、0 个 applicable pending，D2 inactive 且无 active question。S2-S8 不再有
+pending-decision blocker；本文不把已决选项当成 package/runtime 实现完成证据。
 
 ## 已实现范围
 
@@ -189,9 +189,9 @@ python3 scripts/check_agent_kernel_wheel.py
   `compatible`，14 个固定 Server/Web/Worker runner 全部通过。
 - 该证据提交上的 decision register 为 `ready`，仅 D2 stored pending but inactive、
   26 个 resolved、0 个 applicable pending；此项保留为历史取证结果。当前 append-only
-  register 的 D28-D29 已 resolved，仅 D30 仍 pending，状态为 `valid_pending`，D30 active，
-  共有 28 个 resolved、1 个 applicable pending；S2 无 blocker，S3-S8 被 D30 blocked。
-  任何决策状态都不代表对应 Slice 实现或验证已完成。
+  register 的 D28-D30 均 resolved，状态为 `ready`，共有 29 个 resolved、0 个 applicable
+  pending，D2 inactive 且无 active question；S2-S8 没有 pending-decision blocker。
+  任何决策状态都不代表对应 Slice/package/runtime 实现或验证已完成。
 - 隔离 wheel 安装成功；从源码树外完成 13 schema/3 fixture inventory、CAS round-trip
   和 Task `QUEUED→ACTIVE` transition。
 - GitHub Actions

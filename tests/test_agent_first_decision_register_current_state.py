@@ -74,17 +74,17 @@ D22_CUSTOM_TEXT = (
 
 
 class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
-    def test_current_register_preserves_resolved_prefix_and_exposes_d30(self) -> None:
+    def test_current_register_preserves_resolved_prefix_and_is_ready(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
-        self.assertEqual("valid_pending", report["status"])
+        self.assertEqual("ready", report["status"])
         self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
+        self.assertTrue(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D30", report["active_decision_id"])
-        self.assertEqual(1, report["pending_decision_count"])
-        self.assertEqual(28, report["resolved_decision_count"])
+        self.assertIsNone(report["active_decision_id"])
+        self.assertEqual(0, report["pending_decision_count"])
+        self.assertEqual(29, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -117,6 +117,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D27": ("clean_break_no_legacy", "f3ef27ad6318d4da20d4750cdde9387b66045f1708a909b57aba1c6e48ec2b0e"),
             "D28": ("logical_bundle_generated_wrappers", "0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204"),
             "D29": ("layered_atomic_root", "dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da"),
+            "D30": ("worker_journal_server_authority", "4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():
@@ -203,12 +204,8 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         for decision_id, frozen in expected.items():
             with self.subTest(decision_id=decision_id):
                 decision = decisions[decision_id]
-                if decision_id in {"D28", "D29"}:
-                    self.assertEqual("resolved", decision["status"])
-                    self.assertIsNotNone(decision["resolution"])
-                else:
-                    self.assertEqual("pending", decision["status"])
-                    self.assertIsNone(decision["resolution"])
+                self.assertEqual("resolved", decision["status"])
+                self.assertIsNotNone(decision["resolution"])
                 self.assertEqual([], decision["supersedes"])
                 self.assertEqual("S3", decision["required_by_slice"])
                 self.assertEqual(frozen["key"], decision["key"])
@@ -359,14 +356,14 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             register, REPO_ROOT, require_slice="S2", check_document=False
         )
 
-        self.assertEqual("valid_pending", report["status"])
+        self.assertEqual("ready", report["status"])
         self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
+        self.assertTrue(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D30", report["active_decision_id"])
+        self.assertIsNone(report["active_decision_id"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
 
-    def test_current_package_questions_block_slice_three_and_later(self) -> None:
+    def test_current_package_questions_do_not_block_slice_three_and_later(self) -> None:
         register = load_register(REGISTER_PATH)
         for slice_id in ("S3", "S4", "S5", "S6", "S7", "S8"):
             with self.subTest(slice_id=slice_id):
@@ -374,18 +371,11 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                     register, REPO_ROOT, require_slice=slice_id,
                     check_document=False, check_history=False,
                 )
-                self.assertEqual("blocked", report["status"])
-                self.assertEqual(
-                    [{
-                        "code": "slice_blocked_by_pending_decisions",
-                        "slice": slice_id,
-                        "decision_ids": ["D30"],
-                    }],
-                    report["failures"],
-                )
+                self.assertEqual("ready", report["status"])
+                self.assertEqual([], report["failures"])
                 self.assertTrue(report["valid"])
-                self.assertFalse(report["ready"])
-                self.assertEqual("D30", report["active_decision_id"])
+                self.assertTrue(report["ready"])
+                self.assertIsNone(report["active_decision_id"])
 
 
 if __name__ == "__main__":
