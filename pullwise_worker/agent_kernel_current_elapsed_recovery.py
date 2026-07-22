@@ -24,9 +24,30 @@ def rebuild_execution_window(
     local_monotonic_now_ms: int,
 ) -> RebuiltExecutionWindow:
     if (
+        isinstance(absolute_deadline_ms, bool)
+        or not isinstance(absolute_deadline_ms, int)
+        or absolute_deadline_ms < 0
+    ):
+        raise CurrentBudgetError("CONTRACT_INVALID")
+
+    if (
         isinstance(trusted_wall_ms, bool)
         or not isinstance(trusted_wall_ms, int)
         or trusted_wall_ms < 0
+    ):
+        raise CurrentBudgetError("CONTRACT_INVALID")
+
+    if (
+        isinstance(durable_control_wall_ms, bool)
+        or not isinstance(durable_control_wall_ms, int)
+        or durable_control_wall_ms < 0
+    ):
+        raise CurrentBudgetError("CONTRACT_INVALID")
+
+    if (
+        isinstance(hard_wall_ms, bool)
+        or not isinstance(hard_wall_ms, int)
+        or hard_wall_ms < 0
     ):
         raise CurrentBudgetError("CONTRACT_INVALID")
 

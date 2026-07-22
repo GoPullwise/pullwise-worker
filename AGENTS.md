@@ -207,6 +207,18 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
   it reaches 400 or fewer lines retires it from later re-entry. The gate reads
   every committed blob revision for each genesis path, so a source-only
   historical reduction also lowers the floor or retires the path.
+- `generated_file_exceptions` is a closed exact exception, not a wildcard or
+  marker-only exemption. Its sole allowed path is
+  `pullwise_worker/_generated_agent_task_contract.py`, pinned to first-line
+  marker `"""Generated from the Server-owned Agent-First bundle; do not edit."""`,
+  provenance
+  `pullwise-server@48023e68b5bb04c7d5effd0a07d2c213deb7ea71:pullwise_server/agent_first_contract_bundle_python.py`,
+  6140 physical lines, and SHA-256
+  `dd6818e6f22631aa2ca840f9fc93e02a160d88e7e457c0256bfec857590edef6`.
+  Tracking, readability, path, marker, provenance, count, or digest drift
+  fails closed. The exception remains exact through the 401-600 range and
+  must be removed once the file is absent or <=400 lines; it does not reopen
+  the handwritten genesis path set.
 
 ## Agent-First Specification Decision Gate
 

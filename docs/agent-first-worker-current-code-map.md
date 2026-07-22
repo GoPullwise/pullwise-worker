@@ -93,4 +93,10 @@ The inventory covers every Git-tracked regular file above 400 physical lines tha
 | `tests/test_worker_main.py` | `test` | `review_trigger_existing` | 504 | CLI dispatch and host lifecycle/readiness/update/uninstall command contracts. | Split CLI parser/dispatch from lifecycle, update, uninstall, and doctor command tests if growth is required. |
 | `tests/test_current_run_eta.py` | `test` | `review_trigger_existing` | 469 | Dependency scheduling, resource concurrency, retry rewiring, confidence, deadline, and sanitized ETA snapshot tests. | Keep estimator tests cohesive; split scheduling from snapshot/confidence behavior only if growth is required. |
 | `pullwise_worker/codex_sdk_runtime.py` | `production` | `review_trigger_existing` | 463 | Symlink-safe SDK log IO, event/turn usage scoping, runtime resource health/close, bounded calls, and identifier validation. | Keep the runtime resource aggregate cohesive; safe IO and token/event accounting are the first seams if new duties are added. |
+
+### Generated file exceptions
+
+| Path | Physical lines | Digest | Provenance | Reason | Considered split seam | Owner | Removal condition |
+|---|---:|---|---|---|---|---|---|
+| `pullwise_worker/_generated_agent_task_contract.py` | 6140 | `dd6818e6f22631aa2ca840f9fc93e02a160d88e7e457c0256bfec857590edef6` | `pullwise-server@48023e68b5bb04c7d5effd0a07d2c213deb7ea71:pullwise_server/agent_first_contract_bundle_python.py` | D28 requires immutable Server-generated Python wrapper and Worker cannot hand-edit it. | Server generator owns partitioning and Worker must preserve exact bytes. | Pullwise Server current-contract package owner | Remove when Worker no longer checks in this wrapper or it falls to <=400 physical lines. |
 <!-- END GENERATED WORKER SLICE 0 BASELINE -->

@@ -267,3 +267,17 @@ indeterminate verdict 不得吞掉独立 registered 或 unexpected legacy failur
 
 AGENTS.md 与 MVP implementation design 都是已有 oversized 文档；它们承载 durable
 boundary/status，不计作本切片新增实现模块的尺寸豁免。
+
+## 完成证据
+
+唯一的生成包装器例外是 `pullwise_worker/_generated_agent_task_contract.py`：来源固定为 `pullwise-server@48023e68b5bb04c7d5effd0a07d2c213deb7ea71:pullwise_server/agent_first_contract_bundle_python.py`，固定为 6140 行及 SHA-256 `dd6818e6f22631aa2ca840f9fc93e02a160d88e7e457c0256bfec857590edef6`。它不是通配符或仅凭 marker 的豁免；文件缺失或降至 <=400 行时必须移除。
+
+| 责任组 | 文件与最终行数 |
+| --- | --- |
+| package facade/contract/authority | `agent_kernel_current_package.py` 210；`agent_kernel_current_contract.py` 140；`agent_kernel_current_package_authority.py` 259 |
+| settlement/publication + validation | `agent_kernel_current_settlement.py` 309；`agent_kernel_current_settlement_validation.py` 122 |
+| Slice-0 observation + manifest validation | `scripts/agent_first_slice0_baseline.py` 385；`scripts/agent_first_slice0_manifest.py` 267 |
+| package tests + fixtures | `tests/test_agent_kernel_current_package.py` 282；`tests/current_package_support.py` 141 |
+| journal tests + settlement test | `tests/test_agent_kernel_current_r0_journal.py` 289；`tests/test_agent_kernel_current_r0_settlement.py` 150 |
+
+已验证结果：exact package suite `Ran 12 OK`；current journal/settlement/recovery/budget/adversarial/R0 execution cluster `Ran 26 OK`；exact Slice-0 unit suite `Ran 6 OK`。machine checker 返回 `compatible=true`、`failures=[]`、`document_matches=true`、`oversized_legacy_count=11`、`review_trigger_count=7`、`generated_exception_count=1`。
