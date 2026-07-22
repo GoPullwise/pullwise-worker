@@ -36,7 +36,7 @@ class GatewayRig:
         self.authority_ticket = object()
         self.dispatch_capability = object()
         self.begin_decision = DispatchDecision.winner(self.dispatch_capability)
-        self.fence_after_reserve = False
+        self.fence_after_plan = False
         self.authority_fenced = False
         self.descriptor = ToolDescriptor(
             tool_key="internal.read_source",
