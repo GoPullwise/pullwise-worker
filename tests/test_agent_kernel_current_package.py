@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import fields, FrozenInstanceError
+import hashlib
 import os
 from pathlib import Path
 import unittest
@@ -27,7 +28,6 @@ from tests.current_package_support import (
     abandonment_document,
     authority,
     authority_document,
-    grant_document,
     request_bytes,
 )
 
@@ -66,6 +66,60 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
         self.assertTrue(SERVER_BUNDLE.is_file(), "Server bundle artifact is required")
         self.assertEqual(SERVER_WRAPPER.read_bytes(), WORKER_WRAPPER.read_bytes())
         self.assertEqual(SERVER_BUNDLE.read_bytes(), generated_contract.bundle_bytes())
+
+    def test_d22_release_gate_schemas_and_golden_fixtures_are_public(self) -> None:
+        expected = {
+            'benchmark-bundle': (
+                'benchmark-bundle/v1',
+                'benchmark_bundle_golden_current',
+            ),
+            'release-gate-policy': (
+                'release-gate-policy/v1',
+                'release_gate_policy_golden_bootstrap',
+            ),
+            'release-gate-report': (
+                'release-gate-report/v1',
+                'release_gate_report_golden_bootstrap_pass',
+            ),
+            'release-gate-attestation': (
+                'release-gate-attestation/v1',
+                'release_gate_attestation_golden_bootstrap_pass',
+            ),
+        }
+        families = {
+            family['family_id']: family
+            for family in generated_contract.bundle()['families']
+        }
+        public_schema_ids = set(generated_contract.schema_ids())
+
+        for family_id, (schema_id, fixture_id) in expected.items():
+            with self.subTest(family_id=family_id):
+                family = families[family_id]
+                self.assertEqual(
+                    [schema_id],
+                    [schema['$id'] for schema in family['schemas']],
+                )
+                self.assertIn(schema_id, public_schema_ids)
+                self.assertEqual(schema_id, generated_contract.schema(schema_id)['$id'])
+
+                fixture = generated_contract.fixture(fixture_id)
+                self.assertEqual(
+                    fixture,
+                    next(
+                        item
+                        for item in family['fixtures']
+                        if item['fixture_id'] == fixture_id
+                    ),
+                )
+                self.assertEqual('golden', fixture['fixture_class'])
+                self.assertEqual(schema_id, fixture['schema_id'])
+                self.assertEqual(
+                    fixture['document'],
+                    generated_contract.validate_document(
+                        schema_id,
+                        fixture['document'],
+                    ),
+                )
 
     def test_current_tool_catalog_is_package_owned_and_gateway_ready(self) -> None:
         descriptor = CURRENT_TOOL_CATALOG.resolve('internal.read_source')
@@ -110,23 +164,52 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
         self.assertEqual(7, parsed.owner_epoch)
         self.assertEqual(11, parsed.native_epoch)
         self.assertEqual(13, parsed.transport_epoch)
+        self.assertEqual(
+            '2026-07-22T12:01:00.000Z',
+            parsed.absolute_deadline_at,
+        )
+        self.assertEqual(1_000, parsed.terminalization_reserve_ms)
+        self.assertEqual(
+            parsed.grant.absolute_deadline_at,
+            parsed.absolute_deadline_at,
+        )
+        self.assertEqual(
+            parsed.grant.terminalization_reserve_ms,
+            parsed.terminalization_reserve_ms,
+        )
         self.assertEqual('ACTIVE', parsed.lifecycle)
         self.assertEqual('RUN', parsed.desired_state)
 
-    def test_authority_rejects_noncanonical_bytes_and_mismatched_grant_fence(self) -> None:
+    def test_authority_rejects_noncanonical_bytes_and_untrusted_outer_binding(
+        self,
+    ) -> None:
         canonical = canonical_validated_current_bytes(
             AUTHORITY_SCHEMA_ID, authority_document()
         )
         with self.assertRaisesRegex(GatewayError, 'AUTHORITY_ENVELOPE_NONCANONICAL'):
             ServerAuthorityEnvelope.from_canonical_bytes(canonical + b'\n')
 
-        stale_grant = grant_document(owner_epoch=6)
-        mismatched = authority_document(grant=stale_grant, owner_epoch=7)
-        mismatched_bytes = canonical_validated_current_bytes(
-            AUTHORITY_SCHEMA_ID, mismatched
+        mismatched = authority_document()
+        mismatched['absolute_deadline_at'] = '2026-07-22T12:02:00.000Z'
+        unsigned = {
+            name: value
+            for name, value in mismatched.items()
+            if name != 'authority_digest'
+        }
+        mismatched['authority_digest'] = hashlib.sha256(
+            b'pullwise:server-authority-envelope:v1\0'
+            + canonical_current_document_bytes(unsigned)
+        ).hexdigest()
+
+        with self.assertRaises(GatewayError) as raised:
+            ServerAuthorityEnvelope.from_canonical_bytes(
+                canonical_current_document_bytes(mismatched)
+            )
+        self.assertEqual('AUTHORITY_ENVELOPE_INVALID', raised.exception.code)
+        self.assertEqual(
+            'AUTHORITY_INPUT_UNTRUSTED:$',
+            raised.exception.detail,
         )
-        with self.assertRaisesRegex(GatewayError, 'AUTHORITY_GRANT_BINDING_MISMATCH'):
-            ServerAuthorityEnvelope.from_canonical_bytes(mismatched_bytes)
 
     def test_abandonment_response_preserves_successor_and_nested_old_grant(self) -> None:
         complete = abandonment_document()

@@ -75,6 +75,8 @@ class CurrentJournalTestCase(unittest.TestCase):
                 "native_epoch": 3,
                 "transport_epoch": 4,
                 "policy_digest": "6" * 64,
+                "absolute_deadline_at": "2026-07-22T12:35:56.000Z",
+                "terminalization_reserve_ms": 1_000,
                 "capability_ids": ["source.read"],
                 "tool_keys": ["internal.read_source"],
                 "elapsed_limit_ms": elapsed_limit_ms,
@@ -97,6 +99,10 @@ class CurrentJournalTestCase(unittest.TestCase):
                 "owner_epoch": grant.owner_epoch,
                 "native_epoch": grant.native_epoch,
                 "transport_epoch": grant.transport_epoch,
+                "absolute_deadline_at": grant_document["absolute_deadline_at"],
+                "terminalization_reserve_ms": grant_document[
+                    "terminalization_reserve_ms"
+                ],
                 "lifecycle": "ACTIVE",
                 "desired_state": "RUN",
                 "grant": grant.as_document(),

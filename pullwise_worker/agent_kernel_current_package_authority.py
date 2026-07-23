@@ -33,6 +33,8 @@ class ServerDispatchGrant:
     owner_epoch: int
     native_epoch: int
     transport_epoch: int
+    absolute_deadline_at: str
+    terminalization_reserve_ms: int
     policy_digest: str
     capability_ids: tuple[str, ...]
     tool_keys: tuple[str, ...]
@@ -66,6 +68,8 @@ class ServerDispatchGrant:
             owner_epoch=complete["owner_epoch"],
             native_epoch=complete["native_epoch"],
             transport_epoch=complete["transport_epoch"],
+            absolute_deadline_at=complete["absolute_deadline_at"],
+            terminalization_reserve_ms=complete["terminalization_reserve_ms"],
             policy_digest=complete["policy_digest"],
             capability_ids=tuple(complete["capability_ids"]),
             tool_keys=tuple(complete["tool_keys"]),
@@ -87,6 +91,8 @@ _GRANT_BOUND_FIELDS = (
     "owner_epoch",
     "native_epoch",
     "transport_epoch",
+    "absolute_deadline_at",
+    "terminalization_reserve_ms",
 )
 
 
@@ -110,6 +116,8 @@ class ServerAuthorityEnvelope:
     owner_epoch: int
     native_epoch: int
     transport_epoch: int
+    absolute_deadline_at: str
+    terminalization_reserve_ms: int
     lifecycle: str
     desired_state: str
     authority_digest: str
@@ -154,6 +162,8 @@ class ServerAuthorityEnvelope:
             owner_epoch=complete["owner_epoch"],
             native_epoch=complete["native_epoch"],
             transport_epoch=complete["transport_epoch"],
+            absolute_deadline_at=complete["absolute_deadline_at"],
+            terminalization_reserve_ms=complete["terminalization_reserve_ms"],
             lifecycle=complete["lifecycle"],
             desired_state=complete["desired_state"],
             authority_digest=complete["authority_digest"],

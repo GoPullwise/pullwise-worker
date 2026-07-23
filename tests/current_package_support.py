@@ -41,6 +41,8 @@ def grant_document(
             'native_epoch': native_epoch,
             'transport_epoch': transport_epoch,
             'policy_digest': '7' * 64,
+            'absolute_deadline_at': '2026-07-22T12:01:00.000Z',
+            'terminalization_reserve_ms': 1_000,
             'capability_ids': ['source.read'],
             'tool_keys': ['internal.read_source'],
             'elapsed_limit_ms': 60_000,
@@ -80,6 +82,10 @@ def authority_document(
             'owner_epoch': owner_epoch,
             'native_epoch': native_epoch,
             'transport_epoch': transport_epoch,
+            'absolute_deadline_at': selected_grant['absolute_deadline_at'],
+            'terminalization_reserve_ms': selected_grant[
+                'terminalization_reserve_ms'
+            ],
             'lifecycle': 'ACTIVE',
             'desired_state': 'RUN',
             'grant': selected_grant,

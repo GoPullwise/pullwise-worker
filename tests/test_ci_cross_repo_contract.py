@@ -114,6 +114,7 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
         lock_tests = (
             "test_worker_pin_is_the_generated_package_tuple",
             "test_worker_wrapper_is_exact_server_artifact",
+            "test_d22_release_gate_schemas_and_golden_fixtures_are_public",
         )
 
         for workflow in (ci, release):
