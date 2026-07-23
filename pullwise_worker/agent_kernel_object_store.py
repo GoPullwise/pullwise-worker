@@ -124,7 +124,8 @@ class ObjectStore:
         size = 0
         try:
             with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                os.fchmod(handle.fileno(), 0o600)
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), 0o600)
                 for chunk in chunks:
                     if not isinstance(chunk, bytes):
                         raise AgentKernelStorageError("content_chunk_not_bytes")
@@ -136,6 +137,8 @@ class ObjectStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             self._stage("after_file_fsync")
+            if not hasattr(os, "fchmod"):
+                os.chmod(temporary, 0o600)
             sha256 = digest.hexdigest()
             self._verify_path(temporary, sha256, size)
             final = self.path_for_digest(sha256)
@@ -145,7 +148,10 @@ class ObjectStore:
             except FileExistsError:
                 self._verify_concurrent_publish(final, sha256, size)
             else:
-                os.chmod(final, 0o600, follow_symlinks=False)
+                if os.name == "posix":
+                    os.chmod(final, 0o600, follow_symlinks=False)
+                else:
+                    os.chmod(final, 0o600)
             self._fsync_directory(final.parent)
             self._remove_temporary(temporary)
             self._stage("after_object_publish")
@@ -239,7 +245,7 @@ class ObjectStore:
                 not stat.S_ISREG(metadata.st_mode)
                 or stat.S_ISLNK(metadata.st_mode)
                 or not TEMPORARY_PATTERN.fullmatch(candidate.name)
-                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or (os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o600)
                 or metadata.st_mtime > cutoff
             ):
                 continue
@@ -336,14 +342,21 @@ class ObjectStore:
         path: Path, digest: str, size: int, *, capture: bool = False
     ) -> bytes | None:
         try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                raise CasCorruptError("CAS_CORRUPT: object missing or unreadable")
+            if stat.S_ISLNK(metadata.st_mode):
+                raise CasCorruptError("CAS_CORRUPT: object is a symlink")
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(descriptor, "rb", closefd=True) as handle:
                 metadata = os.fstat(handle.fileno())
                 if not stat.S_ISREG(metadata.st_mode):
                     raise CasCorruptError("CAS_CORRUPT: object is not a regular file")
                 if metadata.st_nlink != 1:
                     raise CasCorruptError("CAS_CORRUPT: object has unexpected hardlinks")
-                if stat.S_IMODE(metadata.st_mode) != 0o600:
+                if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o600:
                     raise CasCorruptError("CAS_CORRUPT: object permissions are not private")
                 if metadata.st_size != size:
                     raise CasCorruptError("CAS_CORRUPT: object size mismatch")
@@ -389,6 +402,8 @@ class ObjectStore:
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
+        if os.name != "posix":
+            return
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(descriptor)
@@ -398,3 +413,4 @@ class ObjectStore:
     def _stage(self, name: str) -> None:
         if self.stage_hook is not None:
             self.stage_hook(name)
+
