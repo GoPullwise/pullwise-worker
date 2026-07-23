@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: GoPullwise/pullwise-server
-          ref: 48023e68b5bb04c7d5effd0a07d2c213deb7ea71
+          ref: e997688beb7ec9d071d3e3c20e2685edd98c36fc
           path: current-contract-server
       - name: Check out frozen Web contract consumer
         uses: actions/checkout@v4

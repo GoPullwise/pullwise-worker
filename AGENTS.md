@@ -212,9 +212,9 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
   `pullwise_worker/_generated_agent_task_contract.py`, pinned to first-line
   marker `"""Generated from the Server-owned Agent-First bundle; do not edit."""`,
   provenance
-  `pullwise-server@48023e68b5bb04c7d5effd0a07d2c213deb7ea71:pullwise_server/agent_first_contract_bundle_python.py`,
-  6140 physical lines, and SHA-256
-  `dd6818e6f22631aa2ca840f9fc93e02a160d88e7e457c0256bfec857590edef6`.
+  `pullwise-server@e997688beb7ec9d071d3e3c20e2685edd98c36fc:pullwise_server/agent_first_contract_bundle_python.py`,
+  6970 physical lines, and SHA-256
+  `a8a4bb9228be3c0179ee60958c9f08e2254e88377f149434753913b643243009`.
   Tracking, readability, path, marker, provenance, count, or digest drift
   fails closed. The exception remains exact through the 401-600 range and
   must be removed once the file is absent or <=400 lines; it does not reopen
