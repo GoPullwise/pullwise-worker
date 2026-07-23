@@ -85,7 +85,11 @@ def _relative_path(value: object, label: str) -> str:
     return text
 
 
-def validate_baseline(baseline: object) -> dict[str, Any]:
+def validate_baseline(
+    baseline: object,
+    *,
+    require_current_generated_provenance: bool = True,
+) -> dict[str, Any]:
     if not isinstance(baseline, dict):
         raise BaselineFormatError("baseline:keys")
     if baseline.get("schema_id") == LEGACY_SCHEMA_ID:
@@ -232,8 +236,12 @@ def validate_baseline(baseline: object) -> dict[str, Any]:
             raise BaselineFormatError(f"generated_file_exceptions[{index}].path")
         if item["marker"] != catalog["marker"]:
             raise BaselineFormatError(f"generated_file_exceptions[{index}].marker")
-        if item["provenance"] != catalog["provenance"]:
-            raise BaselineFormatError(f"generated_file_exceptions[{index}].provenance")
+        provenance_path = f"generated_file_exceptions[{index}].provenance"
+        if require_current_generated_provenance:
+            if item["provenance"] != catalog["provenance"]:
+                raise BaselineFormatError(provenance_path)
+        else:
+            _text(item["provenance"], provenance_path)
         lines = item["physical_lines"]
         if (
             not isinstance(lines, int)

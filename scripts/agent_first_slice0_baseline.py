@@ -144,7 +144,13 @@ def verify_baseline(
             current_head = current_dirty = None
             history = tuple(ratchet_baselines or ())
             source_history = dict(ratchet_source_counts or {})
-        history = tuple(validate_baseline(snapshot) for snapshot in history)
+        history = tuple(
+            validate_baseline(
+                snapshot,
+                require_current_generated_provenance=False,
+            )
+            for snapshot in history
+        )
     except (
         BaselineFormatError,
         BaselineObservationError,

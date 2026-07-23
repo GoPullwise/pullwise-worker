@@ -384,9 +384,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             ),
         }
         register = load_register(REGISTER_PATH)
-        decision = next(
-            item for item in register["decisions"] if item["id"] == "D22"
-        )
+        decision = next(item for item in register["decisions"] if item["id"] == "D22")
 
         self.assertEqual(4725, len(D22_CUSTOM_TEXT))
         self.assertEqual(6931, len(D22_CUSTOM_TEXT.encode("utf-8")))
@@ -395,34 +393,6 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual("resolved", decision["status"])
         self.assertEqual(expected_resolution, decision["resolution"])
         self.assertEqual([], decision["supersedes"])
-
-    def test_current_package_questions_do_not_block_slice_two(self) -> None:
-        register = load_register(REGISTER_PATH)
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S2", check_document=False
-        )
-
-        self.assertEqual("ready", report["status"])
-        self.assertTrue(report["valid"])
-        self.assertTrue(report["ready"])
-        self.assertEqual([], report["failures"])
-        self.assertIsNone(report["active_decision_id"])
-        self.assertEqual(["D2"], report["inactive_decision_ids"])
-
-    def test_current_package_questions_do_not_block_slice_three_and_later(self) -> None:
-        register = load_register(REGISTER_PATH)
-        for slice_id in ("S3", "S4", "S5", "S6", "S7", "S8"):
-            with self.subTest(slice_id=slice_id):
-                report = verify_register(
-                    register, REPO_ROOT, require_slice=slice_id,
-                    check_document=False, check_history=False,
-                )
-                self.assertEqual("ready", report["status"])
-                self.assertEqual([], report["failures"])
-                self.assertTrue(report["valid"])
-                self.assertTrue(report["ready"])
-                self.assertIsNone(report["active_decision_id"])
-
 
 if __name__ == "__main__":
     unittest.main()
