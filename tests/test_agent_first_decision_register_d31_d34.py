@@ -54,7 +54,9 @@ EXPECTED_DECISIONS = {
     },
     "D34": {
         "key": "current-candidate-activation-boundary",
-        "depends_on": ["D22", "D23", "D24", "D27", "D28", "D29"],
+        "depends_on": [
+            "D22", "D23", "D24", "D27", "D28", "D29", "D31", "D32", "D33"
+        ],
         "required_by_slice": "S7",
         "recommended_option_id": "candidate_only_no_activation",
         "option_ids": [

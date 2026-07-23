@@ -2,7 +2,7 @@
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
   "active_decision_id": null,
-  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30"],
+  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
     "start_marker": "<!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->",
@@ -12,11 +12,11 @@
     {"id": "target-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "mvp-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "post-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
-    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29"]},
-    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30"]},
+    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29", "D31", "D32", "D33"]},
+    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30", "D31", "D32", "D33"]},
     {"id": "mvp-legacy-mapping", "decision_ids": ["D4", "D9", "D12", "D13", "D18", "D19", "D20", "D27"]},
-    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30"]},
-    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30"]}
+    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30", "D31", "D33", "D34"]},
+    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34"]}
   ],
   "decisions": [
     {
@@ -558,6 +558,130 @@
         "authority": "user", "decided_at": "2026-07-22",
         "evidence_refs": ["conversation:user-confirmation:2026-07-22:D30:worker_journal_server_authority"],
         "resolution_sha256": "4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf"
+      },
+      "supersedes": []
+    },
+    {
+      "id": "D31", "key": "server-owned-deadline-wire", "scope": "P0.3/P0.6", "title": "Server-owned immutable deadline wire",
+      "question": "Which authority computes and persists the absolute Task deadline and terminalization reserve carried by claim/grant?",
+      "status": "resolved", "depends_on": ["D7", "D21", "D23", "D29", "D30"], "activation": null, "required_by_slice": "S4",
+      "effects": ["authority", "data_model", "state_semantics"],
+      "source_refs": ["handoff:2026-07-23:approved-D7", "AGENTS.md#agent-first-task-control-semantics"],
+      "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
+      "options": [
+        {
+          "id": "server_owned_immutable_deadline_wire",
+          "summary": "Server acceptance computes and persists the immutable wall deadline and reserve once, and every grant/envelope carries those exact values.",
+          "rationale": "The Worker can rebuild process-local monotonic accounting without becoming deadline authority or extending a Task during claim/recovery.",
+          "consequences": ["Acceptance storage and grant/envelope schemas must exact-bind the persisted values; Worker must reject drift and never recompute them"]
+        },
+        {
+          "id": "worker_derived_deadline_wire",
+          "summary": "Worker derives the deadline and reserve from claim time and the policy received with each grant.",
+          "rationale": "This avoids Server acceptance fields but makes recovery and delayed claim timing a second authority.",
+          "consequences": ["A later claim or process restart can silently extend or disagree about the Task deadline"]
+        }
+      ],
+      "recommended_option_id": "server_owned_immutable_deadline_wire",
+      "resolution": {
+        "kind": "option", "selected_option_id": "server_owned_immutable_deadline_wire", "custom_text": null,
+        "decision_text": "Confirm server_owned_immutable_deadline_wire: Server acceptance is the sole authority for accepted_at, absolute_deadline_at, and terminalization_reserve_ms. In the immutable acceptance transaction, absolute_deadline_at is computed once as accepted_at + effective_policy.budgets.wall_ms and terminalization_reserve_ms is copied from the accepted effective policy. agent-worker-grant/v1 and server-authority-envelope/v1 carry those persisted values verbatim. Worker validates and consumes them and never recomputes, extends, or substitutes them from claim time or a local clock.",
+        "authority": "user", "decided_at": "2026-07-23",
+        "evidence_refs": ["conversation:user-approval:2026-07-23:D7:server_owned_immutable_deadline_wire"],
+        "resolution_sha256": "d6fe7e5184e410aa6d034be1b593c8bf83126d5af300ea489a3d077642b42254"
+      },
+      "supersedes": []
+    },
+    {
+      "id": "D32", "key": "transport-abandonment-record", "scope": "P0.6/P0.7/P1.5", "title": "Independent transport abandonment record",
+      "question": "Should transport abandonment evidence be an independent immutable document or reuse the abandon response authority bytes?",
+      "status": "resolved", "depends_on": ["D5", "D8", "D23", "D25", "D29"], "activation": null, "required_by_slice": "S4",
+      "effects": ["authority", "data_model", "state_semantics"],
+      "source_refs": ["handoff:2026-07-23:approved-D8", "AGENTS.md#agent-kernel-slice-1-storage-contracts"],
+      "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "post-closure"],
+      "options": [
+        {
+          "id": "independent_transport_abandonment_record",
+          "summary": "Create transport-abandonment-record/v1 as immutable non-result evidence distinct from the abandon response authority.",
+          "rationale": "Evidence identity and the fenced successor authority have different roles and must not share bytes or digests.",
+          "consequences": ["The abandonment transaction stores both sealed documents while preserving exact idempotent response replay"]
+        },
+        {
+          "id": "abandon_response_is_evidence_record",
+          "summary": "Reuse agent-claim-abandon-response/v1 bytes and digest as the abandonment evidence record.",
+          "rationale": "This creates one document but conflates operation response authority with immutable historical evidence.",
+          "consequences": ["Receipt, TaskResult, and successor-authority boundaries become ambiguous"]
+        }
+      ],
+      "recommended_option_id": "independent_transport_abandonment_record",
+      "resolution": {
+        "kind": "option", "selected_option_id": "independent_transport_abandonment_record", "custom_text": null,
+        "decision_text": "Confirm independent_transport_abandonment_record: transport-abandonment-record/v1 is independent immutable non-result evidence with distinct canonical bytes and digests from agent-claim-abandon-response/v1, which remains the fenced successor authority response. The same abandonment transaction seals both documents, fences the exact predecessor tuple, and exact retry returns the original response bytes. The record must not terminalize a Task or TaskResult, must not bind a transport receipt, and must not reuse response bytes or its digest as abandonment evidence.",
+        "authority": "user", "decided_at": "2026-07-23",
+        "evidence_refs": ["conversation:user-approval:2026-07-23:D8:independent_transport_abandonment_record"],
+        "resolution_sha256": "11794116e7db5fdb330e001fa1ab7b7039ff1f1f04bc3283b9cddbc30bf3995e"
+      },
+      "supersedes": []
+    },
+    {
+      "id": "D33", "key": "canonical-terminal-selector", "scope": "P0.7", "title": "Canonical mechanical terminal selector",
+      "question": "How is the D10 global safety-first matrix represented and bound so callers cannot choose an outcome or reason?",
+      "status": "resolved", "depends_on": ["D9", "D10", "D11", "D13", "D20", "D23", "D29"], "activation": null, "required_by_slice": "S4",
+      "effects": ["authority", "data_model", "external_behavior", "state_semantics"],
+      "source_refs": ["handoff:2026-07-23:approved-D10", "AGENTS.md#agent-first-gate-decision-semantics"],
+      "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
+      "options": [
+        {
+          "id": "canonical_mechanical_terminal_selector",
+          "summary": "One closed selector mechanically derives lifecycle, outcome, and reason from six authoritative axes and seals the complete selector input/result digest.",
+          "rationale": "The same facts deterministically reproduce one result and no caller can promote a preferred candidate outcome.",
+          "consequences": ["Unknown effects and cancel-with-effects require explicit states/outcomes; tombstone/delete is a pre-matrix fence"]
+        },
+        {
+          "id": "caller_selected_terminal_outcome",
+          "summary": "Callers submit the selected outcome and reason with supporting gate facts for validation.",
+          "rationale": "This keeps the current helper signature but leaves precedence selection outside the canonical contract.",
+          "consequences": ["Equivalent fact sets can yield different outcomes across callers or profiles"]
+        }
+      ],
+      "recommended_option_id": "canonical_mechanical_terminal_selector",
+      "resolution": {
+        "kind": "option", "selected_option_id": "canonical_mechanical_terminal_selector", "custom_text": null,
+        "decision_text": "Confirm canonical_mechanical_terminal_selector: terminal selection is one exhaustive deterministic function over exactly six authoritative axes: profile, gate_mode, cancel_state, effect_state, cause_family, and delivery_state. Any caller-supplied outcome or reason is rejected. A tombstone/delete fence preempts the matrix. Unknown effects before the immutable deadline remain RECONCILING with no TaskResult; at or after the deadline they select TERMINATED_WITH_UNKNOWN_EFFECTS. Authoritative cancellation with committed effects selects CANCELLED_WITH_EFFECTS; cancellation without committed effects selects CANCELLED. The remaining precedence is safe success gate mode, committed effects without safe complete delivery as PARTIAL, recoverable cause as BLOCKED, then FAILED. Availability only controls success eligibility and delivery projection, never precedence. The selector-input digest binds task/deletion version, ordered fact refs, effect summary, availability, gate predicates, and the mechanically selected result.",
+        "authority": "user", "decided_at": "2026-07-23",
+        "evidence_refs": ["conversation:user-approval:2026-07-23:D10:canonical_mechanical_terminal_selector"],
+        "resolution_sha256": "8bf9ed4ac35fdd2f0bfd790c1a8f8879776a44711683152921c9ae330e105fb4"
+      },
+      "supersedes": []
+    },
+    {
+      "id": "D34", "key": "current-candidate-activation-boundary", "scope": "P0.3/P1.2/P1.6", "title": "Current candidate activation boundary",
+      "question": "Does this package cycle create an unactivated candidate or also connect production routes, enable the D24 barrier, deploy, and start canary?",
+      "status": "resolved", "depends_on": ["D22", "D23", "D24", "D27", "D28", "D29", "D31", "D32", "D33"], "activation": null, "required_by_slice": "S7",
+      "effects": ["authority", "external_behavior", "permission", "release_ownership"],
+      "source_refs": ["handoff:2026-07-23:current-checkpoint", "conversation:user-approval:2026-07-23:candidate-boundary"],
+      "affected_units": ["mvp-executable-gates", "post-closure"],
+      "options": [
+        {
+          "id": "candidate_only_no_activation",
+          "summary": "Build and verify one exact-pinned current candidate package without production route/auth integration, D24 activation, deployment, or canary.",
+          "rationale": "Contract closure and cross-repo canonical-byte proof must exist before a later production authority/cutover slice.",
+          "consequences": ["The phase stops with a handoff after one Generate and full candidate validation"]
+        },
+        {
+          "id": "activate_d24_and_production_routes",
+          "summary": "In the same cycle connect production current-task/operator routes and auth, switch Worker execution, activate D24, deploy, and canary.",
+          "rationale": "This reaches runtime sooner but collapses contract, authority, rollout, and external-operation gates into one change.",
+          "consequences": ["A candidate defect would be coupled directly to production cutover"]
+        }
+      ],
+      "recommended_option_id": "candidate_only_no_activation",
+      "resolution": {
+        "kind": "option", "selected_option_id": "candidate_only_no_activation", "custom_text": null,
+        "decision_text": "Confirm candidate_only_no_activation: this phase creates one Server-owned candidate package and exact-pins its canonical bytes across Server, Worker, and Web after all pre-generation gates and exactly one Generate. The new current-task/operator route and auth boundary are later work. This decision does not enable the D24 barrier, wire production HTTP/auth, switch the production Worker loop, perform deployment, or start canary; it authorizes no external release or cutover.",
+        "authority": "user", "decided_at": "2026-07-23",
+        "evidence_refs": ["conversation:user-approval:2026-07-23:candidate_only_no_activation"],
+        "resolution_sha256": "2be5b5752b65714204fa6f41a0a126eb30e82bafcdeb38b5ece426938561158c"
       },
       "supersedes": []
     }

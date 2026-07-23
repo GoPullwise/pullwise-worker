@@ -257,9 +257,9 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D30; D2 remains pending but inactive
+- The resolved prefix remains D1 and D3-D34; D2 remains pending but inactive
   under D1. All applicable decisions are resolved: the register is `ready` with
-  29 resolved records, zero applicable pending records, and no active question.
+  33 resolved records, zero applicable pending records, and no active question.
   S2-S8 have no pending-decision blocker. This closes only the specification
   decision gate; it is not package/runtime implementation or release evidence.
   Do not author Server package schemas in Worker or connect production
@@ -296,6 +296,37 @@ inference never select an option or authorize production implementation.
   contract must freeze begin/settlement/abandon/replay transitions and crash
   fixtures, and must keep local tool receipts type-distinct from Server transport
   receipts. This decision is not evidence that the journal or package exists.
+  D31 is bound to `server_owned_immutable_deadline_wire` digest
+  `d6fe7e5184e410aa6d034be1b593c8bf83126d5af300ea489a3d077642b42254`:
+  Server acceptance persists `accepted_at`, computes `absolute_deadline_at` once
+  as `accepted_at + effective_policy.budgets.wall_ms`, and copies
+  `terminalization_reserve_ms` from that accepted policy. Grant and authority
+  envelope carry those exact persisted values; Worker validates and consumes
+  them but never recomputes or extends them from claim/recovery time.
+  D32 is bound to `independent_transport_abandonment_record` digest
+  `11794116e7db5fdb330e001fa1ab7b7039ff1f1f04bc3283b9cddbc30bf3995e`:
+  `transport-abandonment-record/v1` is immutable non-result evidence with bytes
+  and digest distinct from `agent-claim-abandon-response/v1`. The response
+  remains fenced successor authority; the record cannot terminalize a Task,
+  become a TaskResult, or bind a transport receipt. Exact retry reuses the
+  original response and record without another version or fence transition.
+  D33 is bound to `canonical_mechanical_terminal_selector` digest
+  `8bf9ed4ac35fdd2f0bfd790c1a8f8879776a44711683152921c9ae330e105fb4`:
+  one closed selector derives lifecycle/outcome/reason from exactly `profile`,
+  `gate_mode`, `cancel_state`, `effect_state`, `cause_family`, and
+  `delivery_state`; callers cannot supply the selected outcome or reason.
+  Tombstone/delete pre-fences the matrix. Unknown effects remain `RECONCILING`
+  before deadline and become `TERMINATED_WITH_UNKNOWN_EFFECTS` at/after it;
+  cancellation with committed effects becomes `CANCELLED_WITH_EFFECTS`.
+  TaskResult CAS must bind the selector-input digest covering versions, ordered
+  facts, effects, availability, predicates, and mechanically selected result.
+  D34 is bound to `candidate_only_no_activation` digest
+  `2be5b5752b65714204fa6f41a0a126eb30e82bafcdeb38b5ece426938561158c`:
+  this cycle ends with one fully validated, exact-pinned Server-owned candidate.
+  Current-task/operator routes and auth remain later work. Do not connect
+  production HTTP/auth, switch the production Worker loop, enable D24, deploy,
+  or start canary in this cycle. Generate may run exactly once and only after
+  every source/fixture/closure/DAG/registry/digest/Python-Node parity gate passes.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only
@@ -333,7 +364,7 @@ include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
 `contracts/agent-first/spec-decision-register.json` is an atomic
-machine-registry exception at 541 physical lines, owned by the Worker
+machine-registry exception at 689 physical lines, owned by the Worker
 specification owner. It stays atomic because one ordered frozen
 question/definition/resolution packet enforces question order behind one
 structural-validation and immutable-history boundary. The considered split is
@@ -368,10 +399,11 @@ non-regular files, unsupported schema keywords, and unresolved references.
   positive integer age threshold. Verify every database-indexed object before
   deleting staging files or objects: a database row without durable bytes
   remains an error; a durable unbound object may be collected after the threshold.
-- The design names `transport-receipt/v1` and
-  `transport-abandonment-record/v1` without defining their field contracts.
-  Record this as `SPEC_GAP`; do not invent or register either schema until its
-  normative shape, identity, and idempotency rules are explicitly resolved.
+- D32 closes the transport-abandonment shape/identity gap. Implement
+  `transport-abandonment-record/v1` only as the independent immutable evidence
+  record defined by the Server-owned current package. Keep it type-distinct
+  from the already separate transport receipt and abandon response; never use
+  response bytes as the record or let abandonment bind a receipt/result.
 - Verify Agent Kernel package data by building a wheel without dependencies,
   installing it into an isolated virtual environment, and loading the default
   registry from outside the source tree. The smoke check must also validate the

@@ -41,6 +41,10 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 | `D28` | `P0.3/P1.2` | current package 身份、发布物与 exact pin | `resolved` | `active` | `S3` | D23, D27 | `logical_bundle_generated_wrappers` |
 | `D29` | `P0.3/P0.6/P1.2/P1.5` | current package 基础契约的原子闭包 | `resolved` | `active` | `S3` | D3, D6, D7, D15, D21, D24, D25, D27, D28 | `layered_atomic_root` |
 | `D30` | `P0.3/P0.6` | grant 至 tool receipt/budget 的 dispatch 线性化 | `resolved` | `active` | `S3` | D7, D21, D25, D29 | `worker_journal_server_authority` |
+| `D31` | `P0.3/P0.6` | Server-owned immutable deadline wire | `resolved` | `active` | `S4` | D7, D21, D23, D29, D30 | `server_owned_immutable_deadline_wire` |
+| `D32` | `P0.6/P0.7/P1.5` | Independent transport abandonment record | `resolved` | `active` | `S4` | D5, D8, D23, D25, D29 | `independent_transport_abandonment_record` |
+| `D33` | `P0.7` | Canonical mechanical terminal selector | `resolved` | `active` | `S4` | D9, D10, D11, D13, D20, D23, D29 | `canonical_mechanical_terminal_selector` |
+| `D34` | `P0.3/P1.2/P1.6` | Current candidate activation boundary | `resolved` | `active` | `S7` | D22, D23, D24, D27, D28, D29, D31, D32, D33 | `candidate_only_no_activation` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -683,4 +687,88 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 **Effects:** `authority`, `data_model`, `permission`, `state_semantics`
 
 **Sources:** `AGENTS.md#s3a-internal-read-tracer-boundary`, `docs/agent-first-worker-mvp-implementation-design.md:781`, `docs/agent-first-worker-mvp-implementation-design.md:1778`
+
+### D31 — Server-owned immutable deadline wire
+
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
+
+**Question:** Which authority computes and persists the absolute Task deadline and terminalization reserve carried by claim/grant?
+
+**Options:**
+
+- `server_owned_immutable_deadline_wire` — selected by resolution: Server acceptance computes and persists the immutable wall deadline and reserve once, and every grant/envelope carries those exact values. The Worker can rebuild process-local monotonic accounting without becoming deadline authority or extending a Task during claim/recovery. Consequences: Acceptance storage and grant/envelope schemas must exact-bind the persisted values; Worker must reject drift and never recompute them
+- `worker_derived_deadline_wire`: Worker derives the deadline and reserve from claim time and the policy received with each grant. This avoids Server acceptance fields but makes recovery and delayed claim timing a second authority. Consequences: A later claim or process restart can silently extend or disagree about the Task deadline
+
+**Resolution:** `server_owned_immutable_deadline_wire` (`option`). Confirm server_owned_immutable_deadline_wire: Server acceptance is the sole authority for accepted_at, absolute_deadline_at, and terminalization_reserve_ms. In the immutable acceptance transaction, absolute_deadline_at is computed once as accepted_at + effective_policy.budgets.wall_ms and terminalization_reserve_ms is copied from the accepted effective policy. agent-worker-grant/v1 and server-authority-envelope/v1 carry those persisted values verbatim. Worker validates and consumes them and never recomputes, extends, or substitutes them from claim time or a local clock.
+
+**Authority/evidence:** `user` on `2026-07-23`; `conversation:user-approval:2026-07-23:D7:server_owned_immutable_deadline_wire`; digest `d6fe7e5184e410aa6d034be1b593c8bf83126d5af300ea489a3d077642b42254`.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `data_model`, `state_semantics`
+
+**Sources:** `handoff:2026-07-23:approved-D7`, `AGENTS.md#agent-first-task-control-semantics`
+
+### D32 — Independent transport abandonment record
+
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
+
+**Question:** Should transport abandonment evidence be an independent immutable document or reuse the abandon response authority bytes?
+
+**Options:**
+
+- `independent_transport_abandonment_record` — selected by resolution: Create transport-abandonment-record/v1 as immutable non-result evidence distinct from the abandon response authority. Evidence identity and the fenced successor authority have different roles and must not share bytes or digests. Consequences: The abandonment transaction stores both sealed documents while preserving exact idempotent response replay
+- `abandon_response_is_evidence_record`: Reuse agent-claim-abandon-response/v1 bytes and digest as the abandonment evidence record. This creates one document but conflates operation response authority with immutable historical evidence. Consequences: Receipt, TaskResult, and successor-authority boundaries become ambiguous
+
+**Resolution:** `independent_transport_abandonment_record` (`option`). Confirm independent_transport_abandonment_record: transport-abandonment-record/v1 is independent immutable non-result evidence with distinct canonical bytes and digests from agent-claim-abandon-response/v1, which remains the fenced successor authority response. The same abandonment transaction seals both documents, fences the exact predecessor tuple, and exact retry returns the original response bytes. The record must not terminalize a Task or TaskResult, must not bind a transport receipt, and must not reuse response bytes or its digest as abandonment evidence.
+
+**Authority/evidence:** `user` on `2026-07-23`; `conversation:user-approval:2026-07-23:D8:independent_transport_abandonment_record`; digest `11794116e7db5fdb330e001fa1ab7b7039ff1f1f04bc3283b9cddbc30bf3995e`.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `data_model`, `state_semantics`
+
+**Sources:** `handoff:2026-07-23:approved-D8`, `AGENTS.md#agent-kernel-slice-1-storage-contracts`
+
+### D33 — Canonical mechanical terminal selector
+
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
+
+**Question:** How is the D10 global safety-first matrix represented and bound so callers cannot choose an outcome or reason?
+
+**Options:**
+
+- `canonical_mechanical_terminal_selector` — selected by resolution: One closed selector mechanically derives lifecycle, outcome, and reason from six authoritative axes and seals the complete selector input/result digest. The same facts deterministically reproduce one result and no caller can promote a preferred candidate outcome. Consequences: Unknown effects and cancel-with-effects require explicit states/outcomes; tombstone/delete is a pre-matrix fence
+- `caller_selected_terminal_outcome`: Callers submit the selected outcome and reason with supporting gate facts for validation. This keeps the current helper signature but leaves precedence selection outside the canonical contract. Consequences: Equivalent fact sets can yield different outcomes across callers or profiles
+
+**Resolution:** `canonical_mechanical_terminal_selector` (`option`). Confirm canonical_mechanical_terminal_selector: terminal selection is one exhaustive deterministic function over exactly six authoritative axes: profile, gate_mode, cancel_state, effect_state, cause_family, and delivery_state. Any caller-supplied outcome or reason is rejected. A tombstone/delete fence preempts the matrix. Unknown effects before the immutable deadline remain RECONCILING with no TaskResult; at or after the deadline they select TERMINATED_WITH_UNKNOWN_EFFECTS. Authoritative cancellation with committed effects selects CANCELLED_WITH_EFFECTS; cancellation without committed effects selects CANCELLED. The remaining precedence is safe success gate mode, committed effects without safe complete delivery as PARTIAL, recoverable cause as BLOCKED, then FAILED. Availability only controls success eligibility and delivery projection, never precedence. The selector-input digest binds task/deletion version, ordered fact refs, effect summary, availability, gate predicates, and the mechanically selected result.
+
+**Authority/evidence:** `user` on `2026-07-23`; `conversation:user-approval:2026-07-23:D10:canonical_mechanical_terminal_selector`; digest `8bf9ed4ac35fdd2f0bfd790c1a8f8879776a44711683152921c9ae330e105fb4`.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `data_model`, `external_behavior`, `state_semantics`
+
+**Sources:** `handoff:2026-07-23:approved-D10`, `AGENTS.md#agent-first-gate-decision-semantics`
+
+### D34 — Current candidate activation boundary
+
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S7`.
+
+**Question:** Does this package cycle create an unactivated candidate or also connect production routes, enable the D24 barrier, deploy, and start canary?
+
+**Options:**
+
+- `candidate_only_no_activation` — selected by resolution: Build and verify one exact-pinned current candidate package without production route/auth integration, D24 activation, deployment, or canary. Contract closure and cross-repo canonical-byte proof must exist before a later production authority/cutover slice. Consequences: The phase stops with a handoff after one Generate and full candidate validation
+- `activate_d24_and_production_routes`: In the same cycle connect production current-task/operator routes and auth, switch Worker execution, activate D24, deploy, and canary. This reaches runtime sooner but collapses contract, authority, rollout, and external-operation gates into one change. Consequences: A candidate defect would be coupled directly to production cutover
+
+**Resolution:** `candidate_only_no_activation` (`option`). Confirm candidate_only_no_activation: this phase creates one Server-owned candidate package and exact-pins its canonical bytes across Server, Worker, and Web after all pre-generation gates and exactly one Generate. The new current-task/operator route and auth boundary are later work. This decision does not enable the D24 barrier, wire production HTTP/auth, switch the production Worker loop, perform deployment, or start canary; it authorizes no external release or cutover.
+
+**Authority/evidence:** `user` on `2026-07-23`; `conversation:user-approval:2026-07-23:candidate_only_no_activation`; digest `2be5b5752b65714204fa6f41a0a126eb30e82bafcdeb38b5ece426938561158c`.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `external_behavior`, `permission`, `release_ownership`
+
+**Sources:** `handoff:2026-07-23:current-checkpoint`, `conversation:user-approval:2026-07-23:candidate-boundary`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->

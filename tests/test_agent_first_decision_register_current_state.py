@@ -84,7 +84,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual([], report["failures"])
         self.assertIsNone(report["active_decision_id"])
         self.assertEqual(0, report["pending_decision_count"])
-        self.assertEqual(29, report["resolved_decision_count"])
+        self.assertEqual(33, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -118,6 +118,10 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D28": ("logical_bundle_generated_wrappers", "0a9c7e47ab03c92e5d48003ee3d7dc1b5df1cd68031fdd97dda7f85520297204"),
             "D29": ("layered_atomic_root", "dfe6c2e4b62226d5e7b155e2b7a51d04c94fd13905834b908e5d1b24f30eb5da"),
             "D30": ("worker_journal_server_authority", "4ab2e27ff93ea323673ccd36b0d4da41d3bd0e616160248660c3a274a59d44bf"),
+            "D31": ("server_owned_immutable_deadline_wire", "d6fe7e5184e410aa6d034be1b593c8bf83126d5af300ea489a3d077642b42254"),
+            "D32": ("independent_transport_abandonment_record", "11794116e7db5fdb330e001fa1ab7b7039ff1f1f04bc3283b9cddbc30bf3995e"),
+            "D33": ("canonical_mechanical_terminal_selector", "8bf9ed4ac35fdd2f0bfd790c1a8f8879776a44711683152921c9ae330e105fb4"),
+            "D34": ("candidate_only_no_activation", "2be5b5752b65714204fa6f41a0a126eb30e82bafcdeb38b5ece426938561158c"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():
@@ -151,12 +155,12 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
-        expected_order.extend(["D28", "D29", "D30"])
+        expected_order.extend(["D28", "D29", "D30", "D31", "D32", "D33", "D34"])
         self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
             [
                 *[item["id"] for item in REQUIRED_CATALOG],
-                "D27", "D28", "D29", "D30",
+                "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34",
             ],
             [item["id"] for item in register["decisions"]],
         )
@@ -200,6 +204,45 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                     "worker_cas_event_chain",
                 ],
             },
+            "D31": {
+                "key": "server-owned-deadline-wire",
+                "depends_on": ["D7", "D21", "D23", "D29", "D30"],
+                "recommended": "server_owned_immutable_deadline_wire",
+                "options": [
+                    "server_owned_immutable_deadline_wire",
+                    "worker_derived_deadline_wire",
+                ],
+            },
+            "D32": {
+                "key": "transport-abandonment-record",
+                "depends_on": ["D5", "D8", "D23", "D25", "D29"],
+                "recommended": "independent_transport_abandonment_record",
+                "options": [
+                    "independent_transport_abandonment_record",
+                    "abandon_response_is_evidence_record",
+                ],
+            },
+            "D33": {
+                "key": "canonical-terminal-selector",
+                "depends_on": ["D9", "D10", "D11", "D13", "D20", "D23", "D29"],
+                "recommended": "canonical_mechanical_terminal_selector",
+                "options": [
+                    "canonical_mechanical_terminal_selector",
+                    "caller_selected_terminal_outcome",
+                ],
+            },
+            "D34": {
+                "key": "current-candidate-activation-boundary",
+                "depends_on": [
+                    "D22", "D23", "D24", "D27", "D28", "D29",
+                    "D31", "D32", "D33",
+                ],
+                "recommended": "candidate_only_no_activation",
+                "options": [
+                    "candidate_only_no_activation",
+                    "activate_d24_and_production_routes",
+                ],
+            },
         }
         for decision_id, frozen in expected.items():
             with self.subTest(decision_id=decision_id):
@@ -207,7 +250,10 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual("resolved", decision["status"])
                 self.assertIsNotNone(decision["resolution"])
                 self.assertEqual([], decision["supersedes"])
-                self.assertEqual("S3", decision["required_by_slice"])
+                expected_slice = "S7" if decision_id == "D34" else (
+                    "S4" if decision_id in {"D31", "D32", "D33"} else "S3"
+                )
+                self.assertEqual(expected_slice, decision["required_by_slice"])
                 self.assertEqual(frozen["key"], decision["key"])
                 self.assertEqual(frozen["depends_on"], decision["depends_on"])
                 self.assertEqual(
