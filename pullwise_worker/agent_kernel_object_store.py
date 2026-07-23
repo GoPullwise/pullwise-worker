@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import secrets
 import hashlib
 import os
 from pathlib import Path
@@ -116,10 +117,19 @@ class ObjectStore:
             encoding,
             max_bytes,
         )
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix="object-", suffix=".tmp", dir=self.tmp_root
-        )
-        temporary = Path(temporary_name)
+        while True:
+            temporary = self.tmp_root / f"object-{secrets.token_hex(16)}.tmp"
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                    | getattr(os, "O_BINARY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                break
+            except FileExistsError:
+                continue
         digest = hashlib.sha256()
         size = 0
         try:
@@ -140,7 +150,7 @@ class ObjectStore:
             if not hasattr(os, "fchmod"):
                 os.chmod(temporary, 0o600)
             sha256 = digest.hexdigest()
-            self._verify_path(temporary, sha256, size)
+            self._verify_path(temporary, sha256, size, verify_private_permissions=os.name == "posix")
             final = self.path_for_digest(sha256)
             _private_directory(final.parent)
             try:
@@ -339,7 +349,7 @@ class ObjectStore:
 
     @staticmethod
     def _verify_path(
-        path: Path, digest: str, size: int, *, capture: bool = False
+        path: Path, digest: str, size: int, *, capture: bool = False, verify_private_permissions: bool = True
     ) -> bytes | None:
         try:
             try:
@@ -348,7 +358,6 @@ class ObjectStore:
                 raise CasCorruptError("CAS_CORRUPT: object missing or unreadable")
             if stat.S_ISLNK(metadata.st_mode):
                 raise CasCorruptError("CAS_CORRUPT: object is a symlink")
-        try:
             descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(descriptor, "rb", closefd=True) as handle:
                 metadata = os.fstat(handle.fileno())
@@ -356,7 +365,7 @@ class ObjectStore:
                     raise CasCorruptError("CAS_CORRUPT: object is not a regular file")
                 if metadata.st_nlink != 1:
                     raise CasCorruptError("CAS_CORRUPT: object has unexpected hardlinks")
-                if os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o600:
+                if verify_private_permissions and os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o600:
                     raise CasCorruptError("CAS_CORRUPT: object permissions are not private")
                 if metadata.st_size != size:
                     raise CasCorruptError("CAS_CORRUPT: object size mismatch")

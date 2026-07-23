@@ -143,7 +143,8 @@ class AgentKernelStorageTest(unittest.TestCase):
         path = store.path_for_digest(ref["sha256"])
         self.assertEqual(ref["size_bytes"], path.stat().st_size)
         self.assertEqual(b'{"schema_id":"example/v1"}', path.read_bytes())
-        self.assertEqual(0o600, path.stat().st_mode & 0o777)
+        if os.name == "posix":
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
         with database.connect() as connection:
             object_row = connection.execute(
                 "SELECT size_bytes, content_schema_id FROM content_objects WHERE sha256=?",
@@ -198,6 +199,8 @@ class AgentKernelStorageTest(unittest.TestCase):
     def test_existing_link_or_overbroad_permissions_are_corruption(self) -> None:
         cases = ("hardlink", "symlink", "permissions")
         for case in cases:
+            if case == "permissions" and os.name != "posix":
+                continue
             with self.subTest(case=case):
                 database = AgentKernelDatabase(self.worker_root / case)
                 database.initialize()
