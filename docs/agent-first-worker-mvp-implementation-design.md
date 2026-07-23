@@ -568,7 +568,7 @@ WHERE task_id=?
 4. 同事务插入 `result_publications` 与 terminal event，更新 Attempt `PUBLISHING→SUCCEEDED`。
 5. affected row 不是 1 时 publication 失败；候选 CAS object 可由 GC 清理，绝不能改 TaskResult version/digest 后重用。
 
-取消/非成功 terminalization 使用同样的唯一结果 CAS，但允许 `desired_state=CANCEL`，并使用各自正向 guard。外层 lease 已失效时 Worker 不再拥有 result publish 权；它必须在同一 Task 控制事务中停止 transport 写、永久 fence 精确的旧 transport/native Attempt 与 owner incarnation/session、记录与 Task terminal 字段分离的 transport abandonment 事实，并按 D5 令 `task_version` 恰好 `+1`。精确幂等重试返回原版本且不再增版，任一单边写都回滚。Task 保持原 `ACTIVE` 或 `FINALIZING`，`terminal_kind/result_ref/result_digest/outcome/terminal_at` 全部不变，绝不得向 Server 伪造 TaskResult。`transport-abandonment-record/v1` 的字段、identity 与幂等规则仍是 `SPEC_GAP`，本决策不授权发明 schema；MVP 也不具备跨 lease 创建 successor 的能力。最终无 successor 时，只有内部 TaskResult CAS 可按 D10 的完整全局矩阵形成语义终态；Server ACK 只确认 transport projection。
+取消/非成功 terminalization 使用同样的唯一结果 CAS，但允许 `desired_state=CANCEL`，并使用各自正向 guard。外层 lease 已失效时 Worker 不再拥有 result publish 权；它必须在同一 Task 控制事务中停止 transport 写、永久 fence 精确的旧 transport/native Attempt 与 owner incarnation/session、记录与 Task terminal 字段分离的 transport abandonment 事实，并按 D5 令 `task_version` 恰好 `+1`。精确幂等重试返回原版本且不再增版，任一单边写都回滚。Task 保持原 `ACTIVE` 或 `FINALIZING`，`terminal_kind/result_ref/result_digest/outcome/terminal_at` 全部不变，绝不得向 Server 伪造 TaskResult。D32 现已冻结独立 `transport-abandonment-record/v1`：它是与 `agent-claim-abandon-response/v1` bytes/digest 分离的 immutable non-result evidence，不得 terminalize Task/TaskResult 或绑定 transport receipt；MVP 仍不具备跨 lease 创建 successor 的能力。最终无 successor 时，只有内部 TaskResult CAS 可按 D33 的机械全局矩阵形成语义终态；Server ACK 只确认 transport projection。
 
 ## 5. 核心不可变契约
 

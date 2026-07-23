@@ -819,7 +819,7 @@ ApprovalEvent必须绑定task/version/ledger/policy/effect action/scope/expiry/a
 
 V1.3完成门通过后，Worker才把`same_run_resume@1.0`加入advertisement；它依赖`agent_task_protocol@1`。只有Server offer且本次grant selected时，grant的`resume_until`才非null。V1.0/V1.2 Worker不能因本地checkpoint存在就请求resume。
 
-跨 lease resume 是 D8 所称 successor 的唯一正向能力：旧 lease 丢失时先独立原子提交 abandonment/fence/Task version `+1` 并保持 Task `ACTIVE|FINALIZING`；resume 请求随后只能消费该既有事实，不能在 successor 事务里第一次 fence 或再次 transition 旧 Attempt。`transport-abandonment-record/v1` 的字段、identity、幂等 contract 仍是 `SPEC_GAP`，本节不得就地发明。
+跨 lease resume 是 D8 所称 successor 的唯一正向能力：旧 lease 丢失时先独立原子提交 abandonment/fence/Task version `+1` 并保持 Task `ACTIVE|FINALIZING`；resume 请求随后只能消费该既有事实，不能在 successor 事务里第一次 fence 或再次 transition 旧 Attempt。D32 已冻结 `transport-abandonment-record/v1` 为独立 immutable non-result evidence：它与 abandon response authority 使用不同 canonical bytes/digest，不得 terminalize Task/TaskResult 或绑定 transport receipt；后续 resume 只能引用 Server-owned current package 定义的该 record，不能重用 response bytes 或自行扩展字段。
 
 ### 8.1 Checkpoint watermark
 
