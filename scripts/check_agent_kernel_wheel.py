@@ -168,9 +168,7 @@ def main() -> int:
 
         environment_root = audit_root / "venv"
         venv.EnvBuilder(with_pip=True).create(environment_root)
-        python = environment_root / ("Scripts" if os.name == "nt" else "bin") / (
-            "python.exe" if os.name == "nt" else "python"
-        )
+        python = environment_root / "bin" / "python"
         _run(
             [str(python), "-m", "pip", "install", "--no-deps", str(wheels[0])],
             cwd=audit_root,
