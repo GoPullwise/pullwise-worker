@@ -22,7 +22,7 @@ GENERATED_MARKER = (
     '\"\"\"Generated from the Server-owned Agent-First bundle; do not edit.\"\"\"'
 )
 GENERATED_PROVENANCE = (
-    "pullwise-server@a2538e7a5fa1cba2a35a9ea9e076501ac719570f:"
+    "pullwise-server@43ca421c862772a2e000d617ef0c2f1b83759590:"
     "pullwise_server/agent_first_contract_bundle_python.py"
 )
 

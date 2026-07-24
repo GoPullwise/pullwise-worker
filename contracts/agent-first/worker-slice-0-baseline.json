@@ -126,10 +126,10 @@
   "generated_file_exceptions": [
     {
       "path": "pullwise_worker/_generated_agent_task_contract.py",
-      "physical_lines": 6970,
-      "sha256": "a8a4bb9228be3c0179ee60958c9f08e2254e88377f149434753913b643243009",
+      "physical_lines": 7120,
+      "sha256": "aa5dda6c4646875bbe74078624a22c08957a7f0098606584464b94a24fd301de",
       "marker": "\"\"\"Generated from the Server-owned Agent-First bundle; do not edit.\"\"\"",
-      "provenance": "pullwise-server@a2538e7a5fa1cba2a35a9ea9e076501ac719570f:pullwise_server/agent_first_contract_bundle_python.py",
+      "provenance": "pullwise-server@43ca421c862772a2e000d617ef0c2f1b83759590:pullwise_server/agent_first_contract_bundle_python.py",
       "reason": "D28 requires immutable Server-generated Python wrapper and Worker cannot hand-edit it.",
       "considered_split_seam": "Server generator owns partitioning and Worker must preserve exact bytes.",
       "owner": "Pullwise Server current-contract package owner",
