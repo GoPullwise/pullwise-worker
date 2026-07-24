@@ -67,6 +67,9 @@ class AgentKernelCurrentPackageTest(unittest.TestCase):
         self.assertEqual(SERVER_WRAPPER.read_bytes(), WORKER_WRAPPER.read_bytes())
         self.assertEqual(SERVER_BUNDLE.read_bytes(), generated_contract.bundle_bytes())
 
+    def test_release_gate_evaluator_is_package_owned(self) -> None:
+        self.assertTrue(callable(generated_contract.evaluate_release_gate))
+
     def test_d22_release_gate_schemas_and_golden_fixtures_are_public(self) -> None:
         expected = {
             'benchmark-bundle': (

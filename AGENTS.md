@@ -219,6 +219,11 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
   fails closed. The exception remains exact through the 401-600 range and
   must be removed once the file is absent or <=400 lines; it does not reopen
   the handwritten genesis path set.
+- The tri-state release evaluator remains a generated contract consumer only.
+  Worker may expose and exact-pin `evaluate_release_gate`, but must not add
+  evaluator storage, signing/trust, organization principals, baseline/canary
+  runtime state, external evidence collection, or switch the production loop
+  to this evaluator in the current candidate.
 
 ## Agent-First Specification Decision Gate
 
