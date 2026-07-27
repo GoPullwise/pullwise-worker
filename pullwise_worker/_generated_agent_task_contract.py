@@ -6534,7 +6534,18 @@ def _rule_release_principal(value: dict[str, object]) -> None:
 
 
 def _rule_release_signing_key(value: dict[str, object]) -> None:
-    _rule_release_principal(value)
+    issued_at = _timestamp_millis(value["issued_at"])
+    expires_at = _timestamp_millis(value["expires_at"])
+    _release_require(
+        issued_at is not None,
+        "RELEASE_SIGNING_KEY_TIME_INVALID",
+        "$.issued_at",
+    )
+    _release_require(
+        expires_at is not None and expires_at > issued_at,
+        "RELEASE_SIGNING_KEY_TIME_INVALID",
+        "$.expires_at",
+    )
 
 
 def _rule_release_key_revocation(value: dict[str, object]) -> None:
