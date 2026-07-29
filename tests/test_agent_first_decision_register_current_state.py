@@ -84,7 +84,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual([], report["failures"])
         self.assertIsNone(report["active_decision_id"])
         self.assertEqual(0, report["pending_decision_count"])
-        self.assertEqual(33, report["resolved_decision_count"])
+        self.assertEqual(34, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -122,6 +122,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D32": ("independent_transport_abandonment_record", "11794116e7db5fdb330e001fa1ab7b7039ff1f1f04bc3283b9cddbc30bf3995e"),
             "D33": ("canonical_mechanical_terminal_selector", "8bf9ed4ac35fdd2f0bfd790c1a8f8879776a44711683152921c9ae330e105fb4"),
             "D34": ("candidate_only_no_activation", "2be5b5752b65714204fa6f41a0a126eb30e82bafcdeb38b5ece426938561158c"),
+            "D35": ("replacement_generate_candidate_only_no_activation", "8cde7af149db8e6051f0342bd9490c4be31fce7b1868270ce7206350ee252a9e"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():
@@ -155,12 +156,15 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
-        expected_order.extend(["D28", "D29", "D30", "D31", "D32", "D33", "D34"])
+        expected_order.extend([
+            "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35",
+        ])
         self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
             [
                 *[item["id"] for item in REQUIRED_CATALOG],
                 "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34",
+                "D35",
             ],
             [item["id"] for item in register["decisions"]],
         )

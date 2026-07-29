@@ -76,9 +76,12 @@ class AgentFirstDecisionRegisterD31D34Test(unittest.TestCase):
         register = load_register(REGISTER_PATH)
         decisions = {item["id"]: item for item in register["decisions"]}
 
-        self.assertEqual(["D31", "D32", "D33", "D34"], register["question_order"][-4:])
+        self.assertEqual(
+            ["D31", "D32", "D33", "D34"],
+            register["question_order"][-5:-1],
+        )
         self.assertEqual(["D31", "D32", "D33", "D34"], [
-            item["id"] for item in register["decisions"][-4:]
+            item["id"] for item in register["decisions"][-5:-1]
         ])
         for decision_id, expected in EXPECTED_DECISIONS.items():
             with self.subTest(decision_id=decision_id):
