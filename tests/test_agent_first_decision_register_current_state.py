@@ -156,15 +156,12 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
-        expected_order.extend([
-            "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35",
-        ])
+        expected_order.extend(f"D{number}" for number in range(28, 36))
         self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
             [
                 *[item["id"] for item in REQUIRED_CATALOG],
-                "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34",
-                "D35",
+                *[f"D{number}" for number in range(27, 36)],
             ],
             [item["id"] for item in register["decisions"]],
         )

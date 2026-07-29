@@ -212,9 +212,9 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
   `pullwise_worker/_generated_agent_task_contract.py`, pinned to first-line
   marker `"""Generated from the Server-owned Agent-First bundle; do not edit."""`,
   provenance
-  `pullwise-server@03295b94f637d39ae36aaed71a04da24b234b874:pullwise_server/agent_first_contract_bundle_python.py`,
-  7268 physical lines, and SHA-256
-  `13da1959a1cc002b9e2e2677e2b520632a34640b7ce15e29ec6bf9158b000af5`.
+  `pullwise-server@e5cfc2e9dff64942a14e65e10172f53a3d16766b:pullwise_server/agent_first_contract_bundle_python.py`,
+  7282 physical lines, and SHA-256
+  `13c15395b754eb1c159bb12f43bd40f98e17cf64f0bd4a2082d5664bd97d0d93`.
   Tracking, readability, path, marker, provenance, count, or digest drift
   fails closed. The exception remains exact through the 401-600 range and
   must be removed once the file is absent or <=400 lines; it does not reopen
@@ -262,9 +262,9 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D34; D2 remains pending but inactive
+- The resolved prefix remains D1 and D3-D35; D2 remains pending but inactive
   under D1. All applicable decisions are resolved: the register is `ready` with
-  33 resolved records, zero applicable pending records, and no active question.
+  34 resolved records, zero applicable pending records, and no active question.
   S2-S8 have no pending-decision blocker. This closes only the specification
   decision gate; it is not package/runtime implementation or release evidence.
   Do not author Server package schemas in Worker or connect production
@@ -327,11 +327,20 @@ inference never select an option or authorize production implementation.
   facts, effects, availability, predicates, and mechanically selected result.
   D34 is bound to `candidate_only_no_activation` digest
   `2be5b5752b65714204fa6f41a0a126eb30e82bafcdeb38b5ece426938561158c`:
-  this cycle ends with one fully validated, exact-pinned Server-owned candidate.
-  Current-task/operator routes and auth remain later work. Do not connect
+  its exactly-once Generate allowance was consumed by the original coordinated
+  candidate, and D35 withdraws that old tuple. Never restore or fall back to
+  those prior package bytes.
+  D35 is bound to `replacement_generate_candidate_only_no_activation` digest
+  `8cde7af149db8e6051f0342bd9490c4be31fce7b1868270ce7206350ee252a9e`:
+  it supersedes only D34's Generate limit and authorized exactly one replacement
+  after every source/fixture/closure/DAG/registry/digest/Python-Node parity gate
+  passed. That allowance is consumed by package `0.1.0`, content
+  `11ced3caa5333f5d841a5f5d0ca33e9a91522f9809cd23943f56d1f371409564`,
+  root `e6dc056cb1b61c2a47c28d3e02117352bae35c7fecb07d10bad6afd65b9e194e`.
+  Any further Generate requires another append-only superseding decision.
+  Current-task/operator routes and auth remain later work: do not connect
   production HTTP/auth, switch the production Worker loop, enable D24, deploy,
-  or start canary in this cycle. Generate may run exactly once and only after
-  every source/fixture/closure/DAG/registry/digest/Python-Node parity gate passes.
+  or start canary.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only
