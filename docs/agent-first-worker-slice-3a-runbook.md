@@ -270,7 +270,7 @@ boundary/status，不计作本切片新增实现模块的尺寸豁免。
 
 ## 完成证据
 
-唯一的生成包装器例外是 `pullwise_worker/_generated_agent_task_contract.py`：来源固定为 `pullwise-server@aaec24c281ad396a8caa6f75bc9c3f3bef0241b2:pullwise_server/agent_first_contract_bundle_python.py`，固定为 7266 行及 SHA-256 `09b14ac14601c561faebc8371eb2d77998f204eff826ad32699b99e085eadad8`。它不是通配符或仅凭 marker 的豁免；文件缺失或降至 <=400 行时必须移除。
+唯一的生成包装器例外是 `pullwise_worker/_generated_agent_task_contract.py`：来源固定为 `pullwise-server@03295b94f637d39ae36aaed71a04da24b234b874:pullwise_server/agent_first_contract_bundle_python.py`，固定为 7268 行及 SHA-256 `13da1959a1cc002b9e2e2677e2b520632a34640b7ce15e29ec6bf9158b000af5`。它不是通配符或仅凭 marker 的豁免；文件缺失或降至 <=400 行时必须移除。
 
 | 责任组 | 文件与最终行数 |
 | --- | --- |

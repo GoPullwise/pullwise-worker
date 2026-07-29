@@ -18,7 +18,7 @@ RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
 WHEEL_CHECK_PATH = REPO_ROOT / "scripts" / "check_agent_kernel_wheel.py"
 
 
-CURRENT_PACKAGE_SERVER_COMMIT = "aaec24c281ad396a8caa6f75bc9c3f3bef0241b2"
+CURRENT_PACKAGE_SERVER_COMMIT = "03295b94f637d39ae36aaed71a04da24b234b874"
 
 
 class CrossRepositoryCiContractTest(unittest.TestCase):
