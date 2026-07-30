@@ -24,9 +24,12 @@ class AgentFirstDecisionRegisterD36Test(unittest.TestCase):
         )
 
     def test_d36_is_the_resolved_append_only_implementation_boundary(self) -> None:
-        self.assertEqual("D36", self.register["question_order"][-1])
-        self.assertEqual("D36", self.register["decisions"][-1]["id"])
-        self.assertIsNone(self.register["active_decision_id"])
+        self.assertEqual(["D36", "D37"], self.register["question_order"][-2:])
+        self.assertEqual(
+            ["D36", "D37"],
+            [item["id"] for item in self.register["decisions"][-2:]],
+        )
+        self.assertEqual("D37", self.register["active_decision_id"])
         self.assertEqual(
             "mvp-s3-s7-implementation-authorization", self.decision["key"]
         )
@@ -74,19 +77,40 @@ class AgentFirstDecisionRegisterD36Test(unittest.TestCase):
             resolution["resolution_sha256"],
         )
 
-    def test_d36_resolution_opens_s3_through_s7_decision_gates(self) -> None:
-        for required_slice in ("S3", "S4", "S5", "S6", "S7"):
+    def test_d37_does_not_retroactively_block_d36_s3_scope(self) -> None:
+        report = verify_register(
+            self.register,
+            REPO_ROOT,
+            require_slice="S3",
+        )
+        self.assertEqual("valid_pending", report["status"])
+        self.assertTrue(report["valid"])
+        self.assertFalse(report["ready"])
+        self.assertEqual("D37", report["active_decision_id"])
+        self.assertEqual([], report["failures"])
+
+    def test_d37_blocks_d36_s4_through_s7_scope(self) -> None:
+        for required_slice in ("S4", "S5", "S6", "S7"):
             with self.subTest(required_slice=required_slice):
                 report = verify_register(
                     self.register,
                     REPO_ROOT,
                     require_slice=required_slice,
                 )
-                self.assertEqual("ready", report["status"])
+                self.assertEqual("blocked", report["status"])
                 self.assertTrue(report["valid"])
-                self.assertTrue(report["ready"])
-                self.assertIsNone(report["active_decision_id"])
-                self.assertEqual([], report["failures"])
+                self.assertFalse(report["ready"])
+                self.assertEqual("D37", report["active_decision_id"])
+                self.assertEqual(
+                    [
+                        {
+                            "code": "slice_blocked_by_pending_decisions",
+                            "slice": required_slice,
+                            "decision_ids": ["D37"],
+                        }
+                    ],
+                    report["failures"],
+                )
 
     def test_recommended_option_separates_implementation_from_activation(self) -> None:
         selected = next(

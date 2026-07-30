@@ -11,22 +11,9 @@ from tests.test_agent_first_decision_register_current_state import (
 
 
 class AgentFirstDecisionRegisterCurrentSlicesTest(unittest.TestCase):
-    def test_resolved_d36_leaves_completed_slice_two_ready(self) -> None:
+    def test_pending_d37_does_not_block_completed_slices(self) -> None:
         register = load_register(REGISTER_PATH)
-        report = verify_register(
-            register, REPO_ROOT, require_slice="S2", check_document=False
-        )
-
-        self.assertEqual("ready", report["status"])
-        self.assertTrue(report["valid"])
-        self.assertTrue(report["ready"])
-        self.assertEqual([], report["failures"])
-        self.assertIsNone(report["active_decision_id"])
-        self.assertEqual(["D2"], report["inactive_decision_ids"])
-
-    def test_no_pending_decision_blocks_slice_three_and_later(self) -> None:
-        register = load_register(REGISTER_PATH)
-        for slice_id in ("S3", "S4", "S5", "S6", "S7", "S8"):
+        for slice_id in ("S2", "S3"):
             with self.subTest(slice_id=slice_id):
                 report = verify_register(
                     register,
@@ -35,11 +22,38 @@ class AgentFirstDecisionRegisterCurrentSlicesTest(unittest.TestCase):
                     check_document=False,
                     check_history=False,
                 )
-                self.assertEqual("ready", report["status"])
-                self.assertEqual([], report["failures"])
+                self.assertEqual("valid_pending", report["status"])
                 self.assertTrue(report["valid"])
-                self.assertTrue(report["ready"])
-                self.assertIsNone(report["active_decision_id"])
+                self.assertFalse(report["ready"])
+                self.assertEqual([], report["failures"])
+                self.assertEqual("D37", report["active_decision_id"])
+                self.assertEqual(["D2"], report["inactive_decision_ids"])
+
+    def test_pending_d37_blocks_slice_four_and_later(self) -> None:
+        register = load_register(REGISTER_PATH)
+        for slice_id in ("S4", "S5", "S6", "S7", "S8"):
+            with self.subTest(slice_id=slice_id):
+                report = verify_register(
+                    register,
+                    REPO_ROOT,
+                    require_slice=slice_id,
+                    check_document=False,
+                    check_history=False,
+                )
+                self.assertEqual("blocked", report["status"])
+                self.assertTrue(report["valid"])
+                self.assertFalse(report["ready"])
+                self.assertEqual("D37", report["active_decision_id"])
+                self.assertEqual(
+                    [
+                        {
+                            "code": "slice_blocked_by_pending_decisions",
+                            "slice": slice_id,
+                            "decision_ids": ["D37"],
+                        }
+                    ],
+                    report["failures"],
+                )
 
 
 if __name__ == "__main__":

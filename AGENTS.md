@@ -262,16 +262,16 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D35; D2 remains pending but inactive
-  under D1. D36 is the one active pending decision, so the register is
-  `valid_pending` with 34 resolved records and one applicable pending record.
-  S2 is not blocked, while S3-S8 are blocked by D36 until the user explicitly
-  selects an option. A recommendation is not a resolution and D35 remains the
-  controlling implementation boundary in the meantime.
-  This closes only the earlier specification decisions; it is not
-  package/runtime implementation or release evidence.
-  Do not author Server package schemas in Worker or connect production
-  Gateway/Observation state before the corresponding implementation slices close.
+- The resolved prefix remains D1 and D3-D36; D2 remains pending but inactive
+  under D1. D37 is the one active pending decision, so the register is
+  `valid_pending` with 35 resolved records and one applicable pending record.
+  D37 does not retroactively block the completed S3 authority/R0 tracer scope,
+  but it blocks S4-S8 before any contract source edit, Generate, Task/Attempt/
+  Owner bootstrap, checkpoint/recovery implementation, or dependent S5-S7 work.
+  A recommendation is not a resolution; D36's zero-contract-change and
+  zero-Generate stop condition remains controlling until the user explicitly
+  resolves D37. Do not invent ContentRefs, transport identities, unversioned
+  wire envelopes, legacy supplements, or checkpoint schemas to bypass it.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -354,6 +354,15 @@ inference never select an option or authorize production implementation.
   or any S8 release/cutover/rollback operation. Do not add a legacy adapter,
   shim, dual path, fallback, downgrade, compatibility mode, second runner, or
   second production authority.
+  D37 is the active append-only S4 contract-gap question. The implemented
+  tracer proved that `server-authority-envelope/v1` does not carry the
+  TaskRequest, EffectiveExecutionPolicy, RequirementLedger, or complete
+  `outer_job_id/run_id` transport roots required for an atomic Worker
+  Task/Attempt/Owner projection. The frozen package also has no versioned
+  machine checkpoint, semantic checkpoint, or
+  `committed-checkpoint-manifest/v1`. Until D37 is explicitly resolved, keep
+  all contract source and generated artifacts unchanged and stop S4-S8 at this
+  boundary.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only

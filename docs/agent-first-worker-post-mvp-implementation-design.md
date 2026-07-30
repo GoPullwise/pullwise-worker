@@ -68,12 +68,13 @@ D26 已选择 `roadmap_separate_designs`（resolution digest
 `absolute_plus_baseline` current-contract 单值特化解决（resolution digest
 `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`）。D22/D26
 原始闭合点上的机器 decision register 无 active decision，规范状态为 ready；当前
-append-only register 中 D28-D36 均 resolved；所有 applicable decisions 已关闭，状态为
-`ready`，共有 35 个 resolved、0 个 applicable pending，无 active question，S3-S8 不再有
-pending-decision blocker。D36 只授权本地仓库和 CI 的 S3-S7 current-graph 实现/验证，
-不授权 contract source change、Generate、D24、deployment、production traffic、canary 或
-任何 S8 操作。D2 仍是 inactive pending，不适用且不得据此恢复旧生产权威。D26 只确定
-文档成熟度与开工边界，不授权 post-MVP runtime、schema、protocol 或 deployment 变更。
+append-only register 中 D28-D36 均 resolved，D37 是唯一 active pending decision，状态为
+`valid_pending`，共有 35 个 resolved、1 个 applicable pending。D37 不追溯阻断已完成的
+S3 current authority/R0 tracer，但阻断 S4-S8；它记录 bootstrap wire 与双层 checkpoint
+schema 缺口。D36 的 contract source change/Generate 均为零的停线规则继续有效，任何
+source edit 或 Generate 都须先显式解决 D37。D2 仍是 inactive pending，不适用且不得据此
+恢复旧生产权威。D26 只确定文档成熟度与开工边界，不授权 post-MVP runtime、schema、
+protocol 或 deployment 变更。
 
 本文按以下 maturity 分类：
 
