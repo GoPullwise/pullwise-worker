@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Callable
 
+from .agent_kernel_current_bootstrap import (
+    CurrentRuntimeBootstrapConsumer,
+    CurrentRuntimeBootstrapError,
+)
 from .agent_kernel_current_database import CurrentAgentKernelDatabase
 from .agent_kernel_current_package import (
     CURRENT_TOOL_CATALOG,
     CurrentInvocationCodec,
-    ServerAuthorityEnvelope,
 )
 from .agent_kernel_current_policy import CurrentR0Policy
 from .agent_kernel_current_r0_execution import CurrentR0ExecutionAdapter
@@ -33,6 +36,7 @@ class CurrentRuntimeRunner:
         if clock is not None and not callable(clock):
             raise GatewayError("CURRENT_RUNTIME_CLOCK_INVALID")
         self.journal = CurrentDispatchJournal(database, clock=clock)
+        self.bootstrap = CurrentRuntimeBootstrapConsumer(database)
         self.preparer = R0ReadPreparer(
             capture_provider=capture_provider,
             base_revision=base_revision,
@@ -44,11 +48,11 @@ class CurrentRuntimeRunner:
         )
         self.policy = CurrentR0Policy()
 
-    def run_r0(self, authority_bytes: bytes, request_bytes: bytes) -> bytes:
-        authority = ServerAuthorityEnvelope.from_canonical_bytes(authority_bytes)
-        recorded = self.journal.record_authority(authority)
-        if not isinstance(recorded, ServerAuthorityEnvelope):
-            raise GatewayError("CURRENT_AUTHORITY_INVALID")
+    def run_r0(self, bootstrap_bytes: bytes, request_bytes: bytes) -> bytes:
+        try:
+            recorded = self.bootstrap.ingest(bootstrap_bytes)
+        except CurrentRuntimeBootstrapError as exc:
+            raise GatewayError(exc.code, exc.detail) from exc
         gateway = AgentKernelGateway(
             codec=CurrentInvocationCodec(
                 recorded,

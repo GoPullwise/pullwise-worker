@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -145,7 +146,7 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
             "dispatch_settlements",
             "dispatch_abandonments",
         )
-        with self.database.connect() as connection:
+        with closing(self.database.connect()) as connection:
             counts = tuple(
                 connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 for table in state_tables

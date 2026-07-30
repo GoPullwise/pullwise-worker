@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
@@ -10,6 +11,12 @@ import unittest
 from pullwise_worker.agent_kernel_current_database import (
     CurrentAgentKernelDatabase,
     CurrentDatabaseError,
+)
+from pullwise_worker.agent_kernel_current_migrations import (
+    MIGRATION_1,
+    MIGRATION_1_SCHEMA_SHA256,
+    MIGRATION_1_SHA256,
+    MIGRATION_2_SHA256,
 )
 from pullwise_worker.agent_kernel_current_objects import (
     CurrentObjectError,
@@ -42,22 +49,69 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.scratch.cleanup()
 
-    def test_new_root_has_strict_sqlite_configuration_and_migration_one(self) -> None:
+    def test_new_root_has_strict_sqlite_configuration_and_append_only_migrations(
+        self,
+    ) -> None:
         database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
 
         self.assertEqual(self.root / "agent-kernel-current.sqlite3", database.path)
         self.assertNotIn("shadow", database.path.as_posix())
-        with database.connect() as connection:
+        with closing(database.connect()) as connection:
             self.assertEqual("wal", connection.execute("PRAGMA journal_mode").fetchone()[0])
             self.assertEqual(1, connection.execute("PRAGMA foreign_keys").fetchone()[0])
             self.assertEqual(2, connection.execute("PRAGMA synchronous").fetchone()[0])
             self.assertGreaterEqual(
                 connection.execute("PRAGMA busy_timeout").fetchone()[0], 1_000
             )
-            self.assertEqual(1, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(2, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(
+                (1, MIGRATION_1_SHA256),
+                tuple(connection.execute(
+                    "SELECT schema_version, migration_sha256 FROM current_schema"
+                ).fetchone()),
+            )
+            self.assertEqual(
+                (2, MIGRATION_1_SHA256, MIGRATION_2_SHA256),
+                tuple(connection.execute(
+                    "SELECT schema_version, previous_migration_sha256, "
+                    "migration_sha256 FROM current_schema_v2"
+                ).fetchone()),
+            )
         if os.name == "posix":
             self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE(database.path.stat().st_mode))
+
+    def test_migration_one_bytes_and_schema_digest_remain_frozen(self) -> None:
+        self.assertEqual(
+            "48b777f8938969239636aade3e0e6fef74229e3332491a28b2ff0dcf74363e6f",
+            MIGRATION_1_SHA256,
+        )
+        self.assertEqual(
+            "fc08a2896a328b7e7aeff52bdd61d8a09867fea521a1c07c85e250d0b3b61d08",
+            MIGRATION_1_SCHEMA_SHA256,
+        )
+
+    def test_existing_migration_one_database_upgrades_in_place_once(self) -> None:
+        self.root.mkdir(mode=0o700)
+        path = self.root / "agent-kernel-current.sqlite3"
+        connection = sqlite3.connect(path)
+        for statement in MIGRATION_1:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO current_schema VALUES (1, 1, ?)",
+            (MIGRATION_1_SHA256,),
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+        connection.close()
+
+        database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
+        with closing(database.connect()) as upgraded:
+            self.assertEqual(2, upgraded.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(
+                1,
+                upgraded.execute("SELECT COUNT(*) FROM current_schema_v2").fetchone()[0],
+            )
 
     def test_package_lock_rejects_non_lowercase_digest(self) -> None:
         with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_PACKAGE_LOCK_INVALID"):
