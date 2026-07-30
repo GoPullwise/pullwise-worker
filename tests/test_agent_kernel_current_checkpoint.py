@@ -104,7 +104,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
         manifest = manifest_document(context[0])
         self.assertEqual(manifest["manifest_hash"], first.manifest_hash)
         self.assertEqual(first, replay)
-        self.assertEqual((6, 1, 1, 1, 0, 0), self.counts())
+        self.assertEqual((9, 1, 1, 1, 0, 0), self.counts())
         connection = self.database.connect()
         try:
             head = connection.execute(
@@ -253,7 +253,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
                 *checkpoint_documents(2, previous_manifest=first_manifest)
             )
         self.assertEqual("AUTHORITY_FENCED", commit_error.exception.code)
-        self.assertEqual((6, 1, 1, 1, 0, 0), self.counts())
+        self.assertEqual((9, 1, 1, 1, 0, 0), self.counts())
 
     def test_server_ack_bytes_are_exactly_verified_persisted_and_replayed(self) -> None:
         store = CurrentCheckpointStore(self.database)
@@ -262,7 +262,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
 
         self.assertEqual(committed, store.record_server_ack(ack))
         self.assertEqual(committed, store.record_server_ack(ack))
-        self.assertEqual((6, 1, 1, 1, 1, 1), self.counts())
+        self.assertEqual((9, 1, 1, 1, 1, 1), self.counts())
 
         with self.assertRaises(CurrentCheckpointError) as noncanonical:
             store.record_server_ack(ack + b"\n")
@@ -275,7 +275,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
         with self.assertRaises(CurrentCheckpointError) as conflicted:
             store.record_server_ack(conflict)
         self.assertEqual("CHECKPOINT_ACK_CONFLICT", conflicted.exception.code)
-        self.assertEqual((6, 1, 1, 1, 1, 1), self.counts())
+        self.assertEqual((9, 1, 1, 1, 1, 1), self.counts())
 
     def test_every_server_ack_write_stage_rolls_back_both_ack_rows(self) -> None:
         committed = CurrentCheckpointStore(self.database).commit(
