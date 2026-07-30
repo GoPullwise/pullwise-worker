@@ -119,6 +119,7 @@ class CurrentRequirementLedgerStoreTest(unittest.TestCase):
         candidate = successor_ledger(self.initial)
         mutated = deepcopy(candidate)
         mutated["entries"][0]["statement"] = "Mutated accepted objective."
+        mutated.pop("ledger_digest")
         mutated = contract.seal_document("requirement-ledger/v1", mutated)
 
         with self.assertRaises(CurrentRequirementLedgerError) as history:
@@ -190,10 +191,13 @@ class CurrentRequirementLedgerStoreTest(unittest.TestCase):
                     self.bootstrap.task_id
                 )
                 self.assertEqual(1, current.ledger_version)
-                with database.connect() as connection:
+                connection = database.connect()
+                try:
                     count = connection.execute(
                         "SELECT COUNT(*) FROM requirement_ledger_versions"
                     ).fetchone()[0]
+                finally:
+                    connection.close()
                 self.assertEqual(1, count)
 
 

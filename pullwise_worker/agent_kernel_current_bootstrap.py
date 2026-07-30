@@ -19,6 +19,11 @@ from .agent_kernel_current_package import (
     validate_current_document,
     verify_current_document_digest,
 )
+from .agent_kernel_current_requirements import (
+    CurrentRequirementLedgerError,
+    install_bootstrap_semantics,
+    verify_bootstrap_semantics,
+)
 
 
 BOOTSTRAP_SCHEMA_ID = "agent-task-runtime-bootstrap/v1"
@@ -82,6 +87,8 @@ class CurrentRuntimeBootstrapConsumer:
                 self.fault_hook("after_owner")
                 recorded = self.authority.apply_active(connection, envelope)
                 self.fault_hook("after_authority")
+                install_bootstrap_semantics(connection, document)
+                self.fault_hook("after_semantic_roots")
                 self.fault_hook("before_commit")
                 return recorded
         except CurrentRuntimeBootstrapError:
@@ -93,6 +100,10 @@ class CurrentRuntimeBootstrapConsumer:
                 else "RUNTIME_BOOTSTRAP_AUTHORITY_CONFLICT"
             )
             raise CurrentRuntimeBootstrapError(code, exc.code) from exc
+        except CurrentRequirementLedgerError as exc:
+            raise CurrentRuntimeBootstrapError(
+                "RUNTIME_BOOTSTRAP_SEMANTIC_ROOT_INVALID", exc.code
+            ) from exc
         except sqlite3.Error as exc:
             raise CurrentRuntimeBootstrapError(
                 "RUNTIME_BOOTSTRAP_WRITE_FAILED", type(exc).__name__
@@ -200,6 +211,14 @@ class CurrentRuntimeBootstrapConsumer:
             bytes(authority["grant_bytes"]),
         ) != (envelope.canonical_bytes, envelope.grant.canonical_bytes):
             self._fail("RUNTIME_BOOTSTRAP_STORAGE_CORRUPT")
+        try:
+            verify_bootstrap_semantics(
+                connection, json.loads(raw.decode("utf-8"))
+            )
+        except CurrentRequirementLedgerError as exc:
+            raise CurrentRuntimeBootstrapError(
+                "RUNTIME_BOOTSTRAP_STORAGE_CORRUPT", exc.code
+            ) from exc
 
     @staticmethod
     def _insert_bootstrap(

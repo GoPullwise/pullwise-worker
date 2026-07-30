@@ -28,7 +28,12 @@ BOOTSTRAP_TABLES = (
     "authority_history",
     "authority_heads",
     "dispatch_budgets",
+    "checkpoint_objects",
+    "requirement_ledger_versions",
+    "requirement_ledger_heads",
 )
+
+BOOTSTRAP_COUNTS = (1,) * 10 + (3, 1, 1)
 
 
 class CurrentRuntimeBootstrapConsumerTest(unittest.TestCase):
@@ -58,7 +63,7 @@ class CurrentRuntimeBootstrapConsumerTest(unittest.TestCase):
         expected = golden_runtime_bootstrap()
         self.assertEqual(expected["authority"]["authority_digest"], first.digest)
         self.assertEqual(first, replay)
-        self.assertEqual((1,) * len(BOOTSTRAP_TABLES), self.counts())
+        self.assertEqual(BOOTSTRAP_COUNTS, self.counts())
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT bootstrap_bytes, task_record_bytes, attempt_record_bytes, "
@@ -88,6 +93,7 @@ class CurrentRuntimeBootstrapConsumerTest(unittest.TestCase):
             "after_attempt",
             "after_owner",
             "after_authority",
+            "after_semantic_roots",
             "before_commit",
         )
         for stage in stages:
