@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D36",
+  "active_decision_id": null,
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -723,9 +723,9 @@
     {
       "id": "D36", "key": "mvp-s3-s7-implementation-authorization", "scope": "MVP S3-S7", "title": "MVP S3-S7 implementation and external-activation boundary",
       "question": "Which bounded implementation authority, if any, should replace D35's candidate-only boundary: local code and CI implementation of MVP S3-S7, only the S3-S4 current-runtime tracer bullet, or no runtime implementation, while keeping external activation and any new Generate prohibited?",
-      "status": "pending", "depends_on": ["D20", "D21", "D23", "D27", "D30", "D35"], "activation": null, "required_by_slice": "S3",
+      "status": "resolved", "depends_on": ["D20", "D21", "D23", "D27", "D30", "D35"], "activation": null, "required_by_slice": "S3",
       "effects": ["authority", "external_behavior", "permission", "release_ownership"],
-      "source_refs": ["handoff:2026-07-30:next-agent-implementation-decision", "conversation:user-request:2026-07-30:inspect-handoff-and-start"],
+      "source_refs": ["handoff:2026-07-30:next-agent-implementation-decision", "conversation:user-request:2026-07-30:inspect-handoff-and-start", "conversation:user-approval:2026-07-30:mvp_s3_s7_implementation_only_no_external_activation"],
       "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
       "options": [
         {
@@ -763,8 +763,14 @@
         }
       ],
       "recommended_option_id": "mvp_s3_s7_implementation_only_no_external_activation",
-      "resolution": null,
-      "supersedes": []
+      "resolution": {
+        "kind": "option", "selected_option_id": "mvp_s3_s7_implementation_only_no_external_activation", "custom_text": null,
+        "decision_text": "批准 mvp_s3_s7_implementation_only_no_external_activation：授权在本地仓库和 CI 中实现并验证 MVP S3–S7 的唯一 current production graph，从 TDD S3–S4 current-runtime tracer bullet 开始；允许 Server current-task/operator HTTP/Auth、Worker current runner、Gate/TaskResult、current transport 和 WorkerDebugFragment 的实现。继续禁止任何 contract source change 或 Generate、D24 实现或启用、部署、修改已部署 Worker、生产流量、canary、legacy 删除，以及所有 S8 release/cutover/rollback 操作；不允许 legacy adapter、shim、dual path、fallback、downgrade、compatibility mode、第二 runner 或第二 production authority。",
+        "authority": "user", "decided_at": "2026-07-30",
+        "evidence_refs": ["conversation:user-approval:2026-07-30:mvp_s3_s7_implementation_only_no_external_activation"],
+        "resolution_sha256": "cb40a540cff9af1d350bf1a413aa3aeaee0ca1ddce65afabec7443f294944a1b"
+      },
+      "supersedes": ["D35"]
     }
   ]
 }

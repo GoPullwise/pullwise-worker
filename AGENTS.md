@@ -344,14 +344,16 @@ inference never select an option or authorize production implementation.
   Current-task/operator routes and auth remain later work: do not connect
   production HTTP/auth, switch the production Worker loop, enable D24, deploy,
   or start canary.
-  D36 is pending with recommended option
-  `mvp_s3_s7_implementation_only_no_external_activation`. It has no resolution
-  digest and does not yet supersede D35. Until the user explicitly resolves it,
-  do not implement S3-S7 production runtime code. If approved, record the
-  option-anchored resolution and structural `supersedes: ["D35"]` before TDD;
-  the recommended boundary allows local code/CI only and keeps contract source
-  changes, Generate, D24, deployment, production traffic, cutover, and canary
-  outside its authority.
+  D36 is bound to `mvp_s3_s7_implementation_only_no_external_activation`
+  digest `cb40a540cff9af1d350bf1a413aa3aeaee0ca1ddce65afabec7443f294944a1b`
+  and structurally supersedes D35. It authorizes local repository and CI
+  implementation/verification of the sole current S3-S7 graph, beginning with
+  a TDD S3-S4 current-runtime tracer bullet. It does not authorize contract
+  source changes or Generate, D24 implementation or enablement, deployment,
+  changes to a deployed Worker, production traffic, canary, legacy deletion,
+  or any S8 release/cutover/rollback operation. Do not add a legacy adapter,
+  shim, dual path, fallback, downgrade, compatibility mode, second runner, or
+  second production authority.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only
