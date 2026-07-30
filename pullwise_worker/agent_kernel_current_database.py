@@ -11,11 +11,14 @@ import stat
 from typing import Iterator
 
 from .agent_kernel_current_migrations import (
+    BASE_SCHEMA_VERSION,
     CURRENT_SCHEMA_VERSION,
+    CURRENT_SCHEMA_SHA256,
     CURRENT_TABLES,
     MIGRATION_1,
     MIGRATION_1_SHA256,
-    MIGRATION_1_SCHEMA_SHA256,
+    MIGRATION_2,
+    MIGRATION_2_SHA256,
     schema_fingerprint,
 )
 
@@ -126,7 +129,20 @@ class CurrentAgentKernelDatabase:
                     connection.execute(statement)
                 connection.execute(
                     "INSERT INTO current_schema VALUES (1, ?, ?)",
-                    (CURRENT_SCHEMA_VERSION, MIGRATION_1_SHA256),
+                    (BASE_SCHEMA_VERSION, MIGRATION_1_SHA256),
+                )
+                connection.execute(f"PRAGMA user_version = {BASE_SCHEMA_VERSION}")
+                version = BASE_SCHEMA_VERSION
+            if version == BASE_SCHEMA_VERSION:
+                for statement in MIGRATION_2:
+                    connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO current_schema_v2 VALUES (1, ?, ?, ?)",
+                    (
+                        CURRENT_SCHEMA_VERSION,
+                        MIGRATION_1_SHA256,
+                        MIGRATION_2_SHA256,
+                    ),
                 )
                 connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             elif version != CURRENT_SCHEMA_VERSION:
@@ -203,13 +219,23 @@ class CurrentAgentKernelDatabase:
     def _validate_schema(self, connection: sqlite3.Connection) -> None:
         if self._table_names(connection) != set(CURRENT_TABLES):
             raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "table set")
-        if schema_fingerprint(connection) != MIGRATION_1_SCHEMA_SHA256:
+        if schema_fingerprint(connection) != CURRENT_SCHEMA_SHA256:
             raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "schema fingerprint")
         row = connection.execute(
             "SELECT schema_version, migration_sha256 FROM current_schema WHERE singleton = 1"
         ).fetchone()
-        if row != (CURRENT_SCHEMA_VERSION, MIGRATION_1_SHA256):
+        if row != (BASE_SCHEMA_VERSION, MIGRATION_1_SHA256):
             raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "migration lock")
+        row = connection.execute(
+            "SELECT schema_version, previous_migration_sha256, migration_sha256 "
+            "FROM current_schema_v2 WHERE singleton = 1"
+        ).fetchone()
+        if row != (
+            CURRENT_SCHEMA_VERSION,
+            MIGRATION_1_SHA256,
+            MIGRATION_2_SHA256,
+        ):
+            raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "migration 2 lock")
 
     def _lock_package(self, connection: sqlite3.Connection) -> None:
         row = connection.execute(

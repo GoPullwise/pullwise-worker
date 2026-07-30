@@ -19,6 +19,10 @@ from pullwise_worker.agent_kernel_gateway import GatewayError
 from pullwise_worker.agent_kernel_source_state import SourceSelectionPolicy
 from tests.agent_kernel_capture_fakes import FakeCaptureProvider
 from tests.current_journal_support import CurrentJournalTestCase
+from tests.current_runtime_bootstrap_support import (
+    bootstrap_bytes,
+    golden_runtime_bootstrap,
+)
 
 
 class CurrentRuntimeRunnerTest(unittest.TestCase):
@@ -66,10 +70,10 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
             }
         )
 
-    def test_server_authority_bytes_drive_one_current_r0_with_exact_replay(
+    def test_runtime_bootstrap_drives_one_current_r0_with_exact_replay(
         self,
     ) -> None:
-        authority = CurrentJournalTestCase.make_authority()
+        raw_bootstrap = bootstrap_bytes()
         timestamps = iter(
             (
                 "2026-07-22T12:34:50.000Z",
@@ -85,8 +89,8 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
             clock=lambda: next(timestamps),
         )
 
-        first = runner.run_r0(authority.canonical_bytes, self._request())
-        replay = runner.run_r0(authority.canonical_bytes, self._request())
+        first = runner.run_r0(raw_bootstrap, self._request())
+        replay = runner.run_r0(raw_bootstrap, self._request())
 
         result = verify_current_document_digest(
             "r0-read-result/v1",
@@ -116,10 +120,10 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
             source_document["byte_sha256"],
         )
 
-    def test_noncanonical_authority_is_rejected_before_any_runtime_write(
+    def test_noncanonical_bootstrap_is_rejected_before_any_runtime_write(
         self,
     ) -> None:
-        authority = CurrentJournalTestCase.make_authority()
+        raw_bootstrap = bootstrap_bytes()
         runner = CurrentRuntimeRunner(
             self.database,
             capture_provider=self.capture,
@@ -128,9 +132,9 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
         )
 
         with self.assertRaises(GatewayError) as raised:
-            runner.run_r0(authority.canonical_bytes + b"\n", self._request())
+            runner.run_r0(raw_bootstrap + b"\n", self._request())
 
-        self.assertEqual("AUTHORITY_ENVELOPE_NONCANONICAL", raised.exception.code)
+        self.assertEqual("RUNTIME_BOOTSTRAP_NONCANONICAL", raised.exception.code)
         state_tables = (
             "authority_history",
             "authority_heads",
@@ -147,6 +151,21 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
                 for table in state_tables
             )
         self.assertEqual((0,) * len(state_tables), counts)
+        self.assertEqual(0, self.capture.begin_calls)
+
+    def test_bare_authority_has_no_runtime_compatibility_path(self) -> None:
+        authority = CurrentJournalTestCase.make_authority()
+        runner = CurrentRuntimeRunner(
+            self.database,
+            capture_provider=self.capture,
+            base_revision=self.base_revision,
+            max_read_bytes=1024,
+        )
+
+        with self.assertRaises(GatewayError) as raised:
+            runner.run_r0(authority.canonical_bytes, self._request())
+
+        self.assertEqual("RUNTIME_BOOTSTRAP_INVALID", raised.exception.code)
         self.assertEqual(0, self.capture.begin_calls)
 
 

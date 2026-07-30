@@ -32,26 +32,39 @@ class CurrentAuthorityProjection:
         *,
         expected_previous_digest: str | None = None,
     ) -> ServerAuthorityEnvelope:
-        parsed = self._validated_active(envelope)
         with self.database.transaction() as connection:
-            old = self._head_projection(connection, parsed.task_id, required=False)
-            if isinstance(old, AgentClaimAbandonResponse):
-                self._fail("AUTHORITY_FENCED")
-            if old is not None and old.digest == parsed.digest:
-                self._assert_exact_active(old, parsed)
-                return old
-            if old is not None:
-                if expected_previous_digest != old.digest:
-                    self._fail("AUTHORITY_SUCCESSOR_CONFLICT")
-                self._fail("ACTIVE_AUTHORITY_SUCCESSOR_FORBIDDEN")
-            if expected_previous_digest is not None:
-                self._fail("AUTHORITY_SUCCESSOR_CONFLICT")
-            self._insert_active(connection, parsed)
-            connection.execute(
-                "INSERT INTO authority_heads(task_id, projection_digest) VALUES (?, ?)",
-                (parsed.task_id, parsed.digest),
+            return self.apply_active(
+                connection,
+                envelope,
+                expected_previous_digest=expected_previous_digest,
             )
-            initialize_budget(connection, parsed)
+
+    def apply_active(
+        self,
+        connection: sqlite3.Connection,
+        envelope: ServerAuthorityEnvelope,
+        *,
+        expected_previous_digest: str | None = None,
+    ) -> ServerAuthorityEnvelope:
+        parsed = self._validated_active(envelope)
+        old = self._head_projection(connection, parsed.task_id, required=False)
+        if isinstance(old, AgentClaimAbandonResponse):
+            self._fail("AUTHORITY_FENCED")
+        if old is not None and old.digest == parsed.digest:
+            self._assert_exact_active(old, parsed)
+            return old
+        if old is not None:
+            if expected_previous_digest != old.digest:
+                self._fail("AUTHORITY_SUCCESSOR_CONFLICT")
+            self._fail("ACTIVE_AUTHORITY_SUCCESSOR_FORBIDDEN")
+        if expected_previous_digest is not None:
+            self._fail("AUTHORITY_SUCCESSOR_CONFLICT")
+        self._insert_active(connection, parsed)
+        connection.execute(
+            "INSERT INTO authority_heads(task_id, projection_digest) VALUES (?, ?)",
+            (parsed.task_id, parsed.digest),
+        )
+        initialize_budget(connection, parsed)
         return parsed
 
     def record_projection(

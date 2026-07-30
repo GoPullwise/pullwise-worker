@@ -5,8 +5,15 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
+from .agent_kernel_current_runtime_migrations import (
+    CURRENT_RUNTIME_TABLES,
+    MIGRATION_2,
+    MIGRATION_2_SHA256,
+)
 
-CURRENT_SCHEMA_VERSION = 1
+
+BASE_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 MIGRATION_1 = (
     """
@@ -289,6 +296,19 @@ def _expected_schema_fingerprint() -> str:
 
 MIGRATION_1_SCHEMA_SHA256 = _expected_schema_fingerprint()
 
+
+def _expected_current_schema_fingerprint() -> str:
+    connection = sqlite3.connect(":memory:")
+    try:
+        for statement in MIGRATION_1 + MIGRATION_2:
+            connection.execute(statement)
+        return schema_fingerprint(connection)
+    finally:
+        connection.close()
+
+
+CURRENT_SCHEMA_SHA256 = _expected_current_schema_fingerprint()
+
 CURRENT_TABLES = frozenset(
     {
         "current_schema",
@@ -303,13 +323,18 @@ CURRENT_TABLES = frozenset(
         "dispatch_abandonments",
     }
 )
+CURRENT_TABLES = CURRENT_TABLES | CURRENT_RUNTIME_TABLES
 
 
 __all__ = [
+    "BASE_SCHEMA_VERSION",
     "CURRENT_SCHEMA_VERSION",
+    "CURRENT_SCHEMA_SHA256",
     "CURRENT_TABLES",
     "MIGRATION_1",
     "MIGRATION_1_SHA256",
     "MIGRATION_1_SCHEMA_SHA256",
+    "MIGRATION_2",
+    "MIGRATION_2_SHA256",
     "schema_fingerprint",
 ]
