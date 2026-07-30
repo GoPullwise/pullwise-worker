@@ -217,6 +217,9 @@ def _load_current(
     return _row_value(row)
 
 
+load_current_requirement_ledger = _load_current
+
+
 class CurrentRequirementLedgerStore:
     def __init__(
         self,
@@ -345,5 +348,6 @@ __all__ = [
     "CurrentRequirementLedgerError",
     "CurrentRequirementLedgerStore",
     "install_bootstrap_semantics",
+    "load_current_requirement_ledger",
     "verify_bootstrap_semantics",
 ]

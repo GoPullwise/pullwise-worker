@@ -48,9 +48,15 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
             self.inputs["documents"],
         )
 
+    @staticmethod
+    def prepare_inputs(
+        inputs: dict[str, object],
+    ) -> dict[str, object]:
+        return {key: value for key, value in inputs.items() if key != "documents"}
+
     def test_prepare_and_freeze_are_mechanical_closed_and_exact_replay(self) -> None:
         store = CurrentTerminalizationStore(self.database)
-        prepared = store.prepare(**self.inputs)
+        prepared = store.prepare(**self.prepare_inputs(self.inputs))
 
         self.assertEqual("BLOCKED", prepared.outcome)
         self.assertEqual("CAPABILITY_UNAVAILABLE", prepared.reason_code)
@@ -61,7 +67,8 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
         self.assertEqual(frozen, replay)
         self.assertEqual("BLOCKED", frozen.outcome)
         self.assertEqual(prepared.selector_input_digest, frozen.selector_input_digest)
-        with self.database.connect() as connection:
+        connection = self.database.connect()
+        try:
             candidate = connection.execute(
                 "SELECT outcome,reason_code,result_digest,task_result_core_sha256 "
                 "FROM terminalization_candidates"
@@ -71,12 +78,14 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
                 "WHERE sha256=?",
                 (candidate["task_result_core_sha256"],),
             ).fetchone()
+        finally:
+            connection.close()
         self.assertEqual(("BLOCKED", "CAPABILITY_UNAVAILABLE"), tuple(candidate[:2]))
         self.assertEqual("task-result-core/v1", core["content_schema_id"])
 
     def test_forged_outcome_missing_closure_and_budget_drift_fail_closed(self) -> None:
         store = CurrentTerminalizationStore(self.database)
-        prepared = store.prepare(**self.inputs)
+        prepared = store.prepare(**self.prepare_inputs(self.inputs))
         raw = self.result_bytes(prepared)
         forged = raw.replace(b'"BLOCKED"', b'"FAILED"', 1)
         with self.assertRaises(CurrentTerminalizationError) as outcome:
@@ -91,25 +100,24 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
         missing_objects.pop(next(iter(missing_objects)))
         missing["objects"] = missing_objects
         with self.assertRaises(CurrentTerminalizationError) as closure:
-            store.prepare(**missing)
+            store.prepare(**self.prepare_inputs(missing))
         self.assertEqual("EVIDENCE_OBJECT_MISSING", closure.exception.code)
 
-        drift = deepcopy(self.inputs)
-        budget = deepcopy(drift["documents"]["budget"])
-        budget["consumed_ms"] += 1
-        from tests.current_s5_support import canonical_bytes, object_sha256, reseal
-
-        budget = reseal("budget-summary/v1", budget)
-        budget_raw = canonical_bytes("budget-summary/v1", budget)
-        budget_sha = object_sha256(budget_raw)
-        drift["objects"][budget_sha] = ("budget-summary/v1", budget_raw)
+        connection = self.database.connect()
+        try:
+            connection.execute(
+                "UPDATE dispatch_budgets SET consumed_ms=1 WHERE task_id=?",
+                (self.authority.task_id,),
+            )
+        finally:
+            connection.close()
         with self.assertRaises(CurrentTerminalizationError) as budget_error:
-            store.prepare(**drift)
+            store.prepare(**self.prepare_inputs(self.inputs))
         self.assertEqual("BUDGET_CLOSURE_INVALID", budget_error.exception.code)
 
     def test_fence_and_every_freeze_stage_roll_back_candidate_and_objects(self) -> None:
         store = CurrentTerminalizationStore(self.database)
-        prepared = store.prepare(**self.inputs)
+        prepared = store.prepare(**self.prepare_inputs(self.inputs))
         raw = self.result_bytes(prepared)
         CurrentAuthorityProjection(self.database).record_fenced(
             fenced_authority(self.authority),
@@ -138,7 +146,7 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
                         raise RuntimeError(f"injected:{selected}")
 
                 store = CurrentTerminalizationStore(database, fault_hook=inject)
-                prepared = store.prepare(**inputs)
+                prepared = store.prepare(**self.prepare_inputs(inputs))
                 result = blocked_task_result_bytes(
                     authority, prepared, inputs["documents"]
                 )
