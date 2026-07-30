@@ -262,16 +262,20 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D36; D2 remains pending but inactive
-  under D1. D37 is the one active pending decision, so the register is
-  `valid_pending` with 35 resolved records and one applicable pending record.
-  D37 does not retroactively block the completed S3 authority/R0 tracer scope,
-  but it blocks S4-S8 before any contract source edit, Generate, Task/Attempt/
-  Owner bootstrap, checkpoint/recovery implementation, or dependent S5-S7 work.
-  A recommendation is not a resolution; D36's zero-contract-change and
-  zero-Generate stop condition remains controlling until the user explicitly
-  resolves D37. Do not invent ContentRefs, transport identities, unversioned
-  wire envelopes, legacy supplements, or checkpoint schemas to bypass it.
+- The resolved prefix remains D1 and D3-D37; D2 remains pending but inactive
+  under D1. The register is `ready` with 36 resolved records, zero applicable
+  pending records, and no active decision. D37 is bound to selected option
+  `bounded_s4_contract_closure_one_generate_no_activation` and resolution digest
+  `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`.
+  It supersedes D36's zero-contract-change/zero-Generate limit only for the
+  bounded S4 bootstrap/checkpoint contract closure and exactly one Generate
+  after every pre-generation gate is green; D36's local S3-S7 authorization and
+  all no-activation boundaries remain controlling. Current handoff state is
+  Server source closure complete but Generate count `0`; published Server,
+  Worker, and Web pins still identify the prior D35 tuple. Complete the final
+  long semantic-closure gate before consuming Generate, and do not invent
+  ContentRefs, transport identities, unversioned wire envelopes, legacy
+  supplements, or manually edited generated artifacts.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -354,15 +358,17 @@ inference never select an option or authorize production implementation.
   or any S8 release/cutover/rollback operation. Do not add a legacy adapter,
   shim, dual path, fallback, downgrade, compatibility mode, second runner, or
   second production authority.
-  D37 is the active append-only S4 contract-gap question. The implemented
-  tracer proved that `server-authority-envelope/v1` does not carry the
-  TaskRequest, EffectiveExecutionPolicy, RequirementLedger, or complete
-  `outer_job_id/run_id` transport roots required for an atomic Worker
-  Task/Attempt/Owner projection. The frozen package also has no versioned
-  machine checkpoint, semantic checkpoint, or
-  `committed-checkpoint-manifest/v1`. Until D37 is explicitly resolved, keep
-  all contract source and generated artifacts unchanged and stop S4-S8 at this
-  boundary.
+  D37 is resolved to `bounded_s4_contract_closure_one_generate_no_activation`
+  with digest `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`.
+  Server-owned source now closes the versioned accept/bootstrap and dual
+  checkpoint/committed-manifest contracts required by S4. This does not itself
+  authorize Worker runtime activation: finish every pre-generation gate,
+  consume D37's Generate allowance exactly once, synchronize Server/Worker/Web
+  exact pins, and only then resume local S4-S7 TDD. D24 implementation or
+  enablement, deployment, deployed-Worker changes, production traffic, canary,
+  legacy deletion, S8 release/cutover/rollback, fallback, dual path,
+  compatibility mode, a second runner, and a second production authority all
+  remain forbidden.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only
