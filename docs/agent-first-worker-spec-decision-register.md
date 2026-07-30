@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `none`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D36`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -46,6 +46,7 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 | `D33` | `P0.7` | Canonical mechanical terminal selector | `resolved` | `active` | `S4` | D9, D10, D11, D13, D20, D23, D29 | `canonical_mechanical_terminal_selector` |
 | `D34` | `P0.3/P1.2/P1.6` | Current candidate activation boundary | `resolved` | `active` | `S7` | D22, D23, D24, D27, D28, D29, D31, D32, D33 | `candidate_only_no_activation` |
 | `D35` | `P0.3/P1.2/P1.6` | Current candidate replacement Generate authorization | `resolved` | `active` | `S7` | D22, D23, D27, D28, D29, D31, D32, D33, D34 | `replacement_generate_candidate_only_no_activation` |
+| `D36` | `MVP S3-S7` | MVP S3-S7 implementation and external-activation boundary | `pending` | `active` | `S3` | D20, D21, D23, D27, D30, D35 | `mvp_s3_s7_implementation_only_no_external_activation` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -793,4 +794,24 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 **Effects:** `authority`, `external_behavior`, `permission`, `release_ownership`
 
 **Sources:** `handoff:2026-07-29:d34-generate-consumed`, `conversation:user-approval:2026-07-29:replacement_generate_candidate_only_no_activation`
+
+### D36 — MVP S3-S7 implementation and external-activation boundary
+
+**Stored status:** `pending`; **applicability:** `active`; **required before:** `S3`.
+
+**Question:** Which bounded implementation authority, if any, should replace D35's candidate-only boundary: local code and CI implementation of MVP S3-S7, only the S3-S4 current-runtime tracer bullet, or no runtime implementation, while keeping external activation and any new Generate prohibited?
+
+**Options:**
+
+- `mvp_s3_s7_implementation_only_no_external_activation` — non-normative recommendation, not selected: Authorize local repository and CI implementation and verification of the sole current production graph for MVP S3-S7: Server current-task/operator HTTP/Auth, the Worker current runner, Gate/TaskResult, current transport, and WorkerDebugFragment, with zero external activation. This permits the bounded runtime sequence after candidate exact-pin while separating implementation authority from S8 release, cutover, deployment, and production operator authority. Consequences: When explicitly resolved, D36 supersedes D35; until then D35 remains controlling and S3-S7 implementation stays blocked; Server may implement current-task/operator HTTP/Auth code; Worker may make the repository Worker main loop use the sole current runner; Web may change only where S3-S7 contract consumption or verification requires it; This authorizes S3–S7 once, beginning with a TDD S3–S4 current-runtime tracer bullet; each slice requires local and CI evidence, Server/Worker/Web ownership, and stop-condition reporting; D24 implementation and enablement, deployment, changes to any deployed Worker, production traffic, canary, legacy deletion, and all S8 release/cutover/rollback operations remain prohibited pending separate decisions and operator authority; Contract source changes and Generate count are both zero; any contract gap stops work and requires a new append-only decision before source edits or Generate; No legacy adapter, shim, dual read/write, fallback, downgrade, compatibility mode, second runner, or second production authority may be added
+- `mvp_s3_s4_runtime_implementation_only_no_external_activation`: Authorize only the local repository and CI S3-S4 current-runtime tracer bullet, with S5-S8 and every external activation operation still prohibited. This is the smaller authority if the owner wants to validate Server authority, Worker journal/Gateway, checkpoint, and recovery before deciding whether to implement Gate, transport, and Debug. Consequences: When explicitly resolved, D36 supersedes D35 and authorizes only S3-S4 implementation; Server current-task/operator HTTP/Auth code and the repository Worker main loop may change only as required by the S3-S4 tracer bullet; S5 Gate/TaskResult, S6 current transport, S7 WorkerDebugFragment, D24 implementation or enablement, S8, deployment, production traffic, canary, legacy deletion, and cutover remain prohibited; Contract source changes and Generate count are both zero; any contract gap stops work for a new append-only decision
+- `retain_candidate_only_no_implementation`: Restate the D35 candidate-only boundary and authorize no current runtime implementation. This keeps the exact-pinned candidate as evidence while deferring all S3-S8 implementation and external activation. Consequences: When explicitly resolved, D36 supersedes D35 with the same no-implementation boundary; No production HTTP/Auth code, Worker main-loop switch, D24 implementation or enablement, deployment, production traffic, canary, legacy deletion, cutover, contract source change, or Generate is authorized
+
+**Resolution:** No option has been selected.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `external_behavior`, `permission`, `release_ownership`
+
+**Sources:** `handoff:2026-07-30:next-agent-implementation-decision`, `conversation:user-request:2026-07-30:inspect-handoff-and-start`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->
