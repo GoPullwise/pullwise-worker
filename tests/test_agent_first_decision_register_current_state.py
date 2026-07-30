@@ -396,6 +396,5 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual("resolved", decision["status"])
         self.assertEqual(expected_resolution, decision["resolution"])
         self.assertEqual([], decision["supersedes"])
-
 if __name__ == "__main__":
     unittest.main()

@@ -212,9 +212,9 @@ assigns future Agent Kernel ownership nor authorizes production implementation.
   `pullwise_worker/_generated_agent_task_contract.py`, pinned to first-line
   marker `"""Generated from the Server-owned Agent-First bundle; do not edit."""`,
   provenance
-  `pullwise-server@e5cfc2e9dff64942a14e65e10172f53a3d16766b:pullwise_server/agent_first_contract_bundle_python.py`,
-  7282 physical lines, and SHA-256
-  `13c15395b754eb1c159bb12f43bd40f98e17cf64f0bd4a2082d5664bd97d0d93`.
+  `pullwise-server@a223f1ffdee345da366ab7c3bf8ca230ad7f39cb:pullwise_server/agent_first_contract_bundle_python.py`,
+  7685 physical lines, and SHA-256
+  `05083dd49b298a6e147a8b6e8c41f569fb5bfc7aec09236733f68ae899331679`.
   Tracking, readability, path, marker, provenance, count, or digest drift
   fails closed. The exception remains exact through the 401-600 range and
   must be removed once the file is absent or <=400 lines; it does not reopen
@@ -270,12 +270,16 @@ inference never select an option or authorize production implementation.
   It supersedes D36's zero-contract-change/zero-Generate limit only for the
   bounded S4 bootstrap/checkpoint contract closure and exactly one Generate
   after every pre-generation gate is green; D36's local S3-S7 authorization and
-  all no-activation boundaries remain controlling. Current handoff state is
-  Server source closure complete but Generate count `0`; published Server,
-  Worker, and Web pins still identify the prior D35 tuple. Complete the final
-  long semantic-closure gate before consuming Generate, and do not invent
-  ContentRefs, transport identities, unversioned wire envelopes, legacy
-  supplements, or manually edited generated artifacts.
+  all no-activation boundaries remain controlling. Every pre-generation gate
+  passed and the allowance is consumed exactly once (count `1`). Server,
+  Worker, and Web now exact-pin package `0.1.0`, content
+  `9dfa928d1a2d139036701b7d69354e6e4ceb16b9fa5d913fc77cd6fd823454fb`,
+  root `4a37e789495b8b22d102ef1e87110b8e28abf555fa30bcd5baa1a2568d4b22ef`,
+  from Server generated-artifact commit
+  `a223f1ffdee345da366ab7c3bf8ca230ad7f39cb`. Do not Generate again without a
+  new append-only superseding decision, and do not invent ContentRefs,
+  transport identities, unversioned wire envelopes, legacy supplements, or
+  manually edited generated artifacts.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -360,15 +364,19 @@ inference never select an option or authorize production implementation.
   second production authority.
   D37 is resolved to `bounded_s4_contract_closure_one_generate_no_activation`
   with digest `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`.
-  Server-owned source now closes the versioned accept/bootstrap and dual
-  checkpoint/committed-manifest contracts required by S4. This does not itself
-  authorize Worker runtime activation: finish every pre-generation gate,
-  consume D37's Generate allowance exactly once, synchronize Server/Worker/Web
-  exact pins, and only then resume local S4-S7 TDD. D24 implementation or
-  enablement, deployment, deployed-Worker changes, production traffic, canary,
-  legacy deletion, S8 release/cutover/rollback, fallback, dual path,
-  compatibility mode, a second runner, and a second production authority all
-  remain forbidden.
+  Every required pre-generation gate passed, and its Generate allowance is now
+  consumed exactly once by package `0.1.0`, content
+  `9dfa928d1a2d139036701b7d69354e6e4ceb16b9fa5d913fc77cd6fd823454fb`,
+  root `4a37e789495b8b22d102ef1e87110b8e28abf555fa30bcd5baa1a2568d4b22ef`,
+  produced by Server commit `a223f1ffdee345da366ab7c3bf8ca230ad7f39cb`.
+  Server-owned source and exact-pinned generated consumers now close the
+  versioned accept/bootstrap and dual checkpoint/committed-manifest contracts
+  required by S4. Do not Generate again without another append-only
+  superseding decision. Local S4-S7 TDD may resume, but Worker runtime
+  activation, D24 implementation or enablement, deployment, deployed-Worker
+  changes, production traffic, canary, legacy deletion, S8
+  release/cutover/rollback, fallback, dual path, compatibility mode, a second
+  runner, and a second production authority all remain forbidden.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only

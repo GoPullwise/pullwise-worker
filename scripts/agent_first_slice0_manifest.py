@@ -27,7 +27,7 @@ GENERATED_FILE_CATALOG = {
     "pullwise_worker/_generated_agent_task_contract.py": {
         "marker": '"""Generated from the Server-owned Agent-First bundle; do not edit."""',
         "provenance": (
-            "pullwise-server@e5cfc2e9dff64942a14e65e10172f53a3d16766b:"
+            "pullwise-server@a223f1ffdee345da366ab7c3bf8ca230ad7f39cb:"
             "pullwise_server/agent_first_contract_bundle_python.py"
         ),
     },
