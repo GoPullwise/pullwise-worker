@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -8,11 +9,13 @@ import unittest
 
 from pullwise_worker.agent_kernel_current_contract import CURRENT_PACKAGE
 from pullwise_worker.agent_kernel_current_database import CurrentAgentKernelDatabase
+from pullwise_worker.agent_kernel_current_objects import PublishedCurrentObject
 from pullwise_worker.agent_kernel_current_package import (
     canonical_current_document_bytes,
     verify_current_document_digest,
 )
 from pullwise_worker.agent_kernel_current_runtime import CurrentRuntimeRunner
+from pullwise_worker.agent_kernel_gateway import GatewayError
 from pullwise_worker.agent_kernel_source_state import SourceSelectionPolicy
 from tests.agent_kernel_capture_fakes import FakeCaptureProvider
 from tests.current_journal_support import CurrentJournalTestCase
@@ -42,6 +45,15 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.scratch.cleanup()
+
+    @staticmethod
+    def _published_object(content_ref: dict[str, object]) -> PublishedCurrentObject:
+        digest = content_ref["sha256"]
+        return PublishedCurrentObject(
+            sha256=digest,
+            size_bytes=content_ref["size_bytes"],
+            relative_path=f"objects/{digest[:2]}/{digest}",
+        )
 
     @staticmethod
     def _request() -> bytes:
@@ -82,11 +94,60 @@ class CurrentRuntimeRunnerTest(unittest.TestCase):
         )
         self.assertEqual(first, replay)
         self.assertEqual(1, self.capture.begin_calls)
-        self.assertEqual(len(self.payload), result["payload_ref"]["size_bytes"])
+        payload_bytes = runner.journal.object_store.read_verified(
+            self._published_object(result["payload_ref"])
+        )
+        payload_document = verify_current_document_digest(
+            "r0-read-payload/v1",
+            json.loads(payload_bytes),
+        )
+        source_bytes = runner.journal.object_store.read_verified(
+            self._published_object(payload_document["content_ref"])
+        )
+        source_document = verify_current_document_digest(
+            "source-content/v1",
+            json.loads(source_bytes),
+        )
+        actual = base64.b64decode(source_document["data_base64"], validate=True)
+        self.assertEqual(self.payload, actual)
+        self.assertEqual(len(self.payload), source_document["size_bytes"])
         self.assertEqual(
             hashlib.sha256(self.payload).hexdigest(),
-            result["payload_ref"]["sha256"],
+            source_document["byte_sha256"],
         )
+
+    def test_noncanonical_authority_is_rejected_before_any_runtime_write(
+        self,
+    ) -> None:
+        authority = CurrentJournalTestCase.make_authority()
+        runner = CurrentRuntimeRunner(
+            self.database,
+            capture_provider=self.capture,
+            base_revision=self.base_revision,
+            max_read_bytes=1024,
+        )
+
+        with self.assertRaises(GatewayError) as raised:
+            runner.run_r0(authority.canonical_bytes + b"\n", self._request())
+
+        self.assertEqual("AUTHORITY_ENVELOPE_NONCANONICAL", raised.exception.code)
+        state_tables = (
+            "authority_history",
+            "authority_heads",
+            "dispatch_budgets",
+            "dispatch_intents",
+            "content_objects",
+            "content_bindings",
+            "dispatch_settlements",
+            "dispatch_abandonments",
+        )
+        with self.database.connect() as connection:
+            counts = tuple(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in state_tables
+            )
+        self.assertEqual((0,) * len(state_tables), counts)
+        self.assertEqual(0, self.capture.begin_calls)
 
 
 if __name__ == "__main__":
