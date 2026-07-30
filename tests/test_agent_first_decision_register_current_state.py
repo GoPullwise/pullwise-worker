@@ -74,17 +74,17 @@ D22_CUSTOM_TEXT = (
 
 
 class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
-    def test_current_register_preserves_resolved_prefix_with_pending_d37(self) -> None:
+    def test_current_register_preserves_the_fully_resolved_prefix(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
-        self.assertEqual("valid_pending", report["status"])
+        self.assertEqual("ready", report["status"])
         self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
+        self.assertTrue(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D37", report["active_decision_id"])
-        self.assertEqual(1, report["pending_decision_count"])
-        self.assertEqual(35, report["resolved_decision_count"])
+        self.assertIsNone(report["active_decision_id"])
+        self.assertEqual(0, report["pending_decision_count"])
+        self.assertEqual(36, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -124,6 +124,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D34": ("candidate_only_no_activation", "2be5b5752b65714204fa6f41a0a126eb30e82bafcdeb38b5ece426938561158c"),
             "D35": ("replacement_generate_candidate_only_no_activation", "8cde7af149db8e6051f0342bd9490c4be31fce7b1868270ce7206350ee252a9e"),
             "D36": ("mvp_s3_s7_implementation_only_no_external_activation", "cb40a540cff9af1d350bf1a413aa3aeaee0ca1ddce65afabec7443f294944a1b"),
+            "D37": ("bounded_s4_contract_closure_one_generate_no_activation", "ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():

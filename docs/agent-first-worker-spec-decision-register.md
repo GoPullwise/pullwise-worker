@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `D37`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `none`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -47,7 +47,7 @@ Active question: `D37`. Questions are asked one at a time. User silence, existin
 | `D34` | `P0.3/P1.2/P1.6` | Current candidate activation boundary | `resolved` | `active` | `S7` | D22, D23, D24, D27, D28, D29, D31, D32, D33 | `candidate_only_no_activation` |
 | `D35` | `P0.3/P1.2/P1.6` | Current candidate replacement Generate authorization | `resolved` | `active` | `S7` | D22, D23, D27, D28, D29, D31, D32, D33, D34 | `replacement_generate_candidate_only_no_activation` |
 | `D36` | `MVP S3-S7` | MVP S3-S7 implementation and external-activation boundary | `resolved` | `active` | `S3` | D20, D21, D23, D27, D30, D35 | `mvp_s3_s7_implementation_only_no_external_activation` |
-| `D37` | `MVP S4` | S4 bootstrap and checkpoint contract gap | `pending` | `active` | `S4` | D6, D7, D8, D23, D28, D29, D30, D31, D32, D36 | `bounded_s4_contract_closure_one_generate_no_activation` |
+| `D37` | `MVP S4` | S4 bootstrap and checkpoint contract gap | `resolved` | `active` | `S4` | D6, D7, D8, D23, D28, D29, D30, D31, D32, D36 | `bounded_s4_contract_closure_one_generate_no_activation` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -820,21 +820,23 @@ Active question: `D37`. Questions are asked one at a time. User silence, existin
 
 ### D37 — S4 bootstrap and checkpoint contract gap
 
-**Stored status:** `pending`; **applicability:** `active`; **required before:** `S4`.
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S4`.
 
 **Question:** D36 的 TDD tracer 已证明 current claim 只返回 server-authority-envelope/v1，无法同时携带 TaskRequest、EffectiveExecutionPolicy、RequirementLedger、outer_job_id/run_id 与 Worker 原子构造 Task/Attempt/Owner 所需 roots；冻结 package 也没有 machine checkpoint、semantic checkpoint 或 committed-checkpoint-manifest/v1。应授权哪一种 bounded contract closure 和 Generate 边界，或保持停工？
 
 **Options:**
 
-- `bounded_s4_contract_closure_one_generate_no_activation` — non-normative recommendation, not selected: 先完成 bounded S4 contract design/source closure：新增版本化 agent-task-accept-request/v1 与原子 agent-task-runtime-bootstrap/v1，令 Server 一次性绑定 current package、server-authority-envelope/v1、TaskRequest、EffectiveExecutionPolicy、RequirementLedger、完整 outer_job_id/run_id transport facts 及 Task/Attempt/Owner 构造 roots；再新增 machine checkpoint、semantic checkpoint 与 committed-checkpoint-manifest/v1，并执行 exactly one Generate，同步 Server/Worker/Web exact pins 后恢复 S4 TDD。 一个 Server-owned、单 digest 的 bootstrap wire 可避免多次 fetch 混代、伪 ContentRef、Worker 自行发明 transport identity 或 legacy 补值；版本化双层 checkpoint 文档则是验证 hash chain、watermark 与同 outer lease recovery 的前提。 Consequences: D37 获批时 supersedes D36 的 zero-contract-change/zero-Generate 限制，但完整重申 D36 的本地 S3-S7 实现授权和所有外部停线边界; 授权仅覆盖经先行设计与 valid/invalid/crash fixtures 验证的 S4 bootstrap/checkpoint source edits 以及 exactly one Generate；生成后必须恢复三端 exact-pin、bundle check、decision gate 和 CI 绿色; 继续禁止 D24 实现或启用、deployment、修改已部署 Worker、production traffic、canary、legacy 删除、S8 release/cutover/rollback、fallback、dual path、compatibility mode、second runner 或第二 production authority
+- `bounded_s4_contract_closure_one_generate_no_activation` — selected by resolution: 先完成 bounded S4 contract design/source closure：新增版本化 agent-task-accept-request/v1 与原子 agent-task-runtime-bootstrap/v1，令 Server 一次性绑定 current package、server-authority-envelope/v1、TaskRequest、EffectiveExecutionPolicy、RequirementLedger、完整 outer_job_id/run_id transport facts 及 Task/Attempt/Owner 构造 roots；再新增 machine checkpoint、semantic checkpoint 与 committed-checkpoint-manifest/v1，并执行 exactly one Generate，同步 Server/Worker/Web exact pins 后恢复 S4 TDD。 一个 Server-owned、单 digest 的 bootstrap wire 可避免多次 fetch 混代、伪 ContentRef、Worker 自行发明 transport identity 或 legacy 补值；版本化双层 checkpoint 文档则是验证 hash chain、watermark 与同 outer lease recovery 的前提。 Consequences: D37 获批时 supersedes D36 的 zero-contract-change/zero-Generate 限制，但完整重申 D36 的本地 S3-S7 实现授权和所有外部停线边界; 授权仅覆盖经先行设计与 valid/invalid/crash fixtures 验证的 S4 bootstrap/checkpoint source edits 以及 exactly one Generate；生成后必须恢复三端 exact-pin、bundle check、decision gate 和 CI 绿色; 继续禁止 D24 实现或启用、deployment、修改已部署 Worker、production traffic、canary、legacy 删除、S8 release/cutover/rollback、fallback、dual path、compatibility mode、second runner 或第二 production authority
 - `separate_root_fetch_minimal_checkpoint_generate_no_activation`: 扩展 claim/grant/authority 以绑定 request/policy/ledger 与 outer_job_id/run_id digests，使用多个 authenticated existing-document fetch 获取 roots，仅为双层 checkpoint 新增 versioned schemas，然后 exactly one Generate 并保持零外部激活。 该方案可减少 bootstrap wrapper 的嵌套，但必须证明每次 fetch 与同一 authority/task version 原子绑定，且本地只在全部 bytes 验证后一次提交。 Consequences: 需要额外的 mix-generation、partial fetch、retry 与 stale authority adversarial tests; 仍必须同步 Server/Worker/Web exact pins，且不授权 D24、deployment、production traffic、canary、legacy 或 second runner
 - `defer_s4_no_contract_change_or_generate`: 保持 D36 的 zero-contract-change/zero-Generate 边界，接受当前交付只到 Server HTTP/Auth 与 Worker R0 journal tracer，S4 Task/Attempt/Owner/checkpoint/recovery 及其后的 S5-S7 继续停工。 这避免新的 package cycle，但不能用伪 roots、未版本化 wire、legacy adapter 或缺失 checkpoint schema 宣称 S4 完成。 Consequences: D37 解决前 S4-S8 decision gates 保持 blocked；已完成 S3 tracer 代码与验证证据可保留; 不得切换 Worker main loop、增加 fallback/dual path/second runner，或执行任何 D24、deployment、production traffic、canary、legacy 删除与 S8 操作
 
-**Resolution:** No option has been selected.
+**Resolution:** `bounded_s4_contract_closure_one_generate_no_activation` (`option`). 批准 bounded_s4_contract_closure_one_generate_no_activation：授权先以测试定义并完成 bounded S4 contract design/source closure，新增版本化 agent-task-accept-request/v1、原子 agent-task-runtime-bootstrap/v1、machine checkpoint、semantic checkpoint 与 committed-checkpoint-manifest/v1；仅在全部 source、fixture、semantic closure、DAG、registry、digest 和 Python/Node parity 预生成门绿色后执行且仅执行一次 Generate，同步 Server/Worker/Web exact pins，然后继续 D36 的本地 S4-S7 实现与验证授权。D37 supersedes D36 的 zero-contract-change/zero-Generate 限制，但继续禁止 D24 实现或启用、deployment、修改已部署 Worker、production traffic、canary、legacy 删除、S8 release/cutover/rollback、fallback、dual path、compatibility mode、second runner 或第二 production authority。
 
-**Supersedes:** none
+**Authority/evidence:** `user` on `2026-07-30`; `conversation:user-approval:2026-07-30:bounded_s4_contract_closure_one_generate_no_activation`; digest `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`.
+
+**Supersedes:** D36
 
 **Effects:** `authority`, `data_model`, `external_behavior`, `permission`, `state_semantics`
 
-**Sources:** `implementation-stop:2026-07-30:s4-bootstrap-and-checkpoint-contract-gap`, `conversation:user-approval:2026-07-30:mvp_s3_s7_implementation_only_no_external_activation`
+**Sources:** `implementation-stop:2026-07-30:s4-bootstrap-and-checkpoint-contract-gap`, `conversation:user-approval:2026-07-30:mvp_s3_s7_implementation_only_no_external_activation`, `conversation:user-approval:2026-07-30:bounded_s4_contract_closure_one_generate_no_activation`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->
