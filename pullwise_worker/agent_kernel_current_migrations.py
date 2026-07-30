@@ -10,6 +10,11 @@ from .agent_kernel_current_checkpoint_migrations import (
     MIGRATION_3,
     MIGRATION_3_SHA256,
 )
+from .agent_kernel_current_checkpoint_ack_migrations import (
+    CURRENT_ACK_TABLES,
+    MIGRATION_4,
+    MIGRATION_4_SHA256,
+)
 from .agent_kernel_current_runtime_migrations import (
     CURRENT_RUNTIME_TABLES,
     MIGRATION_2,
@@ -19,7 +24,8 @@ from .agent_kernel_current_runtime_migrations import (
 
 BASE_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 2
-CURRENT_SCHEMA_VERSION = 3
+CHECKPOINT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 MIGRATION_1 = (
     """
@@ -306,7 +312,7 @@ MIGRATION_1_SCHEMA_SHA256 = _expected_schema_fingerprint()
 def _expected_current_schema_fingerprint() -> str:
     connection = sqlite3.connect(":memory:")
     try:
-        for statement in MIGRATION_1 + MIGRATION_2 + MIGRATION_3:
+        for statement in MIGRATION_1 + MIGRATION_2 + MIGRATION_3 + MIGRATION_4:
             connection.execute(statement)
         return schema_fingerprint(connection)
     finally:
@@ -331,10 +337,12 @@ CURRENT_TABLES = frozenset(
 )
 CURRENT_TABLES = CURRENT_TABLES | CURRENT_RUNTIME_TABLES
 CURRENT_TABLES = CURRENT_TABLES | CURRENT_CHECKPOINT_TABLES
+CURRENT_TABLES = CURRENT_TABLES | CURRENT_ACK_TABLES
 
 
 __all__ = [
     "BASE_SCHEMA_VERSION",
+    "CHECKPOINT_SCHEMA_VERSION",
     "CURRENT_SCHEMA_VERSION",
     "CURRENT_SCHEMA_SHA256",
     "CURRENT_TABLES",
@@ -345,6 +353,8 @@ __all__ = [
     "MIGRATION_2_SHA256",
     "MIGRATION_3",
     "MIGRATION_3_SHA256",
+    "MIGRATION_4",
+    "MIGRATION_4_SHA256",
     "RUNTIME_SCHEMA_VERSION",
     "schema_fingerprint",
 ]

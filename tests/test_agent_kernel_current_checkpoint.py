@@ -21,6 +21,7 @@ from pullwise_worker.agent_kernel_current_package import (
     seal_current_document,
 )
 from tests.current_checkpoint_support import (
+    checkpoint_ack_bytes,
     checkpoint_documents,
     manifest_document,
 )
@@ -33,6 +34,7 @@ CHECKPOINT_TABLES = (
     "checkpoint_index",
     "checkpoint_heads",
     "checkpoint_server_acks",
+    "checkpoint_server_ack_documents",
 )
 
 
@@ -102,7 +104,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
         manifest = manifest_document(context[0])
         self.assertEqual(manifest["manifest_hash"], first.manifest_hash)
         self.assertEqual(first, replay)
-        self.assertEqual((6, 1, 1, 1, 0), self.counts())
+        self.assertEqual((6, 1, 1, 1, 0, 0), self.counts())
         connection = self.database.connect()
         try:
             head = connection.execute(
@@ -160,7 +162,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
                 store = CurrentCheckpointStore(self.database, fault_hook=inject)
                 with self.assertRaisesRegex(RuntimeError, "injected"):
                     store.commit(*context)
-                self.assertEqual((0, 0, 0, 0, 0), self.counts())
+                self.assertEqual((0, 0, 0, 0, 0, 0), self.counts())
                 connection = self.database.connect()
                 try:
                     versions = connection.execute(
@@ -180,9 +182,9 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
         second = checkpoint_documents(2, previous_manifest=first_manifest)
         second_commit = store.commit(*second)
 
-        store.record_server_ack(first_commit)
+        store.record_server_ack(checkpoint_ack_bytes(first_commit, self.bootstrap))
         self.assertEqual(first_commit, store.recover(self.bootstrap.task_id).commit)
-        store.record_server_ack(second_commit)
+        store.record_server_ack(checkpoint_ack_bytes(second_commit, self.bootstrap))
         self.assertEqual(second_commit, store.recover(self.bootstrap.task_id).commit)
 
         connection = sqlite3.connect(self.database.path)
@@ -210,7 +212,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
         third = checkpoint_documents(3, previous_manifest=second_manifest)
         third_commit = store.commit(*third)
         for item in (first_commit, second_commit, third_commit):
-            store.record_server_ack(item)
+            store.record_server_ack(checkpoint_ack_bytes(item, self.bootstrap))
 
         connection = sqlite3.connect(self.database.path)
         digest = connection.execute(
@@ -242,14 +244,55 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
         )
 
         with self.assertRaises(CurrentCheckpointError) as ack_error:
-            store.record_server_ack(first_commit)
+            store.record_server_ack(
+                checkpoint_ack_bytes(first_commit, self.bootstrap)
+            )
         self.assertEqual("AUTHORITY_FENCED", ack_error.exception.code)
         with self.assertRaises(CurrentCheckpointError) as commit_error:
             store.commit(
                 *checkpoint_documents(2, previous_manifest=first_manifest)
             )
         self.assertEqual("AUTHORITY_FENCED", commit_error.exception.code)
-        self.assertEqual((6, 1, 1, 1, 0), self.counts())
+        self.assertEqual((6, 1, 1, 1, 0, 0), self.counts())
+
+    def test_server_ack_bytes_are_exactly_verified_persisted_and_replayed(self) -> None:
+        store = CurrentCheckpointStore(self.database)
+        committed = store.commit(*checkpoint_documents(1))
+        ack = checkpoint_ack_bytes(committed, self.bootstrap)
+
+        self.assertEqual(committed, store.record_server_ack(ack))
+        self.assertEqual(committed, store.record_server_ack(ack))
+        self.assertEqual((6, 1, 1, 1, 1, 1), self.counts())
+
+        with self.assertRaises(CurrentCheckpointError) as noncanonical:
+            store.record_server_ack(ack + b"\n")
+        self.assertEqual("CHECKPOINT_ACK_INVALID", noncanonical.exception.code)
+        conflict = checkpoint_ack_bytes(
+            committed,
+            self.bootstrap,
+            accepted_at="2026-07-22T00:02:01.000Z",
+        )
+        with self.assertRaises(CurrentCheckpointError) as conflicted:
+            store.record_server_ack(conflict)
+        self.assertEqual("CHECKPOINT_ACK_CONFLICT", conflicted.exception.code)
+        self.assertEqual((6, 1, 1, 1, 1, 1), self.counts())
+
+    def test_every_server_ack_write_stage_rolls_back_both_ack_rows(self) -> None:
+        committed = CurrentCheckpointStore(self.database).commit(
+            *checkpoint_documents(1)
+        )
+        ack = checkpoint_ack_bytes(committed, self.bootstrap)
+        before = self.counts()
+        for stage in ("ack.after_index", "ack.after_document", "ack.before_commit"):
+            with self.subTest(stage=stage):
+                def inject(actual: str, *, selected: str = stage) -> None:
+                    if actual == selected:
+                        raise RuntimeError(f"injected:{selected}")
+
+                store = CurrentCheckpointStore(self.database, fault_hook=inject)
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    store.record_server_ack(ack)
+                self.assertEqual(before, self.counts())
 
 
 if __name__ == "__main__":

@@ -160,3 +160,50 @@ def manifest_document(raw: bytes) -> dict[str, object]:
     return contract.verify_document_digest(
         "committed-checkpoint-manifest/v1", json.loads(raw)
     )
+
+
+def checkpoint_ack_bytes(
+    item: object,
+    authority: object,
+    *,
+    accepted_at: str | None = None,
+) -> bytes:
+    request_unsigned = {
+        "schema_id": "checkpoint-watermark-request/internal-v1",
+        "package": contract.package_tuple(),
+        "task_id": item.task_id,
+        "generation": item.generation,
+        "previous_manifest_hash": item.previous_manifest_hash,
+        "manifest_hash": item.manifest_hash,
+        "committed_from_task_version": item.committed_task_version - 1,
+        "committed_task_version": item.committed_task_version,
+        "attempt_id": item.attempt_id,
+        "owner_id": authority.owner_id,
+        "owner_epoch": item.owner_epoch,
+        "lease_id": authority.lease_id,
+        "authority_digest": item.authority_digest,
+        "grant_id": authority.grant.grant_id,
+        "grant_digest": authority.grant_digest,
+        "deletion_version": item.deletion_version,
+        "native_epoch": item.native_epoch,
+        "transport_epoch": item.transport_epoch,
+        "same_run_resume_selected": True,
+    }
+    request_digest = hashlib.sha256(
+        b"pullwise:checkpoint-watermark-request:internal-v1\0"
+        + contract.canonical_document_bytes(request_unsigned)
+    ).hexdigest()
+    ack_unsigned = {
+        **request_unsigned,
+        "schema_id": "checkpoint-watermark-ack/internal-v1",
+        "request_digest": request_digest,
+        "accepted_at": accepted_at
+        or f"2026-07-22T00:01:{item.generation:02d}.000Z",
+    }
+    ack_digest = hashlib.sha256(
+        b"pullwise:checkpoint-watermark-ack:internal-v1\0"
+        + contract.canonical_document_bytes(ack_unsigned)
+    ).hexdigest()
+    return contract.canonical_document_bytes(
+        {**ack_unsigned, "ack_digest": ack_digest}
+    )

@@ -63,7 +63,10 @@ class CurrentCheckpointStore(CheckpointRecoveryMixin, CheckpointWriteMixin):
         machine = _parse_exact(MACHINE_SCHEMA, machine_state_bytes)
         semantic = _parse_exact(SEMANTIC_SCHEMA, semantic_state_bytes)
         supplied = self._validated_objects(objects, machine, semantic)
-        snapshot = self._commit_snapshot(manifest)
+        try:
+            snapshot = self._commit_snapshot(manifest)
+        except CurrentAuthorityProjectionError as exc:
+            self._fail("AUTHORITY_FENCED", exc.code)
         if snapshot["replay"] is not None:
             return self._assert_replay(
                 snapshot["replay"], manifest_bytes, machine_state_bytes,
