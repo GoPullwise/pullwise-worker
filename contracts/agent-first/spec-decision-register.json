@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D37",
+  "active_decision_id": null,
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -775,9 +775,9 @@
     {
       "id": "D37", "key": "s4-bootstrap-checkpoint-contract-closure", "scope": "MVP S4", "title": "S4 bootstrap and checkpoint contract gap",
       "question": "D36 的 TDD tracer 已证明 current claim 只返回 server-authority-envelope/v1，无法同时携带 TaskRequest、EffectiveExecutionPolicy、RequirementLedger、outer_job_id/run_id 与 Worker 原子构造 Task/Attempt/Owner 所需 roots；冻结 package 也没有 machine checkpoint、semantic checkpoint 或 committed-checkpoint-manifest/v1。应授权哪一种 bounded contract closure 和 Generate 边界，或保持停工？",
-      "status": "pending", "depends_on": ["D6", "D7", "D8", "D23", "D28", "D29", "D30", "D31", "D32", "D36"], "activation": null, "required_by_slice": "S4",
+      "status": "resolved", "depends_on": ["D6", "D7", "D8", "D23", "D28", "D29", "D30", "D31", "D32", "D36"], "activation": null, "required_by_slice": "S4",
       "effects": ["authority", "data_model", "external_behavior", "permission", "state_semantics"],
-      "source_refs": ["implementation-stop:2026-07-30:s4-bootstrap-and-checkpoint-contract-gap", "conversation:user-approval:2026-07-30:mvp_s3_s7_implementation_only_no_external_activation"],
+      "source_refs": ["implementation-stop:2026-07-30:s4-bootstrap-and-checkpoint-contract-gap", "conversation:user-approval:2026-07-30:mvp_s3_s7_implementation_only_no_external_activation", "conversation:user-approval:2026-07-30:bounded_s4_contract_closure_one_generate_no_activation"],
       "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
       "options": [
         {
@@ -810,8 +810,14 @@
         }
       ],
       "recommended_option_id": "bounded_s4_contract_closure_one_generate_no_activation",
-      "resolution": null,
-      "supersedes": []
+      "resolution": {
+        "kind": "option", "selected_option_id": "bounded_s4_contract_closure_one_generate_no_activation", "custom_text": null,
+        "decision_text": "批准 bounded_s4_contract_closure_one_generate_no_activation：授权先以测试定义并完成 bounded S4 contract design/source closure，新增版本化 agent-task-accept-request/v1、原子 agent-task-runtime-bootstrap/v1、machine checkpoint、semantic checkpoint 与 committed-checkpoint-manifest/v1；仅在全部 source、fixture、semantic closure、DAG、registry、digest 和 Python/Node parity 预生成门绿色后执行且仅执行一次 Generate，同步 Server/Worker/Web exact pins，然后继续 D36 的本地 S4-S7 实现与验证授权。D37 supersedes D36 的 zero-contract-change/zero-Generate 限制，但继续禁止 D24 实现或启用、deployment、修改已部署 Worker、production traffic、canary、legacy 删除、S8 release/cutover/rollback、fallback、dual path、compatibility mode、second runner 或第二 production authority。",
+        "authority": "user", "decided_at": "2026-07-30",
+        "evidence_refs": ["conversation:user-approval:2026-07-30:bounded_s4_contract_closure_one_generate_no_activation"],
+        "resolution_sha256": "ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70"
+      },
+      "supersedes": ["D36"]
     }
   ]
 }
