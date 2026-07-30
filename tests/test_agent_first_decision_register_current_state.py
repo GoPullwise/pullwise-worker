@@ -74,16 +74,16 @@ D22_CUSTOM_TEXT = (
 
 
 class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
-    def test_current_register_preserves_resolved_prefix_and_is_ready(self) -> None:
+    def test_current_register_preserves_resolved_prefix_and_exposes_d36(self) -> None:
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
-        self.assertEqual("ready", report["status"])
+        self.assertEqual("valid_pending", report["status"])
         self.assertTrue(report["valid"])
-        self.assertTrue(report["ready"])
+        self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertIsNone(report["active_decision_id"])
-        self.assertEqual(0, report["pending_decision_count"])
+        self.assertEqual("D36", report["active_decision_id"])
+        self.assertEqual(1, report["pending_decision_count"])
         self.assertEqual(34, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
@@ -156,12 +156,12 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
-        expected_order.extend(f"D{number}" for number in range(28, 36))
+        expected_order.extend(f"D{number}" for number in range(28, 37))
         self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
             [
                 *[item["id"] for item in REQUIRED_CATALOG],
-                *[f"D{number}" for number in range(27, 36)],
+                *[f"D{number}" for number in range(27, 37)],
             ],
             [item["id"] for item in register["decisions"]],
         )

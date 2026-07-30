@@ -263,10 +263,13 @@ inference never select an option or authorize production implementation.
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
 - The resolved prefix remains D1 and D3-D35; D2 remains pending but inactive
-  under D1. All applicable decisions are resolved: the register is `ready` with
-  34 resolved records, zero applicable pending records, and no active question.
-  S2-S8 have no pending-decision blocker. This closes only the specification
-  decision gate; it is not package/runtime implementation or release evidence.
+  under D1. D36 is the one active pending decision, so the register is
+  `valid_pending` with 34 resolved records and one applicable pending record.
+  S2 is not blocked, while S3-S8 are blocked by D36 until the user explicitly
+  selects an option. A recommendation is not a resolution and D35 remains the
+  controlling implementation boundary in the meantime.
+  This closes only the earlier specification decisions; it is not
+  package/runtime implementation or release evidence.
   Do not author Server package schemas in Worker or connect production
   Gateway/Observation state before the corresponding implementation slices close.
   D20 remains bound to
@@ -341,6 +344,14 @@ inference never select an option or authorize production implementation.
   Current-task/operator routes and auth remain later work: do not connect
   production HTTP/auth, switch the production Worker loop, enable D24, deploy,
   or start canary.
+  D36 is pending with recommended option
+  `mvp_s3_s7_implementation_only_no_external_activation`. It has no resolution
+  digest and does not yet supersede D35. Until the user explicitly resolves it,
+  do not implement S3-S7 production runtime code. If approved, record the
+  option-anchored resolution and structural `supersedes: ["D35"]` before TDD;
+  the recommended boundary allows local code/CI only and keeps contract source
+  changes, Generate, D24, deployment, production traffic, cutover, and canary
+  outside its authority.
   D24 is bound to custom `new_tasks_only` digest
   `8e9b8ee728dabd8e8f07e3b6ce8057a6e3e11707d07bbaf4e5d1e67f7dfc3806`:
   its audited Server-side acceptance/TaskRecord-creation barrier admits only
@@ -378,7 +389,7 @@ include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
 `contracts/agent-first/spec-decision-register.json` is an atomic
-machine-registry exception at 689 physical lines, owned by the Worker
+machine-registry exception at 770 physical lines, owned by the Worker
 specification owner. It stays atomic because one ordered frozen
 question/definition/resolution packet enforces question order behind one
 structural-validation and immutable-history boundary. The considered split is

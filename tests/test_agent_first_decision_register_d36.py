@@ -30,7 +30,10 @@ class AgentFirstDecisionRegisterD36Test(unittest.TestCase):
         self.assertIsNone(self.decision["resolution"])
         self.assertEqual([], self.decision["supersedes"])
         self.assertEqual("S3", self.decision["required_by_slice"])
-        self.assertEqual(["D20", "D21", "D23", "D27", "D30", "D35"], self.decision["depends_on"])
+        self.assertEqual(
+            ["D20", "D21", "D23", "D27", "D30", "D35"],
+            self.decision["depends_on"],
+        )
         self.assertEqual(
             [
                 "mvp-contract-pack",
