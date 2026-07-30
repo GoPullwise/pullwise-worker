@@ -144,6 +144,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
 
     def test_every_commit_stage_rolls_back_without_advancing_task_or_index(self) -> None:
         context = checkpoint_documents(1)
+        before = self.counts()
         stages = (
             "after_objects",
             "after_manifest",
@@ -162,7 +163,7 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
                 store = CurrentCheckpointStore(self.database, fault_hook=inject)
                 with self.assertRaisesRegex(RuntimeError, "injected"):
                     store.commit(*context)
-                self.assertEqual((0, 0, 0, 0, 0, 0), self.counts())
+                self.assertEqual(before, self.counts())
                 connection = self.database.connect()
                 try:
                     versions = connection.execute(
