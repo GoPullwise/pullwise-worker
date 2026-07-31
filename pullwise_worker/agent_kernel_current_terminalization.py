@@ -10,6 +10,12 @@ from .agent_kernel_current_authority import (
     CurrentAuthorityProjectionError,
 )
 from .agent_kernel_current_database import CurrentAgentKernelDatabase
+from .agent_kernel_current_terminal_commit import (
+    advance_runtime_head,
+    assert_terminal_commit,
+    build_terminal_commit,
+    insert_runtime_records,
+)
 from .agent_kernel_current_terminal_gate import prepare_terminalization
 from .agent_kernel_current_terminal_result import validate_terminal_result
 from .agent_kernel_current_terminalization_contract import (
@@ -79,6 +85,35 @@ class CurrentTerminalizationStore:
         normalized = normalize_objects(objects)
         try:
             with self.database.transaction() as connection:
+                existing = self._stored_row(connection, prepared.task_id)
+                result = validate_terminal_result(
+                    connection,
+                    self.authority,
+                    prepared,
+                    task_result_bytes,
+                    normalized,
+                )
+                if existing is not None:
+                    expected = self._candidate_values(prepared, result)
+                    if tuple(existing[: len(expected)]) != expected:
+                        self._fail("TERMINALIZATION_REPLAY_CONFLICT")
+                    documents = build_terminal_commit(
+                        connection,
+                        self.authority,
+                        prepared,
+                        result,
+                        stored=existing,
+                    )
+                    self._assert_objects(
+                        connection,
+                        self._all_objects(
+                            prepared, result, normalized, documents
+                        ),
+                    )
+                    assert_terminal_commit(
+                        connection, existing, documents
+                    )
+                    return frozen_from_row(existing)
                 fresh = prepare_terminalization(
                     connection,
                     self.authority,
@@ -95,47 +130,34 @@ class CurrentTerminalizationStore:
                 )
                 if fresh != prepared:
                     self._fail("TERMINALIZATION_PREPARED_STALE")
-                result = validate_terminal_result(
-                    connection,
-                    self.authority,
-                    prepared,
-                    task_result_bytes,
-                    normalized,
+                documents = build_terminal_commit(
+                    connection, self.authority, prepared, result
                 )
-                all_objects = dict(normalized)
-                for schema_id, raw in self._prepared_objects(prepared):
-                    all_objects[object_sha256(raw)] = (schema_id, raw)
-                all_objects[result.result_digest] = (
-                    "task-result/v1",
-                    result.canonical_bytes,
-                )
-                all_objects[result.core_sha256] = (
-                    "task-result-core/v1",
-                    result.core_bytes,
+                all_objects = self._all_objects(
+                    prepared, result, normalized, documents
                 )
                 for schema_id, raw in all_objects.values():
                     put_object(connection, schema_id, raw)
                 self.fault_hook("after_objects")
-                existing = connection.execute(
-                    "SELECT * FROM terminalization_candidates WHERE task_id=?",
-                    (prepared.task_id,),
-                ).fetchone()
                 expected = self._candidate_values(prepared, result)
-                if existing is not None:
-                    if tuple(existing) != expected:
-                        self._fail("TERMINALIZATION_REPLAY_CONFLICT")
-                    return frozen_from_row(existing)
                 connection.execute(
                     "INSERT INTO terminalization_candidates VALUES "
                     "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     expected,
                 )
                 self.fault_hook("after_candidate")
+                insert_runtime_records(connection, documents)
+                self.fault_hook("after_runtime_records")
+                connection.execute(
+                    "INSERT INTO terminalization_commits VALUES "
+                    "(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    self._commit_values(result, documents),
+                )
+                self.fault_hook("after_commit")
+                self.fault_hook("before_head")
+                advance_runtime_head(connection, documents)
                 self.fault_hook("before_commit")
-                row = connection.execute(
-                    "SELECT * FROM terminalization_candidates WHERE task_id=?",
-                    (prepared.task_id,),
-                ).fetchone()
+                row = self._stored_row(connection, prepared.task_id)
                 return frozen_from_row(row)
         except CurrentTerminalizationError:
             raise
@@ -171,6 +193,84 @@ class CurrentTerminalizationStore:
             for raw in prepared.terminalization_fact_bytes
         )
         return fixed + facts
+
+    @staticmethod
+    def _all_objects(prepared, result, normalized, documents):
+        values = dict(normalized)
+        for schema_id, raw in CurrentTerminalizationStore._prepared_objects(
+            prepared
+        ):
+            values[object_sha256(raw)] = (schema_id, raw)
+        values[result.result_digest] = (
+            "task-result/v1",
+            result.canonical_bytes,
+        )
+        values[result.core_sha256] = (
+            "task-result-core/v1",
+            result.core_bytes,
+        )
+        for schema_id, raw in documents.object_values():
+            values[object_sha256(raw)] = (schema_id, raw)
+        return values
+
+    @staticmethod
+    def _assert_objects(connection, objects) -> None:
+        for digest, (schema_id, raw) in objects.items():
+            row = connection.execute(
+                "SELECT content_schema_id,size_bytes,object_bytes "
+                "FROM checkpoint_objects WHERE sha256=?",
+                (digest,),
+            ).fetchone()
+            if row is None or (
+                row["content_schema_id"],
+                row["size_bytes"],
+                bytes(row["object_bytes"]),
+            ) != (schema_id, len(raw), raw):
+                raise CurrentTerminalizationError(
+                    "TERMINALIZATION_STORAGE_CORRUPT"
+                )
+
+    @staticmethod
+    def _stored_row(connection, task_id):
+        row = connection.execute(
+            "SELECT c.*,m.base_task_version,"
+            "m.base_task_record_sha256,m.finalizing_task_record_sha256,"
+            "m.terminal_task_record_sha256,"
+            "m.terminalization_event_sha256,"
+            "m.publication_event_sha256,"
+            "m.task_version_authority_sha256,m.committed_at "
+            "FROM terminalization_candidates c "
+            "JOIN terminalization_commits m "
+            "ON m.result_digest=c.result_digest WHERE c.task_id=?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            candidate = connection.execute(
+                "SELECT 1 FROM terminalization_candidates WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if candidate is not None:
+                raise CurrentTerminalizationError(
+                    "TERMINALIZATION_STORAGE_CORRUPT"
+                )
+        return row
+
+    @staticmethod
+    def _commit_values(result, documents) -> tuple[object, ...]:
+        return (
+            result.result_digest,
+            result.document["task_id"],
+            documents.base["task_version"],
+            result.document["published_from_version"],
+            result.document["terminal_task_version"],
+            documents.base_sha256,
+            documents.finalizing_sha256,
+            documents.terminal_sha256,
+            documents.requested_event_sha256,
+            documents.published_event_sha256,
+            documents.proof_sha256,
+            result.document["terminal_at"],
+        )
 
     @staticmethod
     def _candidate_values(

@@ -160,6 +160,63 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
         self.assertEqual(frozen, replay)
         self.assertEqual(before, after)
 
+    def test_conflicting_replay_fails_without_mutating_terminal_head(self) -> None:
+        store = CurrentTerminalizationStore(self.database)
+        prepared = store.prepare(**self.prepare_inputs(self.inputs))
+        result_bytes = self.result_bytes(prepared)
+        frozen = store.freeze(prepared, result_bytes, self.inputs["objects"])
+        changed = json.loads(result_bytes)
+        changed["summary"] = "Conflicting terminal replay bytes."
+        changed_bytes = contract.canonical_validated_bytes(
+            "task-result/v1", changed
+        )
+        connection = self.database.connect()
+        try:
+            before = (
+                tuple(
+                    connection.execute(
+                        "SELECT task_version,record_sha256 "
+                        "FROM runtime_task_heads WHERE task_id=?",
+                        (self.authority.task_id,),
+                    ).fetchone()
+                ),
+                connection.execute(
+                    "SELECT COUNT(*) FROM checkpoint_objects"
+                ).fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM terminalization_commits"
+                ).fetchone()[0],
+            )
+        finally:
+            connection.close()
+
+        with self.assertRaises(CurrentTerminalizationError) as conflict:
+            store.freeze(prepared, changed_bytes, self.inputs["objects"])
+        self.assertEqual(
+            "TERMINALIZATION_REPLAY_CONFLICT", conflict.exception.code
+        )
+        connection = self.database.connect()
+        try:
+            after = (
+                tuple(
+                    connection.execute(
+                        "SELECT task_version,record_sha256 "
+                        "FROM runtime_task_heads WHERE task_id=?",
+                        (self.authority.task_id,),
+                    ).fetchone()
+                ),
+                connection.execute(
+                    "SELECT COUNT(*) FROM checkpoint_objects"
+                ).fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM terminalization_commits"
+                ).fetchone()[0],
+            )
+        finally:
+            connection.close()
+        self.assertEqual(self.authority.task_version + 2, frozen.terminal_task_version)
+        self.assertEqual(before, after)
+
     def test_forged_outcome_missing_closure_and_budget_drift_fail_closed(self) -> None:
         store = CurrentTerminalizationStore(self.database)
         prepared = store.prepare(**self.prepare_inputs(self.inputs))
@@ -205,7 +262,14 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
         self.assertEqual("AUTHORITY_FENCED", fenced.exception.code)
 
         for index, stage in enumerate(
-            ("after_objects", "after_candidate", "before_commit"),
+            (
+                "after_objects",
+                "after_candidate",
+                "after_runtime_records",
+                "after_commit",
+                "before_head",
+                "before_commit",
+            ),
             start=1,
         ):
             with self.subTest(stage=stage):
@@ -242,6 +306,13 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
                 finally:
                     connection.close()
                 self.assertEqual((0, 3), counts)
+                committed = CurrentTerminalizationStore(database).freeze(
+                    prepared, result, inputs["objects"]
+                )
+                self.assertEqual(
+                    authority.task_version + 2,
+                    committed.terminal_task_version,
+                )
 
 
 if __name__ == "__main__":
