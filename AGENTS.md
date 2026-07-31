@@ -281,14 +281,28 @@ inference never select an option or authorize production implementation.
   six-axis selector without fabricating a terminalization fact, bind immutable
   Server grant/authority to the local checkpoint/control-event Task-version
   chain, and implement one real `FINALIZING -> TERMINAL` TaskResult CAS with
-  `published_from_version=N` and `terminal_task_version=N+1`. The D38 Generate
-  count is currently `0`; run exactly one Generate only after every source,
-  fixture, semantic-closure, DAG, registry, digest, and Python/Node parity
-  pre-generation gate is green, then exact-pin Server/Worker/Web. D36's local
+  `published_from_version=N` and `terminal_task_version=N+1`. Every required
+  pre-generation gate passed, and the D38 Generate allowance is consumed
+  exactly once (count `1`) by package `0.1.0`, content
+  `51445b46d40b1c61387edfa3a4bd68e18fa388e7ac2139c45e870a3a6a3cc29d`, root
+  `76b6c450fecacc5209cfc426c337134c0f8a7361c830d9d17103160d746233d9`, Server
+  generated-artifact commit `5048af9`, Worker generated-artifact commit
+  `1b40a18`, wrapper SHA-256
+  `c88455efd633746a34c8833e015d26ca4cd1beb5add4eb2cdd711ffeb7ce48d0`, and
+  package-manifest SHA-256
+  `926b673652924591adb85ed7dbf72495ab113f0e9aa8b2381b5e28bf470e65df`.
+  Server/Worker/Web exact pins are synchronized; do not Generate again without
+  another append-only superseding decision. D36's local
   S5-S7 candidate authority and every no-activation boundary remain
   controlling. Do not invent a second authority/store/runner, a caller-selected
   outcome, legacy supplement, fallback, dual path, compatibility/downgrade
   shim, or manually edited generated artifact.
+  S7 currently stops at `SPEC_GAP`: the exact-pinned
+  `agent-task-runtime-bootstrap/v1.transport_binding` has no authenticated
+  outer `transport_attempt_id`, but `worker-debug-fragment/v1` requires it.
+  The design makes that value the Server claim identity and forbids substituting
+  the native Attempt ID. Keep capture fail closed; do not change contract source
+  or Generate until a new append-only decision authorizes a bounded closure.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
