@@ -21,8 +21,11 @@ class AgentFirstDecisionRegisterD37Test(unittest.TestCase):
         )
 
     def test_d37_records_the_user_approved_bounded_contract_closure(self) -> None:
-        self.assertEqual("D37", self.register["question_order"][-1])
-        self.assertEqual("D37", self.register["decisions"][-1]["id"])
+        self.assertEqual(["D37", "D38"], self.register["question_order"][-2:])
+        self.assertEqual(
+            ["D37", "D38"],
+            [item["id"] for item in self.register["decisions"][-2:]],
+        )
         self.assertIsNone(self.register["active_decision_id"])
         self.assertEqual("resolved", self.decision["status"])
         self.assertEqual(["D36"], self.decision["supersedes"])

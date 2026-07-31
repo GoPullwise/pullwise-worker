@@ -24,10 +24,12 @@ class AgentFirstDecisionRegisterD36Test(unittest.TestCase):
         )
 
     def test_d36_is_the_resolved_append_only_implementation_boundary(self) -> None:
-        self.assertEqual(["D36", "D37"], self.register["question_order"][-2:])
         self.assertEqual(
-            ["D36", "D37"],
-            [item["id"] for item in self.register["decisions"][-2:]],
+            ["D36", "D37", "D38"], self.register["question_order"][-3:]
+        )
+        self.assertEqual(
+            ["D36", "D37", "D38"],
+            [item["id"] for item in self.register["decisions"][-3:]],
         )
         self.assertIsNone(self.register["active_decision_id"])
         self.assertEqual(
