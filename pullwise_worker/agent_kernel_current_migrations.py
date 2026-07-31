@@ -30,6 +30,11 @@ from .agent_kernel_current_terminalization_migrations import (
     MIGRATION_6,
     MIGRATION_6_SHA256,
 )
+from .agent_kernel_current_terminal_commit_migrations import (
+    CURRENT_TERMINAL_COMMIT_TABLES,
+    MIGRATION_7,
+    MIGRATION_7_SHA256,
+)
 
 
 BASE_SCHEMA_VERSION = 1
@@ -37,7 +42,8 @@ RUNTIME_SCHEMA_VERSION = 2
 CHECKPOINT_SCHEMA_VERSION = 3
 ACK_SCHEMA_VERSION = 4
 REQUIREMENT_SCHEMA_VERSION = 5
-CURRENT_SCHEMA_VERSION = 6
+TERMINALIZATION_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 MIGRATION_1 = (
     """
@@ -331,6 +337,7 @@ def _expected_current_schema_fingerprint() -> str:
             + MIGRATION_4
             + MIGRATION_5
             + MIGRATION_6
+            + MIGRATION_7
         ):
             connection.execute(statement)
         return schema_fingerprint(connection)
@@ -359,6 +366,7 @@ CURRENT_TABLES = CURRENT_TABLES | CURRENT_CHECKPOINT_TABLES
 CURRENT_TABLES = CURRENT_TABLES | CURRENT_ACK_TABLES
 CURRENT_TABLES = CURRENT_TABLES | CURRENT_REQUIREMENT_TABLES
 CURRENT_TABLES = CURRENT_TABLES | CURRENT_TERMINALIZATION_TABLES
+CURRENT_TABLES = CURRENT_TABLES | CURRENT_TERMINAL_COMMIT_TABLES
 
 
 __all__ = [
@@ -381,7 +389,10 @@ __all__ = [
     "MIGRATION_5_SHA256",
     "MIGRATION_6",
     "MIGRATION_6_SHA256",
+    "MIGRATION_7",
+    "MIGRATION_7_SHA256",
     "REQUIREMENT_SCHEMA_VERSION",
     "RUNTIME_SCHEMA_VERSION",
+    "TERMINALIZATION_SCHEMA_VERSION",
     "schema_fingerprint",
 ]

@@ -226,9 +226,12 @@ def terminalization_inputs(
     fact.update(
         {
             "task_id": authority.task_id,
-            "observed_task_version": authority.task_version - 1,
+            "observed_task_version": authority.task_version,
             "reason_code": "CAPABILITY_UNAVAILABLE",
-            "idempotency_key": "terminalize:capability_unavailable:1",
+            "idempotency_key": (
+                "terminalize:capability_unavailable:"
+                + str(authority.task_version)
+            ),
             "evidence_refs": [deepcopy(refs["budget"])],
             "observed_at": "2026-07-22T00:00:30.000Z",
         }
@@ -273,7 +276,7 @@ def terminalization_inputs(
             "native_epoch": authority.native_epoch,
             "owner_id": authority.owner_id,
             "owner_epoch": authority.owner_epoch,
-            "task_version": authority.task_version,
+            "task_version": authority.task_version + 1,
             "deletion_version": authority.deletion_version,
             "lifecycle": "FINALIZING",
             "desired_state": "RUN",
@@ -385,8 +388,8 @@ def blocked_task_result_bytes(
                     }
                 ],
             },
-            "published_from_version": authority.task_version,
-            "terminal_task_version": authority.task_version + 1,
+            "published_from_version": authority.task_version + 1,
+            "terminal_task_version": authority.task_version + 2,
             "attempt_identity": {
                 "kind": "started",
                 "attempt_id": authority.attempt_id,

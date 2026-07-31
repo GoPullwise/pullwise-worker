@@ -68,8 +68,8 @@ def _assert_identity(
     attempt = result["attempt_identity"]
     owner = result["owner_identity"]
     exact = (
-        result["published_from_version"] == authority.task_version
-        and result["terminal_task_version"] == authority.task_version + 1
+        result["published_from_version"] == authority.task_version + 1
+        and result["terminal_task_version"] == authority.task_version + 2
         and attempt["kind"] == owner["kind"] == "started"
         and attempt["attempt_id"] == authority.attempt_id
         and attempt["native_epoch"] == authority.native_epoch

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,6 +20,7 @@ from pullwise_worker.agent_kernel_current_terminalization import (
     CurrentTerminalizationError,
     CurrentTerminalizationStore,
 )
+from pullwise_worker import _generated_agent_task_contract as contract
 from tests.current_runtime_bootstrap_support import bootstrap_bytes
 from tests.current_s5_support import (
     blocked_task_result_bytes,
@@ -82,6 +84,81 @@ class CurrentTerminalizationStoreTest(unittest.TestCase):
             connection.close()
         self.assertEqual(("BLOCKED", "CAPABILITY_UNAVAILABLE"), tuple(candidate[:2]))
         self.assertEqual("task-result-core/v1", core["content_schema_id"])
+
+    def test_freeze_commits_two_event_version_chain_and_runtime_head_once(
+        self,
+    ) -> None:
+        store = CurrentTerminalizationStore(self.database)
+        prepared = store.prepare(**self.prepare_inputs(self.inputs))
+        result_bytes = self.result_bytes(prepared)
+
+        frozen = store.freeze(prepared, result_bytes, self.inputs["objects"])
+        connection = self.database.connect()
+        try:
+            head = connection.execute(
+                "SELECT h.task_version,r.source_kind,r.record_bytes "
+                "FROM runtime_task_heads h JOIN runtime_task_records r "
+                "ON r.task_id=h.task_id AND r.task_version=h.task_version "
+                "AND r.record_sha256=h.record_sha256 WHERE h.task_id=?",
+                (self.authority.task_id,),
+            ).fetchone()
+            object_counts = dict(
+                connection.execute(
+                    "SELECT content_schema_id,COUNT(*) FROM checkpoint_objects "
+                    "GROUP BY content_schema_id"
+                ).fetchall()
+            )
+            commit = connection.execute(
+                "SELECT task_version_authority_sha256 "
+                "FROM terminalization_commits WHERE task_id=?",
+                (self.authority.task_id,),
+            ).fetchone()
+            before = (
+                connection.execute(
+                    "SELECT COUNT(*) FROM runtime_task_records"
+                ).fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM checkpoint_objects"
+                ).fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM terminalization_commits"
+                ).fetchone()[0],
+            )
+        finally:
+            connection.close()
+
+        terminal = contract.validate_document(
+            "task-record/v1", json.loads(bytes(head["record_bytes"]))
+        )
+        self.assertEqual(self.authority.task_version + 2, head["task_version"])
+        self.assertEqual("TERMINALIZATION", head["source_kind"])
+        self.assertEqual("TERMINAL", terminal["lifecycle"])
+        self.assertEqual(frozen.result_digest, terminal["result_digest"])
+        self.assertEqual(2, object_counts["task-control-event/v1"])
+        self.assertEqual(1, object_counts["task-version-authority-proof/v1"])
+        self.assertEqual(
+            commit["task_version_authority_sha256"],
+            frozen.task_version_authority_sha256,
+        )
+
+        replay = store.freeze(prepared, result_bytes, self.inputs["objects"])
+        connection = self.database.connect()
+        try:
+            after = (
+                connection.execute(
+                    "SELECT COUNT(*) FROM runtime_task_records"
+                ).fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM checkpoint_objects"
+                ).fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM terminalization_commits"
+                ).fetchone()[0],
+            )
+        finally:
+            connection.close()
+        self.assertEqual(frozen, replay)
+        self.assertEqual(before, after)
 
     def test_forged_outcome_missing_closure_and_budget_drift_fail_closed(self) -> None:
         store = CurrentTerminalizationStore(self.database)

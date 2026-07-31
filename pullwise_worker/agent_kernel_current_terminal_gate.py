@@ -77,7 +77,7 @@ def _assert_authority(
         and snapshot["native_epoch"] == authority.native_epoch
         and snapshot["owner_id"] == authority.owner_id
         and snapshot["owner_epoch"] == authority.owner_epoch
-        and snapshot["task_version"] == authority.task_version
+        and snapshot["task_version"] == authority.task_version + 1
         and snapshot["deletion_version"] == authority.deletion_version
         and snapshot["lease_id"] == authority.lease_id
         and snapshot["desired_state"] == authority.desired_state == "RUN"
@@ -98,6 +98,20 @@ def _assert_control_roots(
 ) -> None:
     task = _task_record(connection, snapshot["task_id"])
     ledger = load_current_requirement_ledger(connection, snapshot["task_id"])
+    exact = (
+        task["task_version"] + 1 == snapshot["task_version"]
+        and task["lifecycle"] == "ACTIVE"
+        and snapshot["lifecycle"] == "FINALIZING"
+        and task["desired_state"] == snapshot["desired_state"] == "RUN"
+        and task["deletion_version"] == snapshot["deletion_version"]
+        and task["current_attempt_id"] == snapshot["attempt_id"]
+        and task["native_epoch"] == snapshot["native_epoch"]
+        and task["owner_id"] == snapshot["owner_id"]
+        and task["owner_epoch"] == snapshot["owner_epoch"]
+        and task["lease_id"] == snapshot["lease_id"]
+    )
+    if not exact:
+        raise CurrentTerminalizationError("GATE_INPUT_STALE")
     for field in ("request_ref", "policy_ref"):
         if snapshot[field] != task[field]:
             raise CurrentTerminalizationError("GATE_INPUT_STALE")

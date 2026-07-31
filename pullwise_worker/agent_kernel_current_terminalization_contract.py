@@ -46,6 +46,7 @@ class FrozenTerminalization:
     selector_input_digest: str
     result_digest: str
     task_result_core_sha256: str
+    task_version_authority_sha256: str
     frozen_at: str
 
 
@@ -212,6 +213,9 @@ def frozen_from_row(row: sqlite3.Row) -> FrozenTerminalization:
         selector_input_digest=row["selector_input_digest"],
         result_digest=row["result_digest"],
         task_result_core_sha256=row["task_result_core_sha256"],
+        task_version_authority_sha256=row[
+            "task_version_authority_sha256"
+        ],
         frozen_at=row["frozen_at"],
     )
 
