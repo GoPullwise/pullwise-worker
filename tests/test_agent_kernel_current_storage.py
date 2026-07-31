@@ -25,6 +25,7 @@ from pullwise_worker.agent_kernel_current_migrations import (
     MIGRATION_5_SHA256,
     MIGRATION_6_SHA256,
     MIGRATION_7_SHA256,
+    MIGRATION_8_SHA256,
 )
 from pullwise_worker.agent_kernel_current_objects import (
     CurrentObjectError,
@@ -71,7 +72,7 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
             self.assertGreaterEqual(
                 connection.execute("PRAGMA busy_timeout").fetchone()[0], 1_000
             )
-            self.assertEqual(7, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(8, connection.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 (1, MIGRATION_1_SHA256),
                 tuple(connection.execute(
@@ -120,6 +121,13 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
                     "migration_sha256 FROM current_schema_v7"
                 ).fetchone()),
             )
+            self.assertEqual(
+                (8, MIGRATION_7_SHA256, MIGRATION_8_SHA256),
+                tuple(connection.execute(
+                    "SELECT schema_version, previous_migration_sha256, "
+                    "migration_sha256 FROM current_schema_v8"
+                ).fetchone()),
+            )
         if os.name == "posix":
             self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE(database.path.stat().st_mode))
@@ -158,7 +166,11 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
             MIGRATION_7_SHA256,
         )
         self.assertEqual(
-            "11c6883445ae1e4b80e21a6ed21036502a716dd9aca29a4709d4ee4c0db383d9",
+            "338d7e618296fba6e1f3e0b39812eb5b1db9a96031e6b15978be251922912b7e",
+            MIGRATION_8_SHA256,
+        )
+        self.assertEqual(
+            "4c5595b200218fedc3e7ea9d4504617d3c373f6e2b1d5e6e7fe1fc96b28d2c31",
             CURRENT_SCHEMA_SHA256,
         )
 
@@ -178,7 +190,7 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
 
         database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
         with closing(database.connect()) as upgraded:
-            self.assertEqual(7, upgraded.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(8, upgraded.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v2").fetchone()[0],
@@ -202,6 +214,10 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
             self.assertEqual(
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v7").fetchone()[0],
+            )
+            self.assertEqual(
+                1,
+                upgraded.execute("SELECT COUNT(*) FROM current_schema_v8").fetchone()[0],
             )
 
     def test_existing_checkpoint_schema_upgrades_to_ack_evidence_once(self) -> None:
@@ -228,7 +244,7 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
 
         database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
         with closing(database.connect()) as upgraded:
-            self.assertEqual(7, upgraded.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(8, upgraded.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v4").fetchone()[0],
@@ -250,6 +266,10 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
             self.assertEqual(
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v7").fetchone()[0],
+            )
+            self.assertEqual(
+                1,
+                upgraded.execute("SELECT COUNT(*) FROM current_schema_v8").fetchone()[0],
             )
 
     def test_package_lock_rejects_non_lowercase_digest(self) -> None:
