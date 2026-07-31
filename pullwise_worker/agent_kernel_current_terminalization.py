@@ -12,10 +12,10 @@ from .agent_kernel_current_authority import (
 from .agent_kernel_current_database import CurrentAgentKernelDatabase
 from .agent_kernel_current_terminal_commit import (
     advance_runtime_head,
-    assert_terminal_commit,
     build_terminal_commit,
     insert_runtime_records,
 )
+from .agent_kernel_current_terminal_replay import assert_terminal_commit
 from .agent_kernel_current_terminal_gate import prepare_terminalization
 from .agent_kernel_current_terminal_result import validate_terminal_result
 from .agent_kernel_current_terminalization_contract import (

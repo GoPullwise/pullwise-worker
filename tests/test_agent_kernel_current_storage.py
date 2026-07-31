@@ -21,9 +21,13 @@ from pullwise_worker.agent_kernel_current_migrations import (
     MIGRATION_2_SHA256,
     MIGRATION_3,
     MIGRATION_3_SHA256,
+    MIGRATION_4,
     MIGRATION_4_SHA256,
+    MIGRATION_5,
     MIGRATION_5_SHA256,
+    MIGRATION_6,
     MIGRATION_6_SHA256,
+    MIGRATION_7_SHA256,
 )
 from pullwise_worker.agent_kernel_current_objects import (
     CurrentObjectError,
@@ -70,7 +74,7 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
             self.assertGreaterEqual(
                 connection.execute("PRAGMA busy_timeout").fetchone()[0], 1_000
             )
-            self.assertEqual(6, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(7, connection.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 (1, MIGRATION_1_SHA256),
                 tuple(connection.execute(
@@ -112,6 +116,13 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
                     "migration_sha256 FROM current_schema_v6"
                 ).fetchone()),
             )
+            self.assertEqual(
+                (7, MIGRATION_6_SHA256, MIGRATION_7_SHA256),
+                tuple(connection.execute(
+                    "SELECT schema_version, previous_migration_sha256, "
+                    "migration_sha256 FROM current_schema_v7"
+                ).fetchone()),
+            )
         if os.name == "posix":
             self.assertEqual(0o700, stat.S_IMODE(self.root.stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE(database.path.stat().st_mode))
@@ -146,7 +157,11 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
             MIGRATION_6_SHA256,
         )
         self.assertEqual(
-            "581a62e7f10e0882bfb1c2fb43de9356a7fbabefc2550425d477bd5a06d60325",
+            "78e91b908faa55aedc2c96d295b91ff11892d98174ab60899c51411b9905af0e",
+            MIGRATION_7_SHA256,
+        )
+        self.assertEqual(
+            "11c6883445ae1e4b80e21a6ed21036502a716dd9aca29a4709d4ee4c0db383d9",
             CURRENT_SCHEMA_SHA256,
         )
 
@@ -166,7 +181,7 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
 
         database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
         with closing(database.connect()) as upgraded:
-            self.assertEqual(6, upgraded.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(7, upgraded.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v2").fetchone()[0],
@@ -186,6 +201,10 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
             self.assertEqual(
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v6").fetchone()[0],
+            )
+            self.assertEqual(
+                1,
+                upgraded.execute("SELECT COUNT(*) FROM current_schema_v7").fetchone()[0],
             )
 
     def test_existing_checkpoint_schema_upgrades_to_ack_evidence_once(self) -> None:
@@ -212,7 +231,7 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
 
         database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
         with closing(database.connect()) as upgraded:
-            self.assertEqual(6, upgraded.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(7, upgraded.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v4").fetchone()[0],
@@ -231,6 +250,107 @@ class CurrentAgentKernelDatabaseTest(unittest.TestCase):
                 1,
                 upgraded.execute("SELECT COUNT(*) FROM current_schema_v6").fetchone()[0],
             )
+            self.assertEqual(
+                1,
+                upgraded.execute("SELECT COUNT(*) FROM current_schema_v7").fetchone()[0],
+            )
+
+    def test_populated_v6_runtime_head_upgrades_without_identity_drift(self) -> None:
+        self.root.mkdir(mode=0o700)
+        path = self.root / "agent-kernel-current.sqlite3"
+        connection = sqlite3.connect(path)
+        for statement in (
+            MIGRATION_1
+            + MIGRATION_2
+            + MIGRATION_3
+            + MIGRATION_4
+            + MIGRATION_5
+            + MIGRATION_6
+        ):
+            connection.execute(statement)
+        locks = (
+            ("current_schema", (1, 1, MIGRATION_1_SHA256)),
+            (
+                "current_schema_v2",
+                (1, 2, MIGRATION_1_SHA256, MIGRATION_2_SHA256),
+            ),
+            (
+                "current_schema_v3",
+                (1, 3, MIGRATION_2_SHA256, MIGRATION_3_SHA256),
+            ),
+            (
+                "current_schema_v4",
+                (1, 4, MIGRATION_3_SHA256, MIGRATION_4_SHA256),
+            ),
+            (
+                "current_schema_v5",
+                (1, 5, MIGRATION_4_SHA256, MIGRATION_5_SHA256),
+            ),
+            (
+                "current_schema_v6",
+                (1, 6, MIGRATION_5_SHA256, MIGRATION_6_SHA256),
+            ),
+        )
+        for table, values in locks:
+            placeholders = ",".join("?" for _ in values)
+            connection.execute(
+                f"INSERT INTO {table} VALUES ({placeholders})", values
+            )
+        task_row = (
+            "task_migration",
+            2,
+            "a" * 64,
+            "BOOTSTRAP",
+            "b" * 64,
+            "ACTIVE",
+            "RUN",
+            "attempt_migration",
+            1,
+            1,
+            0,
+            None,
+            b"preserved-runtime-task-record",
+        )
+        connection.execute(
+            "INSERT INTO runtime_task_records VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            task_row,
+        )
+        connection.execute(
+            "INSERT INTO runtime_task_heads VALUES (?,?,?)",
+            (task_row[0], task_row[1], task_row[2]),
+        )
+        connection.execute("PRAGMA user_version = 6")
+        connection.commit()
+        connection.close()
+
+        database = CurrentAgentKernelDatabase.open(self.root, _PackageRef())
+        with closing(database.connect()) as upgraded:
+            self.assertEqual(
+                task_row,
+                tuple(
+                    upgraded.execute(
+                        "SELECT * FROM runtime_task_records"
+                    ).fetchone()
+                ),
+            )
+            self.assertEqual(
+                task_row[:3],
+                tuple(
+                    upgraded.execute(
+                        "SELECT * FROM runtime_task_heads"
+                    ).fetchone()
+                ),
+            )
+            self.assertEqual(
+                [],
+                upgraded.execute("PRAGMA foreign_key_check").fetchall(),
+            )
+            table_sql = upgraded.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='runtime_task_records'"
+            ).fetchone()[0]
+            self.assertIn("'TERMINALIZATION'", table_sql)
 
     def test_package_lock_rejects_non_lowercase_digest(self) -> None:
         with self.assertRaisesRegex(CurrentDatabaseError, "CURRENT_PACKAGE_LOCK_INVALID"):
