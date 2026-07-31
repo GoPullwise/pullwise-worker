@@ -31,8 +31,11 @@ from .agent_kernel_current_migrations import (
     MIGRATION_6_SHA256,
     MIGRATION_7,
     MIGRATION_7_SHA256,
+    MIGRATION_8,
+    MIGRATION_8_SHA256,
     REQUIREMENT_SCHEMA_VERSION,
     RUNTIME_SCHEMA_VERSION,
+    TERMINAL_COMMIT_SCHEMA_VERSION,
     TERMINALIZATION_SCHEMA_VERSION,
     schema_fingerprint,
 )
@@ -225,9 +228,24 @@ class CurrentAgentKernelDatabase:
                 connection.execute(
                     "INSERT INTO current_schema_v7 VALUES (1, ?, ?, ?)",
                     (
-                        CURRENT_SCHEMA_VERSION,
+                        TERMINAL_COMMIT_SCHEMA_VERSION,
                         MIGRATION_6_SHA256,
                         MIGRATION_7_SHA256,
+                    ),
+                )
+                connection.execute(
+                    f"PRAGMA user_version = {TERMINAL_COMMIT_SCHEMA_VERSION}"
+                )
+                version = TERMINAL_COMMIT_SCHEMA_VERSION
+            if version == TERMINAL_COMMIT_SCHEMA_VERSION:
+                for statement in MIGRATION_8:
+                    connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO current_schema_v8 VALUES (1, ?, ?, ?)",
+                    (
+                        CURRENT_SCHEMA_VERSION,
+                        MIGRATION_7_SHA256,
+                        MIGRATION_8_SHA256,
                     ),
                 )
                 connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
@@ -368,11 +386,21 @@ class CurrentAgentKernelDatabase:
             "FROM current_schema_v7 WHERE singleton = 1"
         ).fetchone()
         if row != (
-            CURRENT_SCHEMA_VERSION,
+            TERMINAL_COMMIT_SCHEMA_VERSION,
             MIGRATION_6_SHA256,
             MIGRATION_7_SHA256,
         ):
             raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "migration 7 lock")
+        row = connection.execute(
+            "SELECT schema_version, previous_migration_sha256, migration_sha256 "
+            "FROM current_schema_v8 WHERE singleton = 1"
+        ).fetchone()
+        if row != (
+            CURRENT_SCHEMA_VERSION,
+            MIGRATION_7_SHA256,
+            MIGRATION_8_SHA256,
+        ):
+            raise CurrentDatabaseError("CURRENT_SCHEMA_UNKNOWN", "migration 8 lock")
 
     def _lock_package(self, connection: sqlite3.Connection) -> None:
         row = connection.execute(
