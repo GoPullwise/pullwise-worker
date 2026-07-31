@@ -112,18 +112,21 @@ baseline 生命周期、分阶段 canary 和同契约回滚；legacy baseline、
 任务或第二生产权威均不得参与发布、hard floor 或回滚。D22/D25/D26 均不授权提前修改
 runtime/schema/protocol/deployment。
 
-## D9-D30 resolution overlay（Normative）
+## D9-D38 resolution overlay（Normative）
 
 机器注册表的冻结前缀已按用户授权解决 D9-D26；在该前缀原始闭合点上，D2 是唯一
-inactive 决策且没有 applicable pending decision。当前 append-only register 中 D28-D36
-均已解决；D36 选择 `mvp_s3_s7_implementation_only_no_external_activation` 并 supersede
-D35。S3 authority/HTTP 与 current R0 journal tracer 的 TDD 实现暴露了 S4 contract gap，
-因此新增 D37 为唯一 active pending decision。register 当前为 `valid_pending`，共有 35 个
-resolved、1 个 applicable pending，D2 inactive。D37 不追溯阻断已完成的 S3 tracer，
-但在显式解决前阻断 S4-S8；D36 的 contract source change/Generate 均为零的停线规则仍然
-有效。不得用伪 ContentRef、未版本化 wire、Worker 自行发明的 `outer_job_id/run_id`、legacy
-补值或无 schema checkpoint 绕过。以下已决结论仍优先于后文以“候选”或“待决”表述的
-旧段落，但不代表对应 runtime 已经实现：
+inactive 决策且没有 applicable pending decision。当前 append-only register 中 D28-D38
+均已解决，register 为 `ready`，共有 37 个 resolved、0 个 applicable pending，D2
+inactive。D36 选择 `mvp_s3_s7_implementation_only_no_external_activation`；D37 已闭合
+S4 accept/bootstrap 与双层 checkpoint/committed-manifest contract，消费恰好一次 Generate，
+随后 S4 Task/Attempt/Owner、checkpoint、recovery 与 ACK tracer 已按 TDD 实现。S5 成功路径
+测试又暴露 passed Success Gate、机械 selector、immutable Server authority/local Task version
+chain 和真实 `FINALIZING -> TERMINAL` TaskResult CAS 的契约缺口。D38 已选择
+`bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation`，仅授权该 bounded
+S5 closure，并仅在所有预生成门绿色后授权恰好一次 Generate；当前 D38 Generate count 为
+`0`。不得伪造 success terminalization fact、让 caller 选择 outcome/reason、引入第二
+authority/store/runner、legacy 补值、fallback、dual path 或 compatibility/downgrade shim。
+以下已决结论仍优先于后文以“候选”或“待决”表述的旧段落，但不代表对应 runtime 已经实现：
 
 - D9 以内部 TaskResult CAS 作为唯一语义终态线性化点；Server ACK 只确认可恢复
   transport projection，不能创建、替换或改写已提交 outcome。D10 要求以一张全局
@@ -202,8 +205,8 @@ resolved、1 个 applicable pending，D2 inactive。D37 不追溯阻断已完成
 | S1 | shadow foundation 已实现；因两个显式 `SPEC_GAP` 不标记为完整规范闭合 | [Slice 1 runbook](agent-first-worker-slice-1-runbook.md)：schema/canonical/CAS/SQLite/wheel；transport contracts 与通用 waiver keyring 仍待后续规范 |
 | S2 | shadow foundation 已实现 | [Slice 2 runbook](agent-first-worker-slice-2-runbook.md)：typed reducer、TaskStore、fencing、races、migration 2/3、recovery-safe legacy one-slot shadow bridge；当前 `outer_lease.fenced → Task TERMINAL/transport_abandoned` 仅是历史 shadow 行为，不满足 D8，禁止晋升为生产语义 |
 | S3 | current authority/HTTP/Auth 与 R0 journal tracer 已按 TDD 实现并定向验证 | Server operator accept + authenticated worker register/claim 返回 canonical bytes；Worker 用唯一 current codec/authority projection/journal/budget/one-shot capability/descriptor-held R0/CAS/Observation/settlement 完成 exact replay。该证据不等于 main-loop 切换、S4 完成或外部激活 |
-| S4 | D37 contract gap 阻断，尚未实现 Task/Attempt/Owner bootstrap 与 checkpoint/recovery | claim 仅返回 `server-authority-envelope/v1`，缺 TaskRequest、EffectiveExecutionPolicy、RequirementLedger 和完整 `outer_job_id/run_id` roots；冻结 package 也缺 machine/semantic/committed checkpoint schema。D36 要求遇到该 gap 停工并在任何 source edit/Generate 前取得 append-only 决议 |
-| S5-S7 | candidate Gate/TaskResult、transport/receipt 与 Debug 相关基础存在；依赖 S4，当前被 D37 阻断 | 机器 decision register 现有 35 个 resolved、1 个 applicable pending，D2 inactive；不得跨过 S4 gap 开始 dependent production-graph implementation，也不能从 candidate tests 推断已实现或可部署 |
+| S4 | 本地 current Task/Attempt/Owner bootstrap、双层 checkpoint、committed manifest、同 lease recovery 与 ACK tracer 已按 TDD 实现并定向验证 | D37 source closure 与恰好一次 Generate 已完成；Server accept/bootstrap/watermark 和 Worker 单一 current journal/control path 提供证据。该证据不等于 main-loop 切换或外部激活 |
+| S5-S7 | D38 bounded S5 contract closure 正在进行；既有 non-success candidate 只证明 fail-closed 路径，S6/S7 仍依赖真实 S5 终态事务 | register 现有 37 个 resolved、0 个 applicable pending，D2 inactive；D38 Generate count 为 `0`。必须先以 TDD 闭合 passed Success Gate bridge、六轴 selector、单一 version authority 与真实 `FINALIZING -> TERMINAL` CAS，再在全部预生成门绿色后恰好一次 Generate；不得从 candidate tests 推断已实现、已激活或可部署 |
 | S8 | 未开始且不在 D36 推荐实施授权内 | 真实 release evidence、D24、legacy clean cutover、rollback、部署、canary 与生产观察窗必须由后续独立决议和 operator authority 授权 |
 | Agentic intent execution | 已实现并验证 | [执行契约与证据](agentic-intent-test-execution.md) |
 | Main-finding validation binding | 已实现并验证 | [binding contract 与证据](review-worker-validation-binding.md) |

@@ -262,24 +262,33 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D37; D2 remains pending but inactive
-  under D1. The register is `ready` with 36 resolved records, zero applicable
-  pending records, and no active decision. D37 is bound to selected option
-  `bounded_s4_contract_closure_one_generate_no_activation` and resolution digest
-  `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`.
-  It supersedes D36's zero-contract-change/zero-Generate limit only for the
-  bounded S4 bootstrap/checkpoint contract closure and exactly one Generate
-  after every pre-generation gate is green; D36's local S3-S7 authorization and
-  all no-activation boundaries remain controlling. Every pre-generation gate
-  passed and the allowance is consumed exactly once (count `1`). Server,
-  Worker, and Web now exact-pin package `0.1.0`, content
+- The resolved prefix remains D1 and D3-D38; D2 remains pending but inactive
+  under D1. The register is `ready` with 37 resolved records, zero applicable
+  pending records, and no active decision. D37 remains bound to
+  `bounded_s4_contract_closure_one_generate_no_activation` with resolution
+  digest `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`;
+  its single Generate allowance is consumed by package `0.1.0`, content
   `9dfa928d1a2d139036701b7d69354e6e4ceb16b9fa5d913fc77cd6fd823454fb`,
   root `4a37e789495b8b22d102ef1e87110b8e28abf555fa30bcd5baa1a2568d4b22ef`,
   from Server generated-artifact commit
-  `a223f1ffdee345da366ab7c3bf8ca230ad7f39cb`. Do not Generate again without a
-  new append-only superseding decision, and do not invent ContentRefs,
-  transport identities, unversioned wire envelopes, legacy supplements, or
-  manually edited generated artifacts.
+  `a223f1ffdee345da366ab7c3bf8ca230ad7f39cb`.
+  D38 is bound to
+  `bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation`
+  with resolution digest
+  `d1cbc20e4220c6d073d01a060cce1ae2f109459e0c110d4e403c41ecd0303368`.
+  It supersedes only D37's consumed Generate boundary for the bounded S5
+  closure: versionedly bridge a passed Success Gate to the sole mechanical
+  six-axis selector without fabricating a terminalization fact, bind immutable
+  Server grant/authority to the local checkpoint/control-event Task-version
+  chain, and implement one real `FINALIZING -> TERMINAL` TaskResult CAS with
+  `published_from_version=N` and `terminal_task_version=N+1`. The D38 Generate
+  count is currently `0`; run exactly one Generate only after every source,
+  fixture, semantic-closure, DAG, registry, digest, and Python/Node parity
+  pre-generation gate is green, then exact-pin Server/Worker/Web. D36's local
+  S5-S7 candidate authority and every no-activation boundary remain
+  controlling. Do not invent a second authority/store/runner, a caller-selected
+  outcome, legacy supplement, fallback, dual path, compatibility/downgrade
+  shim, or manually edited generated artifact.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is

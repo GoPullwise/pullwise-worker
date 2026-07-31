@@ -70,13 +70,14 @@ D26 已选择 `roadmap_separate_designs`（resolution digest
 `absolute_plus_baseline` current-contract 单值特化解决（resolution digest
 `94ec57c0b72801dc37d8a7de08b16cc78b8ffc8bdb69b39f0eb0b56cf80d6e96`）。D22/D26
 原始闭合点上的机器 decision register 无 active decision，规范状态为 ready；当前
-append-only register 中 D28-D36 均 resolved，D37 是唯一 active pending decision，状态为
-`valid_pending`，共有 35 个 resolved、1 个 applicable pending。D37 不追溯阻断已完成的
-S3 current authority/R0 tracer，但阻断 S4-S8；它记录 bootstrap wire 与双层 checkpoint
-schema 缺口。D36 的 contract source change/Generate 均为零的停线规则继续有效，任何
-source edit 或 Generate 都须先显式解决 D37。D2 仍是 inactive pending，不适用且不得据此
-恢复旧生产权威。D26 只确定文档成熟度与开工边界，不授权 post-MVP runtime、schema、
-protocol 或 deployment 变更。
+append-only register 中 D28-D38 均 resolved，共有 37 个 resolved、0 个 applicable
+pending，D2 inactive。D37 的 S4 accept/bootstrap 与 checkpoint contract closure、单次
+Generate 和本地 S4 tracer 已完成；D38 现仅授权 bounded S5 terminal control/selector
+contract closure、全部预生成门绿色后的恰好一次 Generate，以及后续本地 S5-S7 candidate。
+D38 Generate count 当前为 `0`。它不授权 post-MVP runtime/schema/protocol/deployment，
+也不授权 D24、外部激活、生产流量、canary、legacy 删除、S8、fallback/dual path、
+compatibility/downgrade shim 或第二 authority/store/runner。D2 仍是 inactive pending，
+不得据此恢复旧生产权威；D26 只确定文档成熟度与开工边界。
 
 本文按以下 maturity 分类：
 
