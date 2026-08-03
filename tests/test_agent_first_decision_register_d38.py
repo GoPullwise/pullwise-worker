@@ -51,8 +51,11 @@ class AgentFirstDecisionRegisterD38Test(unittest.TestCase):
 
     def test_d38_records_the_exact_user_approved_bounded_s5_closure(self) -> None:
         decision = self._decision()
-        self.assertEqual("D38", self.register["question_order"][-1])
-        self.assertEqual("D38", self.register["decisions"][-1]["id"])
+        self.assertEqual(["D38", "D39"], self.register["question_order"][-2:])
+        self.assertEqual(
+            ["D38", "D39"],
+            [item["id"] for item in self.register["decisions"][-2:]],
+        )
         self.assertIsNone(self.register["active_decision_id"])
         self.assertEqual("resolved", decision["status"])
         self.assertEqual(["D37"], decision["supersedes"])

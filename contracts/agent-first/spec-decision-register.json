@@ -2,7 +2,7 @@
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
   "active_decision_id": null,
-  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38"],
+  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
     "start_marker": "<!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->",
@@ -12,11 +12,11 @@
     {"id": "target-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "mvp-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "post-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
-    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29", "D31", "D32", "D33", "D36", "D37", "D38"]},
-    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D36", "D37", "D38"]},
+    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29", "D31", "D32", "D33", "D36", "D37", "D38", "D39"]},
+    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D36", "D37", "D38", "D39"]},
     {"id": "mvp-legacy-mapping", "decision_ids": ["D4", "D9", "D12", "D13", "D18", "D19", "D20", "D27"]},
-    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30", "D31", "D33", "D34", "D35", "D36", "D37", "D38"]},
-    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38"]}
+    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30", "D31", "D33", "D34", "D35", "D36", "D37", "D38", "D39"]},
+    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39"]}
   ],
   "decisions": [
     {
@@ -867,6 +867,48 @@
         "resolution_sha256": "d1cbc20e4220c6d073d01a060cce1ae2f109459e0c110d4e403c41ecd0303368"
       },
       "supersedes": ["D37"]
+    },
+    {
+      "id": "D39", "key": "s7-transport-attempt-binding-contract-closure", "scope": "MVP S7", "title": "S7 authenticated outer transport attempt binding gap",
+      "question": "The S7 RED boundary proves that authenticated agent-task-runtime-bootstrap/v1.transport_binding lacks the exact Server-owned outer transport_attempt_id required by worker-debug-fragment/v1, while Worker native_attempt_id is a distinct engine identity. Which bounded source closure may extend the proven single-authority chain without fabrication, derivation/substitution, a second authority/store/runner, codegraph, or activation?",
+      "status": "resolved", "depends_on": ["D8", "D9", "D23", "D25", "D28", "D29", "D30", "D31", "D34", "D36", "D37", "D38"], "activation": null, "required_by_slice": "S7",
+      "effects": ["authority", "data_model", "external_behavior", "permission", "state_semantics"],
+      "source_refs": ["implementation-stop:2026-07-31:s7-transport-attempt-binding-gap", "handoff:2026-08-03:s7-decision-boundary", "conversation:user-approval:2026-08-03:bounded_s7_transport_attempt_binding_one_generate_no_activation"],
+      "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
+      "options": [
+        {
+          "id": "bounded_s7_transport_attempt_binding_one_generate_no_activation",
+          "summary": "Add the exact Server-owned outer transport_attempt_id to authenticated agent-task-runtime-bootstrap/v1.transport_binding and only the claim/accept authority source required by a proven single-authority chain; after all pre-generation gates pass, perform exactly one Generate, synchronize Server/Worker/Web exact pins and producer provenance, then resume local S7 and stop before S8 with no activation.",
+          "rationale": "The outer transport attempt identifies the Server delivery epoch, while native_attempt_id identifies a Worker engine attempt; carrying both from their owning authorities is the only way to construct worker-debug-fragment/v1 without fabrication, derivation/substitution, or a second authority/store/runner.",
+          "consequences": [
+            "Source and valid/invalid/golden/idempotency/fence/crash fixtures must bind the Server-owned outer transport_attempt_id through the proven single-authority chain and keep it distinct from native_attempt_id",
+            "Semantic closure, registry/DAG/digest, and Python/Node parity must all pass before exactly one Generate; Server/Worker/Web exact pins and producer provenance must be synchronized immediately afterward",
+            "D39 supersedes only D38's consumed Generate boundary for this bounded S7 closure and restores D36 local S7 candidate authority; stop before S8",
+            "D24 implementation or enablement, deployment, changes to a deployed Worker, production traffic, canary, legacy deletion, S8, fallback, dual path, compatibility/downgrade, second authority/store/runner, codegraph, and activation remain prohibited"
+          ]
+        },
+        {
+          "id": "runtime_only_native_substitution_no_generate",
+          "summary": "Leave the package unchanged and substitute Worker native_attempt_id for the missing outer transport_attempt_id at runtime.",
+          "rationale": "This avoids a package cycle but collapses two independently owned identities and fabricates Server transport authority in Worker code.",
+          "consequences": ["worker-debug-fragment/v1 would not prove the Server transport attempt and S7 would remain invalid"]
+        },
+        {
+          "id": "defer_s7_no_contract_change_or_generate",
+          "summary": "Keep the D38 package and stop S7 at the proven missing-binding boundary.",
+          "rationale": "This preserves the consumed D38 Generate count but cannot honestly construct WorkerDebugFragment.",
+          "consequences": ["No source edit, Generate, runtime workaround, activation, or S8 work is permitted"]
+        }
+      ],
+      "recommended_option_id": "bounded_s7_transport_attempt_binding_one_generate_no_activation",
+      "resolution": {
+        "kind": "option", "selected_option_id": "bounded_s7_transport_attempt_binding_one_generate_no_activation", "custom_text": null,
+        "decision_text": "批准 D39：bounded_s7_transport_attempt_binding_one_generate_no_activation。授权先以 RED tests 定义并完成 bounded S7 transport-attempt authority closure：将 exact Server-owned outer transport_attempt_id 加入 authenticated agent-task-runtime-bootstrap/v1.transport_binding，并仅在 proven single-authority chain 所需时同步 claim/accept authority source；完整绑定 valid/invalid/golden/idempotency/fence/crash fixtures、semantic closure、registry/DAG/digest 以及 Python/Node parity；严格区分 outer transport_attempt_id 与 Worker native_attempt_id，禁止 fabrication、derivation/substitution 或第二 authority/store/runner。仅在全部预生成门绿色后执行且仅执行一次 Generate；立即同步 Server/Worker/Web exact pins 与 producer provenance，然后恢复 D36 的本地 S7 TDD，完成 WorkerDebugFragment candidate 并停止在 S8 前。D39 仅 supersede D38 的已消费 Generate 边界以覆盖上述 S7 closure；继续禁止 D24 实现或启用、activation、deployment、修改已部署 Worker、production traffic、canary、legacy 删除、S8、fallback、dual path、compatibility/downgrade、second authority/store/runner 和 codegraph。",
+        "authority": "user", "decided_at": "2026-08-03",
+        "evidence_refs": ["conversation:user-approval:2026-08-03:bounded_s7_transport_attempt_binding_one_generate_no_activation"],
+        "resolution_sha256": "85365d344a6bc0d36d5d11dbc088278722083bf51e98c9cd518dd3d57ac90f9c"
+      },
+      "supersedes": ["D38"]
     }
   ]
 }

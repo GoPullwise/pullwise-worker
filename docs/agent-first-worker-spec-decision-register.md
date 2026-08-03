@@ -49,6 +49,7 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 | `D36` | `MVP S3-S7` | MVP S3-S7 implementation and external-activation boundary | `resolved` | `active` | `S3` | D20, D21, D23, D27, D30, D35 | `mvp_s3_s7_implementation_only_no_external_activation` |
 | `D37` | `MVP S4` | S4 bootstrap and checkpoint contract gap | `resolved` | `active` | `S4` | D6, D7, D8, D23, D28, D29, D30, D31, D32, D36 | `bounded_s4_contract_closure_one_generate_no_activation` |
 | `D38` | `MVP S5` | S5 terminal control and selector contract gap | `resolved` | `active` | `S5` | D5, D8, D9, D10, D13, D20, D23, D25, D28, D29, D30, D31, D33, D36, D37 | `bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation` |
+| `D39` | `MVP S7` | S7 authenticated outer transport attempt binding gap | `resolved` | `active` | `S7` | D8, D9, D23, D25, D28, D29, D30, D31, D34, D36, D37, D38 | `bounded_s7_transport_attempt_binding_one_generate_no_activation` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -862,4 +863,26 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 **Effects:** `authority`, `data_model`, `external_behavior`, `permission`, `state_semantics`
 
 **Sources:** `implementation-stop:2026-07-31:s5-terminal-control-selector-contract-gap`, `handoff:2026-07-31:d38-required`, `conversation:user-approval:2026-07-31:bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation`
+
+### D39 — S7 authenticated outer transport attempt binding gap
+
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S7`.
+
+**Question:** The S7 RED boundary proves that authenticated agent-task-runtime-bootstrap/v1.transport_binding lacks the exact Server-owned outer transport_attempt_id required by worker-debug-fragment/v1, while Worker native_attempt_id is a distinct engine identity. Which bounded source closure may extend the proven single-authority chain without fabrication, derivation/substitution, a second authority/store/runner, codegraph, or activation?
+
+**Options:**
+
+- `bounded_s7_transport_attempt_binding_one_generate_no_activation` — selected by resolution: Add the exact Server-owned outer transport_attempt_id to authenticated agent-task-runtime-bootstrap/v1.transport_binding and only the claim/accept authority source required by a proven single-authority chain; after all pre-generation gates pass, perform exactly one Generate, synchronize Server/Worker/Web exact pins and producer provenance, then resume local S7 and stop before S8 with no activation. The outer transport attempt identifies the Server delivery epoch, while native_attempt_id identifies a Worker engine attempt; carrying both from their owning authorities is the only way to construct worker-debug-fragment/v1 without fabrication, derivation/substitution, or a second authority/store/runner. Consequences: Source and valid/invalid/golden/idempotency/fence/crash fixtures must bind the Server-owned outer transport_attempt_id through the proven single-authority chain and keep it distinct from native_attempt_id; Semantic closure, registry/DAG/digest, and Python/Node parity must all pass before exactly one Generate; Server/Worker/Web exact pins and producer provenance must be synchronized immediately afterward; D39 supersedes only D38's consumed Generate boundary for this bounded S7 closure and restores D36 local S7 candidate authority; stop before S8; D24 implementation or enablement, deployment, changes to a deployed Worker, production traffic, canary, legacy deletion, S8, fallback, dual path, compatibility/downgrade, second authority/store/runner, codegraph, and activation remain prohibited
+- `runtime_only_native_substitution_no_generate`: Leave the package unchanged and substitute Worker native_attempt_id for the missing outer transport_attempt_id at runtime. This avoids a package cycle but collapses two independently owned identities and fabricates Server transport authority in Worker code. Consequences: worker-debug-fragment/v1 would not prove the Server transport attempt and S7 would remain invalid
+- `defer_s7_no_contract_change_or_generate`: Keep the D38 package and stop S7 at the proven missing-binding boundary. This preserves the consumed D38 Generate count but cannot honestly construct WorkerDebugFragment. Consequences: No source edit, Generate, runtime workaround, activation, or S8 work is permitted
+
+**Resolution:** `bounded_s7_transport_attempt_binding_one_generate_no_activation` (`option`). 批准 D39：bounded_s7_transport_attempt_binding_one_generate_no_activation。授权先以 RED tests 定义并完成 bounded S7 transport-attempt authority closure：将 exact Server-owned outer transport_attempt_id 加入 authenticated agent-task-runtime-bootstrap/v1.transport_binding，并仅在 proven single-authority chain 所需时同步 claim/accept authority source；完整绑定 valid/invalid/golden/idempotency/fence/crash fixtures、semantic closure、registry/DAG/digest 以及 Python/Node parity；严格区分 outer transport_attempt_id 与 Worker native_attempt_id，禁止 fabrication、derivation/substitution 或第二 authority/store/runner。仅在全部预生成门绿色后执行且仅执行一次 Generate；立即同步 Server/Worker/Web exact pins 与 producer provenance，然后恢复 D36 的本地 S7 TDD，完成 WorkerDebugFragment candidate 并停止在 S8 前。D39 仅 supersede D38 的已消费 Generate 边界以覆盖上述 S7 closure；继续禁止 D24 实现或启用、activation、deployment、修改已部署 Worker、production traffic、canary、legacy 删除、S8、fallback、dual path、compatibility/downgrade、second authority/store/runner 和 codegraph。
+
+**Authority/evidence:** `user` on `2026-08-03`; `conversation:user-approval:2026-08-03:bounded_s7_transport_attempt_binding_one_generate_no_activation`; digest `85365d344a6bc0d36d5d11dbc088278722083bf51e98c9cd518dd3d57ac90f9c`.
+
+**Supersedes:** D38
+
+**Effects:** `authority`, `data_model`, `external_behavior`, `permission`, `state_semantics`
+
+**Sources:** `implementation-stop:2026-07-31:s7-transport-attempt-binding-gap`, `handoff:2026-08-03:s7-decision-boundary`, `conversation:user-approval:2026-08-03:bounded_s7_transport_attempt_binding_one_generate_no_activation`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->
