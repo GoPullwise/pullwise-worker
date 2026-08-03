@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: GoPullwise/pullwise-server
-          ref: a223f1ffdee345da366ab7c3bf8ca230ad7f39cb
+          ref: 06ed22299e324a8a39f9030c653aef34044c3d3e
           path: current-contract-server
 
       - name: Validate release tag ancestry
