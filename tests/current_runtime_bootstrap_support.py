@@ -5,7 +5,11 @@ from copy import deepcopy
 from pullwise_worker import _generated_agent_task_contract as contract
 
 
-def golden_runtime_bootstrap() -> dict[str, object]:
+def golden_runtime_bootstrap(
+    *,
+    outer_job_id: str = "job-1",
+    run_id: str = "run-1",
+) -> dict[str, object]:
     package = contract.package_tuple()
     request = deepcopy(
         contract.fixture("task_control_golden_task_request")["document"]
@@ -20,8 +24,8 @@ def golden_runtime_bootstrap() -> dict[str, object]:
             "schema_id": "agent-task-accept-request/v1",
             "package": package,
             "idempotency_key": "accept:bootstrap:one",
-            "outer_job_id": "job-1",
-            "run_id": "run-1",
+            "outer_job_id": outer_job_id,
+            "run_id": run_id,
             "task_request": request,
             "effective_policy": policy,
             "requirement_ledger": ledger,
@@ -56,6 +60,8 @@ def golden_runtime_bootstrap() -> dict[str, object]:
     )
     task.update(
         {
+            "outer_job_id": outer_job_id,
+            "run_id": run_id,
             "lifecycle": "ACTIVE",
             "task_version": 2,
             "lease_id": lease_id,
