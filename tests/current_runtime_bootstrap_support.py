@@ -74,6 +74,8 @@ def golden_runtime_bootstrap(
         }
     )
     attempt["transport_binding"]["lease_id"] = lease_id
+    attempt["transport_binding"]["outer_job_id"] = outer_job_id
+    attempt["transport_binding"]["run_id"] = run_id
     attempt["transport_binding"]["transport_attempt_id"] = transport_attempt_id
 
     grant = deepcopy(

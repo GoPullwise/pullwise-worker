@@ -158,6 +158,8 @@ def _pre_gate_manifest(root: dict[str, object]) -> dict[str, object]:
 def terminalization_inputs(
     database: object,
     authority: object,
+    *,
+    source_available: bool = False,
 ) -> dict[str, object]:
     bootstrap = __import__(
         "tests.current_runtime_bootstrap_support",
@@ -263,6 +265,15 @@ def terminalization_inputs(
     root["termination_facts"] = [
         {"availability": "available", "ref": refs["fact"]}
     ]
+    source = None
+    if source_available:
+        source = fixture_document("source_evidence_golden_source_tree")
+        refs["source"] = content_ref("9", "source-tree-manifest/v1", source)
+        root["original_source"] = {
+            "availability": "available",
+            "ref": refs["source"],
+        }
+        root["final_source"] = deepcopy(root["original_source"])
     root = reseal("pre-gate-root-set/v1", root)
     pre_gate = _pre_gate_manifest(root)
 
@@ -321,6 +332,7 @@ def terminalization_inputs(
         ("effect-ledger-snapshot/v1", effects),
         ("publication-content-manifest/v1", publication),
         ("debug-redaction-plan/v1", debug_plan),
+        *((("source-tree-manifest/v1", source),) if source is not None else ()),
     ):
         raw = canonical_bytes(schema_id, document)
         objects[object_sha256(raw)] = (schema_id, raw)

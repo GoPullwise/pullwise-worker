@@ -50,7 +50,11 @@ class CurrentWorkerDebugStoreTest(unittest.TestCase):
         self.authority = CurrentRuntimeBootstrapConsumer(
             self.database
         ).ingest(bootstrap_bytes(bootstrap))
-        self.inputs = terminalization_inputs(self.database, self.authority)
+        self.inputs = terminalization_inputs(
+            self.database,
+            self.authority,
+            source_available=True,
+        )
         self.terminalization = CurrentTerminalizationStore(self.database)
         self.prepared = self.terminalization.prepare(
             **{

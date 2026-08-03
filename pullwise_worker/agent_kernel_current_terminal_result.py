@@ -189,11 +189,19 @@ def validate_terminal_result(
     if actual != expected:
         raise CurrentTerminalizationError("TASK_RESULT_CONTEXT_INVALID")
     try:
+        debug = result["diagnostics"]["worker_debug_fragment"]
+        descriptor = None
+        if debug["availability"] == "available":
+            descriptor, _descriptor_raw = load_ref(
+                connection,
+                debug["ref"],
+                memory,
+            )
         contract.verify_task_result_context(
             result,
             terminal_gate_decision=decision,
             effect_ledger_snapshot=effect,
-            worker_debug_descriptor=None,
+            worker_debug_descriptor=descriptor,
         )
         core = contract.derive_task_result_core(result)
         contract.verify_task_result_core(result, core)
