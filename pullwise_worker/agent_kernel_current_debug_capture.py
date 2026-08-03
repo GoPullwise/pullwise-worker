@@ -280,7 +280,14 @@ def _rescan(archive: bytes, staging_root: Path) -> None:
                         0o600,
                     )
                     try:
-                        os.write(descriptor, raw)
+                        view = memoryview(raw)
+                        while view:
+                            written = os.write(descriptor, view)
+                            if written < 1:
+                                raise CurrentWorkerDebugError(
+                                    "DEBUG_REDACTION_FAILED"
+                                )
+                            view = view[written:]
                         os.fsync(descriptor)
                     finally:
                         os.close(descriptor)
@@ -326,7 +333,7 @@ def prepare_debug_content(
     summary_base: object = {}
     for path in sorted(set(_MEDIA_TYPES) - _GENERATED):
         candidate = root / path
-        if not candidate.exists():
+        if not os.path.lexists(candidate):
             continue
         raw = _read_regular(candidate, limits.max_file_bytes)
         if raw is None:

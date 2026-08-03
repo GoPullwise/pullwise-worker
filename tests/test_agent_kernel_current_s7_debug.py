@@ -159,6 +159,15 @@ class CurrentWorkerDebugStoreTest(unittest.TestCase):
             hashlib.sha256(captured.canonical_bytes).hexdigest(),
             captured.sha256,
         )
+        self.assertEqual("redacted", captured.redaction_report["status"])
+        self.assertGreaterEqual(
+            captured.redaction_report["structured_pass_detection_count"],
+            2,
+        )
+        self.assertEqual(
+            0,
+            captured.redaction_report["archive_rescan_detection_count"],
+        )
 
         archive = self.objects.read_verified(captured.archive_object)
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
