@@ -51,11 +51,15 @@ def golden_runtime_bootstrap() -> dict[str, object]:
         contract.fixture("task_control_golden_task_owner")["document"]
     )
     lease_id = "lease_22222222222222222222222222222222"
+    transport_attempt_id = (
+        "transport_attempt_33333333333333333333333333333333"
+    )
     task.update(
         {
             "lifecycle": "ACTIVE",
             "task_version": 2,
             "lease_id": lease_id,
+            "transport_attempt_id": transport_attempt_id,
             "native_epoch": 1,
             "current_attempt_id": attempt["attempt_id"],
             "owner_epoch": 1,
@@ -64,6 +68,7 @@ def golden_runtime_bootstrap() -> dict[str, object]:
         }
     )
     attempt["transport_binding"]["lease_id"] = lease_id
+    attempt["transport_binding"]["transport_attempt_id"] = transport_attempt_id
 
     grant = deepcopy(
         contract.fixture("authority_golden_server_authority_envelope")[
@@ -124,6 +129,7 @@ def golden_runtime_bootstrap() -> dict[str, object]:
                 "outer_job_id": task["outer_job_id"],
                 "run_id": task["run_id"],
                 "lease_id": lease_id,
+                "transport_attempt_id": transport_attempt_id,
                 "transport_epoch": task["transport_epoch"],
             },
             "construction_roots": {
