@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 
 from .agent_kernel_current_checkpoint_migrations import (
     CURRENT_CHECKPOINT_TABLES,
@@ -44,6 +43,10 @@ from .agent_kernel_current_debug_migrations import (
     CURRENT_DEBUG_TABLES,
     MIGRATION_9,
     MIGRATION_9_SHA256,
+)
+from .agent_kernel_current_schema import (
+    expected_schema_fingerprint,
+    schema_fingerprint,
 )
 
 
@@ -336,7 +339,7 @@ def _expected_schema_fingerprint() -> str:
         connection.close()
 
 
-MIGRATION_1_SCHEMA_SHA256 = _expected_schema_fingerprint()
+MIGRATION_1_SCHEMA_SHA256 = expected_schema_fingerprint(MIGRATION_1)
 
 
 def _expected_current_schema_fingerprint() -> str:
