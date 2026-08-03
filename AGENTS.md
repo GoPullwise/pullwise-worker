@@ -262,8 +262,8 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D38; D2 remains pending but inactive
-  under D1. The register is `ready` with 37 resolved records, zero applicable
+- The resolved prefix remains D1 and D3-D39; D2 remains pending but inactive
+  under D1. The register is `ready` with 38 resolved records, zero applicable
   pending records, and no active decision. D37 remains bound to
   `bounded_s4_contract_closure_one_generate_no_activation` with resolution
   digest `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`;
@@ -297,12 +297,31 @@ inference never select an option or authorize production implementation.
   controlling. Do not invent a second authority/store/runner, a caller-selected
   outcome, legacy supplement, fallback, dual path, compatibility/downgrade
   shim, or manually edited generated artifact.
-  S7 currently stops at `SPEC_GAP`: the exact-pinned
-  `agent-task-runtime-bootstrap/v1.transport_binding` has no authenticated
-  outer `transport_attempt_id`, but `worker-debug-fragment/v1` requires it.
-  The design makes that value the Server claim identity and forbids substituting
-  the native Attempt ID. Keep capture fail closed; do not change contract source
-  or Generate until a new append-only decision authorizes a bounded closure.
+- D39 (`85365d344a6bc0d36d5d11dbc088278722083bf51e98c9cd518dd3d57ac90f9c`)
+  is bound to
+  `bounded_s7_transport_attempt_binding_one_generate_no_activation`. It
+  supersedes only the pre-D39 S7 `SPEC_GAP` and authorizes bounded local S7
+  closure: authenticate the Server-issued outer `transport_attempt_id` claim,
+  capture debug fragment/descriptor variants, enforce replay, conflict,
+  concurrency, redaction, and bounded extraction behavior, and add migration 9
+  with schema-v9 fingerprint
+  `028cc25005ce33dd7b16017fe7e5324774205b0b603f2e2582e9930511065e6a`.
+  Exactly one Generate was consumed (count `1`) for
+  `@pullwise/agent-task-contract@0.1.0`: content
+  `35468e289dd08a2b9a91b5c7ffb589f844c4373cfedd8f3846cc40dd1e8f6105`, root
+  `ff6fce2d8a0d28adeb880b97ebfaa6037fa0503eb7c1accd68e840994add43b1`,
+  Python wrapper `bd099dd825c2b2340061b67500bc02f1bb4fee0a1ce7ff44138b36b8821a59fd`,
+  npm wrapper `4027cf1383772871efa293a1c55338e96e17d5c0387efd84d059585cdce6c0ef`,
+  and package manifest
+  `161c7d7bef846de963a491f2d9f07f9cbc1ced039a3c017467d6f02f14b1925e`;
+  Server producer commit is `06ed22299e324a8a39f9030c653aef34044c3d3e`.
+  The Worker implementation is local candidate-only: do not Generate again,
+  activate D24, deploy, send production traffic/canary, delete legacy paths,
+  add fallback/dual/compatibility/downgrade shims, create a second
+  authority/store/runner, or begin S8. Native Attempt ID substitution remains
+  forbidden.
+- The preceding S7 `SPEC_GAP` text is historical pre-D39 guidance; D39 is the
+  controlling bounded closure and its no-activation boundary remains active.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
