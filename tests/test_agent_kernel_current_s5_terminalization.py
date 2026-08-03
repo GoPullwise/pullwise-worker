@@ -22,8 +22,8 @@ from pullwise_worker.agent_kernel_current_terminalization import (
 )
 from pullwise_worker import _generated_agent_task_contract as contract
 from tests.current_runtime_bootstrap_support import bootstrap_bytes
+from tests.current_s5_result_support import blocked_task_result_bytes
 from tests.current_s5_support import (
-    blocked_task_result_bytes,
     fenced_authority,
     terminalization_inputs,
 )

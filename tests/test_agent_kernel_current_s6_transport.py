@@ -21,8 +21,8 @@ from pullwise_worker.agent_kernel_current_transport import (
     CurrentTaskResultTransportStore,
 )
 from tests.current_runtime_bootstrap_support import bootstrap_bytes
+from tests.current_s5_result_support import blocked_task_result_bytes
 from tests.current_s5_support import (
-    blocked_task_result_bytes,
     terminalization_inputs,
 )
 
