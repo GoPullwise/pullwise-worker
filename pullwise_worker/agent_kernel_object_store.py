@@ -124,7 +124,10 @@ class ObjectStore:
         size = 0
         try:
             with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                os.fchmod(handle.fileno(), 0o600)
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), 0o600)
+                else:
+                    temporary.chmod(0o600)
                 for chunk in chunks:
                     if not isinstance(chunk, bytes):
                         raise AgentKernelStorageError("content_chunk_not_bytes")
@@ -336,7 +339,7 @@ class ObjectStore:
         path: Path, digest: str, size: int, *, capture: bool = False
     ) -> bytes | None:
         try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(descriptor, "rb", closefd=True) as handle:
                 metadata = os.fstat(handle.fileno())
                 if not stat.S_ISREG(metadata.st_mode):
@@ -389,6 +392,8 @@ class ObjectStore:
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
+        if os.name == "nt":
+            return
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(descriptor)
