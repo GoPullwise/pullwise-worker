@@ -24,6 +24,7 @@ from pullwise_worker.agent_kernel_current_migrations import (
     MIGRATION_7,
     MIGRATION_7_SHA256,
     MIGRATION_8_SHA256,
+    MIGRATION_9_SHA256,
 )
 from pullwise_worker.agent_kernel_current_package import CURRENT_PACKAGE
 
@@ -88,7 +89,7 @@ class CurrentTaskResultTransportMigrationTest(unittest.TestCase):
         connection = database.connect()
         try:
             self.assertEqual(
-                8, connection.execute("PRAGMA user_version").fetchone()[0]
+                9, connection.execute("PRAGMA user_version").fetchone()[0]
             )
             self.assertEqual(
                 (7, MIGRATION_6_SHA256, MIGRATION_7_SHA256),
@@ -102,6 +103,13 @@ class CurrentTaskResultTransportMigrationTest(unittest.TestCase):
                 tuple(connection.execute(
                     "SELECT schema_version,previous_migration_sha256,"
                     "migration_sha256 FROM current_schema_v8"
+                ).fetchone()),
+            )
+            self.assertEqual(
+                (9, MIGRATION_8_SHA256, MIGRATION_9_SHA256),
+                tuple(connection.execute(
+                    "SELECT schema_version,previous_migration_sha256,"
+                    "migration_sha256 FROM current_schema_v9"
                 ).fetchone()),
             )
             self.assertEqual(

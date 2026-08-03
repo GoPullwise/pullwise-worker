@@ -221,6 +221,12 @@ def record_descriptor(database, fault_hook, captured, receipt):
             content_ref("worker-debug-fragment-descriptor/v1", raw),
         )
         with database.transaction() as connection:
+            if receipt_document is not None:
+                _verify_receipt_authority(
+                    connection,
+                    captured,
+                    receipt_document,
+                )
             existing = connection.execute(
                 "SELECT descriptor_sha256,state,server_receipt_sha256 "
                 "FROM worker_debug_descriptors WHERE fragment_sha256=?",
@@ -270,6 +276,40 @@ def record_descriptor(database, fault_hook, captured, receipt):
     except Exception as exc:
         detail = str(getattr(exc, "code", type(exc).__name__))
         raise CurrentWorkerDebugError("DEBUG_RECEIPT_CONFLICT", detail) from exc
+
+
+def _verify_receipt_authority(connection, captured, receipt) -> None:
+    row = connection.execute(
+        "SELECT bootstrap_bytes FROM runtime_bootstraps WHERE task_id=?",
+        (captured.document["task_id"],),
+    ).fetchone()
+    if row is None:
+        raise CurrentWorkerDebugError("DEBUG_RECEIPT_CONFLICT")
+    bootstrap = parse_exact(
+        "agent-task-runtime-bootstrap/v1",
+        bytes(row["bootstrap_bytes"]),
+        "DEBUG_RECEIPT_CONFLICT",
+    )
+    authority = bootstrap["authority"]
+    exact_fields = (
+        "task_id",
+        "attempt_id",
+        "session_id",
+        "owner_id",
+        "lease_id",
+        "task_version",
+        "deletion_version",
+        "owner_epoch",
+        "native_epoch",
+        "transport_epoch",
+    )
+    if (
+        receipt["package"] != bootstrap["package"]
+        or any(receipt[key] != authority[key] for key in exact_fields)
+        or receipt["authority_digest"] != authority["authority_digest"]
+        or receipt["grant_digest"] != authority["grant"]["grant_digest"]
+    ):
+        raise CurrentWorkerDebugError("DEBUG_RECEIPT_CONFLICT")
 
 
 __all__ = ["commit_capture", "load_capture_context", "record_descriptor"]

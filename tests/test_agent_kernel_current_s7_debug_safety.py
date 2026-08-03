@@ -302,6 +302,22 @@ class CurrentWorkerDebugSafetyTest(unittest.TestCase):
         receipt_bytes = contract.canonical_validated_bytes(
             "server-transport-receipt/v1", receipt
         )
+        wrong_receipt = deepcopy(receipt)
+        wrong_receipt.pop("receipt_digest")
+        wrong_receipt["task_id"] = "task_" + "f" * 32
+        wrong_receipt = contract.seal_document(
+            "server-transport-receipt/v1", wrong_receipt
+        )
+        with self.assertRaisesRegex(
+            CurrentWorkerDebugError,
+            "DEBUG_RECEIPT_CONFLICT",
+        ):
+            store.record_uploaded(
+                captured,
+                contract.canonical_validated_bytes(
+                    "server-transport-receipt/v1", wrong_receipt
+                ),
+            )
         descriptor = store.record_uploaded(captured, receipt_bytes)
         self.assertEqual(
             descriptor,
