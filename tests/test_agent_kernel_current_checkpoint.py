@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -118,6 +119,15 @@ class CurrentCheckpointStoreTest(unittest.TestCase):
             connection.close()
         self.assertEqual((1, manifest["manifest_hash"]), tuple(head))
         self.assertEqual((3, 1, manifest["manifest_hash"]), tuple(task))
+
+    def test_checkpoint_fixture_projects_only_checkpoint_transport_binding(self) -> None:
+        _, machine_bytes, _, _ = checkpoint_documents(1)
+
+        machine = json.loads(machine_bytes)
+        self.assertEqual(
+            {"outer_job_id", "run_id", "lease_id", "transport_epoch"},
+            set(machine["transport_binding"]),
+        )
 
     def test_manifest_cas_rejects_skip_and_same_generation_fork(self) -> None:
         store = CurrentCheckpointStore(self.database)

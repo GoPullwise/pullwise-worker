@@ -76,7 +76,15 @@ def checkpoint_documents(
             "owner_id": authority["owner_id"],
             "owner_epoch": authority["owner_epoch"],
             "session_id": authority["session_id"],
-            "transport_binding": bootstrap["transport_binding"],
+            "transport_binding": {
+                key: bootstrap["transport_binding"][key]
+                for key in (
+                    "outer_job_id",
+                    "run_id",
+                    "lease_id",
+                    "transport_epoch",
+                )
+            },
             "workspace_state_ref": _content_ref(
                 "source-tree-manifest/v1", workspace_bytes, 1
             ),
