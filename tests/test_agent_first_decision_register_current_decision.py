@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from scripts.agent_first_decision_register import load_register
+
 from tests.test_agent_first_decision_register_current_state import (
     D22_CUSTOM_TEXT,
     REGISTER_PATH,
