@@ -31,7 +31,7 @@ MIGRATION_9 = (
             capture_kind IN ('startup','checkpoint','terminal','crash')
         ),
         snapshot_seq INTEGER NOT NULL CHECK (snapshot_seq >= 1),
-        archive_sha256 TEXT NOT NULL UNIQUE CHECK (length(archive_sha256) = 64)
+        archive_sha256 TEXT NOT NULL CHECK (length(archive_sha256) = 64)
             REFERENCES content_objects(sha256),
         file_manifest_sha256 TEXT NOT NULL
             CHECK (length(file_manifest_sha256) = 64)
