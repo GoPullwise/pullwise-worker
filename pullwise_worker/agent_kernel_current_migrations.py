@@ -316,53 +316,18 @@ MIGRATION_1_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 
-def schema_fingerprint(connection: sqlite3.Connection) -> str:
-    rows = connection.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master "
-        "WHERE type IN ('table', 'index', 'trigger') "
-        "AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
-    )
-    inventory = "\n".join(
-        "\x1f".join((kind, name, table, " ".join((sql or "").split())))
-        for kind, name, table, sql in rows
-    )
-    return hashlib.sha256(inventory.encode("utf-8")).hexdigest()
-
-
-def _expected_schema_fingerprint() -> str:
-    connection = sqlite3.connect(":memory:")
-    try:
-        for statement in MIGRATION_1:
-            connection.execute(statement)
-        return schema_fingerprint(connection)
-    finally:
-        connection.close()
-
-
 MIGRATION_1_SCHEMA_SHA256 = expected_schema_fingerprint(MIGRATION_1)
-
-
-def _expected_current_schema_fingerprint() -> str:
-    connection = sqlite3.connect(":memory:")
-    try:
-        for statement in (
-            MIGRATION_1
-            + MIGRATION_2
-            + MIGRATION_3
-            + MIGRATION_4
-            + MIGRATION_5
-            + MIGRATION_6
-            + MIGRATION_7
-            + MIGRATION_8
-            + MIGRATION_9
-        ):
-            connection.execute(statement)
-        return schema_fingerprint(connection)
-    finally:
-        connection.close()
-
-
-CURRENT_SCHEMA_SHA256 = _expected_current_schema_fingerprint()
+CURRENT_SCHEMA_SHA256 = expected_schema_fingerprint(
+    MIGRATION_1
+    + MIGRATION_2
+    + MIGRATION_3
+    + MIGRATION_4
+    + MIGRATION_5
+    + MIGRATION_6
+    + MIGRATION_7
+    + MIGRATION_8
+    + MIGRATION_9
+)
 
 CURRENT_TABLES = frozenset(
     {
