@@ -2,7 +2,7 @@
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
   "active_decision_id": null,
-  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39"],
+  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
     "start_marker": "<!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->",
@@ -12,11 +12,11 @@
     {"id": "target-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "mvp-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "post-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
-    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29", "D31", "D32", "D33", "D36", "D37", "D38", "D39"]},
-    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D36", "D37", "D38", "D39"]},
+    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29", "D31", "D32", "D33", "D36", "D37", "D38", "D39", "D40"]},
+    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D36", "D37", "D38", "D39", "D40"]},
     {"id": "mvp-legacy-mapping", "decision_ids": ["D4", "D9", "D12", "D13", "D18", "D19", "D20", "D27"]},
-    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30", "D31", "D33", "D34", "D35", "D36", "D37", "D38", "D39"]},
-    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39"]}
+    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30", "D31", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"]},
+    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"]}
   ],
   "decisions": [
     {
@@ -909,6 +909,42 @@
         "resolution_sha256": "85365d344a6bc0d36d5d11dbc088278722083bf51e98c9cd518dd3d57ac90f9c"
       },
       "supersedes": ["D38"]
+    },
+    {
+      "id": "D40", "key": "s8-offline-candidate-authorization", "scope": "MVP S8", "title": "S8 bounded offline candidate authorization",
+      "question": "D39 closure is complete and the user has approved bounded local/offline S8 audit and TDD without Generate or activation. Which append-only boundary may permit an offline S8 candidate while preserving every release, operator, deployment, and production prohibition and stopping on any current-package gap?",
+      "status": "resolved", "depends_on": ["D20", "D21", "D22", "D23", "D24", "D27", "D28", "D29", "D34", "D36", "D39"], "activation": null, "required_by_slice": "S8",
+      "effects": ["authority", "external_behavior", "permission", "release_ownership"],
+      "source_refs": ["handoff:2026-08-04:s8-spec-gap", "conversation:user-approval:2026-08-04:bounded_s8_offline_candidate_no_generate_no_activation"],
+      "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
+      "options": [
+        {
+          "id": "bounded_s8_offline_candidate_no_generate_no_activation",
+          "summary": "Permit read-only S8 surface discovery and one-behavior-at-a-time local/CI TDD against the existing exact-pinned current package, using only deterministic synthetic fixtures and offline evaluator composition; keep contract/package generation and every activation or release operation prohibited.",
+          "rationale": "This is the smallest boundary that moves S8 implementation evidence forward without fabricating signed benchmark artifacts, assigning release principals, changing the current package, or converting local tests into deployment authority.",
+          "consequences": [
+            "D40 supersedes D39 only to lift stop-before-S8 for a bounded local/offline candidate; D39's consumed Generate is not restored and Generate count remains zero",
+            "Contract source, schema, protocol, and package changes remain prohibited; if the exact current package cannot express a required public behavior, record a new SPEC_GAP and stop",
+            "Synthetic fixtures and offline validation may prove code behavior but cannot be represented as real signed benchmark-bundle/v1, release-gate-policy/v1, release-gate-report/v1, release-gate-attestation/v1, release, or MVP DoD evidence",
+            "D24 implementation or activation, deployment, changes to a deployed Worker, production traffic, real benchmark or evidence signing, canary, cutover, legacy deletion, fallback, dual path, compatibility/downgrade, second authority/store/runner, and codegraph remain prohibited"
+          ]
+        },
+        {
+          "id": "defer_s8_keep_d39_boundary",
+          "summary": "Keep D39's stop-before-S8 boundary and perform no S8 audit, test, or implementation work.",
+          "rationale": "This preserves the completed S7 candidate unchanged but makes no progress on the approved offline S8 candidate.",
+          "consequences": ["No S8 work, Generate, D24 implementation or activation, release, deployment, production traffic, canary, cutover, or legacy deletion is authorized"]
+        }
+      ],
+      "recommended_option_id": "bounded_s8_offline_candidate_no_generate_no_activation",
+      "resolution": {
+        "kind": "option", "selected_option_id": "bounded_s8_offline_candidate_no_generate_no_activation", "custom_text": null,
+        "decision_text": "批准 D40：bounded_s8_offline_candidate_no_generate_no_activation。D40 显式 supersede D39，仅解除其 stop-before-S8 边界：授权在本地 Worker/Server/Web 仓库和 CI 内盘点现有 exact-pinned current package 的 S8 public interfaces，并在用户确认行为计划后按 one-test-at-a-time RED -> GREEN 完成 bounded offline candidate。只允许 deterministic synthetic fixtures、纯离线验证和 evaluator composition；这些产物不得冒充真实签名 benchmark-bundle/v1、release-gate-policy/v1、release-gate-report/v1、release-gate-attestation/v1 或发布证据。Contract source、schema、protocol、package changes 和 Generate count 均保持为零；若现有 exact current package 无法表达必需行为，必须记录新的 SPEC_GAP 并停止。继续禁止 D24 实现或激活、deployment、修改已部署 Worker、production traffic、真实 benchmark/evidence signing、canary、cutover、legacy 删除、fallback、dual path、compatibility/downgrade、second authority/store/runner 和 codegraph；本决议不授权真实 release 或 MVP DoD closure。",
+        "authority": "user", "decided_at": "2026-08-04",
+        "evidence_refs": ["conversation:user-approval:2026-08-04:bounded_s8_offline_candidate_no_generate_no_activation"],
+        "resolution_sha256": "ce023be3c467370077f967bb7e17e9dee2064ea1fbe213a7a97b6815aec6cdc9"
+      },
+      "supersedes": ["D39"]
     }
   ]
 }

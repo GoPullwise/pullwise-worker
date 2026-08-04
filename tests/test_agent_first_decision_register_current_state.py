@@ -84,7 +84,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         self.assertEqual([], report["failures"])
         self.assertIsNone(report["active_decision_id"])
         self.assertEqual(0, report["pending_decision_count"])
-        self.assertEqual(38, report["resolved_decision_count"])
+        self.assertEqual(39, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -127,6 +127,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D37": ("bounded_s4_contract_closure_one_generate_no_activation", "ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70"),
             "D38": ("bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation", "d1cbc20e4220c6d073d01a060cce1ae2f109459e0c110d4e403c41ecd0303368"),
             "D39": ("bounded_s7_transport_attempt_binding_one_generate_no_activation", "85365d344a6bc0d36d5d11dbc088278722083bf51e98c9cd518dd3d57ac90f9c"),
+            "D40": ("bounded_s8_offline_candidate_no_generate_no_activation", "ce023be3c467370077f967bb7e17e9dee2064ea1fbe213a7a97b6815aec6cdc9"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():
@@ -160,12 +161,12 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
-        expected_order.extend(f"D{number}" for number in range(28, 40))
+        expected_order.extend(f"D{number}" for number in range(28, 41))
         self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
             [
                 *[item["id"] for item in REQUIRED_CATALOG],
-                *[f"D{number}" for number in range(27, 40)],
+                *[f"D{number}" for number in range(27, 41)],
             ],
             [item["id"] for item in register["decisions"]],
         )

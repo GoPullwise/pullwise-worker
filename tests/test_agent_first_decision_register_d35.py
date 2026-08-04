@@ -24,12 +24,12 @@ class AgentFirstDecisionRegisterD35Test(unittest.TestCase):
 
     def test_d35_is_an_append_only_resolved_supersession_of_d34(self) -> None:
         self.assertEqual(
-            ["D35", "D36", "D37", "D38", "D39"],
-            self.register["question_order"][-5:],
+            ["D35", "D36", "D37", "D38", "D39", "D40"],
+            self.register["question_order"][-6:],
         )
         self.assertEqual(
-            ["D35", "D36", "D37", "D38", "D39"],
-            [item["id"] for item in self.register["decisions"][-5:]],
+            ["D35", "D36", "D37", "D38", "D39", "D40"],
+            [item["id"] for item in self.register["decisions"][-6:]],
         )
         self.assertEqual("current-candidate-replacement-generate", self.decision["key"])
         self.assertEqual("resolved", self.decision["status"])

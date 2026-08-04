@@ -50,6 +50,7 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 | `D37` | `MVP S4` | S4 bootstrap and checkpoint contract gap | `resolved` | `active` | `S4` | D6, D7, D8, D23, D28, D29, D30, D31, D32, D36 | `bounded_s4_contract_closure_one_generate_no_activation` |
 | `D38` | `MVP S5` | S5 terminal control and selector contract gap | `resolved` | `active` | `S5` | D5, D8, D9, D10, D13, D20, D23, D25, D28, D29, D30, D31, D33, D36, D37 | `bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation` |
 | `D39` | `MVP S7` | S7 authenticated outer transport attempt binding gap | `resolved` | `active` | `S7` | D8, D9, D23, D25, D28, D29, D30, D31, D34, D36, D37, D38 | `bounded_s7_transport_attempt_binding_one_generate_no_activation` |
+| `D40` | `MVP S8` | S8 bounded offline candidate authorization | `resolved` | `active` | `S8` | D20, D21, D22, D23, D24, D27, D28, D29, D34, D36, D39 | `bounded_s8_offline_candidate_no_generate_no_activation` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -885,4 +886,25 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 **Effects:** `authority`, `data_model`, `external_behavior`, `permission`, `state_semantics`
 
 **Sources:** `implementation-stop:2026-07-31:s7-transport-attempt-binding-gap`, `handoff:2026-08-03:s7-decision-boundary`, `conversation:user-approval:2026-08-03:bounded_s7_transport_attempt_binding_one_generate_no_activation`
+
+### D40 — S8 bounded offline candidate authorization
+
+**Stored status:** `resolved`; **applicability:** `active`; **required before:** `S8`.
+
+**Question:** D39 closure is complete and the user has approved bounded local/offline S8 audit and TDD without Generate or activation. Which append-only boundary may permit an offline S8 candidate while preserving every release, operator, deployment, and production prohibition and stopping on any current-package gap?
+
+**Options:**
+
+- `bounded_s8_offline_candidate_no_generate_no_activation` — selected by resolution: Permit read-only S8 surface discovery and one-behavior-at-a-time local/CI TDD against the existing exact-pinned current package, using only deterministic synthetic fixtures and offline evaluator composition; keep contract/package generation and every activation or release operation prohibited. This is the smallest boundary that moves S8 implementation evidence forward without fabricating signed benchmark artifacts, assigning release principals, changing the current package, or converting local tests into deployment authority. Consequences: D40 supersedes D39 only to lift stop-before-S8 for a bounded local/offline candidate; D39's consumed Generate is not restored and Generate count remains zero; Contract source, schema, protocol, and package changes remain prohibited; if the exact current package cannot express a required public behavior, record a new SPEC_GAP and stop; Synthetic fixtures and offline validation may prove code behavior but cannot be represented as real signed benchmark-bundle/v1, release-gate-policy/v1, release-gate-report/v1, release-gate-attestation/v1, release, or MVP DoD evidence; D24 implementation or activation, deployment, changes to a deployed Worker, production traffic, real benchmark or evidence signing, canary, cutover, legacy deletion, fallback, dual path, compatibility/downgrade, second authority/store/runner, and codegraph remain prohibited
+- `defer_s8_keep_d39_boundary`: Keep D39's stop-before-S8 boundary and perform no S8 audit, test, or implementation work. This preserves the completed S7 candidate unchanged but makes no progress on the approved offline S8 candidate. Consequences: No S8 work, Generate, D24 implementation or activation, release, deployment, production traffic, canary, cutover, or legacy deletion is authorized
+
+**Resolution:** `bounded_s8_offline_candidate_no_generate_no_activation` (`option`). 批准 D40：bounded_s8_offline_candidate_no_generate_no_activation。D40 显式 supersede D39，仅解除其 stop-before-S8 边界：授权在本地 Worker/Server/Web 仓库和 CI 内盘点现有 exact-pinned current package 的 S8 public interfaces，并在用户确认行为计划后按 one-test-at-a-time RED -> GREEN 完成 bounded offline candidate。只允许 deterministic synthetic fixtures、纯离线验证和 evaluator composition；这些产物不得冒充真实签名 benchmark-bundle/v1、release-gate-policy/v1、release-gate-report/v1、release-gate-attestation/v1 或发布证据。Contract source、schema、protocol、package changes 和 Generate count 均保持为零；若现有 exact current package 无法表达必需行为，必须记录新的 SPEC_GAP 并停止。继续禁止 D24 实现或激活、deployment、修改已部署 Worker、production traffic、真实 benchmark/evidence signing、canary、cutover、legacy 删除、fallback、dual path、compatibility/downgrade、second authority/store/runner 和 codegraph；本决议不授权真实 release 或 MVP DoD closure。
+
+**Authority/evidence:** `user` on `2026-08-04`; `conversation:user-approval:2026-08-04:bounded_s8_offline_candidate_no_generate_no_activation`; digest `ce023be3c467370077f967bb7e17e9dee2064ea1fbe213a7a97b6815aec6cdc9`.
+
+**Supersedes:** D39
+
+**Effects:** `authority`, `external_behavior`, `permission`, `release_ownership`
+
+**Sources:** `handoff:2026-08-04:s8-spec-gap`, `conversation:user-approval:2026-08-04:bounded_s8_offline_candidate_no_generate_no_activation`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->
