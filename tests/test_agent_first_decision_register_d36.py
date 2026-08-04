@@ -32,7 +32,7 @@ class AgentFirstDecisionRegisterD36Test(unittest.TestCase):
             ["D36", "D37", "D38", "D39", "D40", "D41"],
             [item["id"] for item in self.register["decisions"][-6:]],
         )
-        self.assertEqual("D41", self.register["active_decision_id"])
+        self.assertIsNone(self.register["active_decision_id"])
         self.assertEqual(
             "mvp-s3-s7-implementation-authorization", self.decision["key"]
         )
@@ -88,10 +88,10 @@ class AgentFirstDecisionRegisterD36Test(unittest.TestCase):
                     REPO_ROOT,
                     require_slice=required_slice,
                 )
-                self.assertEqual("valid_pending", report["status"])
+                self.assertEqual("ready", report["status"])
                 self.assertTrue(report["valid"])
-                self.assertFalse(report["ready"])
-                self.assertEqual("D41", report["active_decision_id"])
+                self.assertTrue(report["ready"])
+                self.assertIsNone(report["active_decision_id"])
                 self.assertEqual([], report["failures"])
 
     def test_recommended_option_separates_implementation_from_activation(self) -> None:

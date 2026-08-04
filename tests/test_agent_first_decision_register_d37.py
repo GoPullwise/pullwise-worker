@@ -29,7 +29,7 @@ class AgentFirstDecisionRegisterD37Test(unittest.TestCase):
             ["D37", "D38", "D39", "D40", "D41"],
             [item["id"] for item in self.register["decisions"][-5:]],
         )
-        self.assertEqual("D41", self.register["active_decision_id"])
+        self.assertIsNone(self.register["active_decision_id"])
         self.assertEqual("resolved", self.decision["status"])
         self.assertEqual(["D36"], self.decision["supersedes"])
         self.assertEqual("S4", self.decision["required_by_slice"])
@@ -113,8 +113,8 @@ class AgentFirstDecisionRegisterD37Test(unittest.TestCase):
             with self.subTest(invariant=invariant):
                 self.assertIn(invariant, text)
 
-    def test_resolved_d37_remains_valid_while_pending_d41_blocks_s8(self) -> None:
-        for slice_id in ("S3", "S4", "S5", "S6", "S7"):
+    def test_resolved_d37_remains_valid_with_resolved_d41(self) -> None:
+        for slice_id in ("S3", "S4", "S5", "S6", "S7", "S8"):
             with self.subTest(slice_id=slice_id):
                 report = verify_register(
                     self.register,
@@ -122,25 +122,11 @@ class AgentFirstDecisionRegisterD37Test(unittest.TestCase):
                     require_slice=slice_id,
                     check_history=False,
                 )
-                self.assertEqual("valid_pending", report["status"])
+                self.assertEqual("ready", report["status"])
                 self.assertTrue(report["valid"])
-                self.assertFalse(report["ready"])
-                self.assertEqual("D41", report["active_decision_id"])
+                self.assertTrue(report["ready"])
+                self.assertIsNone(report["active_decision_id"])
                 self.assertEqual([], report["failures"])
-
-        report = verify_register(
-            self.register,
-            REPO_ROOT,
-            require_slice="S8",
-            check_history=False,
-        )
-        self.assertEqual("blocked", report["status"])
-        self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
-        self.assertEqual("D41", report["active_decision_id"])
-        self.assertEqual(
-            ["D41"], report["failures"][0]["decision_ids"]
-        )
 
 
 if __name__ == "__main__":

@@ -336,15 +336,19 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         self.assertIn(resolution["resolution_sha256"], rendered)
         self.assertIn("**Supersedes:** none", rendered)
 
-    def test_rendered_register_preserves_d37_and_exposes_pending_d41(self) -> None:
+    def test_rendered_register_preserves_d37_and_exposes_resolved_d41(self) -> None:
         register = load_register(REGISTER_PATH)
         rendered = render_document(register)
         tick = chr(96)
         decision = next(
             item for item in register["decisions"] if item["id"] == "D37"
         )
+        d41 = next(
+            item for item in register["decisions"] if item["id"] == "D41"
+        )
 
-        self.assertIn(f"Active question: {tick}D41{tick}.", rendered)
+        self.assertIn(f"Active question: {tick}none{tick}.", rendered)
+        self.assertNotIn(f"Active question: {tick}D41{tick}.", rendered)
         self.assertNotIn(f"Active question: {tick}D37{tick}.", rendered)
         self.assertNotIn(f"Active question: {tick}D36{tick}.", rendered)
         self.assertIn("mvp_s3_s7_implementation_only_no_external_activation", rendered)
@@ -352,12 +356,14 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
         self.assertIn(decision["resolution"]["decision_text"], rendered)
         self.assertIn(decision["resolution"]["resolution_sha256"], rendered)
         self.assertIn("**Supersedes:** D36", rendered)
-        self.assertIn(
+        self.assertNotIn(
             f"{tick}bounded_s8_raw_evidence_contract_one_generate_no_activation{tick} "
             "— non-normative recommendation, not selected",
             rendered,
         )
-        self.assertIn("**Resolution:** No option has been selected.", rendered)
+        self.assertIn(d41["resolution"]["decision_text"], rendered)
+        self.assertIn(d41["resolution"]["resolution_sha256"], rendered)
+        self.assertIn("**Supersedes:** D40", rendered)
 
     def test_resolved_history_is_immutable(self) -> None:
         prior = _resolved_d1()

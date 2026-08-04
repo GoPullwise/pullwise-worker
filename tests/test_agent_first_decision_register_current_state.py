@@ -78,13 +78,13 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
-        self.assertEqual("valid_pending", report["status"])
+        self.assertEqual("ready", report["status"])
         self.assertTrue(report["valid"])
-        self.assertFalse(report["ready"])
+        self.assertTrue(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertEqual("D41", report["active_decision_id"])
-        self.assertEqual(1, report["pending_decision_count"])
-        self.assertEqual(39, report["resolved_decision_count"])
+        self.assertIsNone(report["active_decision_id"])
+        self.assertEqual(0, report["pending_decision_count"])
+        self.assertEqual(40, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
         self.assertTrue(report["document_matches"])
@@ -128,6 +128,7 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             "D38": ("bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation", "d1cbc20e4220c6d073d01a060cce1ae2f109459e0c110d4e403c41ecd0303368"),
             "D39": ("bounded_s7_transport_attempt_binding_one_generate_no_activation", "85365d344a6bc0d36d5d11dbc088278722083bf51e98c9cd518dd3d57ac90f9c"),
             "D40": ("bounded_s8_offline_candidate_no_generate_no_activation", "ce023be3c467370077f967bb7e17e9dee2064ea1fbe213a7a97b6815aec6cdc9"),
+            "D41": ("bounded_s8_raw_evidence_contract_one_generate_no_activation", "ccfa987beb48b1158a0122b13ed6bab40bd955e5142fbd1e0fc56f7151b1cca5"),
         }
         decisions = {item["id"]: item for item in register["decisions"]}
         for decision_id, expected in expected_resolutions.items():
@@ -171,8 +172,8 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
             [item["id"] for item in register["decisions"]],
         )
         self.assertEqual(["D4"], decisions["D27"]["supersedes"])
-        self.assertEqual("pending", decisions["D41"]["status"])
-        self.assertIsNone(decisions["D41"]["resolution"])
+        self.assertEqual("resolved", decisions["D41"]["status"])
+        self.assertEqual(["D40"], decisions["D41"]["supersedes"])
 
     def test_current_package_questions_are_append_only_suffix(self) -> None:
         register = load_register(REGISTER_PATH)

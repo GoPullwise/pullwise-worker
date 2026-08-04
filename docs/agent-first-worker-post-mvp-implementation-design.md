@@ -31,6 +31,7 @@
 <!-- D38@sha256:d1cbc20e4220c6d073d01a060cce1ae2f109459e0c110d4e403c41ecd0303368 -->
 <!-- D39@sha256:85365d344a6bc0d36d5d11dbc088278722083bf51e98c9cd518dd3d57ac90f9c -->
 <!-- D40@sha256:ce023be3c467370077f967bb7e17e9dee2064ea1fbe213a7a97b6815aec6cdc9 -->
+<!-- D41@sha256:ccfa987beb48b1158a0122b13ed6bab40bd955e5142fbd1e0fc56f7151b1cca5 -->
 <!-- END AGENT-FIRST DECISION REFS: POST_CLOSURE -->
 
 ## D27 clean-break override（Normative）

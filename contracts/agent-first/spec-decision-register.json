@@ -1,7 +1,7 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": "D41",
+  "active_decision_id": null,
   "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40", "D41"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
@@ -949,7 +949,7 @@
     {
       "id": "D41", "key": "s8-raw-evidence-contract-closure", "scope": "MVP S8", "title": "S8 reproducible raw benchmark evidence gap",
       "question": "The D40 audit proves that release-gate-report/v1 retains only aggregate sample counts and caller-supplied observed values: the exact current package has no raw sample records, per-sample excluded reason, raw-evidence ContentRef, or derivation that can reproduce the required rates and Wilson upper bound. Which bounded closure may make offline report production reproducible without bypassing the Server-owned package or authorizing release activation?",
-      "status": "pending", "depends_on": ["D22", "D23", "D28", "D29", "D40"], "activation": null, "required_by_slice": "S8",
+      "status": "resolved", "depends_on": ["D22", "D23", "D28", "D29", "D40"], "activation": null, "required_by_slice": "S8",
       "effects": ["authority", "data_model", "external_behavior", "permission", "release_ownership", "state_semantics"],
       "source_refs": ["implementation-stop:2026-08-04:s8-raw-evidence-contract-gap", "audit:2026-08-04:release-gate-report-missing-raw-evidence-binding"],
       "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
@@ -980,8 +980,14 @@
         }
       ],
       "recommended_option_id": "bounded_s8_raw_evidence_contract_one_generate_no_activation",
-      "resolution": null,
-      "supersedes": []
+      "resolution": {
+        "kind": "option", "selected_option_id": "bounded_s8_raw_evidence_contract_one_generate_no_activation", "custom_text": null,
+        "decision_text": "我批准 D41：bounded_s8_raw_evidence_contract_one_generate_no_activation",
+        "authority": "user", "decided_at": "2026-08-04",
+        "evidence_refs": ["conversation:user-approval:2026-08-04:bounded_s8_raw_evidence_contract_one_generate_no_activation"],
+        "resolution_sha256": "ccfa987beb48b1158a0122b13ed6bab40bd955e5142fbd1e0fc56f7151b1cca5"
+      },
+      "supersedes": ["D40"]
     }
   ]
 }
