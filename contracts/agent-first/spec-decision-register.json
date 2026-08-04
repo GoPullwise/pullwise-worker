@@ -1,8 +1,8 @@
 {
   "schema_id": "pullwise-agent-first-spec-decision-register/v1",
   "register_id": "agent-first-spec-remediation-2026-07-17",
-  "active_decision_id": null,
-  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"],
+  "active_decision_id": "D41",
+  "question_order": ["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D27", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20", "D21", "D23", "D24", "D25", "D26", "D22", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40", "D41"],
   "document": {
     "path": "docs/agent-first-worker-spec-decision-register.md",
     "start_marker": "<!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->",
@@ -12,11 +12,11 @@
     {"id": "target-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "mvp-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
     {"id": "post-authority-scope", "decision_ids": ["D1", "D2", "D27"]},
-    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29", "D31", "D32", "D33", "D36", "D37", "D38", "D39", "D40"]},
-    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D36", "D37", "D38", "D39", "D40"]},
+    {"id": "mvp-contract-pack", "decision_ids": ["D3", "D4", "D11", "D15", "D16", "D17", "D27", "D28", "D29", "D31", "D32", "D33", "D36", "D37", "D38", "D39", "D40", "D41"]},
+    {"id": "mvp-state-semantics", "decision_ids": ["D3", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D36", "D37", "D38", "D39", "D40", "D41"]},
     {"id": "mvp-legacy-mapping", "decision_ids": ["D4", "D9", "D12", "D13", "D18", "D19", "D20", "D27"]},
-    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30", "D31", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"]},
-    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40"]}
+    {"id": "mvp-executable-gates", "decision_ids": ["D9", "D20", "D21", "D22", "D27", "D28", "D29", "D30", "D31", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40", "D41"]},
+    {"id": "post-closure", "decision_ids": ["D8", "D23", "D24", "D25", "D26", "D27", "D28", "D29", "D30", "D31", "D32", "D33", "D34", "D35", "D36", "D37", "D38", "D39", "D40", "D41"]}
   ],
   "decisions": [
     {
@@ -945,6 +945,43 @@
         "resolution_sha256": "ce023be3c467370077f967bb7e17e9dee2064ea1fbe213a7a97b6815aec6cdc9"
       },
       "supersedes": ["D39"]
+    },
+    {
+      "id": "D41", "key": "s8-raw-evidence-contract-closure", "scope": "MVP S8", "title": "S8 reproducible raw benchmark evidence gap",
+      "question": "The D40 audit proves that release-gate-report/v1 retains only aggregate sample counts and caller-supplied observed values: the exact current package has no raw sample records, per-sample excluded reason, raw-evidence ContentRef, or derivation that can reproduce the required rates and Wilson upper bound. Which bounded closure may make offline report production reproducible without bypassing the Server-owned package or authorizing release activation?",
+      "status": "pending", "depends_on": ["D22", "D23", "D28", "D29", "D40"], "activation": null, "required_by_slice": "S8",
+      "effects": ["authority", "data_model", "external_behavior", "permission", "release_ownership", "state_semantics"],
+      "source_refs": ["implementation-stop:2026-08-04:s8-raw-evidence-contract-gap", "audit:2026-08-04:release-gate-report-missing-raw-evidence-binding"],
+      "affected_units": ["mvp-contract-pack", "mvp-state-semantics", "mvp-executable-gates", "post-closure"],
+      "options": [
+        {
+          "id": "bounded_s8_raw_evidence_contract_one_generate_no_activation",
+          "summary": "Add one canonical release-gate-sample-set/v1 family containing the frozen raw samples and excluded samples with per-sample reasons, exact-bind it from release-gate-report/v1 through a ContentRef and digest, and freeze deterministic report/statistics derivation before exactly one Generate; then resume local/offline report-builder TDD only.",
+          "rationale": "A signed report can be reproducible only when its denominators, exclusions, oracle outcomes, profile consumption, derived basis-point metrics, Wilson calculation, and verdict are mechanically derived from exact-bound canonical evidence instead of caller-supplied aggregates.",
+          "consequences": [
+            "If selected, D41 supersedes D40 only for this proven raw-evidence/report-production package gap and one new Generate boundary; D40's bounded offline-only authority and every external prohibition remain controlling",
+            "Server-owned source must define release-gate-sample-set/v1 ownership, sample identity/order/uniqueness, benchmark task/seed/repeat binding, valid versus excluded union, per-sample infrastructure reasons, oracle and profile facts, exact ContentRef/digest binding, rate denominators, integer rounding, Wilson computation, and PASS/FAIL/INDETERMINATE derivation",
+            "Valid/invalid/golden/idempotency and adversarial fixtures, semantic closure, registry/DAG/digest checks, and Python/Node parity must pass before exactly one Generate; Server/Worker/Web exact pins and producer provenance must be synchronized immediately afterward",
+            "After generation, implementation is limited to one-behavior-at-a-time local/offline report-builder TDD with deterministic synthetic evidence; no real benchmark, evidence signing, attestation, release, or MVP DoD claim is authorized",
+            "D24 implementation or activation, deployment, changes to a deployed Worker, production traffic, real signing, canary, cutover, legacy deletion, fallback, dual path, compatibility/downgrade, second authority/store/runner, and codegraph remain prohibited"
+          ]
+        },
+        {
+          "id": "runtime_only_untyped_samples_no_generate",
+          "summary": "Keep the package unchanged and let a local runtime builder accept an unversioned raw-sample dictionary that is not exact-bound from release-gate-report/v1.",
+          "rationale": "This avoids Generate but creates a second untyped contract and cannot prove that report counts, observed values, Wilson output, or exclusions came from the signed report evidence.",
+          "consequences": ["The D22 reproducibility requirement remains unsatisfied and the S8 candidate must not be treated as release evidence"]
+        },
+        {
+          "id": "defer_s8_keep_d40_gap",
+          "summary": "Keep the exact current package and stop S8 at the proven raw-evidence contract boundary.",
+          "rationale": "This preserves D40's zero-Generate boundary without inventing an unversioned evidence shape or caller-selected statistics.",
+          "consequences": ["No contract source edit, Generate, report-builder implementation, activation, release, deployment, production traffic, signing, canary, or cutover is authorized"]
+        }
+      ],
+      "recommended_option_id": "bounded_s8_raw_evidence_contract_one_generate_no_activation",
+      "resolution": null,
+      "supersedes": []
     }
   ]
 }

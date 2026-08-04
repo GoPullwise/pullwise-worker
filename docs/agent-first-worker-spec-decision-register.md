@@ -7,7 +7,7 @@ Machine source: contracts/agent-first/spec-decision-register.json.
 <!-- BEGIN GENERATED AGENT-FIRST DECISION REGISTER -->
 > Generated from `agent-first-spec-remediation-2026-07-17`. Recommendations are non-normative and are never resolutions. Do not edit this block by hand.
 
-Active question: `none`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
+Active question: `D41`. Questions are asked one at a time. User silence, existing prose, current code, and Agent inference cannot resolve a decision.
 
 | ID | Scope | Decision | Stored status | Applicability | Required before | Depends on | Non-normative recommendation |
 |---|---|---|---|---|---|---|---|
@@ -51,6 +51,7 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 | `D38` | `MVP S5` | S5 terminal control and selector contract gap | `resolved` | `active` | `S5` | D5, D8, D9, D10, D13, D20, D23, D25, D28, D29, D30, D31, D33, D36, D37 | `bounded_s5_terminal_control_and_selector_closure_one_generate_no_activation` |
 | `D39` | `MVP S7` | S7 authenticated outer transport attempt binding gap | `resolved` | `active` | `S7` | D8, D9, D23, D25, D28, D29, D30, D31, D34, D36, D37, D38 | `bounded_s7_transport_attempt_binding_one_generate_no_activation` |
 | `D40` | `MVP S8` | S8 bounded offline candidate authorization | `resolved` | `active` | `S8` | D20, D21, D22, D23, D24, D27, D28, D29, D34, D36, D39 | `bounded_s8_offline_candidate_no_generate_no_activation` |
+| `D41` | `MVP S8` | S8 reproducible raw benchmark evidence gap | `pending` | `active` | `S8` | D22, D23, D28, D29, D40 | `bounded_s8_raw_evidence_contract_one_generate_no_activation` |
 
 ### D1 — MVP/Post-MVP 产品范围
 
@@ -907,4 +908,24 @@ Active question: `none`. Questions are asked one at a time. User silence, existi
 **Effects:** `authority`, `external_behavior`, `permission`, `release_ownership`
 
 **Sources:** `handoff:2026-08-04:s8-spec-gap`, `conversation:user-approval:2026-08-04:bounded_s8_offline_candidate_no_generate_no_activation`
+
+### D41 — S8 reproducible raw benchmark evidence gap
+
+**Stored status:** `pending`; **applicability:** `active`; **required before:** `S8`.
+
+**Question:** The D40 audit proves that release-gate-report/v1 retains only aggregate sample counts and caller-supplied observed values: the exact current package has no raw sample records, per-sample excluded reason, raw-evidence ContentRef, or derivation that can reproduce the required rates and Wilson upper bound. Which bounded closure may make offline report production reproducible without bypassing the Server-owned package or authorizing release activation?
+
+**Options:**
+
+- `bounded_s8_raw_evidence_contract_one_generate_no_activation` — non-normative recommendation, not selected: Add one canonical release-gate-sample-set/v1 family containing the frozen raw samples and excluded samples with per-sample reasons, exact-bind it from release-gate-report/v1 through a ContentRef and digest, and freeze deterministic report/statistics derivation before exactly one Generate; then resume local/offline report-builder TDD only. A signed report can be reproducible only when its denominators, exclusions, oracle outcomes, profile consumption, derived basis-point metrics, Wilson calculation, and verdict are mechanically derived from exact-bound canonical evidence instead of caller-supplied aggregates. Consequences: If selected, D41 supersedes D40 only for this proven raw-evidence/report-production package gap and one new Generate boundary; D40's bounded offline-only authority and every external prohibition remain controlling; Server-owned source must define release-gate-sample-set/v1 ownership, sample identity/order/uniqueness, benchmark task/seed/repeat binding, valid versus excluded union, per-sample infrastructure reasons, oracle and profile facts, exact ContentRef/digest binding, rate denominators, integer rounding, Wilson computation, and PASS/FAIL/INDETERMINATE derivation; Valid/invalid/golden/idempotency and adversarial fixtures, semantic closure, registry/DAG/digest checks, and Python/Node parity must pass before exactly one Generate; Server/Worker/Web exact pins and producer provenance must be synchronized immediately afterward; After generation, implementation is limited to one-behavior-at-a-time local/offline report-builder TDD with deterministic synthetic evidence; no real benchmark, evidence signing, attestation, release, or MVP DoD claim is authorized; D24 implementation or activation, deployment, changes to a deployed Worker, production traffic, real signing, canary, cutover, legacy deletion, fallback, dual path, compatibility/downgrade, second authority/store/runner, and codegraph remain prohibited
+- `runtime_only_untyped_samples_no_generate`: Keep the package unchanged and let a local runtime builder accept an unversioned raw-sample dictionary that is not exact-bound from release-gate-report/v1. This avoids Generate but creates a second untyped contract and cannot prove that report counts, observed values, Wilson output, or exclusions came from the signed report evidence. Consequences: The D22 reproducibility requirement remains unsatisfied and the S8 candidate must not be treated as release evidence
+- `defer_s8_keep_d40_gap`: Keep the exact current package and stop S8 at the proven raw-evidence contract boundary. This preserves D40's zero-Generate boundary without inventing an unversioned evidence shape or caller-selected statistics. Consequences: No contract source edit, Generate, report-builder implementation, activation, release, deployment, production traffic, signing, canary, or cutover is authorized
+
+**Resolution:** No option has been selected.
+
+**Supersedes:** none
+
+**Effects:** `authority`, `data_model`, `external_behavior`, `permission`, `release_ownership`, `state_semantics`
+
+**Sources:** `implementation-stop:2026-08-04:s8-raw-evidence-contract-gap`, `audit:2026-08-04:release-gate-report-missing-raw-evidence-binding`
 <!-- END GENERATED AGENT-FIRST DECISION REGISTER -->
