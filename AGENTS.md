@@ -262,9 +262,10 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D39; D2 remains pending but inactive
-  under D1. The register is `ready` with 38 resolved records, zero applicable
-  pending records, and no active decision. D37 remains bound to
+- The resolved prefix remains D1 and D3-D40; D2 remains pending but inactive
+  under D1. D41 is the sole applicable pending decision and active question.
+  The register is `valid_pending` overall with 39 resolved records and one
+  applicable pending record; `--require-slice S8` is blocked by D41. D37 remains bound to
   `bounded_s4_contract_closure_one_generate_no_activation` with resolution
   digest `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`;
   its single Generate allowance is consumed by package `0.1.0`, content
@@ -317,11 +318,34 @@ inference never select an option or authorize production implementation.
   Server producer commit is `06ed22299e324a8a39f9030c653aef34044c3d3e`.
   The Worker implementation is local candidate-only: do not Generate again,
   activate D24, deploy, send production traffic/canary, delete legacy paths,
-  add fallback/dual/compatibility/downgrade shims, create a second
-  authority/store/runner, or begin S8. Native Attempt ID substitution remains
-  forbidden.
+  add fallback/dual/compatibility/downgrade shims, or create a second
+  authority/store/runner. Native Attempt ID substitution remains forbidden.
+- D40 (`ce023be3c467370077f967bb7e17e9dee2064ea1fbe213a7a97b6815aec6cdc9`)
+  is bound to `bounded_s8_offline_candidate_no_generate_no_activation`. It
+  supersedes D39 only to lift stop-before-S8 for read-only discovery and
+  one-behavior-at-a-time local/offline TDD against the exact current package.
+  Contract source/schema/protocol/package changes and Generate remained zero.
+  The audit proved that `release-gate-report/v1` retains only aggregate sample
+  counts and caller-supplied observed values: no current family or ContentRef
+  binds raw samples, excluded samples with per-sample reasons, or inputs from
+  which rates and the Wilson upper bound can be reproduced. D40 requires this
+  package gap to be recorded as a new `SPEC_GAP` and stops implementation there.
+- D41 (`s8-raw-evidence-contract-closure`) is that active pending question. Its
+  recommendation is
+  `bounded_s8_raw_evidence_contract_one_generate_no_activation`: one canonical
+  `release-gate-sample-set/v1`, exact report ContentRef/digest binding, frozen
+  statistics derivation, all pre-generation closure/parity gates, exactly one
+  Generate, synchronized Server/Worker/Web exact pins, and then local/offline
+  report-builder TDD only. A recommendation is not authority. Until the user
+  resolves D41, do not edit contract source/schema/protocol/package, Generate,
+  or implement a runtime-only untyped report builder. D24 implementation or
+  activation, deployment, deployed-Worker changes, production traffic, real
+  benchmark/signing/attestation/release, canary, cutover, legacy deletion,
+  fallback, dual/compatibility/downgrade paths, second authority/store/runner,
+  and codegraph remain prohibited.
 - The preceding S7 `SPEC_GAP` text is historical pre-D39 guidance; D39 is the
-  controlling bounded closure and its no-activation boundary remains active.
+  completed S7 closure, D40 controls the bounded audit, and pending D41 now
+  controls the fail-closed S8 boundary.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -456,7 +480,7 @@ include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
 `contracts/agent-first/spec-decision-register.json` is an atomic
-machine-registry exception at 770 physical lines, owned by the Worker
+machine-registry exception at 987 physical lines, owned by the Worker
 specification owner. It stays atomic because one ordered frozen
 question/definition/resolution packet enforces question order behind one
 structural-validation and immutable-history boundary. The considered split is

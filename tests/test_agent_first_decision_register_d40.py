@@ -40,9 +40,12 @@ class AgentFirstDecisionRegisterD40Test(unittest.TestCase):
         self.assertIn("D40", decisions)
         decision = decisions["D40"]
 
-        self.assertEqual("D40", self.register["question_order"][-1])
-        self.assertEqual("D40", self.register["decisions"][-1]["id"])
-        self.assertIsNone(self.register["active_decision_id"])
+        self.assertEqual(["D40", "D41"], self.register["question_order"][-2:])
+        self.assertEqual(
+            ["D40", "D41"],
+            [item["id"] for item in self.register["decisions"][-2:]],
+        )
+        self.assertEqual("D41", self.register["active_decision_id"])
         self.assertEqual("resolved", decision["status"])
         self.assertEqual(["D39"], decision["supersedes"])
         self.assertEqual("S8", decision["required_by_slice"])
@@ -82,9 +85,11 @@ class AgentFirstDecisionRegisterD40Test(unittest.TestCase):
             check_document=False,
             check_history=False,
         )
-        self.assertEqual("ready", report["status"])
+        self.assertEqual("blocked", report["status"])
         self.assertTrue(report["valid"])
-        self.assertEqual([], report["failures"])
+        self.assertFalse(report["ready"])
+        self.assertEqual("D41", report["active_decision_id"])
+        self.assertEqual(["D41"], report["failures"][0]["decision_ids"])
 
 
 if __name__ == "__main__":

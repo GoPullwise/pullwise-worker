@@ -78,12 +78,12 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
         register = load_register(REGISTER_PATH)
         report = verify_register(register, REPO_ROOT)
 
-        self.assertEqual("ready", report["status"])
+        self.assertEqual("valid_pending", report["status"])
         self.assertTrue(report["valid"])
-        self.assertTrue(report["ready"])
+        self.assertFalse(report["ready"])
         self.assertEqual([], report["failures"])
-        self.assertIsNone(report["active_decision_id"])
-        self.assertEqual(0, report["pending_decision_count"])
+        self.assertEqual("D41", report["active_decision_id"])
+        self.assertEqual(1, report["pending_decision_count"])
         self.assertEqual(39, report["resolved_decision_count"])
         self.assertEqual(1, report["inactive_decision_count"])
         self.assertEqual(["D2"], report["inactive_decision_ids"])
@@ -161,16 +161,18 @@ class AgentFirstDecisionRegisterCurrentStateTest(unittest.TestCase):
                 self.assertEqual([evidence_ref], resolution["evidence_refs"])
         expected_order = list(QUESTION_ORDER)
         expected_order.insert(8, "D27")
-        expected_order.extend(f"D{number}" for number in range(28, 41))
+        expected_order.extend(f"D{number}" for number in range(28, 42))
         self.assertEqual(expected_order, register["question_order"])
         self.assertEqual(
             [
                 *[item["id"] for item in REQUIRED_CATALOG],
-                *[f"D{number}" for number in range(27, 41)],
+                *[f"D{number}" for number in range(27, 42)],
             ],
             [item["id"] for item in register["decisions"]],
         )
         self.assertEqual(["D4"], decisions["D27"]["supersedes"])
+        self.assertEqual("pending", decisions["D41"]["status"])
+        self.assertIsNone(decisions["D41"]["resolution"])
 
     def test_current_package_questions_are_append_only_suffix(self) -> None:
         register = load_register(REGISTER_PATH)

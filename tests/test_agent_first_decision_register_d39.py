@@ -47,12 +47,14 @@ class AgentFirstDecisionRegisterD39Test(unittest.TestCase):
 
     def test_d39_records_the_exact_user_approved_s7_binding(self) -> None:
         decision = self._decision()
-        self.assertEqual(["D39", "D40"], self.register["question_order"][-2:])
         self.assertEqual(
-            ["D39", "D40"],
-            [item["id"] for item in self.register["decisions"][-2:]],
+            ["D39", "D40", "D41"], self.register["question_order"][-3:]
         )
-        self.assertIsNone(self.register["active_decision_id"])
+        self.assertEqual(
+            ["D39", "D40", "D41"],
+            [item["id"] for item in self.register["decisions"][-3:]],
+        )
+        self.assertEqual("D41", self.register["active_decision_id"])
         self.assertEqual("resolved", decision["status"])
         self.assertEqual(["D38"], decision["supersedes"])
         self.assertEqual("S7", decision["required_by_slice"])
@@ -153,10 +155,10 @@ class AgentFirstDecisionRegisterD39Test(unittest.TestCase):
             require_slice="S7",
             check_history=False,
         )
-        self.assertEqual("ready", report["status"])
+        self.assertEqual("valid_pending", report["status"])
         self.assertTrue(report["valid"])
-        self.assertTrue(report["ready"])
-        self.assertIsNone(report["active_decision_id"])
+        self.assertFalse(report["ready"])
+        self.assertEqual("D41", report["active_decision_id"])
         self.assertEqual([], report["failures"])
 
 
