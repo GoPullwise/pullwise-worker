@@ -262,10 +262,11 @@ inference never select an option or authorize production implementation.
 - In the generated decision view, the option selected by a resolution must be
   labelled as selected. The non-normative recommendation/not-selected label
   applies only to a recommended option that the resolution did not select.
-- The resolved prefix remains D1 and D3-D40; D2 remains pending but inactive
-  under D1. D41 is the sole applicable pending decision and active question.
-  The register is `valid_pending` overall with 39 resolved records and one
-  applicable pending record; `--require-slice S8` is blocked by D41. D37 remains bound to
+- The resolved prefix remains D1 and D3-D41; D2 remains pending but inactive
+  under D1. There is no applicable pending decision or active question. The
+  register and `--require-slice S8` gate are `ready` with 40 resolved records.
+  This closes the specification decision gate only; it does not prove S8
+  implementation or release evidence. D37 remains bound to
   `bounded_s4_contract_closure_one_generate_no_activation` with resolution
   digest `ae16d63b19bcd6ec81c65daf1668a3bf8878210aed137a59761ca9b36f96aa70`;
   its single Generate allowance is consumed by package `0.1.0`, content
@@ -330,22 +331,28 @@ inference never select an option or authorize production implementation.
   binds raw samples, excluded samples with per-sample reasons, or inputs from
   which rates and the Wilson upper bound can be reproduced. D40 requires this
   package gap to be recorded as a new `SPEC_GAP` and stops implementation there.
-- D41 (`s8-raw-evidence-contract-closure`) is that active pending question. Its
-  recommendation is
-  `bounded_s8_raw_evidence_contract_one_generate_no_activation`: one canonical
-  `release-gate-sample-set/v1`, exact report ContentRef/digest binding, frozen
-  statistics derivation, all pre-generation closure/parity gates, exactly one
-  Generate, synchronized Server/Worker/Web exact pins, and then local/offline
-  report-builder TDD only. A recommendation is not authority. Until the user
-  resolves D41, do not edit contract source/schema/protocol/package, Generate,
-  or implement a runtime-only untyped report builder. D24 implementation or
-  activation, deployment, deployed-Worker changes, production traffic, real
-  benchmark/signing/attestation/release, canary, cutover, legacy deletion,
-  fallback, dual/compatibility/downgrade paths, second authority/store/runner,
-  and codegraph remain prohibited.
+- D41 (`ccfa987beb48b1158a0122b13ed6bab40bd955e5142fbd1e0fc56f7151b1cca5`)
+  is bound to `bounded_s8_raw_evidence_contract_one_generate_no_activation`.
+  It supersedes D40 only for the proven raw-evidence/report-production package
+  gap and one new Generate boundary. Define one Server-owned canonical
+  `release-gate-sample-set/v1`, exact-bind it from `release-gate-report/v1`
+  through ContentRef/digest, and freeze deterministic sample identity/order,
+  exclusions, denominators, integer rounding, Wilson computation, profile
+  consumption, and PASS/FAIL/INDETERMINATE derivation. Valid/invalid/golden/
+  idempotency/adversarial fixtures, semantic closure, registry/DAG/digest, and
+  Python/Node parity must all pass before the exactly-one Generate allowance is
+  consumed; its count is currently `0`. Before Server implementation, present
+  the one-public-behavior/interface contract and TDD plan for user approval.
+  After Generate, synchronize Server/Worker/Web exact pins and producer
+  provenance immediately, then continue only local/offline report-builder TDD
+  with deterministic synthetic evidence. D24 implementation or activation,
+  deployment, deployed-Worker changes, production traffic, real benchmark/
+  signing/attestation/release, canary, cutover, legacy deletion, fallback,
+  dual/compatibility/downgrade paths, second authority/store/runner, and
+  codegraph remain prohibited.
 - The preceding S7 `SPEC_GAP` text is historical pre-D39 guidance; D39 is the
-  completed S7 closure, D40 controls the bounded audit, and pending D41 now
-  controls the fail-closed S8 boundary.
+  completed S7 closure, D40 is the bounded audit authority, and resolved D41
+  controls only the raw-evidence contract closure and single Generate boundary.
   D20 remains bound to
   custom `new_gate_immediate_authority` digest
   `3701e29aac3b42c5f88743cc21ea49cafe685d0d2c4b8ab0ec8ff5619dad023a`; D21 is
@@ -480,7 +487,7 @@ include publisher can preserve one order, one digest gate, and byte-exact
 verification.
 
 `contracts/agent-first/spec-decision-register.json` is an atomic
-machine-registry exception at 987 physical lines, owned by the Worker
+machine-registry exception at 993 physical lines, owned by the Worker
 specification owner. It stays atomic because one ordered frozen
 question/definition/resolution packet enforces question order behind one
 structural-validation and immutable-history boundary. The considered split is
