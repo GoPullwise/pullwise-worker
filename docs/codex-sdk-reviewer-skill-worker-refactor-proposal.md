@@ -1,10 +1,28 @@
 # Codex SDK + Reviewer Skill Worker 重构执行规格
 
-状态：Implementation Specification / Governance-gated / 未授权生产切换
+状态：Candidate Implementation Standard / Governance-gated / `PROPOSED_INERT` / 未授权生产切换
 
-版本：2026-08-05-r2（implementation-readiness 补充）
+版本：2026-08-05-r3（cross-repository execution standard hardening）
 
 范围：`pullwise-worker`、`pullwise-server`、`pullwise-web`、`pullwise-admin`
+
+| 元数据 | 固定值 |
+|---|---|
+| 规范标识 | `pullwise-reviewer-refactor/v1` |
+| 候选 normative unit | `reviewer-refactor-program` |
+| 当前成熟度 | `CANDIDATE_NOT_ACTIVE` |
+| 当前可执行边界 | 现有只读检查与 inert 规范自检；`SPEC-READY-04-BOOTSTRAP` PASS 前不得声称 GOV-0A collector 已可执行 |
+| 机器入口 | `docs/reviewer-refactor/spec-manifest.json`、`readiness.json`、`execution-cards.json` |
+
+本规格与下列配套文件构成同一个 content-addressed 候选规范单元：
+
+- `docs/reviewer-refactor/authority-and-readiness.md`
+- `docs/reviewer-refactor/evidence-and-determinism.md`
+- `docs/reviewer-refactor/runtime-contract-and-security.md`
+- `docs/reviewer-refactor/skill-context-and-evaluation.md`
+- `docs/reviewer-refactor/operations-and-execution.md`
+
+配套文件只细化本规格；发现同版本冲突时整体为 `INDETERMINATE`，不得以文件顺序静默覆盖。文件名中的 `proposal` 仅为链接稳定性，不表示本文落库、合并或被引用即获得 authority。
 
 ## 0. 文档地位与授权边界
 
@@ -12,12 +30,12 @@
 
 - `contracts/agent-first/spec-decision-register.json` 仍是当前决策权威。冲突的生产实现必须先由 append-only 新决策逐项 supersede。
 - 当前 D41 仍禁止 D24 激活、部署、生产流量、真实 benchmark、canary、cutover 和 legacy 删除。
-- Stage 0A 可立即执行的只有只读取证、不可覆盖 evidence 和 inert docs/decision packet。即使某个 tracked baseline/test/script 修复不改变既有语义，也必须先证明当前 resolution/`AGENTS.md` exact 授权该 write set；本文不提供该授权。Stage 0B 若替换 gate 或改变 completion 语义，必须先有 append-only 决策。Stage A 需架构所有者参与；Stage B 需新决策明确授权离线 candidate；Stage C–F 在前序门和显式授权前均为 `NO-GO`。
+- `SPEC-READY-04-BOOTSTRAP` PASS 前可立即执行的只有现有只读命令与 inert 规范自检；正式 GOV-0A collector 尚不存在，不得把人工目录或手写 JSON 冒充标准 evidence generation。collector 交付后，Stage 0A 仍只允许只读取证、不可覆盖 evidence 和 exact-bound inert docs/decision packet。即使某个 tracked baseline/test/script 修复不改变既有语义，也必须先证明当前 resolution/`AGENTS.md` exact 授权该 write set；本文不提供该授权。Stage 0B 若替换 gate 或改变 completion 语义，必须先有 append-only 决策。Stage A 需架构所有者参与；Stage B 需新决策明确授权离线 candidate；Stage C–F 在前序门和显式授权前均为 `NO-GO`。
 - 生产始终只有一个 current contract；不得增加 shadow authority、fallback、双写/双读、协议协商、downgrade 或 compatibility mode。
 
 | 阶段 | 当前可执行 | 额外授权 |
 |---|---|---|
-| Stage 0A 证据/provenance | 是（仓外只读 bootstrap；其后可独立应用 exact inert-doc bytes） | tracked docs apply 必须 byte-match bootstrap proposal；baseline/test/script 的任何写入另需现行 exact write-set 授权；不得借修复改规则 |
+| Stage 0A 证据/provenance | 部分：现有只读审计可做；formal collector 在 `SPEC-READY-04` 前不可做 | collector exact bytes/self-test + RR-GOV bootstrap binding；tracked docs apply 必须 byte-match proposal；baseline/test/script 写入另需现行 exact write-set 授权 |
 | Stage 0B gate replacement | 否 | RR-GOV draft/freeze 记录先冻结 history/live catalog、三态、目标 bytes/digests 和替换义务 |
 | Stage A 决策/契约冻结 | 否 | Stage 0B verified PASS + signed advance；RR-SCOPE/TRUST/TRUTH/EVAL/CUT 逐项 draft→freeze |
 | Stage B 离线 candidate | 否 | 新决策取代 D41 停止边界 |
@@ -39,7 +57,7 @@
 | `FAIL` | 已证明至少一个适用门不满足 |
 | `INDETERMINATE` | 缺证、证据损坏、样本不足、不可比或 gate 自身无法给出确定结论 |
 
-截至本文版本，唯一可以进入 `READY` 的是 `GOV-0A` 的只读取证/inert-document 子范围；其中任何 tracked baseline/test/script 修复仍为 `NOT_AUTHORIZED`，除非另有适用 resolution exact 列出该 write set。`GOV-0B` 及后续工作包全部是 `NOT_AUTHORIZED`。`FAIL` 与 `INDETERMINATE` 都不能被当作软通过；二者也不能通过修改 expected、排除项或删除历史证据转成 `PASS`。
+截至本文版本，只有现有只读审计与本候选规范的 inert self-check 可进入 `READY`；formal `GOV-0A` package 因 collector 未交付而仍是 `NOT_IMPLEMENTED/NOT_AUTHORIZED`。任何 tracked baseline/test/script 修复仍为 `NOT_AUTHORIZED`，除非另有适用 resolution exact 列出该 write set。`GOV-0B` 及后续工作包全部是 `NOT_AUTHORIZED`。`FAIL` 与 `INDETERMINATE` 都不能被当作软通过；二者也不能通过修改 expected、排除项或删除历史证据转成 `PASS`。
 
 Decision resolution 只设置允许到达的最大边界，不自动推进阶段。从 Stage A 起，每次进入下一阶段还必须有第 0.4 节的 signed stage-advance record，引用前一阶段 exact PASS evidence、目标 release generation digest、允许的 work packages/write sets 和禁止项；前置 evidence stale、输入 root 或 release generation digest 改变时授权自动失效。Stage 0A→0B 只使用第 0.3 节的一次性 bootstrap 规则和 RR-GOV freeze resolution，不能把该例外扩展到后续阶段。
 
@@ -76,7 +94,7 @@ tracked inert decision bundles 固定在 `pullwise-worker/docs/reviewer-refactor
 2. `GOV-0A` 同时在仓外 evidence generation 的 `proposed-inert/` 中产生 inert `RR-GOV` decision draft bundle 的 exact proposed bytes。它不在采集期间写入任一 worktree，也不被 runtime、generator、schema registry 或 CI release gate 消费；bundle 必须包含拟议目标 path、exact proposed bytes/digests、failing/pass fixtures、旧义务映射、write set 和禁止项。bootstrap 发布后，只有在当前 authority 明确允许 inert docs write set 时，才可把这些 bytes 作为独立 tracked-doc action 写到第 0.6 节路径；复制前后必须 byte-compare，且合并后用新 generation 重新建立 clean snapshot。
 3. architecture/governance owner 可依据 exact bootstrap manifest digest 签发 RR-GOV draft/freeze resolution；这是唯一可以在目标 aggregator 不存在时推进的决策。它只授权 `GOV-0B` 的 `EVD-0` 和 replacement gate write sets，继续禁止 candidate、Generate、benchmark、部署、流量和删除。
 4. `EVD-0` 是 `GOV-0B` 的第一个实现包：先以 tamper/missing/replay/self-check failing fixtures 实现最小 evidence schema/writer/verifier、detached-signature verifier 和 work-package ledger；它不得依赖尚未创建的 v2 runtime/contract。
-5. `EVD-0` 必须重新导入并验证 GOV-0A bootstrap generation、自己的 red/green/direct CI evidence 和 GOV-0B 其余包；连续两次验证必须给出 byte-identical manifest/result。back-validation 将 GOV-0A 的 provisional result 变成 `verified PASS/FAIL/INDETERMINATE`，不得强改为 PASS。GOV-0A 非 PASS 时，只有 RR-GOV-FREEZE-A 已逐项接受该 exact bootstrap digest、解释为何治理 replacement 可关闭不确定性且 EVD-0 证明所有 replacement obligations PASS，GOV-0B 才可在这一次 bootstrap 例外下 PASS。
+5. `EVD-0` 必须重新导入并验证 GOV-0A bootstrap generation、自己的 red/green/direct CI evidence 和 GOV-0B 其余包；对同一 immutable generation 连续两次只读验证必须给出 byte-identical verification verdict/exit。fresh capture 必须新建 generation，只比较 `stable-projection/v1`，不得要求含 generation/timestamp/raw timing 的 manifest/result byte-identical。详细 volatile allowlist 与 fixtures 见 `docs/reviewer-refactor/evidence-and-determinism.md`。back-validation 将 GOV-0A 的 provisional result 变成 `verified PASS/FAIL/INDETERMINATE`，不得强改为 PASS。GOV-0A 非 PASS 时，只有 RR-GOV-FREEZE-A 已逐项接受该 exact bootstrap digest、解释为何治理 replacement 可关闭不确定性且 EVD-0 证明所有 replacement obligations PASS，GOV-0B 才可在这一次 bootstrap 例外下 PASS。
 
 若 bootstrap bytes 缺失、被覆盖、无法复算或 RR-GOV 没有 exact freeze binding，状态保持 `INDETERMINATE/NOT_AUTHORIZED`。此例外不允许手工把任何后续 work package 改成 PASS，也不允许 EVD-0 以“验证器由自己生成”为由省略独立 fixtures、代码审查或 CI evidence。
 
@@ -719,7 +737,7 @@ Worker 在模型 payload 通过 schema/semantic/source/location/coverage 验证�
 - 组件不足时不猜测跨扫描同一性；创建新 issue。
 - 同扫描按 instance id 去重；跨扫描只按 exact issue key。路径移动默认新 issue，除非未来有独立 alias 决策。
 
-finding 必须含 title、severity、numeric confidence `[0,1]`、failure scenario、impact、recommendation、false-positive risk、rule refs、validation status、location。location 含 inventory path、有效行范围、`evidence_sha256` 和有界 span；文件/行/hash 不匹配不得进入 main findings。
+finding 必须含 title、severity、integer `confidence_bps` `0..10000`、failure scenario、impact、recommendation、false-positive risk、rule refs、validation status、location。`10000` 表示 100%，任何进入 canonical JSON 的 confidence 不得使用 float；显示层转换不参与 identity/gate。location 含 inventory path、有效行范围、`evidence_sha256` 和有界 span；文件/行/hash 不匹配不得进入 main findings。
 
 ### 9.3 紧凑 coverage（最多 2,000 个 inventory entries）
 
@@ -854,7 +872,7 @@ RR-GOV 是唯一 bootstrap 变体：GOV-0A 先把 inert draft bundle exact bytes
 3. 以 failing fixtures 证明当前 strict gate 对真正 absent/self-reference 无法给出正确确定性结果，再实现非自引用 verifier。
 4. replacement 必须让 live legacy present=exit `1`/`FAIL`、真正 absent=exit `0`/status `absent`、缺证或历史损坏=exit `2`/`INDETERMINATE`，且 immutable history 不作为 live forbidden input。
 5. CI 默认 ratchet 继续阻止新增 legacy；exact release artifact 在 Stage D 使用 strict gate。不得通过放宽 exclusion、删除历史或只改 expected 获得 PASS。
-6. EVD-0 聚合 GOV-0A/GOV-0B 的直接命令、fixtures、review、line-count、CI 和 decision bindings；生成不可覆盖 signed generation，并用相同输入二次运行证明 deterministic。
+6. EVD-0 聚合 GOV-0A/GOV-0B 的直接命令、fixtures、review、line-count、CI 和 decision bindings；生成不可覆盖 signed generation。对同一 generation 二次只读验证必须产生 byte-identical verdict；对两个新 generation 只比较 schema-governed stable projection，不删除真实漂移。
 
 退出：RR-GOV DRAFT/FREEZE resolution/provenance PASS；EVD-0 schema/signature/stage-advance/ledger tamper fixtures PASS；GOV-0A 已得到 verified final result，且所有被 FREEZE 接受的不确定性有 replacement closure；Slice-0 或有决策的 replacement PASS；absence v2 fixtures/三态 PASS；`GOV-0B/result.json=PASS` 且生产行为未改。
 
