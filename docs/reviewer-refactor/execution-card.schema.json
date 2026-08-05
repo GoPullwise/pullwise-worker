@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pullwise.dev/schemas/reviewer-refactor-execution-cards-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_id", "spec_id", "generation", "cards"],
+  "properties": {
+    "schema_id": {"const": "reviewer-refactor-execution-cards/v1"},
+    "spec_id": {"const": "pullwise-reviewer-refactor/v1"},
+    "generation": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "cards": {"type": "array", "minItems": 18, "maxItems": 18, "items": {"$ref": "#/$defs/card"}}
+  },
+  "$defs": {
+    "stringList": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "repoPath": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repo_id", "path", "path_kind"],
+      "properties": {
+        "repo_id": {"enum": ["worker", "server", "web", "admin", "evidence"]},
+        "path": {"type": "string", "minLength": 1},
+        "path_kind": {"enum": ["file", "tree"]}
+      }
+    },
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "required": ["command_id", "cwd_repo", "argv", "timeout_seconds", "expected_exit", "evidence_outputs"],
+      "properties": {
+        "command_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9._-]{1,63}$"},
+        "cwd_repo": {"enum": ["worker", "server", "web", "admin", "evidence"]},
+        "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 7200},
+        "expected_exit": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0, "maximum": 255}, "uniqueItems": true},
+        "evidence_outputs": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "output": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifact_id", "repo_id", "path", "consumer_state"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 2},
+        "repo_id": {"enum": ["worker", "server", "web", "admin", "evidence"]},
+        "path": {"type": "string", "minLength": 1},
+        "consumer_state": {"enum": ["inert_only", "offline_only", "generated_candidate", "release_current"]}
+      }
+    },
+    "card": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_id", "id", "title", "stage", "authority_state", "owner_role", "reviewer_roles", "repositories", "write_set", "forbidden_set", "dependencies", "decision_bindings", "input_artifacts", "blocking_predicates", "red_commands", "green_commands", "focused_commands", "full_commands", "ci_commands", "outputs", "rollback", "pass_predicates", "line_policy"],
+      "properties": {
+        "schema_id": {"const": "reviewer-refactor-execution-card/v1"},
+        "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9-]{1,31}$"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 160},
+        "stage": {"enum": ["0A", "0B", "A", "B", "B2", "C", "D"]},
+        "authority_state": {"enum": ["NOT_AUTHORIZED", "READY", "IN_PROGRESS", "PASS", "FAIL", "INDETERMINATE"]},
+        "owner_role": {"type": "string", "minLength": 1},
+        "reviewer_roles": {"$ref": "#/$defs/stringList"},
+        "repositories": {"type": "array", "minItems": 1, "items": {"enum": ["worker", "server", "web", "admin", "evidence"]}, "uniqueItems": true},
+        "write_set": {"type": "array", "items": {"$ref": "#/$defs/repoPath"}},
+        "forbidden_set": {"$ref": "#/$defs/stringList"},
+        "dependencies": {"$ref": "#/$defs/stringList"},
+        "decision_bindings": {"$ref": "#/$defs/stringList"},
+        "input_artifacts": {"$ref": "#/$defs/stringList"},
+        "blocking_predicates": {"$ref": "#/$defs/stringList"},
+        "red_commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+        "green_commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+        "focused_commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+        "full_commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+        "ci_commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+        "outputs": {"type": "array", "items": {"$ref": "#/$defs/output"}},
+        "rollback": {"$ref": "#/$defs/stringList"},
+        "pass_predicates": {"$ref": "#/$defs/stringList"},
+        "line_policy": {"type": "object", "additionalProperties": false, "required": ["default_max", "review_max", "hard_max"], "properties": {"default_max": {"const": 400}, "review_max": {"const": 600}, "hard_max": {"const": 600}}}
+      }
+    }
+  }
+}

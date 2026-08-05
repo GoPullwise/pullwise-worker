@@ -906,9 +906,10 @@ RR-GOV 是唯一 bootstrap 变体：GOV-0A 先把 inert draft bundle exact bytes
 5. 冻结 Skill/tool protocol、scratch-only model FS、tool env、gateway/receipt、validation profiles、限额和 exact-load evidence。
 6. 冻结 7.6 DDL/constraints/四事务、migration/历史数据处置和 pre/post-activation rollback，以及 7.4 的 generation-transaction/recovery contract。
 7. 冻结 RR-EVAL benchmark documents，包括 power calculation、统计单位、runtime comparison cells、paired estimator/CI 和 missing-run 规则。
-8. 为每个 packet 运行 exact schema/fixture/test/consumer-absence checks，生成 canonical path/bytes/digests；逐项取得独立 `FREEZE-A` resolution。任何 freeze 后 change 都回到新 amend/freeze record，不原地更新 resolution。
-9. 只应用 FREEZE exact-bound 的四仓 `AGENTS.md` bytes，明确 superseded rules；生成 post-apply `instruction-conflict-report/v1` 并使 unresolved count=0。实际 bytes 与 plan/FREEZE 不同则停止并 append amend/freeze，不能就地更新 digest。
-10. 将 EVD-0 扩展为 EVD-1，验证完整 dependency/stage-advance/release-generation/direct-CI 规则，并发布新 ledger generation；EVD-1 必须继续验证全部 EVD-0 fixtures 和旧 generation。
+8. 冻结 actual principal/key registry、control/source/artifact credential 与 tenant boundary、fleet/observability/canary query、data/evidence lifecycle 和删除/恢复政策；任何 `TBD` 或缺 actual binding 都阻止 FREEZE/PASS。
+9. 为每个 packet 运行 exact schema/fixture/test/consumer-absence checks，生成 canonical path/bytes/digests；逐项取得独立 `FREEZE-A` resolution。任何 freeze 后 change 都回到新 amend/freeze record，不原地更新 resolution。
+10. 只应用 FREEZE exact-bound 的四仓 `AGENTS.md` bytes，明确 superseded rules；生成 post-apply `instruction-conflict-report/v1` 并使 unresolved count=0。实际 bytes 与 plan/FREEZE 不同则停止并 append amend/freeze，不能就地更新 digest。
+11. 将 EVD-0 扩展为 EVD-1，验证完整 dependency/stage-advance/release-generation/direct-CI 规则，并发布新 ledger generation；EVD-1 必须继续验证全部 EVD-0 fixtures 和旧 generation。
 
 退出：register immutable history/provenance PASS；DRAFT/FREEZE 对及 normative units 引用 exact digest；schemas/registries/DDL/tool/generation/benchmark policy 均有 valid+invalid fixtures；instruction conflicts=0；EVD-1/ledger PASS；Stage A signed PASS。各 FREEZE 只设置表中最大边界，实际进入 Stage B/B2 仍需新的 signed stage-advance。
 
