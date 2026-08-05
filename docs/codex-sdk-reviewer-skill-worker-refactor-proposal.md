@@ -1,594 +1,712 @@
-# Codex SDK + Reviewer Skill Worker 重构提案
+# Codex SDK + Reviewer Skill Worker 重构执行规格
 
-状态：Proposal / Non-normative / 未授权实现
+状态：Implementation Specification / Governance-gated / 未授权生产切换
 
-日期：2026-08-04
+版本：2026-08-05
 
-范围：`pullwise-worker` 及其与 Pullwise Server/Web 的代码审查任务边界
+范围：`pullwise-worker`、`pullwise-server`、`pullwise-web`、`pullwise-admin`
 
-## 0. 文档地位
+## 0. 文档地位与授权边界
 
-本文是架构重构提案，不是 current contract、ADR、实施授权或发布授权。
+本文把原架构 Proposal 和 2026-08-05 的补充评审意见合并为可执行的跨仓重构规格，规定目标架构、契约、工作包、测试、阶段门、切换、回滚和删除标准。
 
-- 当前 `contracts/agent-first/spec-decision-register.json`、`AGENTS.md` 和既有规范性设计继续有效。
-- 本文不修改任何已解决决策，不授权代码、schema、协议、部署、canary、cutover 或 legacy 删除。
-- 若接受本提案，必须先新增 append-only 架构决策，明确 supersede 与本提案冲突的既有决策，再更新规范性设计和跨仓契约。
-- 生产切换仍必须遵守单一 current contract、无双轨、无 fallback、无 downgrade 的 clean-break 约束。
+- `contracts/agent-first/spec-decision-register.json` 仍是当前决策权威。冲突的生产实现必须先由 append-only 新决策逐项 supersede。
+- 当前 D41 仍禁止 D24 激活、部署、生产流量、真实 benchmark、canary、cutover 和 legacy 删除。
+- Stage 0 可立即执行治理修复；Stage A 需架构所有者参与；Stage B 需新决策明确授权离线 candidate；Stage C–F 在前序门和显式授权前均为 `NO-GO`。
+- 生产始终只有一个 current contract；不得增加 shadow authority、fallback、双写/双读、协议协商、downgrade 或 compatibility mode。
 
-## 1. 结论
+| 阶段 | 当前可执行 | 额外授权 |
+|---|---|---|
+| Stage 0 治理修复 | 是 | 改变 gate 语义需新决策 |
+| Stage A 决策/契约冻结 | 有条件 | D42-D46 等价决策逐项 resolution |
+| Stage B 离线 candidate | 否 | 新决策取代 D41 停止边界 |
+| Stage C 最小生产壳候选 | 否 | Stage B PASS + 实施授权；仍不接生产 |
+| Stage D 跨仓切换准备 | 否 | Stage C PASS + 契约生成授权 |
+| Stage E 切换/canary | 否 | 离线 attestation + D24 + 发布授权 |
+| Stage F 删除/全量 | 否 | canary PASS + strict absence PASS |
 
-用户提出的方向是合理的，而且对于 Pullwise 当前“单一用途、只读代码审查 Worker”比通用 Agent-First Kernel 更匹配。
+## 1. 执行结论
 
-但“Worker 只剩 Codex SDK + 一个纯文本 Skill”按字面实现仍然过度简化。Skill 是可维护的语义工作流，不是安全、租约、取消、预算、结构化结果和幂等发布的强制执行器。
+采用：
 
-建议目标为：
+> **Thin deterministic Worker shell + pinned Codex Python SDK + explicitly bound versioned Reviewer Skill + mechanical validator + durable terminal candidate outbox**
 
-> **Thin deterministic Worker shell + pinned Codex Python SDK + explicitly bound, versioned reviewer Skill + minimal result validator/outbox**
+- Skill 维护审查方法、证据标准、严重性、置信度、误报抑制和输出纪律。
+- Worker 维护单槽、snapshot、受控指令面、SDK/runtime pin、deadline、cancel、sandbox、coverage、redaction 和 outbox。
+- Server 是队列、租约、取消、预算和全局终态 CAS 的唯一权威。
+- 离线 benchmark 证明语义质量；每次运行的 validator 证明 wire/source/location/coverage/发布事实。
+- 删除无当前产品消费者的通用 Agent OS 抽象：Task Owner、独立 Quality Verifier、Requirement/Observation/Attestation 图、通用 capability/effect、语义 checkpoint、固定 fanout/voting。
 
-也就是：
+这不是纯 prompt Worker；安全、权限、时间、资源、事实和发布仍由代码强制执行。
 
-- 把变化快、需要人类判断的“如何审查”放进纯文本 Skill；
-- 把必须 fail closed、可机械验证的“能做什么、何时停止、什么结果可发布”留在小型 Worker 壳；
-- 删除面向未来通用 Agent 平台的 Task Owner、Quality Verifier、Requirement/Observation/Attestation/CAS 等机制，除非真实产品需求和基准数据重新证明它们必要。
+## 2. 当前证据快照
 
-这不是把安全交给 prompt，而是重新划分正确的抽象边界：**语义策略属于文本，系统不变量属于代码。**
+2026-08-05 当前四仓复核：
 
-## 2. 分析边界与当前事实
+- 默认 builder 仍返回 `ReviewWorkerV1`；Agent Kernel 只是可选 shadow projection。
+- `review_worker_v1.py` 仍注册 30 个生产 phase，SDK 调用仍在该路径。
+- Worker 固定 `openai-codex==0.1.0b3`，已有 `SkillInput`、`Thread.run(..., output_schema=...)`、thread/turn/interrupt；Stage B 不以 SDK 升级为前置。
+- Server/Web 已接收动态 `progressSteps`；旧依赖主要在 billing/quota phase、artifact kind、测试、Admin 配置和文案。
+- Server quota 仍识别 `repo_map`、`risk_routing`、`reviewer_fanout`、`clustering_and_voting`、`validator_disproof`、`final_report_json`。
+- Admin 仍编辑 `reviewerConcurrency`，并消费 `maxBundles/maxReviewerAssignments`。
+- 决策注册表为 `ready`：40 resolved、D2 inactive、无 active decision。
+- Slice-0 当前失败：generated wrapper 8,762/8,062 行不一致、digest 不一致、`tests/test_agent_first_decision_register_gate.py` 未入 baseline。
+- legacy contract baseline 为 `compatible`，14 组固定 probe 全部通过。
+- 默认 absence ratchet 为 `ratchet_clean=true`、`legacy_absent=false`。
+- 当前 `--require-absent` 既发现 live legacy，又因 `worker.004-frozen-contract-baseline` 自引用而 `indeterminate`，不能证明 clean break。
+- 四仓取证时工作树均干净；远端 CI 未纳入本地证据，实施阶段必须复查。
 
-以下事实来自 2026-08-04 的本地仓库与固定依赖快照。
+因此必须从 Stage 0 开始，不能直接写 candidate 或删旧代码。
 
-### 2.1 当前默认运行入口仍是 legacy Worker
+## 3. 范围、目标与非目标
 
-`pullwise_worker/main.py` 通过 `build_review_worker(...)` 构建 Worker。默认未开启
-`PULLWISE_AGENT_KERNEL_SHADOW_ENABLED` 时，返回的仍是 `ReviewWorkerV1`。
+唯一产品任务是 `repo_review.full_scan`：输入为 Server 授权的不可变仓库快照与政策；source 只读；受控验证只写 disposable copy；输出 findings/coverage/limitations/usage/terminal candidate；中断后从头重算，只恢复冻结 outbox。
 
-当前 Agent Kernel 接入点只是对 legacy active marker/outbox 的 shadow projection；截至本快照，
-`agent_kernel*.py` 不直接调用 `openai_codex`、`thread_start` 或 `turn_start`。实际 Codex SDK
-调用仍位于 `review_worker_v1.py`。
+目标：
 
-因此，当前正处在一个成本较低的架构转向窗口：大量 Agent Kernel 候选代码已经存在，但尚未成为唯一生产审查执行路径。
+- 语义来源收敛为一个 Worker-owned Reviewer Skill。
+- 正常路径一个 root thread、一个 main turn；最多一次纯格式修复 turn。
+- 公开进度为 `preparing/reviewing/validating/publishing/terminal`。
+- 使用三层最小契约，不向浏览器泄露 Worker 私有字段。
+- 以 D22 专业化后的 paired benchmark 证明质量不劣。
+- cutover 后删除 30-phase、非目标 Agent Kernel、shadow/fallback/compatibility 和旧消费者。
 
-### 2.2 当前语义编排非常重
+非目标：
 
-当前 `ReviewWorkerV1` 固定注册 30 个 phase，其中包括 repo map、risk routing、bundle planning、
-reviewer fanout、clustering/voting、intent test、validator disproof 和 report rendering。
+- 写回原仓库、自动修复/PR、外部 tool/provider effect、人工 approval、通用 Agent task。
+- reviewer fanout、投票、per-run Verifier、子 Agent、跨 lease semantic resume。
+- 证明模型“理解每一行”；产品只承诺 inventory complete + coverage accounted。
+- 兼容旧任务/wire/table/DTO/数据。历史留存需单独的只读、不可执行、隔离合规决策。
 
-规模快照：
+## 4. 系统不变量
 
-| 范围 | 文件数 | 物理行数 |
-|---|---:|---:|
-| `review_worker_v1.py` | 1 | 18,531 |
-| `agent_kernel*.py` | 83 | 17,665 |
-| 上述两部分生产代码合计 | 84 | 36,196 |
-| `test_review_worker_v1.py` | 1 | 12,958 |
-| `*agent_kernel*.py` 测试 | 51 | 11,356 |
-| 上述两部分测试合计 | 52 | 24,314 |
+1. 每 Worker identity 最多一个 active job、一个 SDK/App Server、一个 auth store。
+2. Server 拥有 lease/cancel/budget/global terminal authority；Agent 不创造 authority。
+3. source snapshot 只读；写入只在 disposable validation copy。
+4. Skill、SDK、CLI、model、effort、schema、source、instruction manifest 均 exact-pin。
+5. Agent tool 无网络、无 provider credential、无 approval；provider OpenAI 出站是独立通道。
+6. 缺失、漂移、超限、未知 schema/reason、stale attempt、source mutation 均 fail closed。
+7. 无 finding 可以成功；无 coverage closure 不能成功。
+8. Worker outbox 是不可变 attempt candidate；Server CAS 才是全局终态。
+9. 不存在第二 runner/authority/current contract/fallback。
+10. 新手写文件遵守 400/600 行门，不向现有超大文件增加新职责。
 
-这些数字不是“代码多就一定错误”的证明，但它们说明维护者面对的是一个通用任务平台，而不是一个容易整体理解的代码审查执行器。
-
-### 2.3 当前 SDK 已具备提案所需的基本能力
-
-仓库固定 `openai-codex==0.1.0b3`。本地已安装版本已经提供：
-
-- `SkillInput(name, path)`，wire shape 为 `{type:"skill", name, path}`；
-- `Thread.run(..., output_schema=...)`；
-- read-only / workspace-write sandbox preset；
-- thread、turn、interrupt 和事件流能力。
-
-当前 `review_worker_v1.py` 只是把 turn input 固定为 text item；接入显式 Skill 不要求先发明新的 App Server 客户端。
-
-初始实现应使用 `turn/start`，因为它已经同时承载显式 Skill input 和当前 turn 的
-`outputSchema`。`review/start` 可以作为后续离线候选评测，但它主要提供 change-review target，
-不能被假定为已经满足 Pullwise 的全仓、Skill binding 和结果契约。
-
-官方文档也明确：Skill 用于可复用工作流和输出要求；需要确定性行为时应保留脚本或程序边界；App Server 推荐同时传 `$skill-name` 文本和 `skill` input item，`outputSchema` 只约束当前 turn 的最终消息。
-
-参考：
-
-- [Codex SDK](https://developers.openai.com/codex/sdk)
-- [Codex Skills](https://developers.openai.com/codex/skills)
-- [Codex App Server](https://developers.openai.com/codex/app-server)
-- [Custom Code Review rules for Codex](https://developers.openai.com/blog/custom-code-review-rules-for-codex)
-
-### 2.4 文本规则对审查质量有真实价值，但不是形式证明
-
-OpenAI 对自定义 repository review rules 的公开评测中，rule-guided variant 找回了 98% 的指定自定义 finding，baseline 为 58.3%。这支持“审查知识应尽量文本化、靠近仓库”的方向。
-
-但该数据只证明 scoped rules 能显著改善特定规则召回，不能证明：
-
-- 一个 Skill 能保证审查了每一行；
-- 一个 turn 能稳定覆盖任意规模仓库；
-- 自报的 tool/evidence 就是真实执行事实；
-- prompt 可以替代 sandbox、lease fence、schema validator 或 terminal outbox。
-
-因此，本提案把它视为可验证假设，而不是跳过离线基准的理由。
-
-## 3. 根因判断
-
-当前方案的主要问题不是“实现水平不够”，而是产品边界和抽象层级错位。
-
-### 3.1 Pullwise 当前需要专用 reviewer，而不是通用 Agent OS
-
-当前目标任务具有很强的收敛性：
-
-- 输入是一份仓库快照和 Server 签发的审查策略；
-- 核心动作是读取、搜索、推理、可选地在隔离副本中验证；
-- 不应写入原始 source；
-- 不应产生外部 provider effect；
-- 输出是一份 findings/coverage/report；
-- Worker 丢失时可以从头重跑，不需要恢复一个有外部副作用的通用任务。
-
-在这个范围内，通用 Task Owner incarnation、独立 Verifier session、Requirement Ledger、
-Observation Manifest、Attestation、Content-addressed Object DAG、跨 lease semantic checkpoint、
-Effect Ledger 和复杂 outcome matrix 的边际价值很低。
-
-如果未来目标变成“可写代码、可审批、可调用外部系统、可跨 lease 接管的通用 Agent 平台”，上述机制会重新变得合理。但不应为了尚未进入产品范围的能力，让当前 reviewer 永久支付复杂度税。
-
-### 3.2 当前方案把“证据存在”与“审查质量”混得过近
-
-机械系统可以证明：
-
-- 某个命令确实被 Worker 执行；
-- 某个文件确实被读取或列入 inventory；
-- 某份结果绑定了哪个 source/skill/runtime digest；
-- 某个终态只提交了一次。
-
-机械系统不能证明模型真正理解了每个文件，也不能把多个 schema/attestation 自动转化为更高缺陷召回率。
-
-因此应把“运行事实完整性”和“语义审查质量”分开：
-
-- 每次运行用小型 shell 保证事实完整性；
-- Skill 负责审查方法；
-- 离线 benchmark/eval 负责证明 Skill 的质量；
-- 不用每次运行一个通用 Quality Verifier 来制造看似更强、但尚未由数据证明的保证。
-
-### 3.3 维护成本集中在变化最频繁的层
-
-审查策略会频繁变化：finding 结构、证据标准、严重性判断、框架注意点、误报抑制、报告语言。
-
-当前这些变化横跨 prompt、phase registry、schema、helper、artifact、progress、Server/Web registry 和测试。一个语义变化容易变成跨模块协议变更。
-
-将审查方法收敛到一个 versioned Skill 后，多数策略变化成为文本审查和离线 eval；只有真正改变安全、资源、wire 或发布不变量时才修改 Worker/Server 代码。
-
-## 4. 三种方案对比
-
-| 维度 | 当前 30-phase + Agent Kernel | 纯 SDK + SKILL.md | 推荐的薄壳 + SDK + Skill |
-|---|---|---|---|
-| 审查策略维护 | 低；策略分散在代码、prompt、schema、phase | 高；主要是文本 | 高；语义集中在文本 |
-| 安全强制 | 高，但机制远超当前任务 | 低；prompt 不是权限边界 | 高；最小 sandbox/gateway 保留 |
-| 租约/取消/超时 | 完整但状态复杂 | 容易遗漏 | 保留直接、可测试的硬路径 |
-| 结果真实性 | 证据结构强，语义价值未必成比例 | 依赖模型自报 | schema + source/location/coverage 机械校验 |
-| crash recovery | 通用 checkpoint/ledger | 通常没有 | 无副作用 run 从头重跑；只恢复 terminal outbox |
-| full-repo 承诺 | inventory/phase 很强，仍不能证明“理解每一行” | 无法可信承诺 | 只承诺可证明的 inventory closure，并诚实报告限制 |
-| 成本/延迟 | 多 turn、多 artifact、多 fanout | 最低 | 低；一个主 turn，最多一个格式修复 turn |
-| 可演进性 | 新能力倾向新增 schema/state | 文本灵活但易漂移 | Skill 版本化 + digest + eval gate |
-| 当前产品适配 | 偏通用平台，过重 | 过薄 | 最匹配 |
-
-最终选择第三种。它不是折中主义，而是把强制性放在正确位置。
-
-## 5. 推荐目标架构
+## 5. 目标架构与信任边界
 
 ```text
 Pullwise Server
-  ├─ job / lease / cancel / budget policy
-  └─ idempotent result ingest
-          │
+  ├─ queue / acceptance / lease / cancel / budget / deadline
+  ├─ private Worker control + terminal CAS
+  ├─ normalized review result + issue dedupe
+  └─ public Web/Admin DTO
+          │ authenticated control/clone transport
           ▼
 Thin Review Worker
-  ├─ single active slot + heartbeat/cancel/deadline
-  ├─ immutable source snapshot + disposable validation workspace
-  ├─ pinned SDK/runtime + explicit Skill binding
-  ├─ result/coverage/location/source validator
-  ├─ logs + usage + redaction
-  └─ durable terminal outbox
-          │
+  ├─ one slot + supervisor
+  ├─ immutable source + instruction manifest
+  ├─ controlled CODEX_HOME/CWD + pinned Skill/SDK/CLI
+  ├─ one thread/turn + optional format repair
+  ├─ source/location/coverage/result validator
+  └─ immutable terminal candidate outbox
+          │ Worker-scoped provider channel
           ▼
-one Codex App Server / one root thread / one main review turn
-          │
-          ├─ Pullwise reviewer Skill：通用审查方法
-          ├─ target repo AGENTS.md：仓库特有不变量
-          └─ source/tools：受 sandbox 与 Worker policy 限制
+Codex SDK / App Server
+  ├─ explicit Reviewer Skill
+  ├─ read-only source/search
+  └─ bounded local validation in disposable copy
 ```
 
-### 5.1 组件职责
+三条通道：
 
-| 组件 | 应负责 | 不应负责 |
+| 通道 | 允许 | 凭据 | Agent 可见 |
+|---|---|---|---|
+| SDK/provider | 仅 OpenAI/Codex 出站 | Worker 专属 auth | 否；工具读不到 auth/env |
+| Worker↔Server/clone | lease/heartbeat/cancel/artifact/result/clone | Worker token/短期 token | 否 |
+| Agent tools | source read/search、disposable copy allowlist 命令 | 无 | 是；network disabled/deny-all |
+
+“无网络、无生产凭据”专指 Agent tools，不是让 SDK 或 Worker control transport 失效。
+
+| 组件 | 必须负责 | 不得负责 |
 |---|---|---|
-| Server | 全局队列、lease、取消、预算 grant、结果幂等接收、公开状态 | 审查 prompt、仓库语义 |
-| Thin Worker | 单槽、隔离、deadline、Skill/runtime pin、校验、终态发布 | repo map、risk route、finding 判断 |
-| Codex SDK/App Server | thread/turn 生命周期、工具执行、事件/usage、interrupt | Server lease authority、terminal truth |
-| Reviewer Skill | 审查步骤、证据标准、严重性/置信度、误报抑制、输出要求 | 提升权限、选择预算、声明终态已提交 |
-| target `AGENTS.md` | 当前仓库/目录特有的兼容性、安全和验证规则 | Pullwise Worker 传输和发布协议 |
-| Result Validator | JSON/schema、路径/行号、inventory closure、source digest、大小/秘密检查 | 重新做一遍自然语言审查 |
+| Server | acceptance/lease/cancel/deadline/budget/CAS/quota/public projection | prompt/Skill/语义判断 |
+| Worker | 隔离/snapshot/instruction/SDK/deadline/validation/outbox | 全局终态/issue 生命周期/公共 DTO |
+| SDK | thread/turn/tool/event/usage/interrupt | lease/terminal truth |
+| Skill | 审查方法和输出纪律 | 权限/预算/终态/网络/凭据 |
+| Validator | schema/binding/location/hash/coverage/redaction | 自然语言复审 |
+| Web/Admin | 公共 DTO 和当前配置 | lease/attempt/Skill/source 私有事实 |
 
-### 5.2 运行约束
+## 6. Reviewer Skill 与受控指令面
 
-- 一个 Worker 最多一个 active job；Server 继续拥有队列，不设本地 queue/prefetch。
-- 一个 Worker 进程最多一个 App Server；每个 attempt 一个新 root thread。
-- 初始版本不做 reviewer fanout、不做独立 per-run Quality Verifier、不做子 Agent 编排。
-- 正常路径只有一个主 review turn；仅当结构化输出无效且预算仍足够时，允许同 thread 一次格式修复 turn。
-- lease 丢失、取消或 absolute deadline 到达时立即 interrupt；旧 attempt 永久禁止发布。
-- review 没有外部 effect，运行中断后从新 attempt 重新开始，不恢复语义 checkpoint。
-- 只有 terminal outbox 需要 crash-safe 恢复和 exact idempotent replay。
+### 6.1 唯一语义资产
 
-## 6. Reviewer Skill 设计
+- `pullwise_worker/reviewer_skill/SKILL.md`
+- `pullwise_worker/reviewer_skill/manifest.json`
+- `pullwise_worker/reviewer_skill/review-result-v1.schema.json`
+- `pullwise_worker/reviewer_skill/eval-fixtures/**`
 
-### 6.1 所有权与分发
+`manifest.json` 固定 Skill name/version、Skill/schema SHA-256、工具 allowlist、最大 turn 数、最小 SDK/runtime tuple。wheel check 必须证明安装 bytes 一致。旧 prompt 的有效知识经有来源的迁移表进入 Skill；迁移后生产不再读取旧 prompt。
 
-Skill 属于 Worker control plane，不属于被审查仓库。建议随 Worker package/image 发布到固定只读路径，例如：
+### 6.2 显式绑定与防 TOCTOU
+
+每个 attempt：
+
+1. 从已安装 package 复制 exact Skill/schema 到 Worker-owned、非 source、非 model-writable staging。
+2. 拒绝 symlink/reparse/non-regular/multi-link/越界路径，生产 POSIX 使用私有权限。
+3. 记录 path/device/inode/size/SHA-256；`Thread.run` 同时传 `$pullwise-reviewer` 文本和显式 `SkillInput`。
+4. turn 后重检同一对象；任何漂移使 attempt `FAILED`。
+5. result 绑定 staged Skill digest 和 package manifest digest。
+
+Stage B 必须故障注入 swap、symlink、truncate、turn 中修改。
+
+### 6.3 关闭隐式 surface
+
+- 使用 Worker-owned 空白/生成式 `CODEX_HOME`，不继承 user/admin/system skills、插件、MCP、hooks 或全局会话。
+- turn `cwd` 位于 Worker-owned model-turn 目录，不在 target repo/Worker source，避免父级 `AGENTS.md` 自动发现。
+- 只装 allowlist Skill；启动后枚举实际 skill/tool/MCP/plugin/hook surface，与 manifest exact compare。
+- 无法证明非允许 surface 被关闭时，Stage B `NO-GO`；prompt 声明不是隔离证据。
+
+### 6.4 target `AGENTS.md`
+
+不依赖 Codex 默认 32 KiB merge，也不把“记录 digest”当成模型已看到内容。Worker 在 snapshot 上生成 `instruction-manifest/v1`：
+
+- 机械发现 root/nested exact `AGENTS.md`，只接受 regular file。
+- canonical POSIX path；浅到深优先级，nested 只作用其子树。
+- 记录 path/scope/depth/size/SHA-256/precedence。
+- 禁止截断。初始上限：128 files、单文件 256 KiB、总计 1 MiB；越限 `PARTIAL/FAILED`。
+- boot input 只内联有界 policy 与 manifest path/digest；Skill 在审查 scope 前读取适用 bytes。
+- Worker 从 SDK tool events 验证 read receipt。它只证明读取，不证明理解。
+- coverage entry 绑定适用 instruction-set digest；缺 receipt 不得标 `inspected`。
+
+限额必须在 Stage A 冻结，benchmark 解盲后不得修改。
+
+### 6.5 Agent 拓扑
+
+- 每 attempt 一个新 root thread，一个 main turn。
+- 仅最终消息 schema 无效且预算充足时，同 thread 允许一次 format repair；不得重扫或新增 finding。
+- 禁止 fanout、独立 verifier、子 Agent、并行 turn、第二 App Server。
+- archive/close 有界；失败标记 runtime unhealthy，下一 attempt 使用新 runtime。
+
+## 7. 三层契约
+
+### 7.1 Server↔Worker 私有 wire
+
+Server-owned canonical source：`pullwise-server/contracts/reviewer-worker/v2/**`，至少含：
+
+- `worker-registration/v2`
+- `review-task-claim/v2`
+- `review-worker-heartbeat/v2`
+- `review-run-event/v2`
+- `review-artifact-descriptor/v2`
+- `review-terminal-candidate/v2`
+- `review-terminal-receipt/v2`
+- `review-error/v2`
+
+它包含 job/run/lease/attempt/epoch、deadline/budget、runtime/Skill/schema/source/instruction binding、outbox generation/digest/idempotency。Web/Admin 不得看到。Server 生成，Worker exact-pin Python wrapper；生成遵守一次性原子跨仓 parity，禁止手改。
+
+### 7.2 Server 内部 normalized result
+
+`normalized-review-result/v1` 不是 wire/浏览器 DTO；它把 accepted candidate 转为 findings/coverage/limitations/usage/artifacts/public state，生成 finding instance id/issue key，并保存私有 audit facts。
+
+建议模块：
+
+- `pullwise_server/review_worker_contract.py`
+- `pullwise_server/review_terminal_cas.py`
+- `pullwise_server/review_result_normalization.py`
+- `pullwise_server/review_public_projection.py`
+
+现有 `_app_part_XX`/`db.py` 只留 composition seam 和冻结行数，不承接新职责。
+
+### 7.3 Server→Web/Admin 公共 DTO
+
+`review-run/v2` 仅含 public run/scan id、公开 status、五级 progress/message/counters/ETA、summary/findings/coverage/limitations、artifact metadata/安全 URL、公开错误与时间。
+
+禁止输出 Worker token、lease、attempt epoch、Skill/instruction 私有 binding、provider auth、thread id、raw env/source、CAS internals。Web 继续动态渲染；Admin 只消费 health/quota 和仍存在的配置。
+
+## 8. 状态机与终态线性化
+
+### 8.1 Worker 本地状态
+
+| 状态 | 含义 | 允许下一状态 |
+|---|---|---|
+| `IDLE` | 无 active slot | `CLAIMED` |
+| `CLAIMED` | job/run/lease/attempt 已持久化 | `PREPARING`、terminal candidate |
+| `PREPARING` | checkout/snapshot/Skill/runtime/instruction/budget 校验 | `REVIEWING`、terminal candidate |
+| `REVIEWING` | main turn 或一次 format repair | `VALIDATING`、terminal candidate |
+| `VALIDATING` | 非 Agent validator | `PUBLISHING`、terminal candidate |
+| `PUBLISHING` | outbox 已 freeze，等待 Server CAS/ACK | local terminal |
+| local terminal | Server receipt 已持久化 | `IDLE` |
+
+每个状态必须对应可观察边界和故障测试；不得为假想能力建状态。
+
+### 8.2 Worker terminal candidate
+
+Worker 在同一锁内：
+
+1. 读取最新 cancel/lease/deadline。
+2. 验证 result、artifact snapshot 和 binding。
+3. canonicalize terminal candidate。
+4. 临时写入、`fsync`、atomic no-clobber publish、目录 `fsync`。
+5. 记录 candidate digest/idempotency key。
+6. 进入 `PUBLISHING`，之后 payload 永不可变。
+
+freeze 前 cancel 获胜时 candidate 为 `CANCELLED`；freeze 后不得改写、补 finding 或重跑。
+
+### 8.3 Server 唯一终态 CAS
+
+Server 以 `(job_id, run_id, attempt_id, lease_epoch, expected_nonterminal_version)` 在一个事务中 CAS：
+
+- stale attempt/lease：拒绝且无任何终态/projection side effect。
+- CAS 前无 cancel：接受 candidate classification。
+- CAS 前 cancel 已权威化：全局终态为 `CANCELLED`；frozen candidate 只作 attempt evidence。
+- terminal CAS 已先提交：后到 cancel/result 不改变终态。
+- 同 idempotency key + 同 digest：返回原 receipt；同 key + 不同 digest：`IDEMPOTENCY_CONFLICT`。
+
+事务同时保存 terminal state、normalized result pointer、quota transition、receipt、projection-pending marker。公共 projection 可幂等收敛，不能改写终态。
+
+| 场景 | 结果 |
+|---|---|
+| turn 前 lease 丢失 | 不启动 turn；旧 attempt 永久禁发 |
+| turn 中 cancel/deadline | bounded interrupt，放弃未冻结输出 |
+| crash，未 freeze | 新 attempt 从头重跑 |
+| crash，已 freeze | 只重放 exact outbox |
+| ACK 丢失 | 相同 key/digest 查询/重放，返回原 receipt |
+| cancel 在 freeze 前 | Worker candidate cancelled |
+| cancel 在 freeze 后、CAS 前 | Server CAS 选择 cancelled |
+| cancel 在 CAS 后 | 终态不变 |
+| stale submit | fail closed，无 projection |
+
+## 9. `review-result/v1` 与 coverage
+
+### 9.1 顶层结构
+
+- `run_binding`：job/run/attempt/lease epoch。
+- `execution_binding`：Worker/SDK/CLI/runtime/model/effort/Skill/output schema digest。
+- `source_binding`：repository/commit/tree/inventory/instruction digest。
+- `findings`、`coverage`、`limitations`、`usage`、`artifacts`。
+- `candidate_classification`：`COMPLETED/PARTIAL/FAILED/CANCELLED`。
+
+`outputSchema` 只约束最终消息 shape；Worker 仍独立验证语义/source binding。
+
+### 9.2 finding identity 与证据
+
+模型不得决定稳定 id，只输出可校验 identity components。
+
+- Worker 计算 `finding_instance_id`：domain separator + inventory digest + concern/rule ref + canonical path + span + evidence hash。
+- Server 计算 `issue_key`：repository lineage + concern/rule ref + path + primary symbol（如有）+ normalized failure signature。
+- 组件不足时不猜测跨扫描同一性；创建新 issue。
+- 同扫描按 instance id 去重；跨扫描只按 exact issue key。路径移动默认新 issue，除非未来有独立 alias 决策。
+
+finding 必须含 title、severity、numeric confidence `[0,1]`、failure scenario、impact、recommendation、false-positive risk、rule refs、validation status、location。location 含 inventory path、有效行范围、`evidence_sha256` 和有界 span；文件/行/hash 不匹配不得进入 main findings。
+
+### 9.3 紧凑 coverage（最多 2,000 文件）
+
+Inventory 按 canonical path UTF-8 byte order 排序并编号 `0..N-1`。coverage 用有序、互斥、无空洞的 inclusive ranges：
+
+```json
+{"start": 0, "end": 12, "status": "inspected", "reason": null}
+```
+
+- status 仅 `inspected/skipped/unsupported`。
+- skipped/unsupported 必须有 closed reason code。
+- inspected 必须有 source read receipt 与 instruction-set digest；无 receipt 不得自报。
+- ranges 必须精确分区 inventory，不能 gap/overlap/OOB/unknown。
+- document 绑定 inventory digest、entry count、encoding version、ranges digest。
+- 超过 2,000 个纳入文件时 preflight 拒绝，不抽样伪装全仓。
+
+“全仓”只表示 inventory complete + coverage accounted，不表示每行语义理解。
+
+### 9.4 classification 与 debug
+
+- `COMPLETED`：结构/source/coverage 全闭合，无未声明 mandatory gap。
+- `PARTIAL`：有可发布结果，但 context/permission/dependency/deadline/instruction/coverage 限制已声明。
+- `FAILED`：无有效可发布结果，或 SDK/auth/sandbox/source/Skill/binding 失败。
+- `CANCELLED`：authoritative cancel 在 Server CAS 前获胜。
+
+Server 只把 accepted normalized result 投影为公共状态；映射固定且不可由 Worker/Agent 覆盖：
+
+| accepted candidate | public status | public progress |
+|---|---|---|
+| `COMPLETED` | `completed` | `terminal` |
+| `PARTIAL` | `partial` | `terminal` |
+| `FAILED` | `failed` | `terminal` |
+| `CANCELLED` | `cancelled` | `terminal` |
+
+非终态只由 Server 按已接受的 lifecycle event 投影为 `preparing/reviewing/validating/publishing`；未知私有状态或 reason 不透传，projection fail closed 并记录 sanitized internal error。
+
+debug bundle 与 audit bundle 分离；不含 source、`run/bundles/**`、auth/token/raw env/其他用户数据。只含 sanitized SDK events/progress/runtime/Skill/source/instruction digests、validator、outbox/receipt metadata 和 Server scoped evidence。所有日志/event/stdout/stderr 有 redaction 与大小上限。
+
+## 10. 30 phase、计费、Admin 与 Web
+
+| 当前职责 | 目标归宿 |
+|---|---|
+| checkout/workspace/SDK init/auth/inventory/budget | Worker `PREPARING` |
+| repo map/risk routing/bundle planning | Skill 方法，不作生产中间协议 |
+| packing/fanout/clustering/voting | 删除；数据证明单 turn 不足前不重建 |
+| JSON/location/QA | Worker `VALIDATING` |
+| intent/disproof | Skill 可选方法；执行仍受 Worker policy/sandbox |
+| validation workspace/test running | disposable validation boundary |
+| final report JSON | main turn 结构化输出 |
+| Markdown render | Server/Web 或小型确定性 renderer |
+| hash/upload/submit | Worker `PUBLISHING` |
+| cleanup | terminal finally，不是公开 phase |
+
+计费删除旧 phase 列表，改为 durable `semantic_review_started`：
+
+- main turn 获得有效 thread/turn id 并开始语义工作后才发送。
+- Server 验证 run/attempt/lease 并幂等持久化；首次事件消费 reservation，此前失败/取消释放。
+- 后续 progress id 不参与计费；迟到/恢复从 durable event store 收敛。
+
+Admin 在协调切换时删除 Plan `reviewerConcurrency`、system `reviewWorker.maxBundles/maxReviewerAssignments` 及默认值/schema/API/UI/tests/copy。保留 model、effort、turn timeout、scan deadline、repository limits、output language；不得换名保留 fanout。
+
+Web 已支持动态 steps：切到五级 steps 与 `review-run/v2`，保留 partial/ETA/debug URL 安全规则，删除旧 artifact/phase fallback，不显示私有 binding，并保持移动端/390px gate。
+
+## 11. Append-only 决策计划
+
+| 建议 ID | 主题 | 冻结内容 |
+|---|---|---|
+| D42 | 专用 reviewer 边界 | full_scan、单 thread/turn、无 fanout/verifier/sub-agent、从头重跑 |
+| D43 | Skill/instruction/runtime trust | exact Skill、CWD/CODEX_HOME、AGENTS、tool/network/credential、TOCTOU |
+| D44 | 三层契约/终态 | private wire、normalized/public DTO、Server CAS、cancel/ACK/stale |
+| D45 | reviewer benchmark/release | D22 专业化 corpus/统计/paired gate/canary/rollback |
+| D46 | clean cutover/deletion | 四仓协调删除、absence v2、same-contract rollback |
+
+实际 ID 由 register 顺序生成。既有决策处理：
+
+| 处理 | 决策 |
+|---|---|
+| 保留核心 | D1、D23、D24 barrier、D26、D27、D28、D31 |
+| 专业化 supersede | D22：保留样本/seed/owner/三态/可比性/canary，替换通用 Agent 指标 |
+| 明确 supersede | D6、D8、D10-D12、D14-D20、D25、D29-D30、D32-D33、D41 的冲突部分 |
+| 保留安全不变量、替换实现 | D3 的 R0/R1/无 effect；D7 deadline 不延长；D13 cancel precedence；D21 单 current contract |
+| 明确替换 | D5 通用 Task version → Server terminal CAS version；D9 Worker TaskResult authority → Server global terminal authority |
+
+每个 supersession 列出旧 digest、保留不变量、撤销义务、normative units、新测试证据；本文不得静默覆盖。
+
+## 12. 分阶段实施计划
+
+### Stage 0：治理证据
+
+1. `S0.1` 追溯 wrapper 8,762/8,062 漂移；按权威生成链同步，或经决策退休并替换 gate。禁止只改 expected。
+2. `S0.2` 将新增 decision-register gate test 纳入正确 baseline/替代 gate。
+3. `S0.3` absence v2 分离 immutable history 与 live forbidden surface；自引用 fixture 必须失败、真正 absent fixture 必须通过。
+4. `S0.4` 建含 Admin 的四仓 deletion inventory，记录 entrypoint/config/table/artifact/test/docs，明确不是兼容承诺。
+5. `S0.5` CI 默认 ratchet 防新增 legacy，strict gate 仅 deletion slice 启用。
+
+退出：decision ready；Slice-0 或有决策的 replacement PASS；absence v2 可确定三态；四仓 inventory 可重复；生产行为未改。
+
+### Stage A：决策与契约冻结
+
+1. resolve D42-D46 等价决策。
+2. 定义 Server canonical wire source/fixtures，但不 Generate/激活。
+3. 冻结 result、coverage、identity、status/error/reason registry。
+4. 冻结 terminal CAS/cancel/ACK/stale。
+5. 冻结 Skill/instruction/tool/限额/exact-load evidence。
+6. 冻结 D45 benchmark documents。
+7. 更新四仓 `AGENTS.md`，明确 superseded rules，避免 current 指令冲突。
+
+退出：register history/provenance PASS；normative units 引用新 digest；fixtures 完整；新决策只授权 Stage B。
+
+### Stage B：离线 candidate
 
 ```text
-pullwise-reviewer-skill/
+pullwise_worker/reviewer_runtime/
+  types.py
+  source_snapshot.py
+  instruction_bundle.py
+  runtime_policy.py
+  sdk_session.py
+  runner.py
+  coverage_codec.py
+  result_validator.py
+  terminal_candidate.py
+pullwise_worker/reviewer_skill/
   SKILL.md
-  references/          # 可选，仍为纯文本
+  manifest.json
+  review-result-v1.schema.json
+scripts/run_reviewer_candidate.py
 ```
 
-初始版本应保持 instruction-only，不包含脚本。机械脚本属于 Worker validator，不放进 Skill 以避免把强制执行伪装成模型工作流。
+先写 failing tests：`test_reviewer_skill_binding.py`、`test_reviewer_instruction_surface.py`、`test_reviewer_candidate_runner.py`、`test_reviewer_result_validator.py`、`test_reviewer_coverage_codec.py`、`test_reviewer_runtime_policy.py`。
 
-每次运行必须记录：
+candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/result、写 production table、切 builder、shadow traffic 或部署。必须证明 exact-load、surface control、AGENTS receipt、source read-only、tool 无网络/凭据、单 turn、有界 cancel/timeout/close、result/coverage/redaction、2,000-file bounded encoding。无法控制 surface 即 `NO-GO`。
 
-- Skill 逻辑版本；
-- 完整 Skill package manifest（`SKILL.md` 与所有 shipped references）的 SHA-256；
-- SDK package/runtime/model/effort identity；
-- source commit/tree/inventory digest；
-- applicable `AGENTS.md` digest 集合；
-- output schema digest。
+### Stage B2：paired benchmark
 
-Skill 修改属于生产 control-plane 变更，必须经过 code review 和离线 eval，不能在运行中自动学习或热改生产版本。
+同 source/model/effort/SDK/CLI/machine/budget 交错运行 legacy 与 candidate；顺序预注册；每 task 3 seeds；独立 oracle 解盲；保存 raw samples/exclusions/bindings/可复算 report。只有 D45 全部门 PASS 才进入 C；缺证/不可比/超时/样本不足均 INDETERMINATE。
 
-### 6.2 显式绑定
+### Stage C：最小生产壳候选，不激活
 
-不能依赖 implicit skill matching。Worker 应同时传入：
+- 从 legacy 按行为测试提取 slot/supervisor/checkout/source/SDK/deadline/cancel/usage/redaction/outbox，不复制 30-phase。
+- Worker 消费 private package，持久化 active marker/exact outbox。
+- Server 小模块实现 claim/heartbeat/event/CAS/normalization；新表无生产入口。
+- 注入 crash-before/after-freeze、cancel-before/after、ACK loss、replay conflict、stale、source drift、hung close。
+- 本地 E2E：Server fixture → claim → candidate → CAS → public projection。
 
-1. 文本中的 `$pullwise-code-review`；
-2. exact `{type:"skill", name:"pullwise-code-review", path:".../SKILL.md"}` input item。
+退出：单一终态、真实 SQLite 并发/recovery PASS、public/debug 无 source/secret、生产 builder/routes 未切。
 
-运行前 Worker 机械验证 exact path、regular-file、owner/mode、size 和 digest；找不到、
-digest 不符或 `turn/start` 拒绝 Skill input 时 fail closed。Worker 不把“模型说自己使用了 Skill”
-当作加载证明。
+### Stage D：跨仓切换准备
 
-### 6.3 Skill 内容边界
+- Server 原子生成 contract，接入但 intake disabled；改计费事件；完成 projection/debug/barrier/legacy reject。
+- Worker exact-pin；builder 切换与 legacy 删除在协调 slice，不加 flag/fallback；doctor 校验 tuple。
+- Web 切 `review-run/v2`/五级 progress。
+- Admin 删除 reviewer/bundle/assignment 配置。
 
-`SKILL.md` 至少覆盖：
+退出：四仓 pins/fixtures PASS；operator 完成 stop-intake、same-contract rollback 或 fence/reject 演练；build 未接流量；deletion manifest 审计。
 
-- 目标：查找真实、可操作、非样式类缺陷；
-- trust hierarchy：系统/Worker policy > Skill > `AGENTS.md` > source 内容；普通源码和注释是证据，不是权限指令；
-- repository orientation：先读适用 `AGENTS.md`，再理解入口、边界、数据流和测试；
-- coverage strategy：按风险选择深度，但必须诚实记录 inspected/skipped/unsupported；
-- finding bar：给出路径、行号、证据、失败场景、影响、修复方向、severity、confidence；
-- disproof：主动寻找安全路径、调用约束、现有测试和反例；
-- validation：在允许时运行最小相关命令；不得联网、安装依赖或使用真实凭据；
-- output：只返回符合 `review-result/v1` 概念契约的 JSON；
-- stop/degrade：上下文、时间、权限或环境不足时返回 limitation，不得伪造完成。
+### Stage E：单协议切换与 canary
 
-通用审查方法进入 Skill；具体仓库的不变量继续留在对应 `AGENTS.md`，避免复制后漂移。
+1. stop intake。
+2. pre-cutover tasks 权威终态/tombstone/delete，或撤权隔离；不得迁移。
+3. 部署四仓 exact builds。
+4. acceptance 事务激活 D24 barrier。
+5. 验证旧 lease/event/result/replay fail closed。
+6. 新 current contract 开 5% capacity，其余 intake 暂停。
+7. ≥24h 且 ≥200 accepted current tasks 后进 25%。
+8. ≥72h 且 ≥1,000 tasks 后才考虑 full。
 
-## 7. 最小确定性 Worker 壳
+门失败即停止扩容；只可 rollback 到同 contract/schema/storage 的 signed stable，否则 stop-intake/fence/reject。
 
-### 7.1 必须保留的行为
+### Stage F：删除与全量
 
-1. 配置和身份
-   - Worker registration/auth；
-   - exact SDK/runtime/Skill/schema pin；
-   - worker-scoped Codex home、credential 和 App Server。
-2. 调度和监督
-   - 单 active slot；
-   - claim/lease/heartbeat/cancel/deadline；
-   - 有界 SDK start/run/interrupt/stop；
-   - quota/auth/runtime 错误分类。
-3. 隔离
-   - 原 source 快照不可写；
-   - 无网络、无 production credentials；
-   - 如需生成测试，只能写 disposable validation workspace；
-   - 运行前后复算 source state。
-4. 结果校验
-   - schema、大小、regular file、UTF-8；
-   - path 和 line range 对原始 source 有效；
-   - inventory closure 与 skipped/unsupported 原因完整；
-   - Skill/runtime/source/output schema digest 绑定；
-   - 日志和 debug artifact 不包含 source/secret。
-5. 发布
-   - immutable terminal payload；
-   - durable outbox；
-   - idempotency key 和 stale lease fence；
-   - cancel/publish race 只能产生一个 authoritative terminal result。
+删除必须在 cutover slice 或紧随强制 slice：
 
-### 7.2 明确删除或不再建设的通用能力
+- `ReviewWorkerV1` 30-phase、prompt/schema/helper/intermediate artifacts。
+- 无消费者的 `agent_kernel*.py`、tables/migrations/contracts/wrappers/tests/docs。
+- shadow builder/flag、legacy result/outbox/DTO/route/fixtures。
+- Server old phase billing/artifact registry/handler/storage/projection。
+- Web old DTO/phase/artifact fixtures/copy。
+- Admin reviewer/bundle/assignment config。
 
-在只读 code-review scope 下，目标路径不应包含：
+历史决策移到 runtime/package/DTO/absence live catalog 不消费的 immutable history。退出：strict absence 为 `absent`；引用图无未解释 consumer；四仓 local/CI PASS；无 flag/fallback/第二 runner；canary PASS 后 full。
 
-- 通用 Task Owner / owner incarnation / delegation API；
-- per-run 独立 Quality Verifier session 和 verifier slots；
-- Requirement Ledger、Observation Manifest、Attestation、Evidence Closure；
-- 通用 CAS object DAG 和多 schema availability graph；
-- R0/R1/R3/R4 通用 capability/effect machinery；
-- semantic checkpoint 和跨 lease owner/session resume；
-- caller-independent 的复杂全局 outcome selector；
-- 固定 reviewer fanout、voting 和 cluster orchestration；
-- 为未来未知 Agent task 预留的状态、表和迁移。
+## 13. Benchmark 与发布门（D22 专业化）
 
-这里删除的是通用抽象，不是安全行为。source snapshot、fence、budget、outbox、redaction 等行为可以从现有实现提取或重写为聚焦模块，但不应保留无实际消费者的通用接口。
+### 13.1 corpus 与运行纪律
 
-## 8. 运行状态与失败语义
+- 至少 120 个 known-gold tasks。
+- 至少 3 个 sealed unknown repository families，每 family 至少 15 tasks。
+- 至少 50 个 oracle-positive in-scope findings。
+- 覆盖 security、correctness、API/schema、state/concurrency/resource、test-gap。
+- 每个适用核心簇对 real defect、bad/incomplete fix、clean counterexample、environment/capability failure、adversarial/prompt injection 各至少 3 tasks。
+- 覆盖小/大仓、monorepo、generated/vendor/binary/submodule、nested `AGENTS.md`、依赖缺失、测试不可运行、context/token/deadline 限制。
+- 每 task 3 个预注册 seed，所有有效 run 等权；不得为追 PASS 追加运行。
+- 只允许 policy 预列 infrastructure reason 排除，逐样本报告；解盲后不得改分母、权重、seed、baseline、阈值或 evaluator。
 
-### 8.1 最小状态机
+### 13.2 质量、安全和相对门
 
-| 状态 | 含义 | 允许的下一状态 |
-|---|---|---|
-| `IDLE` | 无本地 active job | `CLAIMED` |
-| `CLAIMED` | 已绑定 job/run/lease/attempt | `PREPARING`, terminal |
-| `PREPARING` | source、Skill、SDK、预算已校验 | `REVIEWING`, terminal |
-| `REVIEWING` | 唯一主 turn 执行中 | `VALIDATING`, terminal |
-| `VALIDATING` | 机械校验 result/source/coverage | `PUBLISHING`, terminal |
-| `PUBLISHING` | outbox 已冻结，幂等提交中 | terminal |
-| terminal | `COMPLETED`, `PARTIAL`, `FAILED`, `CANCELLED` | 无 |
+零容忍：
 
-不为“未来也许会用”的中间状态建表。每个保留状态都必须对应一个可观察的外部边界和至少一个故障测试。
+- source mutation = 0。
+- unauthorized network/credential/tool/approval = 0。
+- stale/double/conflicting terminal publish = 0。
+- critical/adversarial false verified = 0。
+- `COMPLETED` 中未声明 mandatory coverage gap = 0。
 
-### 8.2 结果分类
+绝对门：
 
-- `COMPLETED`：结构有效、source 未变、inventory closure 完整，且没有未声明 coverage gap。
-- `PARTIAL`：产生了有效 findings/report，但时间、上下文、权限或环境导致 coverage/validation 不完整。
-- `FAILED`：没有可发布的有效报告，或 SDK/auth/sandbox/source-integrity/Skill binding 失败。
-- `CANCELLED`：authoritative cancel 赢得竞态，旧 attempt 不得再发布其他终态。
+- schema/location/evidence/control/source/Skill binding valid rate = 100%。
+- known task success ≥ 70%，unknown ≥ 50%。
+- environment/capability classification accuracy ≥ 95%。
+- false discovery rate ≤ 20%。
+- location accuracy 预注册下限不得低于 98%。
+- clean counterexample 不出现系统性规则噪声。
 
-“没有 finding”可以是成功，但“没有证明 coverage closure”不能冒充成功。
+相对 current stable paired baseline：
 
-### 8.3 中断与恢复
+- high/critical 加权 recall 的 95% non-inferiority 下界不低于预注册 margin，默认 margin = -5 percentage points。
+- false discovery 增加 ≤ 2 percentage points。
+- location/actionability 下降 ≤ 2 percentage points。
+- verified-success p95 wall time/cost 增加均 ≤ 20%。
+- unknown family 单独报告，不能被 known 平均值掩盖。
 
-- 主 turn 前丢 lease：不启动 Codex。
-- 主 turn 中丢 lease/cancel/deadline：interrupt，kill 不健康 runtime，丢弃未冻结结果。
-- Worker crash 且结果尚未冻结：Server 可签发新 attempt，从头运行。
-- Worker crash 且 outbox 已冻结：只恢复 exact outbox submit；不得继续审查或改写结果。
-- submit ACK 丢失：按 idempotency key 查询/重放同一 payload，不能生成第二结果。
+运行诚实性：
 
-只读任务允许“重算代替恢复”，这是本次简化最重要的前提之一。
+- inventory/coverage partition valid rate = 100%。
+- indeterminate case 保持 `PARTIAL/FAILED`，不得假成功。
+- SDK/auth/quota/timeout/cancel/source mutation/ACK loss 分类与 oracle 一致。
+- debug/log 不含 source/secret。
+- runtime 不可比时交错重跑 exact stable build；仍不可比则 INDETERMINATE。
 
-## 9. 结果与 coverage 契约
+### 13.3 evaluator 与职责分离
 
-以下是概念边界，不是本文授权的新 wire schema。
+- benchmark owner 冻结 dataset/oracle。
+- CI/eval owner 产生 raw samples/可复算 report，无 promote 权。
+- release operator 冻结 policy、核验 report、签发 attestation。
+- deployment operator 只能执行已签发 canary/rollback plan。
 
-`review-result/v1` 至少包含：
+Evaluator 只允许 exit 0 PASS、exit 1 FAIL、exit 2 INDETERMINATE；只有 exact PASS report 可签发 attestation。
 
-- run binding：job/run/lease/attempt；
-- control-plane binding：Worker、SDK/runtime、model/effort、Skill、output schema digest；
-- source binding：repo identity、commit/tree/inventory、applicable `AGENTS.md` digests；
-- findings：稳定 finding id、severity、confidence、path/line、evidence、failure scenario、impact、recommendation、rule refs、validation status；
-- coverage：inventory digest、inspected scope、skipped/unsupported scope及原因；
-- limitations：context、environment、dependency、permission、timeout 等；
-- usage：wall time、turn count、token usage；
-- terminal classification。
+## 14. 测试与验证矩阵
 
-### 9.1 必须诚实定义“全仓审查”
-
-应区分三种说法：
-
-1. **Inventory complete**：Worker 机械枚举并绑定了全部纳入范围的文件；可以证明。
-2. **Coverage accounted**：每个 inventory entry 被分类为 inspected/skipped/unsupported；可以机械闭合，但分类内容仍需审计。
-3. **Semantic attention to every line**：模型真正理解了每一行；当前技术无法从最终 JSON 机械证明。
-
-产品若继续展示“全仓扫描”，其定义必须限定为前两项，不得暗示第三项。大仓库超过 context/token/deadline 时必须返回 `PARTIAL` 或明确限制，而不是压缩报告后声称完整。
-
-### 9.2 output schema 的边界
-
-`outputSchema` 能约束最终消息形状，不能证明字段为真。Worker 仍需独立验证：
-
-- path 存在且属于原 inventory；
-- line range 有效且 evidence 与对应 source 区域一致到可接受程度；
-- finding id 唯一；
-- severity/confidence 枚举和范围有效；
-- coverage 集合无未知、重复或遗漏路径；
-- source state 和 control-plane digest 未漂移。
-
-## 10. 30 个现有 phase 的重构归宿
-
-| 当前 phase 组 | 目标归宿 |
+| 领域 | 必测场景 |
 |---|---|
-| `prepare_workspace`, `start_codex_app_server`, `initialize_codex_connection`, `check_codex_auth` | 合并为内部 `PREPARING`；保留行为，不保留四个公共语义 phase |
-| `bootstrap_helper_scripts` | 删除；确定性工具随 Worker package 发布并在启动时校验 |
-| `inventory_repository`, `token_budget` | 保留为 `PREPARING` 的机械前置条件，不作为 Agent 语义阶段 |
-| `repo_map`, `risk_routing`, `bundle_planning` | 方法论移入 Skill；不要求持久化中间 JSON |
-| `bundle_packing`, `reviewer_fanout`, `clustering_and_voting` | 初始目标删除；只有 benchmark 证明单 turn 不足时才重新设计 |
-| `reviewer_json_validation`, `location_validation` | 合并进一次确定性 `VALIDATING` |
-| `intent_mining`, `intent_test_planning`, `intent_test_writing`, `intent_test_failure_analysis`, `validator_disproof` | 方法论移入 Skill；不再是固定 pipeline。允许时由同一 turn 在 disposable workspace 有界执行 |
-| `intent_test_validation`, `validation_workspace_prepare`, `intent_test_running` | workspace/policy/command trace 由 Worker 机械控制；不是固定语义 phase |
-| `final_report_json` | 主 turn 的结构化最终输出 |
-| `render_markdown_report` | Server/Web 从结构化结果渲染，或用小型确定性 renderer；不再调用独立 Agent |
-| `qa_gate` | 合并为 `VALIDATING` 的 schema/source/coverage/result gate |
-| `hash_artifacts`, `upload_artifacts`, `submit_result_envelope` | 合并为 `PUBLISHING`，保留 outbox 和幂等性 |
-| `cleanup_active_job` | terminal `finally` 行为，不是审查 phase |
+| Skill | explicit input、digest drift、swap/symlink/truncate、隐式 skill/plugin/MCP/hook |
+| Instructions | root/nested precedence、超 32 KiB、总量超限、manifest drift、receipt 缺失 |
+| Sandbox | source write、validation-copy write、network、credential path/env、approval |
+| SDK | missing/wrong thread/turn id/status、notification failure、timeout、archive/close hang |
+| Result | malformed schema、unknown enum、traversal、line OOB、evidence mismatch、duplicate |
+| Coverage | 0/1/2,000 files、gap/overlap/order/OOB、unknown reason、instruction binding |
+| Lifecycle | cancel/deadline/lease loss before/during/after turn、crash before/after freeze |
+| Publish | exact replay、ACK loss、key conflict、stale、cancel vs result CAS concurrency |
+| Server | quota event idempotency、normalization、DTO redaction、projection recovery |
+| Web/Admin | dynamic five steps、partial/debug/ETA、private-field absence、配置删除、390px |
 
-公共进度由 30 个百分比阶段缩减为 `preparing/reviewing/validating/publishing/terminal`，Web 不再消费内部 prompt 拓扑。
+每个 feature/bug slice 必须保存：
 
-## 11. 可复用资产与删除边界
+1. 实现前最小 failing test 命令与 failure。
+2. 同一 test 实现后通过。
+3. focused suite。
+4. 项目全套 check。
+5. 文件行数和超大文件 frozen baseline。
+6. 对应 CI run/check。
 
-### 11.1 应保留的能力资产
+纯文档/schema 无运行行为时，可用 schema fixture/generator/check 作 red/green，但需说明例外。
 
-以下资产有独立产品价值，应优先复用其行为或测试，而不是因架构转向全部丢弃：
+当前/目标命令：
 
-- 单槽、heartbeat、cancel/deadline 和 stale publish fence；
-- worker-scoped SDK/Auth/App Server 隔离；
-- source inventory/snapshot 和 source-change 检测；
-- disposable validation workspace 的安全边界；
-- SDK usage/event/error 分类；
-- terminal outbox/idempotent publish；
-- debug/log redaction；
-- S8 benchmark、raw evidence、evaluator 和 release-gate 方法。
+Worker：
 
-“保留能力”不等于“原文件原样保留”。若现有模块被通用类型污染，应通过行为测试提取到更小的专用模块。
+```powershell
+python scripts\agent_first_decision_register.py check --repo-root .
+python scripts\agent_first_slice0_baseline.py check --repo-root .
+python scripts\verify_agent_first_contract_baseline.py check --workspace-root ..
+python scripts\verify_agent_first_legacy_absence.py --workspace-root ..
+python scripts\check_output_contracts.py
+python -m unittest discover -s tests -p "test_*.py"
+```
 
-### 11.2 应迁入 Skill 的知识
+删除 slice 使用新的非自引用 verifier `--require-absent`；Stage 0 前不得把现有 strict command 当通过证据。
 
-- 现有 repo mapper、risk router、reviewer、validator、reporter prompt 中仍有效的方法；
-- `.codereview/prompts` 中经评测证明有效的审查提示；
-- finding 证据标准、误报反证、严重性和 confidence 规则；
-- framework/language 通用的 review checklist。
+Server：
 
-迁移后只能有一个生产语义来源。旧 prompt 不得继续被生产路径读取；有价值的旧案例转为 eval fixtures。
+```powershell
+python -m pytest
+```
 
-### 11.3 clean cutover 后应删除
+Web/Admin：
 
-- legacy 30-phase dispatch、phase-specific prompt/schema/helper 和中间 artifact contract；
-- 无生产消费者的通用 Agent Kernel tables/migrations/types/gates/ledgers；
-- Server/Web 对 30 phase、旧 artifact kinds 和旧进度计数器的依赖；
-- shadow、compatibility adapter、fallback 和第二 runner；
-- 重复表达同一审查规则的 prompt 文档。
+```powershell
+npm run check
+```
 
-删除前必须跨 Worker/Server/Web 生成可审计引用清单；不能只按文件名前缀批量删除。
+发布前还需 Worker wheel/install probe、Server generator/parity、跨仓 exact-pin、真实 SQLite concurrency 和对应 CI。未运行/超时必须报告缺证，不能写“通过”。
 
-## 12. 迁移方案
+## 15. 文件所有权与实施切片
 
-### Stage A：先改决策，不改生产
+| 切片 | 主仓 | 主要目录/职责 | 独立验收 |
+|---|---|---|---|
+| GOV-0 | Worker | decision/slice0/absence scripts、contracts、docs | gate fixtures/current check |
+| SKILL-1 | Worker | `reviewer_skill/**` | package bytes/binding/eval fixtures |
+| RUN-1 | Worker | source snapshot/instruction bundle | source/instruction faults |
+| RUN-2 | Worker | runtime policy/SDK session/runner | sandbox/SDK/turn |
+| RES-1 | Worker | coverage codec/result validator | schema/location/coverage |
+| PUB-1 | Worker | terminal candidate/active marker/outbox | crash/replay |
+| CON-1 | Server | `contracts/reviewer-worker/v2/**`/generator | schema/parity/exact-pin |
+| SRV-1 | Server | terminal CAS/normalization/projection/DB | SQLite concurrency/recovery |
+| SRV-2 | Server | routes/quota/debug | route/integration |
+| WEB-1 | Web | normalizer/flow/detail/history | check + browser QA |
+| ADM-1 | Admin | plan/settings/worker copy | check + mobile |
+| CUT-1 | 四仓 | builder/routes/config/deletion/CI/docs | coordinated checklist |
 
-1. 新增 append-only 架构决策，明确代码审查是 read-only specialized task，而非通用 Agent platform。
-2. 列出并 supersede 所有要求 Task Owner、Verifier、ledgers、固定 pipeline 和旧 current-contract 形态的冲突决策。
-3. 冻结本提案的 scope、质量门、wire ownership 和 clean-cutover 规则。
-4. 在决策前暂停继续扩展通用 Agent Kernel，避免增加 sunk cost。
+两个切片不得同时修改同一超大 legacy 文件；需触及时先提取 narrow seam，并记录所有权/合并顺序。
 
-### Stage B：离线 candidate spike
+## 16. 回滚与 operator runbook
 
-只实现无生产 authority 的最小候选：
+允许回滚仅限已签发 stable build，且同时保持：
 
-- exact pinned SDK；
-- 一个显式 Reviewer Skill；
-- 一个主 thread/turn；
-- output schema；
-- inventory/location/source validator；
-- 本地结果文件。
+- 相同 private/public current contract identity/version/digest。
+- 相同 DB schema/storage semantics。
+- 相同 D24 barrier 与新 task population。
+- 不重新开放旧 route/task/data/Worker。
 
-使用相同 source snapshot 对当前 pipeline 和候选方案做 paired benchmark。该比较是离线评测，不是生产双轨或 shadow authority。
+无此 stable build 时只能 stop-intake、fence/reject 并保留证据。
 
-当前固定 SDK 已暴露 SkillInput/output schema，因此 spike 首先验证行为和质量，不先升级 SDK。
+禁止回滚：
 
-### Stage C：构建最小生产壳
+- 回 `ReviewWorkerV1` 或打开 shadow/fallback/legacy flag。
+- 恢复旧 protocol/schema/table reader。
+- 将 current task 交给旧 Worker。
+- 通过 Admin 选择旧 mode。
+- 用旧 baseline/QA 覆盖新 release gate。
 
-在 candidate 通过质量门后，再接入：
+operator 必须演练：
 
-- claim/heartbeat/cancel/deadline；
-- isolation/validation workspace；
-- event/usage/log；
-- durable outbox 和 idempotent result ingest。
+- stop/reopen intake。
+- barrier 前 task 清点与隔离。
+- stale lease/event/result rejection。
+- ACK loss/outbox recovery。
+- same-contract stable rollback。
+- 无 stable 时 fence/reject。
+- canary auto-stop/证据导出。
+- debug bundle 无 source/secret 审计。
 
-按失败模式测试，不按 30 phase 重建旧架构。
+演练使用非生产环境和 exact release artifacts，结果进入 attestation evidence。
 
-### Stage D：跨仓 clean cutover
+## 17. 风险、停止条件与估算
 
-1. Server/Worker/Web 对同一个最小 current contract exact-pin。
-2. Web 改用粗粒度进度和统一 review result。
-3. 离线 attestation、rollback/stop-intake 演练通过。
-4. 协调打开唯一新 intake；不把剩余流量送回旧 Worker。
+出现任一事实即停止或回 Stage A：
 
-### Stage E：删除旧路径
+1. 近期产品需要写代码、外部 effect、人工 approval 或通用 Agent task。
+2. SDK/runtime 无法关闭非允许 instruction/tool surface，或无法 pin Skill/sandbox/output。
+3. paired benchmark 无法通过关键召回、误报、大仓稳定性或成本 non-inferiority。
+4. 单 turn 系统性无法诚实 coverage，且小规模拓扑扩展也无数据支持。
+5. terminal CAS/clean cutover 无法协调完成，业务又不允许 stop-intake。
+6. 从头重跑 SLO 不可接受，且数据证明需 semantic resume。
+7. 合规要求每次运行独立 principal/不可抵赖 attestation，离线 release gate 不足。
 
-cutover slice 内或其紧随的强制 deletion slice 删除 legacy/Agent-Kernel 非目标路径，运行 absence gate。不能长期保留“备用实现”。
-
-回滚只能回到实现同一最小 current contract 的 exact stable build；若不存在，只能 stop-intake/fence/reject，不能回旧协议。
-
-## 13. 评测与接受门
-
-架构简化必须由质量和运行数据证明，不能只用 LOC 证明。
-
-### 13.1 benchmark corpus
-
-至少覆盖：
-
-- 历史真实缺陷及修复前快照；
-- clean counterexamples 和合法例外；
-- security、correctness、API/schema、state/concurrency/resource、test-gap；
-- 小仓库、大仓库、monorepo、generated/vendor/binary/submodule 边界；
-- nested `AGENTS.md` 和恶意源码 prompt injection；
-- 缺依赖、测试不可运行、超 context/token/deadline；
-- SDK timeout/crash、quota/auth error、cancel、lease loss、source mutation、publish ACK loss。
-
-### 13.2 预注册指标
-
-质量：
-
-- oracle-positive finding recall，按 severity/concern 分层；
-- false discovery / false verified；
-- location accuracy、actionability、duplicate rate；
-- clean counterexample restraint；
-- known 与 unknown repository family 分开报告。
-
-运行：
-
-- schema-valid result rate；
-- inventory closure honesty；
-- source-integrity violation；
-- stale/double terminal publish；
-- p50/p95 wall time、token、cost；
-- platform failure rate。
-
-维护：
-
-- 一个审查规则变更触及的生产文件和契约面；
-- 生产语义来源数量；
-- retained state/table/schema 是否各有当前消费者和故障测试。
-
-### 13.3 推荐 go/no-go 门
-
-正式决策应在揭示候选结果前冻结门槛。建议至少满足：
-
-- source mutation、stale publish、double terminal、未声明 mandatory coverage gap 均为 0；
-- schema/location/control-plane binding 有效率 100%；
-- high/critical 加权召回相对 current stable 的 95% 置信下界不低于预注册 non-inferiority margin；建议 margin 不超过 5 percentage points；
-- false discovery 相对 current 增加不超过 2 percentage points；
-- clean counterexample 不因宽泛 Skill 规则产生系统性噪声；
-- p95 wall time/cost 不超过预注册上限；
-- 所有 indeterminate case 保持 `PARTIAL/FAILED`，没有假成功。
-
-现有 S8 eval/release discipline 应尽量复用；应删除的是运行时通用内核，不是质量评测严谨性。
-
-## 14. 会推翻本提案的证据
-
-出现以下任一事实，应暂停或拒绝本次重构：
-
-1. 已确认的近期产品需求要求 Worker 写代码、调用外部 provider、处理不可重放 effect 或执行人类审批。
-2. paired benchmark 显示单 Skill 方案在关键缺陷召回、大仓库稳定性或误报上无法达到 non-inferiority 门。
-3. 合规要求每次运行必须由独立 principal/session 做不可抵赖 attestation，而离线 eval 不足以满足。
-4. 从头重跑的成本/SLO 不可接受，且跨 lease semantic resume 被数据证明为必要。
-5. SDK/runtime 无法稳定 pin Skill bytes、sandbox 和 output contract，或 beta 兼容性测试不通过。
-6. Server/Web 的最小契约无法在一次协调 clean cutover 中完成，而业务又不允许 stop-intake。
-
-若这些事实不存在，继续建设通用 Agent Kernel 的收益目前没有足够证据。
-
-## 15. 开放决策及推荐默认值
-
-| 决策 | 推荐默认值 |
+| 风险 | 缓解 |
 |---|---|
-| “全仓审查”的产品定义 | inventory complete + coverage accounted；不承诺每行语义理解 |
-| Skill 调用 | exact path + digest + explicit SkillInput；禁止只靠 implicit match |
-| 每次 review 的 Agent 拓扑 | 1 root thread、1 main turn、最多 1 次格式修复；无 fanout |
-| source 权限 | 原 source 只读；需要写入的验证只在 disposable copy |
-| network/credential | 无网络、无 production credential、approval auto-deny |
-| crash recovery | 语义从头重跑；只恢复 frozen terminal outbox |
-| repo-specific rules | 放在 target repo/nested `AGENTS.md`，不复制进 Skill |
-| 通用 review 方法 | 放在 Worker-owned、versioned、instruction-only Skill |
-| progress | 5 个粗粒度状态，不暴露 prompt/phase 拓扑 |
-| quality assurance | 离线 paired eval + 每次运行机械 validator；默认无 per-run Verifier Agent |
-| rollback | 同 contract exact stable build；否则 stop-intake |
+| Skill 混入全局 surface | controlled CWD/CODEX_HOME + surface inventory + fail closed |
+| 大 AGENTS 静默截断 | 自有 manifest/receipt/限额，不依赖默认 merge |
+| coverage 自报不实 | inventory partition + receipts + partial |
+| Server/Worker 双终态 | Worker candidate + Server CAS + concurrency/ACK/stale tests |
+| 简化降低召回 | paired benchmark + unknown families + 3 seeds + oracle |
+| 漏 Admin/计费 | 四仓 inventory + 专属工作包 |
+| gate 自引用 | Stage 0 分离 history/live catalog |
+| 超大文件继续增长 | 小模块 + 400/600 门 + frozen baseline |
 
-## 16. Definition of Done（提案级）
+单人连续投入估算 8–15 工程周：
 
-只有满足以下条件，才可称重构完成：
+- Stage 0：0.5–1.5 周。
+- Stage A：1–2 周。
+- Stage B：2–3 周。
+- corpus/oracle/eval：2–5 周。
+- Stage C：1.5–3 周。
+- Stage D–F：1.5–3 周。
 
-- 有新的 append-only 决策和规范性设计明确授权并 supersede 冲突决策；
-- 生产路径只有一个 Worker current contract 和一个 reviewer Skill 语义来源；
-- 每个 attempt 显式绑定 exact SDK/runtime/model/Skill/schema/source/AGENTS digest；
-- 单槽、lease、cancel、deadline、sandbox、source integrity、budget 和 outbox 不变量全部通过故障注入；
-- 结果 schema、path/line、coverage 和 terminal binding 全部由非 Agent 代码校验；
-- benchmark/eval 满足预注册质量、运行和成本门；
-- Server/Web 已切到粗粒度进度与最小 result contract；
-- legacy 30-phase、非目标 Agent Kernel、shadow/fallback/compatibility 路径及跨端消费者已删除并通过 absence gate；
-- operator 已完成 exact stable rollback 或 stop-intake/fence/reject 演练；
-- 文档明确说明“全仓”的可证明边界和 `PARTIAL` 条件。
+不含 canary 至少 24h + 72h 的日历时间和外部授权等待。corpus/oracle 通常是关键路径，不能只按 Worker LOC 估算。
 
-## 17. 最终建议
+## 18. Definition of Done
 
-应接受这次架构方向调整，并立即把后续讨论聚焦到推荐的薄壳方案，而不是继续把通用 Agent Kernel 做完后再简化。
+只有每项有当前直接证据时才完成：
 
-最小正确原则是：
+- append-only 决策已授权并逐项 supersede；无 current 指令冲突。
+- Slice-0/replacement gate 与非自引用 strict absence gate 可用。
+- 生产只有一个 current private contract、一个 runner、一个 Reviewer Skill。
+- attempt exact-bind SDK/CLI/runtime/model/effort/Skill/schema/source/instruction。
+- CWD/CODEX_HOME/tool/network/credential/approval 全部通过故障注入。
+- slot/lease/cancel/deadline/source/budget/outbox/Server CAS 通过并发/崩溃测试。
+- result/identity/location/evidence/coverage/redaction 均由非 Agent 代码验证。
+- D45 offline benchmark 所有适用门 PASS，无缺证/INDETERMINATE。
+- billing 不再依赖旧 phase；三层 contract/public redaction PASS。
+- Web 使用五级 progress/public DTO；Admin 旧配置已删除。
+- D24 barrier、legacy reject、rollback/stop-intake 演练通过。
+- 30-phase、非目标 Agent Kernel、shadow/fallback/compatibility、旧配置/DTO/table/docs consumers 已删除。
+- strict absence 确定性 `absent`。
+- 四仓 local checks 与对应 CI 全绿；CI 不可用不能完成生产 DoD。
+- canary 5%/25% 的样本、时窗、阈值 PASS 后才 full。
+- 四仓 `AGENTS.md` 记录 durable current rules，不把 superseded rules 留作 current。
 
-> **用 Skill 维护审查智慧，用代码维护系统真相。**
+## 19. 立即下一步
 
-下一步不是直接删代码，而是先用同一批仓库快照做离线 candidate spike 和 paired benchmark。只有质量不劣且运行门通过后，再通过新的 append-only 决策启动 clean-break 重构。
+1. 开 Stage 0 issue：修复/替换 Slice-0，并实现 absence v2。
+2. 生成含 Admin、billing、DTO、table、tests、docs 的四仓删除清单。
+3. 准备 D42-D46 resolution packet，先解决 D5/D9/terminal authority。
+4. 冻结三层契约、result、coverage 与 `semantic_review_started`。
+5. 新决策授权后，按 TDD 建 Skill 和无生产 authority candidate。
+6. exact-load/instruction/coverage/terminal faults 未全绿，不开始真实 benchmark。
+7. paired benchmark 未 PASS，不开始 Stage C–F、部署、流量、canary 或删除。
+
+最小正确原则：
+
+> **由 Skill 维护审查智慧，由代码维护系统真相，由 Server CAS 维护全局终态。**
