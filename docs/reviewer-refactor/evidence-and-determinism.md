@@ -27,7 +27,7 @@ pullwise-worker/scripts/reviewer_refactor_evidence.py
 
 当前该 target 不存在，因此正式 `GOV-0A` collector 状态是 `NOT_IMPLEMENTED`，`SPEC-READY-04-BOOTSTRAP` 不能 PASS。当前可以运行主规格 0.5.3 的既有只读命令做人工审计，但输出不得冒充 `reviewer-refactor-evidence-manifest/v1` 或 signed/provisional GOV-0A generation。
 
-RR-GOV packet 必须绑定 collector 的 proposed exact source bytes、source SHA-256、installed-script SHA-256、Python executable/version/digest、CLI descriptor digest、valid/invalid fixtures和唯一写根。collector 首次落库与启用属于 RR-GOV exact write set；本文不让一个未来脚本追认自己的创建权限。
+`RR-GOV-COLLECTOR-DRAFT-A/FREEZE-A` packet 必须绑定 collector 的 proposed exact source bytes、source SHA-256、installed-script SHA-256、Python executable/version/digest、CLI descriptor digest、valid/invalid fixtures和唯一写根。DRAFT只授权 inert bytes，FREEZE只授权 canonical script/self-tests和一次formal GOV-0A；collector首次落库与启用属于该 exact write set。formal GOV-0A之后的普通RR-GOV packet才处理gate replacement；本文不让一个未来脚本追认自己的创建权限。
 
 ## 2. Collector 安全与发布原子性
 

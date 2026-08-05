@@ -90,6 +90,8 @@ tracked inert decision bundles 固定在 `pullwise-worker/docs/reviewer-refactor
 
 当前没有本文目标的 evidence writer/aggregator，不能要求它先验证自己的创建授权。唯一 bootstrap 如下：
 
+formal GOV-0A 之前还有一个更窄的 collector bootstrap，专门打破“没有 collector 就不能取证、没有取证就不能授权 collector”的循环。它使用两个独立 append-only records：`RR-GOV-COLLECTOR-DRAFT-A` 只授权在 inert packet 中完成 collector source/tests/command descriptor exact bytes，`RR-GOV-COLLECTOR-FREEZE-A` exact-bind 这些 bytes并只授权 canonical collector script path、focused self-tests和一次 formal GOV-0A 采集。两者可引用本规范 manifest、当前只读命令原始 transcript和 exact confirmation，不得声称已有 evidence manifest；不得授权 gate semantics、baseline、candidate、Generate、benchmark或生产。formal GOV-0A 完成后，下面的普通 `RR-GOV-DRAFT-A/FREEZE-A` 才基于其 exact manifest决定 gate replacement。collector FREEZE不能代替 gate FREEZE，gate FREEZE也不能追认未授权运行。
+
 1. `GOV-0A` 把现有只读治理命令的原始 stdout/stderr/exit、命令参数、四仓 HEAD/dirty 状态、环境版本和所有输入/输出 SHA-256 放入上述目录形状；此时 `result.json.status` 只能是 `READY/IN_PROGRESS`，另以非授权字段 `provisional_result=PASS|FAIL|INDETERMINATE` 记录直接命令的暂定归纳，不得称为 signed stage PASS。EVD-0 back-validation 后生成新 generation，才可把六态 `status` 设为 verified final result。
 2. `GOV-0A` 同时在仓外 evidence generation 的 `proposed-inert/` 中产生 inert `RR-GOV` decision draft bundle 的 exact proposed bytes。它不在采集期间写入任一 worktree，也不被 runtime、generator、schema registry 或 CI release gate 消费；bundle 必须包含拟议目标 path、exact proposed bytes/digests、failing/pass fixtures、旧义务映射、write set 和禁止项。bootstrap 发布后，只有在当前 authority 明确允许 inert docs write set 时，才可把这些 bytes 作为独立 tracked-doc action 写到第 0.6 节路径；复制前后必须 byte-compare，且合并后用新 generation 重新建立 clean snapshot。
 3. architecture/governance owner 可依据 exact bootstrap manifest digest 签发 RR-GOV draft/freeze resolution；这是唯一可以在目标 aggregator 不存在时推进的决策。它只授权 `GOV-0B` 的 `EVD-0` 和 replacement gate write sets，继续禁止 candidate、Generate、benchmark、部署、流量和删除。
@@ -875,6 +877,8 @@ RR-GOV 是唯一 bootstrap 变体：GOV-0A 先把 inert draft bundle exact bytes
 
 ### Stage 0A：只读治理证据与 provenance
 
+入场前必须先使 `SPEC-READY-03-MANIFEST` PASS，并交付/冻结 `bootstrap-command.json` 指向的 exact collector bytes，使 `SPEC-READY-04-BOOTSTRAP` 不再为 FAIL。当前只允许运行现有只读审计与 spec verifier；不得手工拼一个目录冒充下述 GOV-0A generation。
+
 1. `S0A.0` 按第 0.2/0.3/0.5 节创建不可覆盖 bootstrap generation，记录四仓 HEAD/clean status、当前命令/环境/input digests；同一 generation 不执行或夹带任何 tracked 修复。所有原始 stdout/stderr/exit 直接保存，`result.json` 只写 provisional 状态；另获授权的 tracked action 完成并合并后必须用新 generation 复核。
 2. `S0A.1` 用当前 register/Slice-0 commands 复现 wrapper 8,762/8,062 和 digest 漂移，输出 `slice0-provenance.json`：D39/D41 record digest、producer version、Generate generation、expected/actual path/line/digest、首次出现 commit。只有既能证明是既有权威生成链/冻结语义内的机械同步遗漏，又有当前 resolution exact 授权目标 write set 时才可修复；截至本文快照不假定该授权存在。否则只产出 evidence packet，留给 RR-GOV。
 3. `S0A.2` 只读取证 405 行 decision-register gate test 未入 baseline。若现有 baseline 定义确已要求收录，也必须先取得 exact write-set 授权，才可 split/reduce 到每个新手写文件 ≤400 行、运行原有 focused/full tests 并机械同步；否则只记录 replacement obligation，不扩大 current baseline。
@@ -1219,6 +1223,12 @@ GOV-0A bootstrap + inert RR-GOV bundle
 
 EVD-0 在 GOV-0B 生成 `work-package-ledger/v1` skeleton；它列出所有已知 package，但未授权项初始为 `NOT_AUTHORIZED`。每个后续阶段创建不可覆盖的新 ledger generation，不原地修改旧状态。每项至少含 owner/reviewer、repository/write set、stage-advance digest、dependency evidence digest、decision/instruction/contract/runtime/release inputs、red command+failure、green command、focused/full/CI commands、output artifacts、line-count result、derived state 和 superseded-by。ledger manifest 不列自己的 hash；package result 由 aggregator 从直接 evidence 推导并反向引用 ledger manifest digest，避免自引用。手工编辑 state、只引用 PR/commit 或缺 direct command/CI bytes 不能产生 PASS。
 
+候选 machine index 位于 `docs/reviewer-refactor/execution-cards.json`，schema 为 `execution-card.schema.json`。generation 1 的 18 张 card 全部故意保持 `NOT_AUTHORIZED` 且 command arrays 为空：这准确表示 FREEZE/advance 尚未绑定真实 argv，而不是遗漏。不得把不存在的命令、`latest` 或 placeholder 填进去制造“可执行”外观；相应决策生效后必须发布新 generation，补齐 exact argv/timeout/evidence outputs 并由 ledger 推导状态。当前结构自检命令固定为：
+
+```text
+python -I -B docs/reviewer-refactor/verify_spec.py --repo-root . --self-test
+```
+
 | Work package | Entry gate | PASS 必须直接证明 |
 |---|---|---|
 | GOV-0A | current read-only/document authority；不扩大 D41 | provenance、四仓 inventory、现有 gate raw outputs、inert RR-GOV bundle；零语义变化；仅 provisional result |
@@ -1379,7 +1389,7 @@ engineering_calendar =
 
 ## 19. 立即下一步
 
-1. 当前只开 `GOV-0A`：先确保四仓 clean，按第 0.5 节在仓外创建 no-clobber provisional bootstrap generation，复现并分类 Slice-0/absence drift，生成 provenance、packaging pin 取证、四仓 deletion inventory 和 `proposed-inert` RR-GOV draft bundle；随后仅把 exact-match bundle 作为独立 inert-doc action 应用。没有另一个 exact write-set resolution 时，不修改 baseline/test/script/packaging metadata，即使判断它是机械遗漏。
+1. 当前先完成 candidate spec self-check，并准备只授权 collector exact source/tests 的 inert RR-GOV bootstrap packet；`bootstrap-command.json` 目前明确记录 collector absent/FAIL。在适用 append-only resolution exact 授权该 script write set 前，不创建或执行 formal collector，也不手工伪造 GOV-0A manifest。collector exact bytes/self-test获授权并落库后，才确保四仓 clean，按第 0.5 节在仓外创建 no-clobber provisional generation，复现并分类 Slice-0/absence drift，生成 provenance、packaging pin取证、四仓 deletion inventory 和 gate-replacement RR-GOV packet。
 2. 将无法在现有语义内修复的项目写入 RR-GOV exact target/fixture/obligation mapping；当前至少包括 Slice-0 generated wrapper drift、405 行未登记 test、strict absence self-reference 和 `setup.py` unpinned requirement。不改 expected、不 Generate、不替换 gate，不把 provisional result 称为 signed PASS。
 3. 按第 0.6 节以 current register v1 entry + exact-bound packet 分别取得 `RR-GOV-DRAFT-A` 与 `RR-GOV-FREEZE-A` option-anchored resolution；然后 GOV-0B 先按 TDD 实现 EVD-0/back-validation，再实现 replacement gate。缺 FREEZE、packet digest 或 exact confirmation 任一项即停在 GOV-0A。
 4. 取得 GOV-0B signed PASS 后，准备 RR-SCOPE/TRUST/TRUTH/EVAL/CUT inert bundles；先取得 DRAFT-A records 与 Stage A advance，完成 non-consumed artifacts/tests，再逐项取得 FREEZE-A。RR-TRUTH 必须明确 supersede D5/D9 的 terminal authority。

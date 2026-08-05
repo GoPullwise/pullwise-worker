@@ -1,0 +1,18 @@
+{
+  "schema_id": "reviewer-refactor-bootstrap-command/v1",
+  "spec_id": "pullwise-reviewer-refactor/v1",
+  "collector_id": "reviewer-refactor-bootstrap-collector/v1",
+  "collector_repo_id": "worker",
+  "collector_path": "scripts/reviewer_refactor_evidence.py",
+  "collector_expected_state": "absent",
+  "collector_sha256": null,
+  "readiness_status": "FAIL",
+  "reason_code": "bootstrap.collector_not_implemented",
+  "python_flags": ["-I", "-B"],
+  "subcommand": "collect-gov-0a",
+  "required_flags": ["--workspace-root", "--evidence-root", "--release-id", "--generation", "--spec-manifest-sha256"],
+  "forbidden_flags": ["--force", "--resume", "--exclude", "--command", "--repository-root-override"],
+  "write_scope": "new-generation-under-explicit-evidence-root-only",
+  "expected_process_exit_before_back_validation": 2,
+  "activation_requirement": "RR-GOV-COLLECTOR-FREEZE-A exact source and command binding plus clean-room self-test"
+}

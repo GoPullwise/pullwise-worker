@@ -81,7 +81,7 @@ plan 每项必须含 current bytes/digest、冲突句稳定 id、目标 bytes/di
 
 | Gate | PASS 条件 |
 |---|---|
-| `SPEC-READY-01-AUTHORITY` | RR-GOV DRAFT/FREEZE exact-bind 本规范 manifest，并创建 `reviewer-refactor-program` normative unit；无模糊确认 |
+| `SPEC-READY-01-AUTHORITY` | collector 专用 DRAFT/FREEZE 只授权 collector/GOV-0A，随后普通 RR-GOV DRAFT/FREEZE exact-bind GOV-0A 与本规范 manifest，并创建 `reviewer-refactor-program` normative unit；无模糊确认或权限合并 |
 | `SPEC-READY-02-INSTRUCTIONS` | 四仓 conflict plan 完整；获授权 bytes 应用后 report `unresolved=0` |
 | `SPEC-READY-03-MANIFEST` | spec manifest、machine cards、schemas、fixtures 全部 digest/结构/self-test PASS |
 | `SPEC-READY-04-BOOTSTRAP` | GOV-0A collector 有 canonical path/bytes/digest/command、clean-room test 和 no-clobber evidence；在此之前不得声称 GOV-0A 可自动执行 |
