@@ -26,6 +26,35 @@
 | Stage E clean cutover/canary | 否 | 离线 attestation + strict absence + D24 + 发布授权 |
 | Stage F 全量/收尾 | 否 | canary PASS |
 
+### 0.1 当前执行状态与状态词
+
+决策注册表的 `ready` 只表示“当前注册表没有未解决的 active decision”，不表示本文提出的 D42–D47 已获授权，也不表示可以开始 candidate、benchmark 或生产实现。本文和后续 issue 只使用以下状态词：
+
+| 状态 | 含义 |
+|---|---|
+| `NOT_AUTHORIZED` | 前置 append-only 决策或阶段授权缺失；禁止写入该阶段的实现代码或运行该阶段的真实操作 |
+| `READY` | 前置授权与输入证据齐全，可以开始，但尚无完成声明 |
+| `IN_PROGRESS` | 已开始且保留 red/green/命令/产物证据 |
+| `PASS` | 所有适用验收项有当前、直接、可复算证据 |
+| `FAIL` | 已证明至少一个适用门不满足 |
+| `INDETERMINATE` | 缺证、证据损坏、样本不足、不可比或 gate 自身无法给出确定结论 |
+
+截至本文版本，唯一可以进入 `READY` 的工作包是 `GOV-0A`；`GOV-0B` 及后续工作包全部是 `NOT_AUTHORIZED`。`FAIL` 与 `INDETERMINATE` 都不能被当作软通过；二者也不能通过修改 expected、排除项或删除历史证据转成 `PASS`。
+
+### 0.2 规范性产物与证据包
+
+本文是实施总规格，不取代决策注册表和生成契约。实施时按下列优先级解析冲突：
+
+1. append-only decision register 中适用且未被 supersede 的 resolution；
+2. Server-owned canonical schemas/registries 及其 signed manifest；
+3. 由 canonical source 原子生成并 exact-pin 的 Worker/Web/Admin artifacts；
+4. 本文、阶段 runbook、issue 与测试计划；
+5. 非规范性说明和历史文档。
+
+每个阶段使用同一个 `release_id`，输出不可覆盖的 `reviewer-refactor-evidence/<release_id>/<stage>/<work-package>/` 证据包。证据包至少包含：`inputs.json`、`commands.jsonl`、`tests.json`、`artifacts.json`、`environment.json`、`decision-bindings.json`、`result.json` 和 SHA-256 `manifest.json`。`result.json` 只能是上述六态之一，并逐项引用直接证据；重跑创建新 evidence generation，禁止原地改写旧失败。CI 保存同一 manifest 的 artifact，release attestation 只引用已签名的 exact generation。
+
+所有尚不存在的目标命令、schema、registry 和 evidence writer 都是相应切片的交付物，不是当前已经可用的事实。文档中的“应运行”不能替代真实命令输出。
+
 ## 1. 执行结论
 
 采用：
@@ -51,10 +80,11 @@
 - Server quota 仍识别 `repo_map`、`risk_routing`、`reviewer_fanout`、`clustering_and_voting`、`validator_disproof`、`final_report_json`。
 - Admin 仍编辑 `reviewerConcurrency`，并消费 `maxBundles/maxReviewerAssignments`。
 - 决策注册表为 `ready`：40 resolved、D2 inactive、无 active decision。
-- Slice-0 当前失败：generated wrapper 8,762/8,062 行不一致、digest 不一致、`tests/test_agent_first_decision_register_gate.py` 未入 baseline。
+- Slice-0 当前失败：当前 generated wrapper 为 8,762 行、SHA-256 `9404c18b39afdb0ee6bd9d15fdbb3b24d9b85f1972a597a5919a868afe480697`，与 D41 记录一致；Slice-0 baseline 仍固定 D39 的 8,062 行、SHA-256 前缀 `bd099` 及旧 producer。Stage 0A 必须取回并记录 baseline 中的完整 D39 digest，证明二者的 provenance，再决定是既有生成链机械漏同步还是需要 D42 replacement；本文不预判结论。
+- `tests/test_agent_first_decision_register_gate.py` 当前 405 行且未入 Slice-0 baseline。它不能以“新增 grandfathered 超限文件”的方式直接纳入；若现有语义确实要求收录，先按单一职责拆分/缩减到不超过 400 行并证明测试语义不变，否则记录为 Stage 0B replacement obligation。
 - legacy contract baseline 为 `compatible`，14 组固定 probe 全部通过。
 - 默认 absence ratchet 为 `ratchet_clean=true`、`legacy_absent=false`。
-- 当前 `--require-absent` 既发现 live legacy，又因 `worker.004-frozen-contract-baseline` 自引用而 `indeterminate`，不能证明 clean break。
+- 当前 `--require-absent` 既发现 live legacy，又因 `worker.004-frozen-contract-baseline` 自引用而 `indeterminate`；当前报告有 108 个 failure，首个确定阻塞原因为 `strict_catalog_self_reference`，不能证明 clean break。
 - 四仓取证时工作树均干净；远端 CI 未纳入本地证据，实施阶段必须复查。
 
 因此必须从 Stage 0A 开始；未完成 Stage 0B 所需决策时，不能替换 gate、写 candidate 或删旧代码。
@@ -104,8 +134,9 @@ Pullwise Server
           ▼
 Thin Review Worker
   ├─ one slot + supervisor
-  ├─ immutable source + instruction manifest
-  ├─ restricted model-visible filesystem + sanitized tool environment
+  ├─ immutable source + instruction manifest（模型文件系统外）
+  ├─ source/instruction/validation gateway + append-only receipt ledger
+  ├─ scratch-only model filesystem + sanitized tool environment
   ├─ controlled CODEX_HOME/CWD + pinned Skill/SDK/CLI
   ├─ one thread/turn + optional format repair
   ├─ source/location/coverage/result validator
@@ -114,8 +145,9 @@ Thin Review Worker
           ▼
 Codex SDK / App Server
   ├─ explicit Reviewer Skill
-  ├─ read-only source/search
-  └─ bounded local validation in disposable copy
+  ├─ typed source/instruction/search tools
+  ├─ bounded validation tool
+  └─ optional generic shell（看不到 source/validation mount）
 ```
 
 三条通道：
@@ -124,31 +156,32 @@ Codex SDK / App Server
 |---|---|---|---|
 | SDK/provider | 仅 OpenAI/Codex 出站 | Worker 专属 auth | 否；工具读不到 auth/env |
 | Worker↔Server/clone | lease/heartbeat/cancel/artifact/result/clone | Worker token/短期 token | 否 |
-| Agent tools | instrumented source read/search、disposable copy allowlist 命令 | 无 | 是；restricted read/write roots、network disabled/deny-all |
+| Agent tools | instrumented source/instruction read/search、bounded validation profile | 无；使用 Worker 预建立的本地 capability channel | 是；只能看到工具返回值和 scratch，network disabled/deny-all |
 
 “无网络、无生产凭据”专指 Agent tools，不是让 SDK 或 Worker control transport 失效。
 
 ### 5.1 模型可见文件系统与进程边界
 
-仅设置 Worker-owned `CODEX_HOME`、turn `cwd` 或 `readOnly/workspaceWrite` preset 不能证明读取隔离。当前 [Codex App Server](https://developers.openai.com/codex/app-server) 的 `readOnly.access` / `workspaceWrite.readOnlyAccess` 在未显式限制时默认是 `fullAccess`；固定的 `openai-codex==0.1.0b3` 公开 Sandbox 封装也没有受限读取根参数。因此 exact tuple 必须通过运行时 capability probe，不能从版本号或 prompt 推断安全性。
+仅设置 Worker-owned `CODEX_HOME`、turn `cwd` 或 `readOnly/workspaceWrite` preset 不能证明读取隔离。当前 [Codex App Server](https://developers.openai.com/codex/app-server) wire 支持显式 `readOnly.access` / `workspaceWrite.readOnlyAccess`，但固定的 `openai-codex==0.1.0b3` 公开 Python Sandbox 封装只提供 preset，不能表达 restricted readable roots。因此 exact tuple 必须通过运行时 capability probe，不能从 App Server 文档、版本号或 prompt 推断 Python SDK 路径已经安全。
 
 每个 turn 的 model-visible filesystem 只能包含：
 
-- Worker-owned model-turn 目录：读写，仅用于允许的临时输出。
-- immutable source snapshot：只读。
-- staged model-visible Skill/runtime assets、instruction manifest/bytes：只读。Agent-output schema 由 Worker 通过 SDK 传入；Worker result schema、control manifest/outbox 不进入 tool readable roots。
-- disposable validation copy：仅在 policy 允许验证时读写。
-- 执行 allowlist 命令所必需的最小系统 binary/library/runtime：只读、显式枚举或由经审计的外部镜像固定。
+- Worker-owned model-turn scratch：读写、容量有界、attempt 后销毁，不含任何 source/instruction/control bytes。
+- staged Reviewer Skill runtime assets：只读、manifest exact-bound；eval fixtures 和 Worker-only schema/control assets不挂载。
+- 受审计的 tool bridge/最小 binary/library/runtime：只读。bridge 本身没有 source 路径或生产凭据，只能使用 Worker 预建立、attempt-scoped 的本地 capability channel。
 
-必须拒绝模型读取 Worker source、Worker control/runtime state、terminal outbox、logs、clone/control token、host/user home、其他 worker root、未列入 manifest 的 temp/cache，以及 `CODEX_HOME` 中的 auth/config/session。App Server/provider supervisor 可以使用 Worker-scoped auth，但 tool child process 只能收到最小 sanitized environment；不得继承 API key、token、`HOME`/`CODEX_HOME` credential path 或 Server transport credential。
+immutable source snapshot、target `AGENTS.md` bytes/instruction manifest、disposable validation copy、Worker source/control/runtime state、terminal outbox、logs、clone/control token、host/user home、其他 worker root、未列入 manifest 的 temp/cache，以及 `CODEX_HOME` auth/config/session **一律不进入模型可见文件系统**。Agent 只能通过 5.4 的工具结果看到获准 source/instruction bytes；validation copy 始终由 Worker-owned validation service 持有，模型和通用 shell 都不能直接遍历或修改它。
+
+App Server/provider supervisor 可以使用 Worker-scoped auth，但 tool child process 只收到固定的 sanitized environment；不得继承 API key、token、proxy credential、`HOME`/`CODEX_HOME` credential path 或 Server transport credential。若运行时不能关闭通用 shell，shell 也只能看到 scratch 和最小 runtime，不能成为 source/read-receipt/validation 的旁路。
 
 实现顺序：
 
-1. 若 exact SDK/CLI tuple 能表达并实际执行 restricted `readableRoots`/`readOnlyAccess`，使用该能力并 exact-pin wire/runtime evidence。
-2. 否则把 App Server 工具执行置于 Worker-owned external sandbox/container/mount namespace，只挂载上述 allowlist roots；provider/control 通道留在工具 sandbox 外。
-3. 若两者都无法隔离读取或清除 tool environment，Stage B `NO-GO`。不得写手工 JSON-RPC 绕过 SDK，也不得把普通 `read-only` preset、文件权限愿望或 prompt 当作证据。
+1. 对当前 exact SDK/CLI/App Server tuple 运行公开 API capability probe，验证 SkillInput、strict output schema、精确工具配置、隐式 surface 枚举/关闭、interrupt/close/event、sandbox policy 实际 wire 和 tool child 隔离。
+2. 优先使用能通过全部探针的受支持 Python SDK/API 路径。若 `0.1.0b3` 不能表达所需能力，只有在 D44 明确选择并 exact-pin 的兼容升级后才能采用新 SDK；不能把当前 App Server wire 的能力当作当前 Python SDK 已暴露的能力。
+3. 允许保留 `0.1.0b3` 的唯一例外，是经验证的外部 Linux sandbox/mount namespace 已使 model/tool process 只能看到 scratch/tool bridge，并由 Worker 外部服务持有 source/validation。该隔离仍需 exact-pin image/kernel/policy evidence。
+4. 两条受支持路径都不能满足时，Stage B `NO-GO`。不得手写 App Server JSON-RPC、猴子补丁 generated SDK types、依赖未公开字段，也不得把普通 `read-only` preset、文件 ACL 愿望或 prompt 当作证据。
 
-Stage B 使用模型可知路径的 sentinel files、sentinel env、host home、其他 worker root、auth store、outbox、source write、validation-copy write 和 network endpoint 做正反故障注入。只有允许路径成功、所有拒绝路径稳定 fail closed，才可签发 capability evidence。
+Stage B 使用模型已知名称的 sentinel files/env/endpoints 覆盖 host home、其他 worker root、auth store、outbox、source、instruction、validation copy、source write、scratch write、网络和 approval。只有允许操作成功、所有拒绝路径稳定 fail closed，才可签发 capability evidence。
 
 ### 5.2 责任边界
 
@@ -160,6 +193,43 @@ Stage B 使用模型可知路径的 sentinel files、sentinel env、host home、
 | Skill | 审查方法和输出纪律 | 权限/预算/终态/网络/凭据 |
 | Validator | schema/binding/location/hash/coverage/redaction | 自然语言复审 |
 | Web/Admin | 公共 DTO 和当前配置 | lease/attempt/Skill/source 私有事实 |
+
+### 5.3 Runtime tuple 与 capability contract
+
+每次 attempt 绑定一个 `evaluation_runtime_digest`。其 canonical document 至少包含 Worker wheel digest、Python 版本、`openai-codex` distribution/version/wheel digest、CLI/App Server executable digest、initialize metadata/protocol version、model/provider/effort/service tier、thread/turn config digest、sandbox/image/kernel/policy digest、Reviewer Skill manifest digest、Agent-output schema digest、tool manifest digest 和 redaction policy digest。字段缺失或实际值与预期不一致时，不启动 main turn。
+
+`runtime-capability-report/v1` 必须由真实进程探针生成，不接受静态代码推断，并逐项给出 `PASS/FAIL/INDETERMINATE`：
+
+- 显式 Skill 只加载 manifest 中的 exact bytes；
+- strict output schema 被真实 turn 接受并拒绝附加/未知字段；
+- 实际 tool/MCP/plugin/hook/approval surface 与 tool manifest 完全一致；
+- source/instruction/validation 只能经 5.4 gateway，generic shell 无旁路；
+- tool child 无 provider/control credential、无任意网络，scratch 是唯一可写根；
+- provider 和 Worker control 通道在 tool sandbox 外正常工作；
+- interrupt、deadline、event/usage、archive/close 有界且错误可分类；
+- capability report 自身绑定 executable/config/image/kernel 和 probe fixture digests。
+
+任何 SDK/CLI/App Server/model/sandbox mechanism 变化都会产生新的 runtime digest、使旧 capability report 失效，并触发 D46 的运行时可比性规则。
+
+### 5.4 不可绕过的 read/validation gateway
+
+Gateway 是 Worker-owned、attempt-scoped 的本地服务，运行在 model/tool sandbox 外。Codex 侧只配置受支持的 typed local tool bridge；bridge 通过预建立的 OS capability/IPC handle 调用 gateway，不能接受模型提供的 token、socket path 或 host absolute path。它不是第二 runner，也不是手写 App Server transport。
+
+冻结的 `reviewer-tool-protocol/v1` 只提供以下工具：
+
+| 工具 | 主要输入 | 主要输出 | 权威事实 |
+|---|---|---|---|
+| `source_inventory` | `inventory_id/cursor/limit` | canonical path、kind、size、digest、language、scope id | inventory 枚举与分页，不代表已审查 |
+| `instruction_read` | inventory/scope id、instruction path、expected digest | 有界 instruction bytes、precedence、instruction-set digest | 对应 scope 的 instruction receipt |
+| `source_read` | inventory id、canonical path、expected file digest、byte/line range | 实际返回范围、encoding、bytes、content digest | full/bounded read receipt |
+| `source_search` | inventory id、literal/受限 regex、path filter、limit | 有界 match/span 列表、truncation | 只证明返回 match，不能生成 inspected |
+| `validation_run` | validation profile id、inventory/source digest、schema-validated args、timeout | exit、bounded stdout/stderr、mutation summary、output digests | 在一次性 copy 中执行的机械验证事实 |
+
+所有请求只能引用 inventory 中的 canonical relative path；拒绝 absolute path、`..`、alternate separator、case ambiguity、symlink/reparse/submodule escape、unknown id 和 stale digest。`instruction_read` 成功前，gateway 自身拒绝该 scope 的首个 `source_read/source_search/validation_run`，不能只靠事后 validator 检查顺序。`validation_run` 只能选择 manifest 中冻结的 command/profile 和参数 schema；service 创建并销毁 disposable copy，执行时网络 deny-all、env allowlist、CPU/RSS/output/deadline 有界，绝不接受任意 shell 字符串。
+
+每个响应包含 `protocol_version/attempt_id/turn_id/tool_call_id/sequence/status/receipt_id/receipt_digest`。Gateway 在模型不可写的 append-only ledger 中按单调 sequence 记录 request digest、resolved object identity、实际 byte/line range、returned-bytes digest、instruction-set digest、limit/truncation、started/finished time、exit/error code，并形成 previous-digest hash chain。Worker freeze result 前验证链、tool-call correlation 和 ledger fsync 边界；模型伪造同形 JSON 不会产生 ledger receipt。
+
+工具错误使用 closed registry：`INVALID_REQUEST`、`STALE_BINDING`、`PATH_REJECTED`、`INSTRUCTION_REQUIRED`、`LIMIT_EXCEEDED`、`UNSUPPORTED_ENCODING`、`VALIDATION_DENIED`、`TIMEOUT`、`SERVICE_UNAVAILABLE`、`INTERNAL_INDETERMINATE`。未知错误、bridge/gateway crash、sequence gap、hash-chain mismatch 或 output truncation 未被结果声明时 fail closed。具体分页、单次/累计 bytes、search matches、validation profiles、CPU/RSS/output 限额在 Stage A 冻结并进入 benchmark binding。
 
 ## 6. Reviewer Skill 与受控指令面
 
@@ -202,7 +272,7 @@ Stage B 必须故障注入 swap、symlink、truncate、turn 中修改。
 - canonical POSIX path；浅到深优先级，nested 只作用其子树。
 - 记录 path/scope/depth/size/SHA-256/precedence。
 - 禁止截断。初始上限：128 files、单文件 256 KiB、总计 1 MiB；越限 `PARTIAL/FAILED`。
-- boot input 只内联有界 policy 与 manifest path/digest；Skill 在审查 scope 前读取适用 bytes。
+- boot input 只内联有界 policy 与 opaque instruction-manifest id/digest，不暴露 host path；Skill 在审查 scope 前通过 `instruction_read` 读取适用 bytes。
 - source 与 instruction bytes 只能通过 Worker-owned instrumented read/search gateway 形成 coverage authority。SDK tool events 只用于 call correlation/diagnostics，不是文件读取证明。
 - gateway 在 model 不可写 ledger 中记录 receipt：attempt/turn/tool-call、单调序号、inventory id、canonical path、byte/line range、returned-bytes SHA-256、完整/部分读取类型、适用 instruction-set digest。search receipt 只能证明返回的匹配范围，不能冒充整文件读取。
 - instruction receipt 必须在对应 scope 的首个 source-read receipt 之前；Worker 按 ledger 时序验证。coverage entry 绑定适用 instruction-set digest；缺失、晚到、digest 不符或只有 search receipt 时不得标 `inspected`。
@@ -253,6 +323,87 @@ Server-owned canonical source：`pullwise-server/contracts/reviewer-worker/v2/**
 `review-run/v2` 仅含 public run/scan id、公开 status、五级 progress/message/counters/ETA、summary/findings/coverage/limitations、artifact metadata/安全 URL、公开错误与时间。
 
 禁止输出 Worker token、lease、attempt epoch、Skill/instruction 私有 binding、provider auth、thread id、raw env/source、CAS internals。Web 继续动态渲染；Admin 只消费 health/quota 和仍存在的配置。
+
+### 7.4 Canonical package、字段矩阵与生成规则
+
+Server canonical source 固定为：
+
+```text
+pullwise-server/contracts/reviewer-worker/v2/
+  manifest.json
+  registry.json
+  schemas/*.schema.json
+  fixtures/valid/*.json
+  fixtures/invalid/*.json
+  generator.lock.json
+pullwise-server/contracts/public/review-run/v2/
+  manifest.json
+  registry.json
+  schemas/*.schema.json
+  fixtures/{valid,invalid}/*.json
+```
+
+所有 object schema 使用 `additionalProperties: false`；所有 integer 有范围；时间是 UTC RFC 3339；digest 为 lowercase SHA-256；ID 有长度/字符集限制；path 只允许 canonical POSIX relative path。每个 private message 有共同 envelope：`schema_id`、`schema_version`、`contract_digest`、`message_id`、`sent_at`。业务判断不得依赖 `sent_at`，而依赖 Server version/epoch/sequence。
+
+最小字段矩阵如下；Stage A 可以增加有明确消费者和测试的字段，但不能删除、改义或把 trusted 字段交给 Agent：
+
+| Schema | 必需字段（除共同 envelope） | 关键约束 |
+|---|---|---|
+| `worker-registration/v2` | worker/session id、build/runtime/capability/tool-manifest digests、slot capacity | capacity 必须为 1；Server 只接受 allowlist exact tuple |
+| `review-task-claim/v2` | job/run/attempt id、lease id/epoch/version/expiry、source descriptor/digest、instruction/inventory digest、deadline、budget、cancel generation/digest | 全部由 Server/Worker preflight 注入；Agent 不可见 |
+| `review-worker-heartbeat/v2` | claim identity、worker state、event sequence、observed lease/cancel generation、remaining deadline | sequence 单调；不能延长 lease/deadline |
+| `review-run-event/v2` | claim identity、event id/sequence、event type、event payload digest | closed event type；`semantic_review_started` 仅一次且幂等 |
+| `review-artifact-descriptor/v2` | artifact id/kind/media type/size/digest、storage generation、redaction class | descriptor 不含本地绝对路径或 raw source |
+| `review-cancel-command/v2` | job/run/attempt、cancel generation/digest/reason/issued version | generation 单调；由 Server 签发 |
+| `review-terminal-candidate/v2` | claim identity、expected nonterminal version、classification、result/artifact-set/outbox digests、idempotency key、execution/source bindings、可选 exact cancel binding | freeze 后 bytes 不变；`CANCELLED` 必须有 cancel binding |
+| `review-terminal-receipt/v2` | idempotency key/candidate digest、accepted/rejected、global classification/version、accepted result ref、closed receipt code | 同 key/digest exact replay 返回同一 receipt |
+| `review-error/v2` | scope、closed code、retry disposition、sanitized public code、evidence ref | message 仅诊断，不控制状态 |
+| `normalized-review-result/v1` | run/execution/source binding、findings、coverage、limitations、usage、artifacts、candidate classification、normalization digest | 只由 Worker validator + Server normalization 产生 |
+| `review-run/v2` | public id/status/progress、summary、findings、coverage、limitations、artifact metadata/safe URL、public error、created/updated/terminal times、etag/version | 私有字段 schema-level absent；public status 只来自 terminal/projection mapping |
+
+`manifest.json` 对 registry、全部 schema/fixture 和 generator version 计算 path/size/SHA-256；`contract_digest` 是 canonical manifest content 的 domain-separated digest。`registry.json` 是所有 enum/reason/event/status 的唯一来源。Server generator 先写临时目录、校验 valid/invalid fixtures、生成语言 artifacts、再进行 no-clobber 原子发布；失败时四仓均不得留下部分更新。
+
+生成目标固定为 Worker 的 private Python wrapper、Server validator/types，以及 Web/Admin 的 public TypeScript types/validators。Worker 不复制 public DTO，Web/Admin 不依赖 private package。每个仓的 `check` 在临时目录重生成并 byte-compare；任何手改 generated file、manifest mismatch、unknown consumer 或跨仓 digest 不一致均失败。一次 release change set 的 `release-manifest.json` exact-pin 四仓 commit、package/build digest 和 private/public contract digest。
+
+### 7.5 Closed registries 与信任来源
+
+`registry.json` 至少冻结：
+
+- Worker state：`IDLE/CLAIMED/PREPARING/REVIEWING/VALIDATING/PUBLISHING/LOCAL_TERMINAL`；
+- terminal classification：`COMPLETED/PARTIAL/FAILED/CANCELLED`；
+- public status/progress：第 9.4 节固定映射和五级 progress；
+- run events、artifact kinds、coverage status/reason、validation status；
+- private error/receipt/cancel/deadline/sandbox/source/Skill/SDK/outbox/CAS reason；
+- public error allowlist 和 private→public sanitization mapping；
+- retry disposition：`NEVER/NEW_ATTEMPT/OPERATOR`，不得由 Agent 或自由文本决定。
+
+初始 registry 必须覆盖本文出现的全部 code；未知值在所有边界 fail closed。free-text `message/detail` 必须有长度、字符和 redaction 上限，只作人类诊断，永不驱动 retry、billing、terminal、coverage 或 public projection。registry 变更等同 contract 变更，必须新 version/digest、fixtures、consumer parity 和适用 benchmark/cutover。
+
+### 7.6 新存储模型与事务边界
+
+Clean break 使用全新的 v2 tables/keys，不复用旧 row shape、trigger 或 reader：
+
+| Table | 核心 key/内容 |
+|---|---|
+| `review_runs_v2` | PK run id；job/repository、current contract/source、state/version、current attempt、deadline/budget、cancel head、terminal head、projection state |
+| `review_attempts_v2` | PK attempt id；run/worker/lease epoch、runtime/Skill/schema/source/instruction bindings、state/event sequence、started/frozen/finished time |
+| `review_run_events_v2` | PK event id；unique(attempt, sequence)；event type/payload digest；billing marker |
+| `review_cancel_commands_v2` | unique(run, generation)；command digest/reason/issued version |
+| `review_terminal_receipts_v2` | unique(idempotency key)；candidate digest、CAS input/output version、global classification、accepted evidence refs |
+| `review_results_v2` | immutable result/normalization digest、private payload ref、public projection input ref |
+| `review_artifacts_v2` | immutable descriptor/storage generation/digest/redaction class |
+| `review_projection_outbox_v2` | unique(run, terminal version, projection kind)；payload digest/delivery state |
+
+四个事务是规范边界：
+
+1. **claim**：只在 run nonterminal、无 active attempt、lease policy 满足时创建 attempt 并推进 run version；
+2. **cancel**：递增 generation、写 command、推进 run version；不直接接受 Worker terminal；
+3. **event/billing**：按 event id + attempt sequence 幂等落库；只有首次有效 `semantic_review_started` 消费 reservation；
+4. **terminal CAS**：按 8.3 的固定顺序，在一个事务写 terminal receipt、run terminal head、accepted evidence/result、quota transition 和 projection outbox。
+
+外键、unique/check constraints 和真实 SQLite 并发测试必须证明没有双 active attempt、sequence 回退、同 key 异 digest、stale side effect 或 terminal 改写。projection worker 只消费 outbox，可重复执行但不能更新 terminal truth。
+
+Stage D 必须选择并记录“全新 v2 schema + pre-cutover task 清空/隔离”的 exact migration；旧表可因合规被保留为不可执行只读 archive，但新进程不得拥有 reader/import/trigger/view，也不得建立 old→v2 转换。没有已演练的 destructive-data 处置授权时只 stop-intake/fence，不擅自删除历史数据。
 
 ## 8. 状态机与终态线性化
 
