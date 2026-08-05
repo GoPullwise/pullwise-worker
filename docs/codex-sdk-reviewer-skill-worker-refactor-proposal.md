@@ -209,11 +209,11 @@ bootstrap 自身的 `reason_codes` 只允许：`bootstrap.authority_violation/bo
 
 ### 0.6 Current decision-register v1 兼容桥
 
-RR-GOV 必须先使用现有 `pullwise-agent-first-spec-decision-register/v1` 完成 DRAFT/FREEZE 授权，不能为了记录替换 gate 的决策而预先替换 gate。Stage 0A 不增加 register top-level/decision/resolution keys，不修改 `DECISION_KEYS`、`SLICES` 或 authority catalog；本节把逻辑 RR record 定义为“一个现有 v1 decision entry + 一个 exact-bound inert packet bundle”。第 11 节所称 `record_phase/write set/target digests` 等扩展字段全部位于 packet，不能硬塞进 v1 decision object。
+RR-GOV-COLLECTOR 与 RR-GOV 都必须使用现有 `pullwise-agent-first-spec-decision-register/v1` 完成各自 DRAFT/FREEZE 授权，不能为了创建 collector 或记录替换 gate 的决策而预先替换 gate。Stage 0A 不增加 register top-level/decision/resolution keys，不修改 `DECISION_KEYS`、`SLICES` 或 authority catalog；本节把逻辑 RR record 定义为“一个现有 v1 decision entry + 一个 exact-bound inert packet bundle”。第 11 节所称 `record_phase/write set/target digests` 等扩展字段全部位于 packet，不能硬塞进 v1 decision object。
 
 #### 0.6.1 Inert packet bundle
 
-每个 bundle 的 canonical tracked target 固定在 `docs/reviewer-refactor-decision-drafts/<packet>/<generation>/`；`<packet>` grammar 为 `[a-z][a-z0-9-]{1,31}`，本次 bootstrap 只允许 `rr-gov`，generation 使用第 0.2 节相同整数 grammar。GOV-0A 先在 evidence 的 `proposed-inert/reviewer-refactor-decision-drafts/...` 产生以下 exact bundle-relative bytes；tracked action 只做 no-transform byte copy，因此 bundle manifest 不因根路径变化而改变：
+每个 bundle 的 canonical tracked target 固定在 `docs/reviewer-refactor-decision-drafts/<packet>/<generation>/`；`<packet>` grammar 为 `[a-z][a-z0-9-]{1,31}`，pre-bootstrap 只允许 `rr-gov-collector`，formal GOV-0A 的 gate-replacement bootstrap 只允许 `rr-gov`，generation 使用第 0.2 节相同整数 grammar。collector packet由通过 `SPEC-READY-03` 的 spec manifest、当前只读 transcript和人工 byte audit产生；不得伪造 evidence ref。formal GOV-0A 则在 evidence 的 `proposed-inert/reviewer-refactor-decision-drafts/...` 产生普通 RR-GOV exact bundle-relative bytes；tracked action 只做 no-transform byte copy，因此 bundle manifest 不因根路径变化而改变：
 
 ```text
 packet.json
@@ -225,7 +225,7 @@ proposed/<repo-id>/<canonical-target-relative-path>
 manifest.json
 ```
 
-`packet.json` 的 `schema_id` 固定为 `reviewer-refactor-decision-packet/v1`，exact keys 为 `schema_id/packet_id/generation/record_phase/option_id/exact_confirmation_text/decider_roles/provenance/supersession_intent/authorized_repositories/authorized_write_set/forbidden_actions/required_inputs/required_fixtures/next_confirmation`；`record_phase` 仅 `DRAFT_A/FREEZE_A`。`provenance` exact keys 为 `bootstrap_ref/spec_ref/created_at/created_by_role`；每个 `supersession_intent` exact keys 为 `decision_id/action/reason`，`action` 仅 `retain/supersede`；`next_confirmation` 为 `null` 或 exact keys `record_phase/option_id/exact_confirmation_text`。其余 plural fields 都是 UTF-8 byte-sorted unique strings；repository 固定为 `worker/server/web/admin`，write-set string 固定为 `<repo-id>:<canonical-posix-relative-path>`。
+`packet.json` 的 `schema_id` 固定为 `reviewer-refactor-decision-packet/v1`，exact keys 为 `schema_id/packet_id/generation/record_phase/option_id/exact_confirmation_text/decider_roles/provenance/supersession_intent/authorized_repositories/authorized_write_set/forbidden_actions/required_inputs/required_fixtures/next_confirmation`；`record_phase` 仅 `DRAFT_A/FREEZE_A`。`provenance` exact keys 为 `bootstrap_ref/spec_ref/created_at/created_by_role`；只有 `rr-gov-collector` 可以令 `bootstrap_ref=null`，此时 `spec_ref` 必须是 exact spec-manifest ref且 required inputs包含 current decision/AGENTS/HEAD transcript digests；所有其他 packet必须有 exact bootstrap ref。每个 `supersession_intent` exact keys 为 `decision_id/action/reason`，`action` 仅 `retain/supersede`；`next_confirmation` 为 `null` 或 exact keys `record_phase/option_id/exact_confirmation_text`。其余 plural fields 都是 UTF-8 byte-sorted unique strings；repository 固定为 `worker/server/web/admin`，write-set string 固定为 `<repo-id>:<canonical-posix-relative-path>`。
 
 `decider_roles` 只可包含 `user/architecture_owner` 且至少一个；`created_by_role` 只可为现有 v1 catalog 的 `user/architecture_owner/operator`，recorder/operator 不能替代 decider。`forbidden_actions` 只使用 `candidate_write/gate_semantics_change/benchmark_execution/production_activation/deployment/production_traffic/legacy_deletion/runtime_consumer/release_consumer`。DRAFT-A 必须包含全部九项；RR-GOV FREEZE-A 只有在 exact target/write set 明确授权时才可移除 `gate_semantics_change`，其余禁止项继续存在。
 
@@ -235,23 +235,23 @@ manifest.json
 
 `fixtures/manifest.json` 的 `schema_id` 固定为 `reviewer-refactor-decision-fixtures/v1`，exact keys 为 `schema_id/fixtures`；每项 exact keys 为 `fixture_id/path/expected_verdict/size_bytes/sha256`，verdict 仅 `PASS/FAIL/INDETERMINATE/NOT_AUTHORIZED`。bundle `manifest.json` 的 `schema_id` 固定为 `reviewer-refactor-decision-draft-manifest/v1`，其余 exact keys、排序、content root 与无自引用规则同第 0.5.2 节，但 domain separator 固定为 `pullwise:reviewer-refactor-decision-draft-content-root/v1\0`，`profile` 固定 `inert-decision-draft`。manifest 必须列出 packet/targets/validation commands/fixtures/proposed 的全部 regular files；未知 file/consumer、tracked path 与 proposed bytes 不一致，或任何 runtime/build/package/release import 均使 bundle FAIL。
 
-v1 refs 使用 closed ASCII form：`repo:<repo-id>:<percent-encoded-path>#<percent-encoded-section>`、`bootstrap:<release-id>:0A:GOV-0A:<generation>:sha256:<64-lowerhex>`、`packet:<packet-id>:<generation>:sha256:<64-lowerhex>`、`confirmation:<system>:<percent-encoded-conversation-id>:<percent-encoded-message-id>:sha256:<64-lowerhex>`。percent encoding 使用 RFC 3986 uppercase hex，禁止未编码 colon、`@`、`#` 和 slash；locator 到 local/CI artifact URI 的映射只放在 packet provenance 与 evidence environment，不能用可变 URI 代替 digest identity。
+v1 refs 使用 closed ASCII form：`repo:<repo-id>:<percent-encoded-path>#<percent-encoded-section>`、`specmanifest:sha256:<64-lowerhex>`、`bootstrap:<release-id>:0A:GOV-0A:<generation>:sha256:<64-lowerhex>`、`packet:<packet-id>:<generation>:sha256:<64-lowerhex>`、`confirmation:<system>:<percent-encoded-conversation-id>:<percent-encoded-message-id>:sha256:<64-lowerhex>`。percent encoding 使用 RFC 3986 uppercase hex，禁止未编码 colon、`@`、`#` 和 slash；locator 到 local/CI artifact URI 的映射只放在 packet provenance 与 evidence environment，不能用可变 URI 代替 digest identity。
 
 #### 0.6.2 v1 decision entry 映射
 
 - DRAFT-A 与 FREEZE-A 始终是两个按实际顺序追加的新 decision ids；不得预留 D42–D47。DRAFT key 使用 `reviewer-refactor-<packet>-draft-a`，FREEZE key 使用 `reviewer-refactor-<packet>-freeze-a`。
-- 两项继续使用 v1 的 exact `DECISION_KEYS`。`resolution.decision_text` 必须 byte-for-byte 等于 packet 的 `exact_confirmation_text`；`source_refs` 至少包含本规格的 `repo:...` ref 和 exact bootstrap ref；`resolution.evidence_refs` 至少包含 exact confirmation ref 与 packet ref。ref 中的 digest 必须按所指 manifest/message exact bytes 独立复算。
+- 两项继续使用 v1 的 exact `DECISION_KEYS`。`resolution.decision_text` 必须 byte-for-byte 等于 packet 的 `exact_confirmation_text`；`source_refs` 至少包含本规格的 `repo:...` ref。普通 packet另需exact bootstrap ref；`rr-gov-collector` 以 exact `specmanifest:` ref + current read-only transcript refs替代缺失的bootstrap。`resolution.evidence_refs` 至少包含 exact confirmation ref 与 packet ref。ref 中的 digest 必须按所指 manifest/message exact bytes 独立复算。
 - `required_by_slice` 在 v1 bridge 中固定为 `S8`，表示这些后续治理决策必须阻断当前最深 release slice，而不是把 RR 工作误称为旧 S8 实现。`affected_units` 必须列出被 supersession intent 影响的现有 normative units；RR-GOV 至少包含 `mvp-executable-gates` 与 `post-closure`。新增 normative unit 或新 stage 枚举只能由 RR-GOV-FREEZE-A 授权的 replacement schema 实现。
 - DRAFT resolution 不 supersede 旧生产 decision，只授权 packet 中 inert draft paths。FREEZE 的 v1 `depends_on` 必须包含 exact DRAFT id；DRAFT 的 `canonical_resolution_sha256` 由 FREEZE packet 的 `required_inputs` 和 evidence ref 绑定，因为 v1 `depends_on` 本身不存 digest。FREEZE 按 packet 逐项 supersede 与新架构冲突的旧 decisions；不冲突的 D41 禁止项继续有效。`question_order` 追加实际 ids，`normative_units[].decision_ids` 与 `affected_units` 双向同步。
 - v1 entry 不复制 packet 的 write set、fixtures 或 target bytes；只保存 content-addressed refs。packet bytes 改变必须新 generation 和新 amend/freeze decision，不能改写已 resolved entry。
 
 #### 0.6.3 记录步骤与 fail-closed 规则
 
-1. GOV-0A 先生成 inert packet、proposed register/document bytes 和 manifest；当前 live register 不变。
-2. recorder 展示 exact `exact_confirmation_text`、packet manifest SHA-256、只授权 write set 和禁止项；“按文档做”“继续”等模糊文本不追加 decision。
-3. user/architecture owner 给出 exact option-anchored confirmation 后，才把对应 v1 decision entry append 到 live register，并用现有 `canonical_resolution_sha256` 计算 digest。该确认只授权 decision register 与 generated human view 的记录写入，以及 packet 明列的下一阶段最大边界；不自动授权目标实现。
-4. 运行 `agent_first_decision_register.py check`，再运行 `sync-document` 并复查 check；保存前后 exact bytes、命令和 CI。失败时该变更不得合并，也不能靠手改 expected/definition digest 放行。
-5. FREEZE 使用新的独立 confirmation 重复该流程。DRAFT confirmation、PR merge、旧 issue 或一般性“同意重构”都不能代替 FREEZE。
+1. spec verifier PASS 后先生成 `rr-gov-collector` inert packet、proposed collector/test bytes和manifest；当前 live register不变，packet明确没有bootstrap ref且只引用exact spec manifest/current read-only transcripts。
+2. recorder展示 exact `exact_confirmation_text`、packet manifest SHA-256、只授权 write set和禁止项；“按文档做”“继续”等模糊文本不追加decision。
+3. user/architecture owner分别给出collector DRAFT与FREEZE的exact option-anchored confirmation后，才把两个v1 entries按顺序append。FREEZE只授权exact collector/test path和一次formal GOV-0A；不得合并gate replacement。
+4. 每次append都运行 `agent_first_decision_register.py check`，再运行 `sync-document` 并复查check；保存前后exact bytes、命令和CI。失败时变更不得合并，也不能靠手改expected/definition digest放行。
+5. exact collector落库、自检并运行formal GOV-0A后，由该generation产生普通`rr-gov` gate packet；再以两个新的独立 confirmation记录RR-GOV DRAFT/FREEZE。DRAFT confirmation、collector FREEZE、PR merge、旧issue或一般性“同意重构”都不能代替gate FREEZE。
 
 当前 CLI 只有 check/render/sync，没有 record 子命令；在 EVD-0 replacement recorder 交付前，上述步骤由受控 recorder 人工组装 entry，但必须 exact compare confirmation、使用现有 canonical digest helper 并通过 current structural/history checks。若 current v1 无法在不改变 schema/tool 的情况下表达某项授权，状态保持 `NOT_AUTHORIZED`，把 schema/tool exact target bytes 加入 RR-GOV-FREEZE-A；不得先改 validator 再让新 validator 授权自己。
 
@@ -838,10 +838,11 @@ Web 已支持动态 steps：切到五级 steps 与 `review-run/v2`，保留 part
 1. `RR-<name>-DRAFT-A` 选择架构方向，绑定 inert decision-draft bundle manifest 和完整 supersession intent，只授权 bundle 中列出的 Stage A draft paths/tests。draft artifact 不得被 runtime、generator、package、production CI release gate 或 consumer 读取；不得 Generate/激活/跑真实 benchmark。
 2. draft work 完成后，`RR-<name>-FREEZE-A` 绑定 canonical target path、exact bytes/SHA-256、schema/registry/fixture/generator/test digests、instruction-conflict plan/proposed `AGENTS.md` bytes 和 replacement obligations。只有 FREEZE record 设置后续最大授权边界；任一 byte/path/义务改变必须再 append amend/freeze record，绝不修改既有 resolution。应用 exact instruction bytes 后的 unresolved=0 report 是 Stage A PASS/后续 advance 条件，不反向要求 FREEZE 前已经更新 current instructions。
 
-RR-GOV 是唯一 bootstrap 变体：GOV-0A 先把 inert draft bundle exact bytes 写入仓外 evidence；随后只有 byte-identical 的独立 tracked-doc apply 可使用当前 inert-doc 边界。`RR-GOV-DRAFT-A` 只允许把 replacement contract/fixtures 完整化，`RR-GOV-FREEZE-A` 才授权 GOV-0B 的 EVD-0 与 gate replacement。后续 packet 不得复用该 bootstrap 例外。
+bootstrap严格分两段：`RR-GOV-COLLECTOR-DRAFT/FREEZE` 是唯一无formal bootstrap ref的pre-bootstrap变体，只能创建/自检collector并运行一次GOV-0A；随后GOV-0A把普通RR-GOV inert bundle exact bytes写入仓外evidence，只有byte-identical的独立tracked-doc apply可使用该inert-doc边界。`RR-GOV-DRAFT-A`只允许把replacement contract/fixtures完整化，`RR-GOV-FREEZE-A`才授权GOV-0B的EVD-0与gate replacement。任何后续packet不得复用两种bootstrap例外。
 
 | Packet | 目标选项 A | 停止选项 B | DRAFT-A 只授权 | FREEZE-A 最大授权边界 |
 |---|---|---|---|---|
+| RR-GOV-COLLECTOR | exact-pin只读collector source/command/tests/no-clobber写根并运行一次formal GOV-0A | 保持人工只读审计，formal GOV-0A为FAIL/NOT_AUTHORIZED | inert collector source/tests/fixtures | canonical collector path+self-tests+一次GOV-0A；禁止gate change |
 | RR-GOV | 分离 immutable history 与 live forbidden catalog；用非自引用 Slice-0/absence v2 replacement，固定 exit 0/1/2 三态并机械迁移旧义务 | 保留当前 gate；本重构停在 GOV-0A | inert replacement contract/fixtures/EVD-0 draft | GOV-0B；继续禁止 candidate/Generate/benchmark/生产 |
 | RR-SCOPE | 唯一任务 `repo_review.full_scan`；单 root thread/main turn、最多一次 format repair、无 fanout/verifier/sub-agent、失败从头重跑 | 不接受该专用边界；停止 candidate | Stage A scope/Skill/result draft specs | 与 TRUST/TRUTH freeze 共同授权 Stage B 离线包 |
 | RR-TRUST | exact Skill/runtime；source/instruction/validation 仅经 5.4 gateway；scratch-only model FS；supported SDK 路径或经验证 external sandbox；能力不足 NO-GO | 不接受该 trust boundary；停止 candidate | Stage A inventory/instruction/tool/runtime policy 与 fixtures | Stage B 离线 trust/runtime slices |

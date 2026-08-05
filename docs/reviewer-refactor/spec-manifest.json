@@ -1,0 +1,24 @@
+{
+  "schema_id": "reviewer-refactor-spec-manifest/v1",
+  "spec_id": "pullwise-reviewer-refactor/v1",
+  "spec_version": "2026-08-05-r3",
+  "status": "PROPOSED_INERT",
+  "files": [
+    {"path":"docs/codex-sdk-reviewer-skill-worker-refactor-proposal.md","size_bytes":165021,"sha256":"6a3bbab04b129a0e6ff435881bd5619945cdb3b18505a789697ed2c3d7d93852","media_type":"text/markdown","role":"main_spec"},
+    {"path":"docs/reviewer-refactor/authority-and-readiness.md","size_bytes":9524,"sha256":"8dfc4a77a0e421932fca0c7608d0bd03df3b75b20de9212da9381bdcbf3cc0cc","media_type":"text/markdown","role":"normative_companion"},
+    {"path":"docs/reviewer-refactor/bootstrap-command.json","size_bytes":941,"sha256":"dec868a466eaebc93456dc38883d5b3d8c65fe239d140a9f5e6b16d8760cc6d2","media_type":"application/json","role":"machine_descriptor"},
+    {"path":"docs/reviewer-refactor/evidence-and-determinism.md","size_bytes":10605,"sha256":"48d64783c3fc715d0fc0ec1102be03d22ea1493809c437591ef3e83d827c5cd6","media_type":"text/markdown","role":"normative_companion"},
+    {"path":"docs/reviewer-refactor/execution-card.schema.json","size_bytes":4625,"sha256":"3a7a226d7718bd19b22d61dba8f1b7b31dac5588510157496aacc19cb02eb411","media_type":"application/json","role":"machine_schema"},
+    {"path":"docs/reviewer-refactor/execution-cards.json","size_bytes":24584,"sha256":"a3c5488c917bc86479378ab2b069ec29cbc58186252aad9b1d799eceee1d3c47","media_type":"application/json","role":"machine_cards"},
+    {"path":"docs/reviewer-refactor/fixtures/spec-verifier/invalid/dependency-cycle.json","size_bytes":166,"sha256":"477bb9c1d33574722cfd9c803fa450f90bac7304ec75246d1aeff6826240e7d8","media_type":"application/json","role":"test_fixture"},
+    {"path":"docs/reviewer-refactor/fixtures/spec-verifier/invalid/float-confidence.json","size_bytes":78,"sha256":"a50c7883bc613c77158edded982016d5658c6aea10d6234b78ead1632a672025","media_type":"application/json","role":"test_fixture"},
+    {"path":"docs/reviewer-refactor/fixtures/spec-verifier/invalid/path-escape.json","size_bytes":102,"sha256":"1991c09a866af979715d0695497375c1ae6cb8e69632e32d8a8f2ac673528614","media_type":"application/json","role":"test_fixture"},
+    {"path":"docs/reviewer-refactor/fixtures/spec-verifier/manifest.json","size_bytes":686,"sha256":"16af581280c76fe2e37e33fdca513cb3edafcaa600b73b38a250f80c58fdac98","media_type":"application/json","role":"fixture_index"},
+    {"path":"docs/reviewer-refactor/fixtures/spec-verifier/valid/scalar-profile.json","size_bytes":127,"sha256":"b1348d18ee96f6f796ebdf7aa804111990abc8c808db4f5776596c278854259c","media_type":"application/json","role":"test_fixture"},
+    {"path":"docs/reviewer-refactor/operations-and-execution.md","size_bytes":13740,"sha256":"9a10662032f40c2946b781cf7c43603545204728097b34851333a341c230259b","media_type":"text/markdown","role":"normative_companion"},
+    {"path":"docs/reviewer-refactor/readiness.json","size_bytes":2477,"sha256":"5c34619c282ab7edc9c512de75c3799be4d492ae6765d56b12efc3e6eae86731","media_type":"application/json","role":"machine_readiness"},
+    {"path":"docs/reviewer-refactor/runtime-contract-and-security.md","size_bytes":12598,"sha256":"2249605d6ea3e3ce6e5cac6e55b5c12c690421854bc9d31408b97232a6a967c8","media_type":"text/markdown","role":"normative_companion"},
+    {"path":"docs/reviewer-refactor/skill-context-and-evaluation.md","size_bytes":14280,"sha256":"558a3e1b205f0c24dc5d8c92f57d4719d2f1b055659feb77168b54a7264b456b","media_type":"text/markdown","role":"normative_companion"},
+    {"path":"docs/reviewer-refactor/verify_spec.py","size_bytes":16680,"sha256":"12ce23cf44b5d1ca925022cde3440bdea48c104e5a39aadd86b4fdb7f8f31712","media_type":"text/x-python","role":"spec_verifier"}
+  ]
+}

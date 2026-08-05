@@ -8,7 +8,7 @@
   "gates": [
     {"gate_id": "SPEC-READY-01-AUTHORITY", "status": "NOT_AUTHORIZED", "reason_code": "authority.rr_gov_freeze_missing", "evidence_refs": ["authority-and-readiness.md#3"]},
     {"gate_id": "SPEC-READY-02-INSTRUCTIONS", "status": "NOT_AUTHORIZED", "reason_code": "instructions.conflict_plan_not_applied", "evidence_refs": ["authority-and-readiness.md#4"]},
-    {"gate_id": "SPEC-READY-03-MANIFEST", "status": "IN_PROGRESS", "reason_code": "spec.self_check_pending", "evidence_refs": ["spec-manifest.json", "execution-cards.json"]},
+    {"gate_id": "SPEC-READY-03-MANIFEST", "status": "PASS", "reason_code": "spec.self_check_pass", "evidence_refs": ["spec-manifest.json", "execution-cards.json", "verify_spec.py --self-test"]},
     {"gate_id": "SPEC-READY-04-BOOTSTRAP", "status": "FAIL", "reason_code": "bootstrap.collector_not_implemented", "evidence_refs": ["evidence-and-determinism.md#1"]},
     {"gate_id": "SPEC-READY-05-EVIDENCE", "status": "NOT_AUTHORIZED", "reason_code": "evidence.evd0_not_authorized", "evidence_refs": ["evidence-and-determinism.md"]},
     {"gate_id": "SPEC-READY-06-CONTRACT", "status": "NOT_AUTHORIZED", "reason_code": "contract.rr_truth_not_frozen", "evidence_refs": ["runtime-contract-and-security.md#1"]},
