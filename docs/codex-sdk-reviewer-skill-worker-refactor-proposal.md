@@ -41,6 +41,8 @@
 
 截至本文版本，唯一可以进入 `READY` 的工作包是 `GOV-0A`；`GOV-0B` 及后续工作包全部是 `NOT_AUTHORIZED`。`FAIL` 与 `INDETERMINATE` 都不能被当作软通过；二者也不能通过修改 expected、排除项或删除历史证据转成 `PASS`。
 
+Decision resolution 只设置允许到达的最大边界，不自动推进阶段。每次从 B→B2→C→D→E→F 还必须有 signed stage-advance record，引用前一阶段 exact PASS evidence、目标 release id/digest、允许的 work packages 和禁止项；前置 evidence stale 或 release digest 改变时授权自动失效。
+
 ### 0.2 规范性产物与证据包
 
 本文是实施总规格，不取代决策注册表和生成契约。实施时按下列优先级解析冲突：
@@ -167,7 +169,7 @@ Codex SDK / App Server
 每个 turn 的 model-visible filesystem 只能包含：
 
 - Worker-owned model-turn scratch：读写、容量有界、attempt 后销毁，不含任何 source/instruction/control bytes。
-- staged Reviewer Skill runtime assets：只读、manifest exact-bound；eval fixtures 和 Worker-only schema/control assets不挂载。
+- staged Reviewer Skill runtime assets：只读、manifest exact-bound；eval fixtures 和 Worker-only schema/control assets 不挂载。
 - 受审计的 tool bridge/最小 binary/library/runtime：只读。bridge 本身没有 source 路径或生产凭据，只能使用 Worker 预建立、attempt-scoped 的本地 capability channel。
 
 immutable source snapshot、target `AGENTS.md` bytes/instruction manifest、disposable validation copy、Worker source/control/runtime state、terminal outbox、logs、clone/control token、host/user home、其他 worker root、未列入 manifest 的 temp/cache，以及 `CODEX_HOME` auth/config/session **一律不进入模型可见文件系统**。Agent 只能通过 5.4 的工具结果看到获准 source/instruction bytes；validation copy 始终由 Worker-owned validation service 持有，模型和通用 shell 都不能直接遍历或修改它。
@@ -220,12 +222,12 @@ Gateway 是 Worker-owned、attempt-scoped 的本地服务，运行在 model/tool
 | 工具 | 主要输入 | 主要输出 | 权威事实 |
 |---|---|---|---|
 | `source_inventory` | `inventory_id/cursor/limit` | canonical path、kind、size、digest、language、scope id | inventory 枚举与分页，不代表已审查 |
-| `instruction_read` | inventory/scope id、instruction path、expected digest | 有界 instruction bytes、precedence、instruction-set digest | 对应 scope 的 instruction receipt |
+| `instruction_read` | inventory id、scope id、expected instruction-set digest | gateway 解析出的 ordered canonical paths、precedence、各文件 digest/有界完整 bytes | 对应 scope 的完整 instruction-set receipts |
 | `source_read` | inventory id、canonical path、expected file digest、byte/line range | 实际返回范围、encoding、bytes、content digest | full/bounded read receipt |
 | `source_search` | inventory id、literal/受限 regex、path filter、limit | 有界 match/span 列表、truncation | 只证明返回 match，不能生成 inspected |
 | `validation_run` | validation profile id、inventory/source digest、schema-validated args、timeout | exit、bounded stdout/stderr、mutation summary、output digests | 在一次性 copy 中执行的机械验证事实 |
 
-所有请求只能引用 inventory 中的 canonical relative path；拒绝 absolute path、`..`、alternate separator、case ambiguity、symlink/reparse/submodule escape、unknown id 和 stale digest。`instruction_read` 成功前，gateway 自身拒绝该 scope 的首个 `source_read/source_search/validation_run`，不能只靠事后 validator 检查顺序。`validation_run` 只能选择 manifest 中冻结的 command/profile 和参数 schema；service 创建并销毁 disposable copy，执行时网络 deny-all、env allowlist、CPU/RSS/output/deadline 有界，绝不接受任意 shell 字符串。
+所有模型提供的 source path/filter 只能引用 inventory 中的 canonical relative path；拒绝 absolute path、`..`、alternate separator、case ambiguity、symlink/reparse/submodule escape、unknown id 和 stale digest。instruction paths 由 gateway 从 frozen manifest/scope 解析，模型不能自选或省略适用文件。`instruction_read` 完整成功前，gateway 自身拒绝该 scope 的首个 `source_read/source_search/validation_run`，不能只靠事后 validator 检查顺序。`validation_run` 只能选择 manifest 中冻结的 command/profile 和参数 schema；service 创建并销毁 disposable copy，执行时网络 deny-all、env allowlist、CPU/RSS/output/deadline 有界，绝不接受任意 shell 字符串。
 
 每个响应包含 `protocol_version/attempt_id/turn_id/tool_call_id/sequence/status/receipt_id/receipt_digest`。Gateway 在模型不可写的 append-only ledger 中按单调 sequence 记录 request digest、resolved object identity、实际 byte/line range、returned-bytes digest、instruction-set digest、limit/truncation、started/finished time、exit/error code，并形成 previous-digest hash chain。Worker freeze result 前验证链、tool-call correlation 和 ledger fsync 边界；模型伪造同形 JSON 不会产生 ledger receipt。
 
@@ -569,7 +571,7 @@ Web 已支持动态 steps：切到五级 steps 与 `review-run/v2`，保留 part
 | RR-GOV（建议 D42） | 分离 immutable history 与 live forbidden catalog；用非自引用 Slice-0/absence v2 replacement，固定 exit 0/1/2 三态并机械迁移旧义务 | 保留当前 gate；本重构停在 GOV-0A | Stage 0B |
 | RR-SCOPE（建议 D43） | 唯一任务 `repo_review.full_scan`；单 root thread/main turn、最多一次 format repair、无 fanout/verifier/sub-agent、失败从头重跑 | 不接受该专用边界；停止 candidate | Stage A 契约冻结 |
 | RR-TRUST（建议 D44） | exact Skill/runtime；source/instruction/validation 仅经 5.4 gateway；scratch-only model FS；supported SDK 路径或经验证 external sandbox；能力不足 NO-GO | 不接受该 trust boundary；停止 candidate | Stage B 离线 trust/runtime slices |
-| RR-TRUTH（建议 D45） | Agent payload 不可信；Worker 生成 immutable candidate；Server terminal CAS 是唯一全局权威；采用 7–9 节三层契约 | 保留现有 terminal authority；停止 v2 contract | Stage A schemas + Stage B/C offline implementation |
+| RR-TRUTH（建议 D45） | Agent payload 不可信；Worker 生成 immutable candidate；Server terminal CAS 是唯一全局权威；采用 7–9 节三层契约 | 保留现有 terminal authority；停止 v2 contract | Stage A schemas + Stage B offline fixtures；不自动授权 C |
 | RR-EVAL（建议 D46） | 采用第 13 节 power-gated、task-clustered paired benchmark、runtime bridge、PASS/FAIL/INDETERMINATE 和签发职责 | 不接受该 release proof；禁止真实 benchmark/发布 | 真实离线 benchmark；不授权生产 |
 | RR-CUT（建议 D47） | 采用第 12/16 节 stop-intake、无 mixed-version 的 clean cutover、pre-canary deletion、same-contract rollback | 业务不接受维护窗/隔离；禁止 cutover | Stage D release preparation；Stage E 仍需 D24/发布授权 |
 
@@ -657,7 +659,7 @@ scripts/run_reviewer_candidate.py
 
 先写 failing tests：`test_reviewer_skill_binding.py`、`test_reviewer_instruction_surface.py`、`test_reviewer_model_fs_policy.py`、`test_reviewer_gateway_service.py`、`test_reviewer_validation_service.py`、`test_reviewer_receipt_ledger.py`、`test_reviewer_candidate_runner.py`、`test_reviewer_result_validator.py`、`test_reviewer_coverage_codec.py`、`test_reviewer_runtime_policy.py`。
 
-candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/result、写 production table、切 builder、shadow traffic 或部署。必须证明 exact-load、surface control、scratch-only model FS、sanitized tool env、instrumented AGENTS/source receipts、gateway 外 source 不可见、validation copy 仅 service 可写、tool 无网络/凭据、单 turn、有界 cancel/timeout/close、untrusted payload/trusted result、result/coverage/redaction、2,000-file bounded encoding。无法控制任一 surface、SDK supported path 或 receipt authority即 `NO-GO`。
+candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/result、写 production table、切 builder、shadow traffic 或部署。必须证明 exact-load、surface control、scratch-only model FS、sanitized tool env、instrumented AGENTS/source receipts、gateway 外 source 不可见、validation copy 仅 service 可写、tool 无网络/凭据、单 turn、有界 cancel/timeout/close、untrusted payload/trusted result、result/coverage/redaction、2,000-file bounded encoding。无法控制任一 surface、SDK supported path 或 receipt authority 即 `NO-GO`。
 
 ### Stage B2：paired benchmark
 
@@ -671,7 +673,7 @@ candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/
 - 注入 crash-before/after-freeze、cancel-before/after、ACK loss、replay conflict、stale、source drift、hung close。
 - 本地 E2E：Server fixture → claim → candidate → CAS → public projection。
 
-退出：单一终态、真实 SQLite 并发/recovery PASS、public/debug 无 source/secret、生产 builder/routes 未切。
+退出：单一终态、真实 SQLite 并发/recovery PASS、public/debug 无 source/secret、生产 builder/routes 未切。进入 Stage D 仍需独立 signed stage-advance record，Stage C PASS 本身不授权生成 release change set。
 
 ### Stage D：跨仓切换准备
 
