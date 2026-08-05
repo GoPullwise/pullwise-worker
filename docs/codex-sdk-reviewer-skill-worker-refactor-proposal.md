@@ -374,10 +374,12 @@ App Server/provider supervisor 可以使用 Worker-scoped auth，但 tool child 
 
 实现顺序：
 
-1. 对当前 exact SDK/CLI/App Server tuple 运行公开 API capability probe，验证 SkillInput、strict output schema、精确工具配置、隐式 surface 枚举/关闭、interrupt/close/event、sandbox policy 实际 wire 和 tool child 隔离。
+1. Stage A FREEZE 前先运行 `CAP-0` artifact/introspection/loopback probe，证明 exact SDK/CLI/App Server 的受支持公开 surface 能够表达 SkillInput、strict output schema、精确工具配置、隐式 surface 关闭、sandbox wire、event/usage、interrupt/close 和 context/compaction accounting；不能表达的机制不得写入冻结架构。
 2. 优先使用能通过全部探针的受支持 Python SDK/API 路径。若 `0.1.0b3` 不能表达所需能力，只有在 RR-TRUST-FREEZE-A 明确选择并 exact-pin 的兼容升级后才能采用新 SDK；不能把当前 App Server wire 的能力当作当前 Python SDK 已暴露的能力。
 3. 允许保留 `0.1.0b3` 的唯一例外，是经验证的外部 Linux sandbox/mount namespace 已使 model/tool process 只能看到 scratch/tool bridge，并由 Worker 外部服务持有 source/validation。该隔离仍需 exact-pin image/kernel/policy evidence。
 4. 两条受支持路径都不能满足时，Stage B `NO-GO`。不得手写 App Server JSON-RPC、猴子补丁 generated SDK types、依赖未公开字段，也不得把普通 `read-only` preset、文件 ACL 愿望或 prompt 当作证据。
+
+`CAP-0` 只证明 architecture feasibility；Stage B 的 `CAP-1` 必须用真实 isolated turn/sentinels 证明实际 enforce。两者的命令、输入和停止边界见 `docs/reviewer-refactor/skill-context-and-evaluation.md`。任一 tuple 改变都同时使 CAP-0/CAP-1 和 downstream context budget stale。
 
 Stage B 使用模型已知名称的 sentinel files/env/endpoints 覆盖 host home、其他 worker root、auth store、outbox、source、instruction、validation copy、source write、scratch write、网络和 approval。只有允许操作成功、所有拒绝路径稳定 fail closed，才可签发 capability evidence。
 
@@ -449,6 +451,8 @@ inventory population 定义为 immutable snapshot 中除固定 `.git/**` 元数�
 
 最多 2,000 的限制适用于上述全部 inventory entries，不是只对模型最终选择的“included files”计数。`N > 2,000`、总 source bytes/单文件超出冻结 preflight 限额或 manifest 无法完整形成时，在任何 main turn 前拒绝；不得抽样、截断、隐藏 vendor/generated 后再宣称全仓。目录统计可以另存，但不进入 dense coverage index。
 
+`N <= 2,000` 仍不代表单 turn 可行。Worker 必须按 exact tokenizer、真实 tool-response serialization 和冻结的最大 tool/output/reserve 计算 `context-budget-report/v1`，满足 `F + I + S + V + O + R <= C` 才可启动；hidden compaction 不允许。详细整数公式和失败语义见 `docs/reviewer-refactor/skill-context-and-evaluation.md`。不满足时在 turn 前以 `CONTEXT_BUDGET_EXCEEDED` fail closed，不抽样或隐式拆 turn。
+
 `source_inventory` cursor 是绑定 attempt/inventory/page-size/last-entry-id 的 opaque capability。每页最多返回 Stage A 冻结且不大于 256 的 entries；最后一页必须返回 entry count、inventory digest 和 completion seal。相同 tool-call/request exact replay 返回原 receipt；复用 cursor 改 limit/filter/inventory 或跳页返回 `CURSOR_CONFLICT/STALE_BINDING`。没有 terminal seal 的枚举不能作为 coverage input。
 
 #### 5.4.2 Instruction pagination 与顺序 seal
@@ -471,6 +475,8 @@ Gateway 只接受期望 cursor 的下一 chunk；同 tool call exact replay 返�
 
 `manifest.json` 还必须列出按 canonical relative path 排序的全部 runtime-reachable Skill files 及其 size/SHA-256。若 `SKILL.md` 引用 `references/`、`scripts/`、`assets/` 或其他文件，它们全部进入同一 manifest；未列入、重复、越界或 digest 漂移的文件拒绝 staging。Stage B 推荐 runtime Skill 只含 `SKILL.md` 和明确必要的只读引用。生产语义只来自这组 runtime assets；`eval-fixtures/**` 仅是离线评测证据，永不 staging、挂载或暴露给模型。
 
+Skill 的 normative sections、finding admission、severity、integer `confidence_bps`、validation status、counterexample pass 和不报告项按 `docs/reviewer-refactor/skill-context-and-evaluation.md` 固定。Stage A 另需 `reviewer-skill-migration/v1` 对全部 production-reachable 旧 prompt semantic units 逐项 retain/rewrite/delete/runtime-policy 迁移并双向绑定 eval fixtures；未映射或仍有旧 consumer 时 `SKILL-1` 不能 PASS。
+
 ### 6.2 显式绑定与防 TOCTOU
 
 每个 attempt：
@@ -492,7 +498,7 @@ Stage B 必须故障注入 swap、symlink、truncate、turn 中修改。
 
 ### 6.4 target `AGENTS.md`
 
-不依赖 Codex 默认 32 KiB merge，也不把“记录 digest”当成模型已看到内容。Worker 在 snapshot 上生成 `instruction-manifest/v1`：
+不依赖 Codex 默认 32 KiB merge，也不把“记录 digest”当成模型已看到内容。target `AGENTS.md` 是可能由攻击者控制的 repository policy input，只能提供 boundary 内的 domain/review/presentation guidance；它不能扩大工具、文件、网络、凭据、budget、coverage、validation 或 terminal 权限。越界内容记录为 `instruction_effect_denied`，不得执行。完整 precedence/注入规则见 `docs/reviewer-refactor/skill-context-and-evaluation.md`。Worker 在 snapshot 上生成 `instruction-manifest/v1`：
 
 - 机械发现 root/nested exact `AGENTS.md`，只接受 regular file。
 - canonical POSIX path；浅到深优先级，nested 只作用其子树。
@@ -512,17 +518,25 @@ Stage B 必须故障注入 swap、symlink、truncate、turn 中修改。
 - 仅最终消息 schema 无效且预算充足时，同 thread 允许一次 format repair；不得重扫或新增 finding。
 - 禁止 fanout、独立 verifier、子 Agent、并行 turn、第二 App Server。
 - archive/close 有界；失败标记 runtime unhealthy，下一 attempt 使用新 runtime。
+- main turn 前 context preflight 必须证明全部 mandatory source/instruction/tool envelopes 和 output/repair reserve 可容纳；否则不启动。运行中出现未预算 context overhead 时只可诚实 `PARTIAL/FAILED`，不得靠 hidden compaction 或丢 coverage 维持 `COMPLETED`。
 
 ## 7. 三层契约
 
 ### 7.1 Server↔Worker 私有 wire
 
-Server-owned canonical source：`pullwise-server/contracts/reviewer-worker/v2/**`，至少含：
+Server-owned canonical source 只有 `pullwise-server/contracts/reviewer-refactor/v2/**` 一个 layered atomic root；private subtree 至少含：
 
 - `worker-registration/v2`
+- `worker-session/v2`
 - `review-task-claim/v2`
 - `review-worker-heartbeat/v2`
 - `review-run-event/v2`
+- `review-source-grant-request/v2`
+- `review-source-grant/v2`
+- `review-source-acquired/v2`
+- `review-artifact-upload-request/v2`
+- `review-artifact-upload-grant/v2`
+- `review-artifact-upload-complete/v2`
 - `review-artifact-descriptor/v2`
 - `review-cancel-command/v2`
 - `review-terminal-candidate/v2`
@@ -530,7 +544,7 @@ Server-owned canonical source：`pullwise-server/contracts/reviewer-worker/v2/**
 - `review-attempt-disposition/v2`
 - `review-error/v2`
 
-它包含 job/run/lease/attempt/epoch、deadline/budget、authoritative cancel generation/digest、runtime/Skill/schema/source/instruction binding、outbox generation/digest/idempotency。Web/Admin 不得看到。Server 生成，Worker exact-pin Python wrapper；生成遵守一次性原子跨仓 parity，禁止手改。
+它包含 tenant/job/run/lease/attempt/epoch、session principal、deadline/budget、authoritative cancel generation/digest、runtime/Skill/schema/source/instruction binding、source/artifact capability identity、outbox generation/digest/idempotency。source fetch 与 artifact upload 使用 one-use、短期、method/object/tenant/attempt/size/digest-bound capability，credential 只经 Worker private handle 传递，不进入 schema/log/evidence/Agent。完整协议见 `docs/reviewer-refactor/runtime-contract-and-security.md`。Server 生成，Worker exact-pin Python wrapper；生成遵守一次性原子跨仓 parity，禁止手改。
 
 ### 7.2 Server 内部 normalized result
 
@@ -553,21 +567,23 @@ Server-owned canonical source：`pullwise-server/contracts/reviewer-worker/v2/**
 
 ### 7.4 Canonical package、字段矩阵与生成规则
 
-Server canonical source 固定为：
+Server canonical source 固定为一个 root，而不是互不闭合的 private/public 两个 manifest：
 
 ```text
-pullwise-server/contracts/reviewer-worker/v2/
+pullwise-server/contracts/reviewer-refactor/v2/
   manifest.json
   registry.json
-  schemas/*.schema.json
-  fixtures/valid/*.json
-  fixtures/invalid/*.json
   generator.lock.json
-pullwise-server/contracts/public/review-run/v2/
-  manifest.json
-  registry.json
-  schemas/*.schema.json
-  fixtures/{valid,invalid}/*.json
+  shared/schemas/*.schema.json
+  private/
+    schemas/*.schema.json
+    fixtures/{valid,invalid}/*.json
+  public/
+    schemas/*.schema.json
+    fixtures/{valid,invalid}/*.json
+  cross-layer/
+    projections/*.json
+    fixtures/{valid,invalid}/*.json
 ```
 
 所有 object schema 使用 `additionalProperties: false`；所有 integer 有范围；时间是 UTC RFC 3339；digest 为 lowercase SHA-256；ID 有长度/字符集限制；path 只允许 canonical POSIX relative path。每个 private message 有共同 envelope：`schema_id`、`schema_version`、`contract_digest`、`message_id`、`sent_at`。业务判断不得依赖 `sent_at`，而依赖 Server version/epoch/sequence。
@@ -577,9 +593,14 @@ pullwise-server/contracts/public/review-run/v2/
 | Schema | 必需字段（除共同 envelope） | 关键约束 |
 |---|---|---|
 | `worker-registration/v2` | worker/session id、build/runtime/capability/tool-manifest digests、slot capacity | capacity 必须为 1；Server 只接受 allowlist exact tuple |
+| `worker-session/v2` | worker/session principal、issuer/audience、build/runtime digest、issued/expiry/revocation generation | short-lived、可轮换但不换 identity；Agent/tool 不可见 |
 | `review-task-claim/v2` | job/run/attempt id、lease id/epoch/version/expiry、source descriptor/digest、instruction/inventory digest、deadline、budget、cancel generation/digest | 全部由 Server/Worker preflight 注入；Agent 不可见 |
+| `review-source-grant-request/v2` / `review-source-grant/v2` | tenant/run/attempt/source object、expected size/digest、capability id/purpose/expiry/secret digest | one-use、≤5 分钟且不晚于 lease；transport secret 只经 private handle |
+| `review-source-acquired/v2` | grant/object/source/snapshot/inventory digests、closed acquisition status | exact ACK 前不启动 main turn；失败不得降级到任意 clone/local path |
 | `review-worker-heartbeat/v2` | claim identity、worker state、event sequence、observed lease/cancel generation、remaining deadline | sequence 单调；不能延长 lease/deadline |
 | `review-run-event/v2` | claim identity、event id/sequence、event type、event payload digest | closed event type；`semantic_review_started` 仅一次且幂等 |
+| `review-artifact-upload-request/v2` / `review-artifact-upload-grant/v2` | tenant/run/attempt、artifact id/kind/size/digest/redaction、capability/purpose/expiry | one-use single object；uncommitted bytes 不可被 reader/terminal 引用 |
+| `review-artifact-upload-complete/v2` | capability/object/actual size/digest/storage generation/encryption metadata digest | Server/store read-back 并幂等 commit 后才可返回 durable descriptor |
 | `review-artifact-descriptor/v2` | artifact id/kind/media type/size/digest、storage generation、redaction class | descriptor 不含本地绝对路径或 raw source |
 | `review-cancel-command/v2` | job/run/attempt、cancel generation/digest/reason/issued version | generation 单调；由 Server 签发 |
 | `review-terminal-candidate/v2` | claim identity、expected nonterminal version、classification、result/artifact-set/outbox digests、idempotency key、execution/source bindings、可选 exact cancel binding | freeze 后 bytes 不变；`CANCELLED` 必须有 cancel binding |
@@ -589,9 +610,9 @@ pullwise-server/contracts/public/review-run/v2/
 | `normalized-review-result/v1` | run/execution/source binding、findings、coverage、limitations、usage、artifacts、candidate classification、normalization digest | 只由 Worker validator + Server normalization 产生 |
 | `review-run/v2` | public id/status/progress、summary、findings、coverage、limitations、artifact metadata/safe URL、public error、created/updated/terminal times、etag/version | 私有字段 schema-level absent；public status 只来自 terminal/projection mapping |
 
-`manifest.json` 对 registry、全部 schema/fixture 和 generator version 计算 path/size/SHA-256；与第 0.2 节相同，它不列自己或 detached signature，也不包含被计算的 `contract_digest` 字段。`contract_digest` 由 exact canonical manifest body bytes + fixed domain separator 计算并由外部 envelope/pin 保存，另存普通 manifest SHA-256；二者都不写回被 hash 的 body。`registry.json` 是所有 enum/reason/event/status 的唯一来源。Server generator 先写临时目录、校验 valid/invalid fixtures、生成语言 artifacts，再进入下述受控发布事务。
+root `manifest.json` 对 registry、全部 shared/private/public/cross-layer schema/fixture/projection 和 generator version 计算 path/size/SHA-256；subtree 不拥有独立 authority/version/digest。与第 0.2 节相同，root manifest 不列自己或 detached signature，也不包含被计算的 `contract_digest` 字段。`contract_digest` 由 exact canonical manifest body bytes + fixed domain separator 计算并由外部 envelope/pin 保存，另存普通 manifest SHA-256；二者都不写回被 hash 的 body。`registry.json` 是所有 enum/reason/event/status 的唯一来源。Server generator 先写临时目录、校验 valid/invalid/cross-layer fixtures、生成语言 artifacts，再进入下述受控发布事务。
 
-生成目标固定为 Worker 的 private Python wrapper、Server validator/types，以及 Web/Admin 的 public TypeScript types/validators。Worker 不复制 public DTO，Web/Admin 不依赖 private package。每个仓的 `check` 在临时目录重生成并 byte-compare；任何手改 generated file、manifest mismatch、unknown consumer 或跨仓 digest 不一致均失败。
+逻辑 package identity 固定为 `pullwise-reviewer-contract-v2`。Server 生成的 Python/npm wrappers 都携带 path/size/digest 完全一致的 canonical root bundle 与 logical digest；语言 loader/types 只是派生层。Worker 只 import private/shared exports；Web/Admin 只 import public exports，并以 browser reference-graph gate 证明 private bytes/fields 未进入交付资产。每个仓的 `check` 在临时目录重生成并 byte-compare；任何手改 generated file、root bytes 不一致、manifest mismatch、private public leak、unknown consumer 或跨仓 logical digest 不一致均失败。
 
 四仓没有一个共同 filesystem/Git atomic-commit primitive，因此“原子生成”明确指 `generation-transaction/v1` 的可恢复逻辑事务，不声称四个 worktree 的 rename 在同一瞬间完成。事务只能运行在 orchestrator 持有单写 lease 的专用、clean release checkouts，不能运行在用户或其他 Agent 正在编辑的共享 worktree：
 
@@ -969,6 +990,10 @@ Stage E 需 Stage D signed PASS、D24/current-generation 与发布授权、exact
 
 `eligible wall-clock` 只在 exact contract/schema/runtime/build digest 未变、目标 capacity 已生效、生产 intake 开放且 gate 所需 telemetry 完整可读时累计。stop-intake、capacity 未达到、观测缺口或未决安全事件期间暂停计时且不得补算；runtime/schema/contract/build 改变会使两个窗口证据 stale，必须回 Stage D/E。两个窗口的 accepted population 按 Server acceptance record 归属，release-smoke、拒绝于 acceptance 前的请求、旧 generation 和前一窗口 task 均不进入后一个窗口分母。每次 promotion record 必须绑定 window start/end、eligible seconds、accepted task inventory digest、gate report/attestation digest 和 exact release digest。
 
+capacity 使用 signed eligible-slot snapshot 和整数向上取整：`K = (C * p + 99) // 100`，每 slot capacity=1；5% 要求 `C >= 20`，25% 要求 `C >= 4`。只启用 snapshot 中 signed sorted list 选出的 K 个 v2 slots，其余 capacity 关闭且不导向 v1。slot/denominator/release 变化暂停或重启窗口。5%/25% calendar 最长分别 14/30 天；低流量未达到 task 门只能 `INDETERMINATE`，不能只靠时间 promotion。窗口结束的未决任务只在不大于两倍最大 scan deadline 的冻结 settlement horizon 内等待，之后按 policy 计失败或不确定。
+
+promotion 不只看时间/数量。`canary-policy/v1` 必须按 `docs/reviewer-refactor/operations-and-execution.md` 固定 telemetry completeness、zero-tolerance authority/security、internal failure/partial/terminalization confidence bounds、p95 wall/cost 和 deterministic output audit sample；任一 telemetry gap 暂停 eligible clock，任一 zero-tolerance event 立即 auto-stop。
+
 门失败即停止扩容；只可 rollback 到同 contract/schema/storage 的 signed stable，否则 stop-intake/fence/reject。
 
 ### Stage F：全量与证据收尾
@@ -996,6 +1021,12 @@ Stage F 需 Stage E signed PASS 和 release + deployment operators 对 E→F rec
 - 只允许 policy 预列 infrastructure reason 排除，逐样本报告；解盲后不得改分母、权重、seed、baseline、阈值或 evaluator。
 - `15 tasks/family` 只足以作为最小覆盖/报告门，不能支持 98% Wilson-style family claim。RR-EVAL-FREEZE-A 必须逐指标标注 `overall/per-stratum/per-family` 适用范围；若 98% 或 <2% bound 适用于单个 family，该 family 也必须扩到其 `n_required`，否则该门 `INDETERMINATE`。
 - task-cluster bootstrap 指标的样本量用冻结的 simulation/power procedure 预估；pilot 只能使用不含 sealed benchmark label 的历史/合成数据。procedure、effect/margin、相关结构、RNG 和目标 power 进入 signed policy。
+
+#### 13.1.1 首发 stable baseline
+
+candidate 实现或 sealed corpus 解盲前必须签发 `stable-baseline/v1`，绑定当前实际 production `ReviewWorkerV1` 的 signed release commit/wheel/source、prompt/Skill/contract/config、model/effort/SDK/CLI/runtime/machine/budget digests，以及 corpus schedule commitment和旧输出到 evaluator model 的 loss-accounted mapping。工作树、latest branch、candidate早期版本或事后最好的一组 run 不能充当 stable。
+
+若 exact stable artifact/semantic assets 无法取得或无法在 candidate runtime 中不改业务语义地运行，对应 relative gate 为 `INDETERMINATE`；不得改成只看 candidate absolute score。runtime不同时继续使用 13.2 的三 cell bridge，且旧/新 output mapping、不可比字段和信息损失必须在解盲前 freeze。完整 first-release规则见 `docs/reviewer-refactor/skill-context-and-evaluation.md`。
 
 ### 13.2 统计单位、缺失运行与置信区间
 
@@ -1317,6 +1348,8 @@ engineering_calendar =
 - **DOD-14** 四仓 local checks 与对应 CI 全绿；CI 不可用不能完成生产 DoD。
 - **DOD-15** 同一 exact build 的 5% 窗口满足 ≥24 eligible hours + ≥200 window-local accepted tasks，随后独立 25% 窗口满足 ≥72 eligible hours + ≥1,000 window-local accepted tasks，且两个窗口全部质量/安全/成本阈值 PASS 后才提升到 full；canary 后若改 runtime/schema/contract/build，必须重走 Stage D/E。
 - **DOD-16** 四仓 `AGENTS.md` 记录 durable current rules，不把 superseded rules 留作 current。
+- **DOD-17** `SPEC-READY-01..12`、content-addressed spec manifest、readiness、machine execution cards/schema/verifier/self-tests 全 PASS；card DAG/write sets/commands 与实际 stage evidence一致。
+- **DOD-18** actual principal/key registry、source/artifact/control auth、tenant isolation、fleet/observability/canary queries与 data/evidence lifecycle policy 均 exact-bound，直接故障/删除/恢复证据 PASS。
 
 ### 18.1 Completion audit matrix
 
@@ -1338,8 +1371,10 @@ engineering_calendar =
 | 14 | four-repo owners | local command logs + immutable CI run ids/artifacts for exact commits |
 | 15 | release operator | 5%/25% signed start records、各自 eligible seconds/window-local accepted inventory、quality/safety/cost gates、exact-build full promotion signature |
 | 16 | governance owner | 四仓 AGENTS digest、current-rule renderer/check、superseded text audit |
+| 17 | spec/governance owner | spec verifier self-test、manifest/readiness/card DAG/write-set/command/fixture digests、`SPEC-READY-01..12` reports |
+| 18 | security/reliability owners | principal/key registry、cross-tenant/auth/storage faults、fleet/telemetry dashboards与alerts、lifecycle deletion/restore/hold reports |
 
-最终 `release-attestation.json` 必须逐个列出 DOD-01..16 的 evidence URI/digest/owner/result；缺任一项时 aggregator 只能返回 `INDETERMINATE`，不能用总括性“全部测试通过”替代。
+最终 `release-attestation.json` 必须逐个列出 DOD-01..18 的 evidence URI/digest/owner/result；缺任一项时 aggregator 只能返回 `INDETERMINATE`，不能用总括性“全部测试通过”替代。
 
 ## 19. 立即下一步
 
