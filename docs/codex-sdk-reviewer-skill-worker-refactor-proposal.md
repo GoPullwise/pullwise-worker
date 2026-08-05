@@ -22,7 +22,7 @@
 | Stage A 决策/契约冻结 | 否 | Stage 0B verified PASS + signed advance；RR-SCOPE/TRUST/TRUTH/EVAL/CUT 逐项 draft→freeze |
 | Stage B 离线 candidate | 否 | 新决策取代 D41 停止边界 |
 | Stage C 最小生产壳候选 | 否 | Stage B2 signed PASS + C advance；仍不接生产 |
-| Stage D 跨仓切换准备 | 否 | Stage C PASS + 契约生成授权 |
+| Stage D 跨仓切换准备 | 否 | Stage C signed PASS + exact-one generation resolution + D advance |
 | Stage E clean cutover/canary | 否 | 离线 attestation + strict absence + D24 + 发布授权 |
 | Stage F 全量/收尾 | 否 | canary PASS |
 
@@ -60,7 +60,9 @@ Decision resolution 只设置允许到达的最大边界，不自动推进阶段
 
 `manifest.json` 使用 `reviewer-refactor-evidence-manifest/v1`，按 canonical relative path 的 UTF-8 bytes 排序，列出除自身和 detached signature 外每个文件的 size/SHA-256/media type，并计算 domain-separated `content_root`。manifest 不列自己的 hash，任何被引用处直接保存 exact manifest bytes 的 SHA-256；`manifest.sig` 只签 exact manifest bytes 及固定 signing purpose，因此不存在 manifest/signature 自引用。未知文件、缺文件、重复/case-colliding path、symlink/reparse/non-regular file、size/digest 漂移均为 `INDETERMINATE`。exit `0` 只对应 `PASS`，exit `1` 只对应 `FAIL`，`NOT_AUTHORIZED/READY/IN_PROGRESS/INDETERMINATE` 均为 exit `2`。
 
-evidence CLI 必须显式接收 canonical absolute `--evidence-root`；该 root 位于四个 repository worktree、model-visible filesystem、source snapshot 和 validation copy 之外，拒绝 symlink/reparse、宽松权限和已存在的目标 generation。`release_id`、stage、work-package id 和正整数 generation 都按 closed grammar 验证后才拼接路径，禁止 caller 提供相对 path 或覆盖旧目录。CI artifact/object-store URI 与本地 root 的映射进入 `environment.json`，但 manifest 只使用相对 path，因而换机器可复算。命令环境只记录 allowlist；secret-bearing raw env/token 不进入证据包。
+evidence CLI 必须显式接收 canonical absolute `--evidence-root`；该 root 位于四个 repository worktree、model-visible filesystem、source snapshot 和 validation copy 之外，拒绝 symlink/reparse、宽松权限和已存在的目标 generation。标识符 grammar 固定为：`release_id=[a-z0-9][a-z0-9._-]{0,63}`，stage 仅 `0A|0B|A|B|B2|C|D|E|F`，work-package id 仅 `[A-Z][A-Z0-9-]{1,31}`，generation 为无前导零的十进制 `1..2147483647`；验证后才拼接路径，禁止 caller 提供相对 path 或覆盖旧目录。表格中的 `WEB-1/ADM-1` 只是并列简写，实际始终是两个 package ids/generations。CI artifact/object-store URI 与本地 root 的映射进入 `environment.json`，但 manifest 只使用相对 path，因而换机器可复算。命令环境只记录 allowlist；secret-bearing raw env/token 不进入证据包。
+
+所有进入 digest/signature 的 JSON body 使用仓库现行 Pullwise JCS Profile 1：UTF-8、无 BOM、NFC、ASCII object keys、safe integers、拒绝 float/duplicate key，并由 canonical serializer 产生 exact bytes；verifier 必须 parse、按同 profile 重编码并 byte-compare，不能接受语义相同但 bytes 不同的 JSON。bootstrap 若目标 canonicalizer 尚未实现，仍以 packet 中保存的 exact bytes/SHA-256 为权威，EVD-0 必须在 back-validation 时完成 canonical byte check；失败保持 `INDETERMINATE`。
 
 tracked inert decision bundles 固定在 `pullwise-worker/docs/reviewer-refactor-decision-drafts/<packet>/<generation>/`，使用 `reviewer-refactor-decision-draft-manifest/v1` 并遵守相同无自引用规则。该目录只允许 packet、target mapping、proposed bytes/fixtures 和说明；任何 package/import/generator/runtime/release-check consumer 都使 draft validation FAIL。FREEZE 后 canonical artifact 进入其 owner repository，旧 draft 仍作为 immutable provenance，不转成运行时 source。
 
@@ -83,13 +85,13 @@ tracked inert decision bundles 固定在 `pullwise-worker/docs/reviewer-refactor
 `EVD-0` 必须交付并验证 `reviewer-refactor-stage-advance/v1` 与 `reviewer-refactor-stage-advance-policy/v1`。record 至少包含：
 
 - `record_id/release_id/from_stage/to_stage/evidence_generation`；
-- 前一阶段 exact PASS manifest URI/digest/content root、适用 decision resolution digests，以及 Stage A 入场用 `instruction-conflict-plan` digest或后续入场用 unresolved=0 的 `instruction-conflict-report` digest；
+- 前一阶段 exact PASS manifest URI/digest/content root、适用 decision resolution digests，以及 Stage A 入场用 `instruction-conflict-plan` digest 或后续入场用 unresolved=0 的 `instruction-conflict-report` digest；
 - 本阶段 immutable input root、目标 release generation digest、允许的 work-package ids、repository/write sets、命令/环境边界和明确禁止项；
 - `issued_at/expires_at`、signing purpose、所需 signer roles/key ids 和 stage-advance policy version。
 
-`stage-advance.json` 只含上述 canonical unsigned body，不含自身 digest 或 signatures；引用者保存 exact body SHA-256。一个或多个 `stage-advance.<role>.sig` detached files 签 exact body bytes + fixed signing purpose，signature manifest 只列 body digest、role/key id 和 signature bytes。任何把 digest/signature 填回被 hash 的 body 的实现都因自引用而无效。
+`stage-advance.json` 只含上述 canonical unsigned body，不含自身 digest 或 signatures；引用者保存 exact body SHA-256。一个或多个 `stage-advance.<role>.sig` detached documents 只列 body digest、role/key id 和对 exact body bytes + fixed signing purpose 的 signature，不含自身 digest。任何把 digest/signature 填回被 hash 的 body 的实现都因自引用而无效。
 
-policy 冻结每条边所需角色与职责分离：Stage A/B/C 至少 architecture/governance owner；B2 另需 benchmark owner；D 另需 release operator；E/F 另需 release 与 deployment operator。实际身份、key、revocation 和 rotation 来自受控 trust registry，不能写进 Agent input 或由自由文本推断。现有 Server production release-trust registry 尚不接受该 schema/purpose；EVD-0 必须在 Worker governance/evidence contract 下交付独立、offline-only 的 trust registry/purpose/schema/role verifier 及 valid/invalid/revoked/expired fixtures，不得借此修改生产 release trust 或 runtime。若 Stage D 需要 Server 消费同一 record，必须在 CON/SRV 的 decision/write set 中显式集成并证明 parity；在 offline verifier 通过前不存在有效 stage advance。
+policy 冻结每条边所需角色与职责分离：Stage A/B/C 至少 architecture/governance owner；B2 另需 benchmark owner；D 另需 release operator；E/F 另需 release 与 deployment operator。它还必须冻结签名算法/版本、public-key format、key id derivation、domain separator、threshold/order、trust-root digest、revocation/rotation/expiry 和 clock-skew policy。实际身份与 key 来自受控 trust registry，不能写进 Agent input 或由自由文本推断。现有 Server production release-trust registry 尚不接受该 schema/purpose；EVD-0 必须在 Worker governance/evidence contract 下交付独立、offline-only 的 trust registry/purpose/schema/role verifier 及 valid/invalid/revoked/expired fixtures，不得借此修改生产 release trust 或 runtime。若 Stage D 需要 Server 消费同一 record，必须在 CON/SRV 的 decision/write set 中显式集成并证明 parity；在 offline verifier 通过前不存在有效 stage advance。
 
 验证顺序固定为 schema/canonical body → detached signature/purpose/role/revocation/expiry → decision 与适用 instruction conflict plan/report binding → previous PASS manifest → input/release generation digest → requested work package/write set。Stage A advance 只能授权 plan 中的 draft/remediation paths；B–F advance 必须引用 unresolved=0 的 report。exact record replay 返回同一 verdict；同 `record_id` 不同 bytes、stale/revoked/expired evidence、越界 write set 或任一 digest 改变均为 `NOT_AUTHORIZED`/exit `2`，不得降为 warning。stage advance 不赋予 decision resolution 未允许的权限，也不能授权未列出的副作用。
 
@@ -423,7 +425,7 @@ pullwise-server/contracts/public/review-run/v2/
 
 生成目标固定为 Worker 的 private Python wrapper、Server validator/types，以及 Web/Admin 的 public TypeScript types/validators。Worker 不复制 public DTO，Web/Admin 不依赖 private package。每个仓的 `check` 在临时目录重生成并 byte-compare；任何手改 generated file、manifest mismatch、unknown consumer 或跨仓 digest 不一致均失败。
 
-四仓没有一个共同 filesystem/Git atomic-commit primitive，因此“原子生成”明确指 `generation-transaction/v1` 的可恢复逻辑事务，不声称四个 worktree 的 rename 在同一瞬间完成：
+四仓没有一个共同 filesystem/Git atomic-commit primitive，因此“原子生成”明确指 `generation-transaction/v1` 的可恢复逻辑事务，不声称四个 worktree 的 rename 在同一瞬间完成。事务只能运行在 orchestrator 持有单写 lease 的专用、clean release checkouts，不能运行在用户或其他 Agent 正在编辑的共享 worktree：
 
 1. 事务绑定 canonical input/registry/generator/runtime digests、四仓 HEAD/dirty 状态、全部 target paths、expected-old digest（或 absent）和 staged-new digest；target 集合之外禁止写入。
 2. 在 worktree 外的私有 staging 生成全部 bytes，完成 schema fixtures、language checks、byte parity 和 target collision 检查；随后将 `PREPARED` journal、staged bytes 和 parent directory 持久化。
@@ -682,14 +684,14 @@ RR-GOV 是唯一 bootstrap 变体：其 inert draft bundle 可由 GOV-0A 在当�
 
 ## 12. 分阶段实施计划
 
-### Stage 0A：不改变语义的治理证据修复
+### Stage 0A：只读治理证据与 provenance
 
 1. `S0A.0` 按第 0.2/0.3 节创建不可覆盖 bootstrap generation，先记录四仓 HEAD/dirty、当前命令/环境/input digests，再执行任何允许的机械修复；所有原始 stdout/stderr/exit 直接保存，`result.json` 只写 provisional 状态。
 2. `S0A.1` 用当前 register/Slice-0 commands 复现 wrapper 8,762/8,062 和 digest 漂移，输出 `slice0-provenance.json`：D39/D41 record digest、producer version、Generate generation、expected/actual path/line/digest、首次出现 commit。只有既能证明是既有权威生成链/冻结语义内的机械同步遗漏，又有当前 resolution exact 授权目标 write set 时才可修复；截至本文快照不假定该授权存在。否则只产出 evidence packet，留给 RR-GOV。
 3. `S0A.2` 只读取证 405 行 decision-register gate test 未入 baseline。若现有 baseline 定义确已要求收录，也必须先取得 exact write-set 授权，才可 split/reduce 到每个新手写文件 ≤400 行、运行原有 focused/full tests 并机械同步；否则只记录 replacement obligation，不扩大 current baseline。
 4. `S0A.3` 建含 Admin 的四仓 deletion inventory，记录 entrypoint/config/table/artifact/test/docs，明确它不是兼容承诺。
 5. `S0A.4` 保持默认 absence ratchet 语义不变，补齐当前 self-reference/legacy-present/108 failures/indeterminate 的可重复证据和 CI 状态。
-6. `S0A.5` 每个修改前后重跑 decision register、Slice-0、contract baseline、default absence，并保存 exit/stdout/stderr/digest；strict absence 只记录当前 `INDETERMINATE`，不宣称通过。
+6. `S0A.5` 对每个另获 exact 授权的修改在前后重跑 decision register、Slice-0、contract baseline、default absence，并保存 exit/stdout/stderr/digest；没有修改时也保存一次完整 current run。strict absence 只记录当前 `INDETERMINATE`，不宣称通过。
 7. `S0A.6` 生成 inert RR-GOV draft bundle：replacement schema/三态/fixtures、history/live 分离、EVD-0 bootstrap contract、目标 paths/digests、旧义务映射、write set 与禁止项；证明它无 runtime/generator/release consumer。
 
 退出：每个 drift 被分类为“可在现有语义内机械修复”或“需新决策”；允许项的当前命令有直接证据；四仓 inventory 可重复；gate/生产语义未改；bootstrap manifest 和 RR-GOV draft bundle 可复算。此时只可声明 `provisional PASS/INDETERMINATE`，不得声明 signed stage PASS。provenance 不足时仍可提交 RR-GOV-DRAFT/FREEZE packet，但 FREEZE 必须显式接受该 exact 不确定性和 replacement obligation。
@@ -722,7 +724,7 @@ RR-GOV 是唯一 bootstrap 变体：其 inert draft bundle 可由 GOV-0A 在当�
 
 ### Stage B：离线 candidate
 
-Stage B 只有在 Stage A signed PASS、RR-SCOPE/TRUST/TRUTH-FREEZE-A 均有效且新的 stage-advance exact-list `SKILL-1/RUN-1/RUN-2/RES-1/PUB-1` 及其 write sets 后才为 `READY`。advance 不得包含 production lease/result/table/builder/route/deployment，也不得继承 D41 已消费的 Generate。
+Stage B 只有在 Stage A signed PASS、`RR-SCOPE-FREEZE-A`、`RR-TRUST-FREEZE-A`、`RR-TRUTH-FREEZE-A` 均有效，且新的 stage-advance exact-list `SKILL-1/RUN-1/RUN-2/RES-1/PUB-1` 及其 write sets 后才为 `READY`。advance 不得包含 production lease/result/table/builder/route/deployment，也不得继承 D41 已消费的 Generate。
 
 ```text
 pullwise_worker/reviewer_runtime/
@@ -754,7 +756,7 @@ candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/
 
 ### Stage B2：paired benchmark
 
-Stage B2 需 Stage B signed PASS、RR-EVAL-FREEZE-A 和由 architecture + benchmark owners 签发的 B→B2 advance。先通过第 13 节 sample-size/power preflight。若 candidate runtime digest 与 stable 相同，则同 source/model/effort/SDK/CLI/machine/budget 交错运行 stable/candidate。若不同，必须按 13.2 建立 candidate-runtime comparison cell，不能把 stable-native 与 candidate 直接称为 runtime-controlled pair。顺序预注册；每 task 3 seeds；独立 oracle 解盲；保存 raw samples/exclusions/bindings/可复算 report。只有 RR-EVAL 全部门 PASS 才进入 C；缺证/不可比/超时/样本不足均按预注册 missing-run 规则计失败或 INDETERMINATE，不得静默排除。
+Stage B2 需 Stage B signed PASS、RR-EVAL-FREEZE-A 和由 architecture + benchmark owners 签发的 B→B2 advance。先通过第 13 节 sample-size/power preflight。若 candidate runtime digest 与 stable 相同，则同 source/model/effort/SDK/CLI/machine/budget 交错运行 stable/candidate。若不同，必须按 13.2 建立 candidate-runtime comparison cell，不能把 stable-native 与 candidate 直接称为 runtime-controlled pair。顺序预注册；每 task 3 seeds；独立 oracle 解盲；保存 raw samples/exclusions/bindings/可复算 report。只有 RR-EVAL-FREEZE-A 的全部适用门 PASS 才进入 C；缺证/不可比/超时/样本不足均按预注册 missing-run 规则计失败或 INDETERMINATE，不得静默排除。
 
 ### Stage C：最小生产壳候选，不激活
 
@@ -1015,13 +1017,13 @@ EVD-0 在 GOV-0B 生成 `work-package-ledger/v1` skeleton；它列出所有已�
 
 | Work package | Entry gate | PASS 必须直接证明 |
 |---|---|---|
-| GOV-0A | current D41 boundary + bootstrap exception | provenance、四仓 inventory、现有 gate raw outputs、inert RR-GOV bundle；零语义变化；仅 provisional result |
+| GOV-0A | current read-only/document authority；不扩大 D41 | provenance、四仓 inventory、现有 gate raw outputs、inert RR-GOV bundle；零语义变化；仅 provisional result |
 | EVD-0 | RR-GOV-FREEZE-A | bootstrap import、manifest/signature/stage-advance/ledger tamper、role/revocation/expiry、exit 0/1/2、deterministic self-check |
 | GOV-0B | EVD-0 + RR-GOV-FREEZE-A | replacement 三态、true absence/live present/history damage/self-reference fixtures、旧义务映射、signed PASS |
 | EVD-1 | RR-* DRAFT-A + signed A advance | EVD-0 backward compatibility；missing/stale dependency/unauthorized write→exit 2，真实 fail→exit 1，完整 evidence→exit 0 |
 | CON-0 | RR-TRUTH-DRAFT-A + signed A advance | canonical draft schemas/registry/fixtures、generator dry-run、target digests、zero runtime/build/release consumers |
 | BEN-0 | RR-EVAL-DRAFT-A + signed A advance | power/sample/unit/estimator/missing-run policy、synthetic golden/invalid fixtures；未读 sealed labels |
-| SKILL-1 | RR-SCOPE/TRUST-FREEZE-A + signed B advance | wheel/install bytes、transitive manifest、explicit SkillInput、无 eval/隐式 surface |
+| SKILL-1 | RR-SCOPE-FREEZE-A + RR-TRUST-FREEZE-A + signed B advance | wheel/install bytes、transitive manifest、explicit SkillInput、无 eval/隐式 surface |
 | RUN-1 | RR-TRUST-FREEZE-A + signed B advance | immutable complete inventory、instruction pagination/precedence/seal、五工具协议、不可伪造 ordered receipt |
 | RUN-2 | RUN-1 + SKILL-1 | exact runtime capability、scratch-only FS、env/network deny、single turn、bounded interrupt/close |
 | RES-1 | RUN-1 + RR-TRUTH-FREEZE-A + signed B advance | untrusted injection rejection、trusted binding、location/evidence、full/partial closed coverage/classifier |
