@@ -80,7 +80,7 @@
 - Server quota 仍识别 `repo_map`、`risk_routing`、`reviewer_fanout`、`clustering_and_voting`、`validator_disproof`、`final_report_json`。
 - Admin 仍编辑 `reviewerConcurrency`，并消费 `maxBundles/maxReviewerAssignments`。
 - 决策注册表为 `ready`：40 resolved、D2 inactive、无 active decision。
-- Slice-0 当前失败：当前 generated wrapper 为 8,762 行、SHA-256 `9404c18b39afdb0ee6bd9d15fdbb3b24d9b85f1972a597a5919a868afe480697`，与 D41 记录一致；Slice-0 baseline 仍固定 D39 的 8,062 行、SHA-256 前缀 `bd099` 及旧 producer。Stage 0A 必须取回并记录 baseline 中的完整 D39 digest，证明二者的 provenance，再决定是既有生成链机械漏同步还是需要 D42 replacement；本文不预判结论。
+- Slice-0 当前失败：当前 generated wrapper 为 8,762 行、SHA-256 `9404c18b39afdb0ee6bd9d15fdbb3b24d9b85f1972a597a5919a868afe480697`，与 D41 记录一致；Slice-0 baseline 仍固定 D39 的 8,062 行、SHA-256 `bd099dd825c2b2340061b67500bc02f1bb4fee0a1ce7ff44138b36b8821a59fd` 及旧 producer。Stage 0A 必须证明二者的完整 provenance，再决定是既有生成链机械漏同步还是需要 D42 replacement；本文不预判结论。
 - `tests/test_agent_first_decision_register_gate.py` 当前 405 行且未入 Slice-0 baseline。它不能以“新增 grandfathered 超限文件”的方式直接纳入；若现有语义确实要求收录，先按单一职责拆分/缩减到不超过 400 行并证明测试语义不变，否则记录为 Stage 0B replacement obligation。
 - legacy contract baseline 为 `compatible`，14 组固定 probe 全部通过。
 - 默认 absence ratchet 为 `ratchet_clean=true`、`legacy_absent=false`。
@@ -562,14 +562,26 @@ Web 已支持动态 steps：切到五级 steps 与 `review-run/v2`，保留 part
 
 ## 11. Append-only 决策计划
 
-| 建议 ID | 主题 | 冻结内容 |
-|---|---|---|
-| D42 | 治理 evidence gate | Slice-0/replacement 边界、immutable history 与 live forbidden catalog、absence v2 三态/自引用消除 |
-| D43 | 专用 reviewer 边界 | full_scan、单 thread/turn、无 fanout/verifier/sub-agent、从头重跑 |
-| D44 | Skill/instruction/runtime trust | exact transitive Skill assets、CWD/CODEX_HOME、restricted read/write roots、sanitized env、instrumented receipts、AGENTS、tool/network/credential、TOCTOU |
-| D45 | 三层契约/终态 | untrusted Agent payload/trusted Worker result、private wire、normalized/public DTO、Server CAS、cancel binding/ACK/stale |
-| D46 | reviewer benchmark/release | D22 专业化 corpus、task-clustered paired statistics、三态、canary/rollback |
-| D47 | clean cutover/deletion | exact release build 在 canary 前完成四仓 live legacy 删除、absence v2、same-contract rollback |
+以下只是待确认 decision packets，不是 resolution。建议 ID 以实际 append 顺序为准；在 register 记录 option-anchored confirmation 和 provenance 前，状态一律为 `PENDING_EXPLICIT_RESOLUTION/NOT_AUTHORIZED`。
+
+| Packet | 目标选项 A | 停止选项 B | A 只授权到 |
+|---|---|---|---|
+| RR-GOV（建议 D42） | 分离 immutable history 与 live forbidden catalog；用非自引用 Slice-0/absence v2 replacement，固定 exit 0/1/2 三态并机械迁移旧义务 | 保留当前 gate；本重构停在 GOV-0A | Stage 0B |
+| RR-SCOPE（建议 D43） | 唯一任务 `repo_review.full_scan`；单 root thread/main turn、最多一次 format repair、无 fanout/verifier/sub-agent、失败从头重跑 | 不接受该专用边界；停止 candidate | Stage A 契约冻结 |
+| RR-TRUST（建议 D44） | exact Skill/runtime；source/instruction/validation 仅经 5.4 gateway；scratch-only model FS；supported SDK 路径或经验证 external sandbox；能力不足 NO-GO | 不接受该 trust boundary；停止 candidate | Stage B 离线 trust/runtime slices |
+| RR-TRUTH（建议 D45） | Agent payload 不可信；Worker 生成 immutable candidate；Server terminal CAS 是唯一全局权威；采用 7–9 节三层契约 | 保留现有 terminal authority；停止 v2 contract | Stage A schemas + Stage B/C offline implementation |
+| RR-EVAL（建议 D46） | 采用第 13 节 power-gated、task-clustered paired benchmark、runtime bridge、PASS/FAIL/INDETERMINATE 和签发职责 | 不接受该 release proof；禁止真实 benchmark/发布 | 真实离线 benchmark；不授权生产 |
+| RR-CUT（建议 D47） | 采用第 12/16 节 stop-intake、无 mixed-version 的 clean cutover、pre-canary deletion、same-contract rollback | 业务不接受维护窗/隔离；禁止 cutover | Stage D release preparation；Stage E 仍需 D24/发布授权 |
+
+每个 packet 的 canonical record 必须包含：
+
+1. `packet_id/option_id/exact_confirmation_text`、decider、时间、provenance；
+2. 被 supersede 的 decision id + digest + normative unit，逐项写“保留/替换/撤销”；
+3. 只授权的 stage/work package 和明确禁止项；
+4. normative artifact paths/digests、所需 failing/pass fixtures、replacement obligations；
+5. rollback/expiry（如有）和下一个需要独立确认的决策。
+
+有效确认必须明确 packet 与 option，例如：`确认 RR-GOV-A，仅授权 Stage 0B，继续禁止 candidate、benchmark、部署和流量。` “按文档做”“同意重构”“继续”或 issue/PR 合并都不是 option-anchored resolution。记录工具必须拒绝模糊确认、越级授权、缺 supersession digest 和把多个独立选项静默合并。
 
 实际 ID 由 register 顺序生成。既有决策处理：
 
@@ -587,12 +599,13 @@ Web 已支持动态 steps：切到五级 steps 与 `review-run/v2`，保留 part
 
 ### Stage 0A：不改变语义的治理证据修复
 
-1. `S0A.1` 复现并追溯 wrapper 8,762/8,062 漂移。只有能够证明是既有权威生成链/冻结语义内的机械同步遗漏时才可修复；若需要再次 Generate、改变 expected 语义或退休 gate，只产出 evidence packet，留给 Stage 0B 决策。
-2. `S0A.2` 追溯 decision-register gate test 未入 baseline。只有现有 baseline 定义已要求收录时才机械同步；否则记录 replacement obligation，不扩大 current baseline。
+1. `S0A.1` 用当前 register/Slice-0 commands 复现 wrapper 8,762/8,062 和 digest 漂移，输出 `slice0-provenance.json`：D39/D41 record digest、producer version、Generate generation、expected/actual path/line/digest、首次出现 commit。只有能够证明是既有权威生成链/冻结语义内的机械同步遗漏时才可修复；若需要再次 Generate、改变 expected 语义或退休 gate，只产出 evidence packet，留给 Stage 0B 决策。
+2. `S0A.2` 追溯 405 行 decision-register gate test 未入 baseline。只有现有 baseline 定义已要求收录时，先 split/reduce 到每个新手写文件 ≤400 行、运行原有 focused/full tests，再机械同步；否则记录 replacement obligation，不扩大 current baseline。
 3. `S0A.3` 建含 Admin 的四仓 deletion inventory，记录 entrypoint/config/table/artifact/test/docs，明确它不是兼容承诺。
-4. `S0A.4` 保持默认 absence ratchet 语义不变，补齐当前 self-reference/legacy-present/indeterminate 的可重复证据和 CI 状态。
+4. `S0A.4` 保持默认 absence ratchet 语义不变，补齐当前 self-reference/legacy-present/108 failures/indeterminate 的可重复证据和 CI 状态。
+5. `S0A.5` 每个修改前后重跑 decision register、Slice-0、contract baseline、default absence，并保存 exit/stdout/stderr/digest；strict absence 只记录当前 `INDETERMINATE`，不宣称通过。
 
-退出：每个 drift 被分类为“可在现有语义内机械修复”或“需新决策”；允许项已 PASS；四仓 inventory 可重复；gate/生产语义未改。
+退出：每个 drift 被分类为“可在现有语义内机械修复”或“需新决策”；允许项已 PASS；四仓 inventory 可重复；gate/生产语义未改；`GOV-0A/result.json` 可复算且为 `PASS`。若 provenance 不足则 GOV-0A 为 `INDETERMINATE`，仍可提交 RR-GOV packet，但不得声称 current baseline 已修复。
 
 ### Stage 0B：有决策的治理 gate replacement
 
@@ -606,14 +619,15 @@ Web 已支持动态 steps：切到五级 steps 与 `review-run/v2`，保留 part
 ### Stage A：决策与契约冻结
 
 1. 在 D42 governance decision 已完成后，resolve D43-D47 等价决策。
-2. 定义 Server canonical wire source/fixtures，但不 Generate/激活。
-3. 冻结 result、coverage、identity、status/error/reason registry。
+2. 定义 7.4 的 Server canonical private/public source、manifest、valid/invalid fixtures 与 generator contract，但未获生成授权前不 Generate/激活。
+3. 冻结 result、coverage、identity、status/error/reason registry 和 private→public sanitization mapping。
 4. 冻结 terminal CAS/cancel binding/ACK/stale 和 untrusted payload/trusted envelope 边界。
-5. 冻结 Skill/instruction/tool/read roots/tool env/read gateway/限额/exact-load evidence。
-6. 冻结 D46 benchmark documents，包括统计单位、paired estimator/CI 和 missing-run 规则。
-7. 更新四仓 `AGENTS.md`，明确 superseded rules，避免 current 指令冲突。
+5. 冻结 Skill/instruction/tool protocol、scratch-only model FS、tool env、gateway/receipt、validation profiles、限额和 exact-load evidence。
+6. 冻结 7.6 DDL/constraints/四事务、migration/历史数据处置和 pre/post-activation rollback。
+7. 冻结 D46 benchmark documents，包括 power calculation、统计单位、runtime comparison cells、paired estimator/CI 和 missing-run 规则。
+8. 更新四仓 `AGENTS.md`，明确 superseded rules，避免 current 指令冲突。
 
-退出：register history/provenance PASS；normative units 引用新 digest；fixtures 完整；新决策只授权 Stage B。
+退出：register history/provenance PASS；normative units 引用新 digest；schemas/registries/DDL/tool/benchmark policy 均有 valid+invalid fixtures；dependency/evidence ledger 已生成；新决策只授权 Stage B。
 
 ### Stage B：离线 candidate
 
@@ -623,7 +637,10 @@ pullwise_worker/reviewer_runtime/
   source_snapshot.py
   instruction_bundle.py
   model_fs_policy.py
-  read_gateway.py
+  gateway_service.py
+  tool_bridge.py
+  validation_service.py
+  receipt_ledger.py
   runtime_policy.py
   sdk_session.py
   runner.py
@@ -638,13 +655,13 @@ pullwise_worker/reviewer_skill/
 scripts/run_reviewer_candidate.py
 ```
 
-先写 failing tests：`test_reviewer_skill_binding.py`、`test_reviewer_instruction_surface.py`、`test_reviewer_model_fs_policy.py`、`test_reviewer_read_gateway.py`、`test_reviewer_candidate_runner.py`、`test_reviewer_result_validator.py`、`test_reviewer_coverage_codec.py`、`test_reviewer_runtime_policy.py`。
+先写 failing tests：`test_reviewer_skill_binding.py`、`test_reviewer_instruction_surface.py`、`test_reviewer_model_fs_policy.py`、`test_reviewer_gateway_service.py`、`test_reviewer_validation_service.py`、`test_reviewer_receipt_ledger.py`、`test_reviewer_candidate_runner.py`、`test_reviewer_result_validator.py`、`test_reviewer_coverage_codec.py`、`test_reviewer_runtime_policy.py`。
 
-candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/result、写 production table、切 builder、shadow traffic 或部署。必须证明 exact-load、surface control、restricted model-visible roots、sanitized tool env、instrumented AGENTS/source receipts、source read-only、validation-copy scoped write、tool 无网络/凭据、单 turn、有界 cancel/timeout/close、untrusted payload/trusted result、result/coverage/redaction、2,000-file bounded encoding。无法控制任一 surface 或 receipt authority 即 `NO-GO`。
+candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/result、写 production table、切 builder、shadow traffic 或部署。必须证明 exact-load、surface control、scratch-only model FS、sanitized tool env、instrumented AGENTS/source receipts、gateway 外 source 不可见、validation copy 仅 service 可写、tool 无网络/凭据、单 turn、有界 cancel/timeout/close、untrusted payload/trusted result、result/coverage/redaction、2,000-file bounded encoding。无法控制任一 surface、SDK supported path 或 receipt authority即 `NO-GO`。
 
 ### Stage B2：paired benchmark
 
-同 source/model/effort/SDK/CLI/machine/budget 交错运行 legacy 与 candidate；顺序预注册；每 task 3 seeds；独立 oracle 解盲；保存 raw samples/exclusions/bindings/可复算 report。只有 D46 全部门 PASS 才进入 C；缺证/不可比/超时/样本不足均按预注册 missing-run 规则计失败或 INDETERMINATE，不得静默排除。
+先通过第 13 节 sample-size/power preflight。若 candidate runtime digest 与 stable 相同，则同 source/model/effort/SDK/CLI/machine/budget 交错运行 stable/candidate。若不同，必须按 13.2 建立 candidate-runtime comparison cell，不能把 stable-native 与 candidate 直接称为 runtime-controlled pair。顺序预注册；每 task 3 seeds；独立 oracle 解盲；保存 raw samples/exclusions/bindings/可复算 report。只有 D46 全部门 PASS 才进入 C；缺证/不可比/超时/样本不足均按预注册 missing-run 规则计失败或 INDETERMINATE，不得静默排除。
 
 ### Stage C：最小生产壳候选，不激活
 
@@ -658,23 +675,28 @@ candidate 只读 fixture/snapshot 并写本地结果；不得调用生产 lease/
 
 ### Stage D：跨仓切换准备
 
-- Server 原子生成 contract，接入但 intake disabled；改计费事件；完成 projection/debug/barrier/legacy reject。
+- Server 原子生成 contract，接入但 intake disabled；改计费事件；完成 projection/debug/D24 barrier/v1 rejection 和 7.6 v2 schema migration。migration rehearsal 从生产形状的备份副本开始，禁止 old→v2 task conversion。
 - 形成一个不可拆分的四仓 exact release change set：Worker builder 只指向新 runner，并删除 `ReviewWorkerV1`、非目标 Agent Kernel 和旧 outbox/result；Server 删除旧 phase billing/artifact/route/storage consumer；Web 删除旧 DTO/phase/artifact fallback；Admin 删除 reviewer/bundle/assignment 配置。不得用 flag/fallback 暂存第二路径。
-- Worker exact-pin private package；Web/Admin 只 pin public DTO；doctor 校验 exact tuple 和 model-visible filesystem capability evidence。
-- 对将部署的 exact commits/build artifacts 运行 strict absence v2、引用图、wheel/install、contract parity、四仓 local/CI。不可把“部署后再删除”当作 Stage D PASS。
+- Worker exact-pin private package；Web/Admin 只 pin public DTO；doctor 校验 exact runtime tuple、tool surface 和 scratch-only filesystem capability evidence。
+- 生成 production runbook，逐命令列出 stop-intake、drain/fence、停旧 Worker/Server、v2 migration、部署顺序、D24 activation、smoke、capacity gate、pre-activation abort、post-activation rollback 和 evidence capture。
+- 对将部署的 exact commits/build artifacts 运行 strict absence v2、引用图、wheel/install、contract parity、DDL/CAS、四仓 local/CI。不可把“部署后再删除”当作 Stage D PASS。
 
-退出：exact release build 内只有一个 current contract/runner/Skill，strict absence exit=`0` 且 status=`absent`；四仓 pins/fixtures/CI PASS；operator 完成 stop-intake、same-contract rollback 或 fence/reject 演练；release build 尚未部署/接流量；deletion manifest 全部关闭或有明确 immutable-history 处置。
+退出：exact release build 内只有一个 current contract/runner/Skill，strict absence exit=`0` 且 status=`absent`；四仓 pins/fixtures/CI PASS；operator 在 production-like 环境完成完整部署、pre-activation abort、same-contract rollback 或 fence/reject 演练；release build 尚未部署/接流量；deletion manifest 全部关闭或有明确 immutable-history 处置。
 
 ### Stage E：clean cutover 与 capacity-only canary
 
-1. stop intake。
-2. pre-cutover tasks 权威终态/tombstone/delete，或撤权隔离；不得迁移。
-3. 部署 Stage D 已通过 strict absence 的四仓 exact builds；部署物内不得含可执行 legacy runner/route/schema consumer。
-4. acceptance 事务激活 D24 barrier。
-5. 验证旧 lease/event/result/replay fail closed。
-6. 新 current contract 开 5% capacity，其余 intake 暂停。
-7. ≥24h 且 ≥200 accepted current tasks 后进 25%。
-8. ≥72h 且 ≥1,000 tasks 后才考虑 full。
+Stage E 使用维护窗或无共享 authority 的 blue/green；禁止让 v1/v2 Server 或 Worker 同时连接同一生产 queue/current tables，禁止 mixed-version rolling deploy。
+
+1. 核验 signed release/evidence digests，stop intake 并冻结 operator generation。
+2. 等待 pre-cutover tasks 到权威终态；不能完成的 task tombstone/delete 或撤权隔离，不得迁移。导出 task/lease/outbox 清单并证明 active=0。
+3. 停止全部旧 Worker，撤销旧 worker session/token；验证没有旧 heartbeat/claim。
+4. 停止并从负载均衡/queue 移除全部旧 Server/consumer；取得 DB migration lock。此时仍未激活 v2，失败可按 16 节 pre-activation abort。
+5. 应用已演练的 v2 schema/data-isolation migration；部署 v2 Server，保持 intake/claim disabled，并证明所有 v1 route/wire/event/result/replay fail closed。
+6. 部署 v2 Worker，允许 registration/health 但 claim disabled；再部署只消费 public v2 DTO 的 Web/Admin。核验 exact pins、contract/runtime/capability digests。
+7. 在隔离的 release-smoke namespace 运行 synthetic E2E，验证 claim/CAS/projection/debug/redaction；该任务不进入生产业务队列或 benchmark 分母。
+8. 在一个 acceptance 事务中激活 D24/current contract generation，同时启用 v2 intake/claim；旧 generation 永久拒绝。
+9. 新 current contract 开 5% capacity，其余容量保持关闭，而不是导向旧路径。
+10. ≥24h 且 ≥200 accepted current tasks 后进 25%；≥72h 且 ≥1,000 tasks 后才考虑 full。
 
 门失败即停止扩容；只可 rollback 到同 contract/schema/storage 的 signed stable，否则 stop-intake/fence/reject。
 
@@ -692,7 +714,8 @@ Stage F 不再修改已 canary 的 runtime/schema/contract，也不在 canary �
 
 ### 13.1 corpus 与运行纪律
 
-- 至少 120 个 known-gold tasks。
+- `120` 只是继承 D22 的绝对下限，不是所有置信门的充分样本量。解盲和排程前，evaluator 必须根据每个门的冻结统计单位、置信方向、阈值和允许失败数计算 `n_required`；最终独立 task-cluster 数是 `max(120, 每个适用总体门 n_required, 每个适用 per-family 门 n_required)`。
+- 对 Bernoulli 门，policy 保存公式、z 值/单双侧、严格不等号、最大允许 failures 和机器复算 fixture。例如零失败时要求 95% Wilson upper **严格小于** 2%：若冻结为单侧 95%，至少 133 个独立 clusters；若使用常见双侧 95% interval 的 upper endpoint，至少 189 个。D46 未明确单双侧前按 189 做容量规划，不能把 120 宣称为可发布样本。
 - 至少 3 个 sealed unknown repository families，每 family 至少 15 tasks。
 - 至少 50 个 oracle-positive in-scope findings。
 - 覆盖 security、correctness、API/schema、state/concurrency/resource、test-gap。
@@ -700,6 +723,8 @@ Stage F 不再修改已 canary 的 runtime/schema/contract，也不在 canary �
 - 覆盖小/大仓、monorepo、generated/vendor/binary/submodule、nested `AGENTS.md`、依赖缺失、测试不可运行、context/token/deadline 限制。
 - 每 task 3 个预注册 seed；所有计划 run 都必须保留。seed 在 task 内等权，但不是三个独立统计样本；不得为追 PASS 追加或替换运行。
 - 只允许 policy 预列 infrastructure reason 排除，逐样本报告；解盲后不得改分母、权重、seed、baseline、阈值或 evaluator。
+- `15 tasks/family` 只足以作为最小覆盖/报告门，不能支持 98% Wilson-style family claim。D46 必须逐指标标注 `overall/per-stratum/per-family` 适用范围；若 98% 或 <2% bound 适用于单个 family，该 family 也必须扩到其 `n_required`，否则该门 `INDETERMINATE`。
+- task-cluster bootstrap 指标的样本量用冻结的 simulation/power procedure 预估；pilot 只能使用不含 sealed benchmark label 的历史/合成数据。procedure、effect/margin、相关结构、RNG 和目标 power 进入 signed policy。
 
 ### 13.2 统计单位、缺失运行与置信区间
 
@@ -713,6 +738,16 @@ D46 必须在解盲前冻结可执行统计契约：
 - paired non-inferiority 使用确定性的、按 strata 分层的 task-cluster bootstrap，计算 `candidate - stable` 的单侧 95% 下置信界；重采样次数、RNG/seed derivation、quantile、small-sample 和 p95 wall-time/cost 算法全部进入 signed policy。若另选统计方法，必须在 D46 中命名、证明 paired/cluster handling 并重新冻结 evaluator，不能在结果后切换。
 - 系统被测自身产生的 timeout、SDK/auth/sandbox/result failure 是评分结果，不是 infrastructure exclusion。只有 policy 预列、同时影响可比双方且有外部证据的基础设施故障可排除；单侧缺样、无法配对、超出排除上限或样本不足均使适用相对门 `INDETERMINATE`，不得补跑替代。
 - 所有适用 absolute/relative/per-family 门取交集，必须全部 PASS；不得用总体平均覆盖失败 strata，也不得解盲后选择 primary metric。
+
+运行时比较单元同样在 D46 冻结：
+
+| Cell | 语义/build 输入 | Runtime | 用途 |
+|---|---|---|---|
+| `S-native` | exact signed stable release | stable runtime digest | 漂移锚点，不在 runtime 改变时直接作为 candidate pair |
+| `S-candidate-runtime` | exact stable source/contract/Skill/prompt semantics；只替换被 D46 允许的 runtime tuple | candidate evaluation runtime digest | runtime-controlled baseline |
+| `C-candidate-runtime` | candidate | 同一 candidate evaluation runtime digest | 与上一 cell 做 primary pair |
+
+candidate runtime 与 stable 相同时只需 `S-native ↔ C`。不同时，三 cell 在同一 72h window、同 machine class/budget/source/task/seed 下按预注册顺序交错；primary comparison 只能是 `S-candidate-runtime ↔ C-candidate-runtime`，并把 `S-native ↔ S-candidate-runtime` 作为 runtime drift 报告。这里“stable”指 exact stable source/semantic assets，不能把替换了 SDK/CLI/model 的 cell 虚称为 byte-identical stable build。若 stable 语义不能在 candidate runtime 运行、需改业务代码/contract、或 runtime drift 超出 D46 上限，则结果 `INDETERMINATE`。
 
 报告必须包含 raw scheduled runs、排除证据、task-level aggregates、cluster/strata membership、bootstrap inputs/seed、每个 confidence bound 和可复算 evaluator output。
 
@@ -731,8 +766,9 @@ D46 必须在解盲前冻结可执行统计契约：
 - schema/location/evidence/control/source/Skill binding valid rate = 100%。
 - known task success ≥ 70%，unknown ≥ 50%。
 - environment/capability classification accuracy ≥ 95%。
+- `false_verified_rate` point estimate < 1%，且适用的 95% Wilson upper < 2%；numerator/denominator 和 critical/adversarial 子门按 D22/D46 冻结。
 - false discovery rate ≤ 20%。
-- location accuracy 预注册下限不得低于 98%。
+- location accuracy 的预注册 point/bound 规则不得低于 98%；若采用 confidence lower bound，样本量必须通过 13.1 preflight，不能只以 observed point 代替。
 - clean counterexample 不出现系统性规则噪声。
 
 相对 current stable paired baseline：
@@ -749,7 +785,7 @@ D46 必须在解盲前冻结可执行统计契约：
 - indeterminate case 保持 `PARTIAL/FAILED`，不得假成功。
 - SDK/auth/quota/timeout/cancel/source mutation/ACK loss 分类与 oracle 一致。
 - debug/log 不含 source/secret。
-- runtime 不可比时交错重跑 exact stable build；仍不可比则 INDETERMINATE。
+- runtime 不可比时按 13.2 三 cell 交错重跑；不能形成 candidate-runtime stable cell 或仍不可比则 INDETERMINATE。
 
 ### 13.4 evaluator 与职责分离
 
@@ -766,15 +802,18 @@ Evaluator 只允许 exit 0 PASS、exit 1 FAIL、exit 2 INDETERMINATE；只有 ex
 |---|---|
 | Skill | explicit input、transitive runtime manifest、unlisted/eval asset exposure、digest drift、swap/symlink/truncate、隐式 skill/plugin/MCP/hook |
 | Instructions | root/nested precedence、超 32 KiB、总量超限、manifest drift、instruction-before-source ordering、search-only/缺失/伪造 receipt |
-| Sandbox | restricted readable/writable roots、host/other-worker/auth/outbox sentinel、source write、validation-copy write、network、sanitized credential path/env、approval |
+| Gateway | typed tool schema、canonical path、instruction-first enforcement、pagination/limit/truncation、bridge crash、sequence/hash-chain/correlation、伪造 response 无 receipt |
+| Sandbox | scratch-only model FS、host/other-worker/auth/outbox/source/instruction/validation sentinel、scratch write、network、sanitized credential path/env、approval |
 | SDK | exact tuple capability probe、restricted-read/external-sandbox evidence、missing/wrong thread/turn id/status、notification failure、timeout、archive/close hang |
 | Result | Agent 注入 trusted fields/classification、Worker binding injection、malformed schema、unknown enum、traversal、line OOB、evidence mismatch、duplicate |
 | Coverage | claim/receipt intersection、0/1/2,000 files、gap/overlap/order/OOB、unknown reason、instruction binding |
 | Lifecycle | bound/unbound/stale cancel、deadline/lease loss before/during/after turn、crash before/after freeze |
 | Publish | exact replay before stale check、ACK loss、key conflict、stale、cancel vs result CAS concurrency |
-| Server | cancel binding、quota event idempotency、normalization、DTO redaction、projection recovery |
+| Contract | valid/invalid fixtures、additionalProperties、closed registries、generator no-clobber、跨仓 byte parity、private/public import 边界 |
+| Server | DDL constraints、claim/cancel/event/terminal 四事务、cancel binding、quota event idempotency、normalization、DTO redaction、projection recovery |
 | Web/Admin | dynamic five steps、partial/debug/ETA、private-field absence、配置删除、390px |
 | Benchmark | task-cluster/strata、3-seed repeated measures、Wilson bounds、paired CI、single-side missing、exclusion cap、per-family failure |
+| Deployment | 无 mixed v1/v2、stop/drain/revoke/migration/order、v1 reject、pre-activation abort、same-contract rollback、D24 atomic activation |
 
 每个 feature/bug slice 必须保存：
 
@@ -816,15 +855,24 @@ npm run check
 
 发布前还需 Worker wheel/install probe、Server generator/parity、跨仓 exact-pin、真实 SQLite concurrency 和对应 CI。未运行/超时必须报告缺证，不能写“通过”。
 
+Stage A 必须交付目标 evidence aggregator：
+
+```powershell
+python scripts/check_reviewer_refactor_evidence.py check --workspace-root .. --release-id <id> --stage <0B|A|B|B2|C|D|E|F>
+```
+
+它只验证 signed inputs、dependency results、direct evidence、artifact digests、commands/CI 和适用门，不替代底层测试；exit 0=`PASS`、1=`FAIL`、2=`INDETERMINATE/NOT_AUTHORIZED`。Stage 0A 在该工具存在前直接使用当前治理命令和 0.2 evidence shape。
+
 ## 15. 文件所有权与实施切片
 
 | 切片 | 主仓 | 主要目录/职责 | 独立验收 |
 |---|---|---|---|
 | GOV-0A | Worker | current decision/slice0/absence evidence、四仓 inventory | 不改变语义的 drift classification/current check |
 | GOV-0B | Worker | D42、replacement slice0/absence scripts、contracts、docs | 三态/self-reference/true-absence fixtures |
+| EVD-1 | Worker | evidence schema/writer/aggregator | tamper/missing/dependency/exit-code fixtures |
 | SKILL-1 | Worker | `reviewer_skill/**` | package bytes/binding/eval fixtures |
 | RUN-1 | Worker | source snapshot/instruction bundle/read gateway | source/instruction/receipt faults |
-| RUN-2 | Worker | model filesystem/runtime policy/SDK session/runner | read/write/env/network sandbox、SDK/turn |
+| RUN-2 | Worker | scratch-only filesystem/runtime policy/SDK session/runner | read/env/network sandbox、SDK/turn/capability |
 | RES-1 | Worker | Agent output/result schemas、coverage codec/result validator | trusted-field injection/schema/location/coverage |
 | PUB-1 | Worker | terminal candidate/active marker/outbox | crash/replay |
 | BEN-1 | Worker/eval | D46 policy/sample/evaluator/report | clustered paired statistics/三态复算 |
@@ -837,14 +885,57 @@ npm run check
 
 两个切片不得同时修改同一超大 legacy 文件；需触及时先提取 narrow seam，并记录所有权/合并顺序。
 
+### 15.1 依赖 DAG
+
+```text
+GOV-0A
+  └─ RR-GOV-A → GOV-0B
+       └─ RR-SCOPE/TRUST/TRUTH/EVAL/CUT-A → Stage A freeze + EVD-1
+            ├─ CON-1 ───────────────┬─ SRV-1 → SRV-2 ───────────────┐
+            ├─ SKILL-1 ─┐           │                               │
+            ├─ RUN-1 ───┼─ RUN-2 ──┼─ RES-1 → PUB-1 ───────────────┤
+            └─ BEN-1 policy         └─ Web/Admin public generation  │
+                                  offline candidate + BEN-1 run     │
+                                                └─ Stage C E2E ─────┤
+                                                                   └─ CUT-1 → D → E → F
+```
+
+依赖只接受前置 work package 的 exact `PASS` manifest；工作树上“代码看起来已合并”不算依赖完成。可以并行的切片必须有互斥 write set 和共同 pinned input digest；任一共享契约变化会使所有下游证据 stale。
+
+### 15.2 Work-package ledger 与验收证据
+
+Stage A 生成 `work-package-ledger.json`，每项至少含 owner/reviewer、repository/write set、dependency evidence digest、decision/contract/runtime inputs、red command+failure、green command、focused/full/CI commands、output artifacts、line-count result、state 和 superseded-by。状态不能手工改成 PASS，只能由 evidence aggregator 从直接证据推导。
+
+| Work package | Entry gate | PASS 必须直接证明 |
+|---|---|---|
+| GOV-0A | current D41 boundary | provenance、四仓 inventory、现有 gate 输出；零语义变化 |
+| GOV-0B | RR-GOV-A | replacement 三态、true absence/live present/history damage/self-reference fixtures、旧义务映射 |
+| EVD-1 | Stage A decisions | tamper/missing/stale dependency→exit 2，真实 fail→exit 1，完整 evidence→exit 0 |
+| SKILL-1 | RR-SCOPE/TRUST-A | wheel/install bytes、transitive manifest、explicit SkillInput、无 eval/隐式 surface |
+| RUN-1 | RR-TRUST-A | immutable inventory、instruction precedence、五工具协议、不可伪造 ordered receipt |
+| RUN-2 | RUN-1 + SKILL-1 | exact runtime capability、scratch-only FS、env/network deny、single turn、bounded interrupt/close |
+| RES-1 | RUN-1 + frozen schemas | untrusted injection rejection、trusted binding、location/evidence、closed coverage/classifier |
+| PUB-1 | RUN-2 + RES-1 | freeze/no-clobber/fsync/replay/crash；无生产 submit |
+| BEN-1 | RR-EVAL-A + candidate PASS | power preflight、sealed corpus、三 runtime cells（适用时）、全部门三态可复算 |
+| CON-1 | RR-TRUTH-A | canonical schemas/registry/fixtures、atomic generation、四仓 exact parity |
+| SRV-1 | CON-1 | 新 DDL constraints、四事务、SQLite concurrency/recovery、terminal CAS |
+| SRV-2 | SRV-1 | intake disabled integration、billing/projection/debug/v1 rejection |
+| WEB-1/ADM-1 | public generator + SRV-2 | 只依赖 public v2、旧 fallback/config absent、check + 390px QA |
+| CUT-1 | 所有上游 PASS | exact release manifest、strict absence、完整 rehearsal、CI、signed runbook/attestation |
+
+每个新手写 production source/test/script 默认 ≤400 行；401–600 行必须在 ledger 中有 cohesion rationale 和 review；>600 不得进入新架构。当前超大 legacy 文件只允许删除或添加调用 narrow seam 所需的最小变更，不得承接新职责。
+
 ## 16. 回滚与 operator runbook
 
-允许回滚仅限已签发 stable build，且同时保持：
+回滚边界以 D24/current-contract activation transaction 为线：
 
-- 相同 private/public current contract identity/version/digest。
-- 相同 DB schema/storage semantics。
-- 相同 D24 barrier 与新 task population。
-- 不重新开放旧 route/task/data/Worker。
+- **激活前 abort**：只有在 v2 accepted task=0、D24/current generation 未改变、旧 schema/storage 未被破坏且旧 token/replica 可按 signed pre-cutover manifest 恢复时，才可整体恢复 exact v1 release。它是仍处于 v1 current contract 时的部署中止，不是 v2 fallback；任何条件不确定就保持 stop-intake。
+- **激活后 rollback**：v2 已成为 current 后，允许回滚仅限已签发 v2 stable build，且同时保持：
+
+  - 相同 private/public current contract identity/version/digest；
+  - 相同 DB schema/storage semantics；
+  - 相同 D24 barrier 与新 task population；
+  - 不重新开放旧 route/task/data/Worker。
 
 无此 stable build 时只能 stop-intake、fence/reject 并保留证据。
 
@@ -892,49 +983,90 @@ operator 必须演练：
 | 漏 Admin/计费 | 四仓 inventory + 专属工作包 |
 | gate 自引用 | Stage 0A 只取证；D42 授权后由 Stage 0B 分离 history/live catalog |
 | 超大文件继续增长 | 小模块 + 400/600 门 + frozen baseline |
+| Python SDK public surface 不足 | Stage B capability probe；受支持升级或外部隔离；否则 NO-GO |
+| contract/registry 跨仓漂移 | Server canonical generator + temp regeneration + release manifest exact parity |
+| benchmark 样本量不足/伪独立 | power preflight + task cluster + per-family applicability + 三态 |
+| mixed-version 部署破坏 clean break | stop/drain/stop-old/deploy-disabled/atomic D24；禁止 rolling mixed authority |
 
-单人连续投入估算 8–15 工程周：
+估算必须按下面的 workload model 重新计算，不能仅按 Worker LOC：
 
-- Stage 0A–0B：0.5–1.5 周，不含 D42 授权等待。
-- Stage A：1–2 周。
-- Stage B：2–3 周。
-- corpus/oracle/eval：2–5 周。
-- Stage C：1.5–3 周。
-- Stage D–F：1.5–3 周。
+```text
+engineering_calendar =
+  decision_wait
+  + critical_path(GOV-0A, GOV-0B, Stage A, RUN/RES/PUB, Stage C, CUT)
+  + max(contract+server+web+admin lane, corpus+oracle lane)
+  + ceil(scheduled_benchmark_runs / safe_parallel_slots) * observed_run_p95
+  + CI/review/rework
+  + canary_minimum_96h
+```
 
-不含 canary 至少 24h + 72h 的日历时间和外部授权等待。corpus/oracle 通常是关键路径，不能只按 Worker LOC 估算。
+同 runtime 的 benchmark 最少约为 `N_clusters × 3 seeds × 2 cells`；runtime 改变时是 `×3 cells`。仅以 13.1 的保守 `N=189` 举例就分别是 1,134/1,701 planned runs，尚未计 per-family 扩样、无效基础设施重排禁止项和 canary。
+
+在决策及时、SDK capability 不阻塞、corpus 可复用且单人连续投入的假设下，当前 planning range 是 12–25 工程周：
+
+- Stage 0A–0B：1–2.5 周，不含授权等待；
+- Stage A/EVD/契约冻结：1.5–3 周；
+- Stage B Worker candidate：3–5 周；
+- corpus/oracle/evaluator + 实际运行：3–7 周；
+- Stage C Server/Worker E2E：2–4 周；
+- Stage D–F 四仓 clean cutover：2–4 周。
+
+这是区间而非承诺；每个阶段以 ledger 的 actual throughput/p95 更新 forecast。外部授权等待和 canary 至少 24h + 72h 的墙钟时间单列。corpus/oracle、SDK capability 和跨仓 release rehearsal 都可能成为关键路径。
 
 ## 18. Definition of Done
 
 只有每项有当前直接证据时才完成：
 
-- append-only 决策已授权并逐项 supersede；无 current 指令冲突。
-- Slice-0/replacement gate 与非自引用 strict absence gate 可用。
-- 生产只有一个 current private contract、一个 runner、一个 Reviewer Skill。
-- attempt exact-bind SDK/CLI/runtime/model/effort/全部 runtime Skill assets/Agent-output schema/result schema/source/instruction。
-- CWD/CODEX_HOME/restricted read-write roots/tool env/network/credential/approval 全部通过 sentinel/故障注入。
-- slot/lease/bound cancel/deadline/source/budget/outbox/Server CAS 通过并发/崩溃测试；Worker 无法自创 `CANCELLED`。
-- Agent payload 与 Worker trusted result 分离；binding/classification/identity/location/evidence/coverage/redaction 均由非 Agent 代码生成或验证。
-- D46 offline benchmark 所有适用门和 task-clustered paired statistics PASS，无缺证/INDETERMINATE。
-- billing 不再依赖旧 phase；三层 contract/public redaction PASS。
-- Web 使用五级 progress/public DTO；Admin 旧配置已删除。
-- D24 barrier、legacy reject、rollback/stop-intake 演练通过。
-- 30-phase、非目标 Agent Kernel、shadow/fallback/compatibility、旧配置/DTO/table/docs consumers 已在 exact release build/canary 前删除。
-- exact release build 的 strict absence 确定性 exit=`0`/status=`absent`，且 canary/full 对同一 build 重检仍通过。
-- 四仓 local checks 与对应 CI 全绿；CI 不可用不能完成生产 DoD。
-- canary 5%/25% 的样本、时窗、阈值 PASS 后才把同一 exact build 提升到 full；canary 后若改 runtime/schema/contract，必须重走 Stage D/E。
-- 四仓 `AGENTS.md` 记录 durable current rules，不把 superseded rules 留作 current。
+- **DOD-01** append-only 决策已授权并逐项 supersede；无 current 指令冲突。
+- **DOD-02** Slice-0/replacement gate 与非自引用 strict absence gate 可用。
+- **DOD-03** 生产只有一个 current private contract、一个 runner、一个 Reviewer Skill。
+- **DOD-04** attempt exact-bind SDK/CLI/runtime/model/effort/全部 runtime Skill assets/Agent-output schema/result schema/source/instruction/tool。
+- **DOD-05** CWD/CODEX_HOME/scratch-only model FS/tool env/network/credential/approval 全部通过 sentinel/故障注入。
+- **DOD-06** slot/lease/bound cancel/deadline/source/budget/outbox/Server CAS 通过并发/崩溃测试；Worker 无法自创 `CANCELLED`。
+- **DOD-07** Agent payload 与 Worker trusted result 分离；binding/classification/identity/location/evidence/coverage/redaction 均由非 Agent 代码生成或验证。
+- **DOD-08** D46 offline benchmark 所有适用门、power/sample gate 和 task-clustered paired statistics PASS，无缺证/INDETERMINATE。
+- **DOD-09** billing 不再依赖旧 phase；三层 contract/generator/public redaction PASS。
+- **DOD-10** Web 使用五级 progress/public DTO；Admin 旧配置已删除。
+- **DOD-11** D24 barrier、legacy reject、完整 deployment、pre-activation abort、post-activation rollback/stop-intake 演练通过。
+- **DOD-12** 30-phase、非目标 Agent Kernel、shadow/fallback/compatibility、旧配置/DTO/table/docs consumers 已在 exact release build/canary 前删除。
+- **DOD-13** exact release build 的 strict absence 确定性 exit=`0`/status=`absent`，且 canary/full 对同一 build 重检仍通过。
+- **DOD-14** 四仓 local checks 与对应 CI 全绿；CI 不可用不能完成生产 DoD。
+- **DOD-15** canary 5%/25% 的样本、时窗、阈值 PASS 后才把同一 exact build 提升到 full；canary 后若改 runtime/schema/contract，必须重走 Stage D/E。
+- **DOD-16** 四仓 `AGENTS.md` 记录 durable current rules，不把 superseded rules 留作 current。
+
+### 18.1 Completion audit matrix
+
+| DoD | Owner | 最小直接证据 |
+|---|---|---|
+| 01 | architecture/governance owner | register check、provenance、normative-unit digest、四仓 instruction conflict scan |
+| 02 | GOV-0B owner | replacement fixtures + strict true-absence/live-present/history-damage reports |
+| 03 | CUT-1 owner | exact release reference graph、builder/routes/package inventory |
+| 04 | Worker owner | attempt binding fixture、wheel/install/runtime capability/tool manifest report |
+| 05 | Worker security owner | sentinel matrix raw results、sandbox/image/config digests |
+| 06 | Worker + Server owner | crash/ACK/stale/cancel/deadline/SQLite concurrency reports |
+| 07 | RES-1 owner | injection/schema/location/coverage/classifier/redaction tests |
+| 08 | benchmark owner + release operator | signed D46 policy、raw schedule、power output、evaluator PASS report |
+| 09 | CON/SRV owner | generator byte parity、registry/fixtures、billing idempotency、DTO redaction |
+| 10 | Web/Admin owners | generated public digest、checks、browser/mobile QA、absence inventory |
+| 11 | deployment operator | production-like runbook transcript、D24 transaction、v1 rejects、abort/rollback evidence |
+| 12 | four-repo owners | deletion manifest closed、strict catalog/reference graph no unexplained consumer |
+| 13 | release operator | exact artifact strict-absence reports at D/E/F，均绑定同一 release digest |
+| 14 | four-repo owners | local command logs + immutable CI run ids/artifacts for exact commits |
+| 15 | release operator | 5%/25% windows、accepted counts、quality/safety/cost gates、full promotion signature |
+| 16 | governance owner | 四仓 AGENTS digest、current-rule renderer/check、superseded text audit |
+
+最终 `release-attestation.json` 必须逐个列出 DOD-01..16 的 evidence URI/digest/owner/result；缺任一项时 aggregator 只能返回 `INDETERMINATE`，不能用总括性“全部测试通过”替代。
 
 ## 19. 立即下一步
 
-1. 开 Stage 0A issue：复现并分类 Slice-0/absence drift；只修复不改变现有语义的机械遗漏。
-2. 生成含 Admin、billing、DTO、table、tests、docs 的四仓 deletion inventory。
-3. 准备并 resolve D42 governance packet，再以 TDD 实现 Stage 0B 的非自引用 absence/replacement gate。
-4. 准备 D43-D47 resolution packet；在 D45 中明确 supersede D5/D9 的 terminal authority，并冻结 cancel binding 与 trusted envelope。
-5. 冻结三层契约、Agent-output/result schema、coverage/read gateway、model-visible filesystem、`semantic_review_started` 和 D46 统计政策。
-6. 新决策授权后，按 TDD 建 Skill 和无生产 authority candidate。
-7. exact-load/read-root/env/instruction-receipt/coverage/terminal faults 未全绿，不开始真实 benchmark。
-8. paired benchmark 未 PASS，不开始 Stage C–F、部署、流量、canary 或删除。
+1. 当前只开 `GOV-0A`：复现并分类 Slice-0/absence drift，生成 provenance/evidence 和四仓 deletion inventory；只修复能证明不改变现有语义的机械遗漏。
+2. 将无法在现有语义内修复的项目写入 RR-GOV packet，不改 expected、不 Generate、不替换 gate。
+3. 取得 `RR-GOV-A` 的 option-anchored 确认并 append resolution；然后按 TDD 实现 GOV-0B。未确认则重构停在 0A。
+4. 逐项准备并显式确认 RR-SCOPE/TRUST/TRUTH/EVAL/CUT；尤其在 RR-TRUTH 中明确 supersede D5/D9 的 terminal authority。
+5. Stage A 冻结 canonical private/public contract、Agent-output/result schema、registry/DDL、gateway/tool/receipt、scratch-only model FS、`semantic_review_started`、D46 power/statistics 和 evidence ledger。
+6. 仅在决策授权后按 DAG/TDD 建 Skill 和无生产 authority candidate；SDK capability 不能证明就 `NO-GO`。
+7. exact-load/surface/env/gateway-receipt/coverage/terminal faults 未全绿，不开始真实 benchmark。
+8. power preflight 与 paired benchmark 未 PASS，不开始 Stage C–F、部署、流量、canary 或删除。
 
 最小正确原则：
 
