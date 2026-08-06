@@ -85,7 +85,12 @@ def validate_profile(value: Any, location: str = "$") -> None:
 
 
 def canonical_rel(value: str) -> str:
-    if not isinstance(value, str) or not value or "\" in value or value.startswith("/"):
+    if (
+        not isinstance(value, str)
+        or not value
+        or chr(92) in value
+        or value.startswith("/")
+    ):
         fail("path.noncanonical", repr(value))
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
@@ -157,7 +162,9 @@ def validate_schema(
     declared = schema.get("type")
     if declared is not None:
         names = [declared] if isinstance(declared, str) else declared
-        if not isinstance(names, list) or not any(_matches_type(value, name) for name in names):
+        if not isinstance(names, list) or not any(
+            _matches_type(value, name) for name in names
+        ):
             fail("schema.type", location)
     if isinstance(value, dict):
         required = schema.get("required", [])

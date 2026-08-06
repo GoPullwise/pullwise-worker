@@ -270,6 +270,11 @@
           "repo_id": "worker",
           "path": "scripts/check_reviewer_refactor_evidence.py",
           "path_kind": "file"
+        },
+        {
+          "repo_id": "evidence",
+          "path": "reviewer-refactor-evidence",
+          "path_kind": "tree"
         }
       ],
       "forbidden_set": [
@@ -367,6 +372,11 @@
           "repo_id": "worker",
           "path": "tests/test_agent_first_legacy_absence.py",
           "path_kind": "file"
+        },
+        {
+          "repo_id": "evidence",
+          "path": "reviewer-refactor-evidence",
+          "path_kind": "tree"
         }
       ],
       "forbidden_set": [
@@ -1221,7 +1231,7 @@
         "destructive Git operations"
       ],
       "dependencies": [
-        "PUB-1"
+        "BEN-1"
       ],
       "decision_bindings": [
         "RR-SERVER-FREEZE-A",

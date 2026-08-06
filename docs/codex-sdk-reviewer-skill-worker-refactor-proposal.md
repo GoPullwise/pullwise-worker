@@ -2,7 +2,7 @@
 
 状态：Candidate Implementation Standard / Governance-gated / `PROPOSED_INERT` / 未授权生产切换
 
-版本：2026-08-05-r3（cross-repository execution standard hardening）
+版本：2026-08-06-r4（agent-handoff and lifecycle closure）
 
 范围：`pullwise-worker`、`pullwise-server`、`pullwise-web`、`pullwise-admin`
 
@@ -12,7 +12,7 @@
 | 候选 normative unit | `reviewer-refactor-program` |
 | 当前成熟度 | `CANDIDATE_NOT_ACTIVE` |
 | 当前可执行边界 | 现有只读检查与 inert 规范自检；`SPEC-READY-04-BOOTSTRAP` PASS 前不得声称 GOV-0A collector 已可执行 |
-| 机器入口 | `docs/reviewer-refactor/spec-manifest.json`、`readiness.json`、`execution-cards.json` |
+| 唯一机器入口 | `docs/reviewer-refactor/agent-entry.json`；它再绑定 `spec-manifest.json`、`readiness.json` 和 `execution-cards.json` |
 
 本规格与下列配套文件构成同一个 content-addressed 候选规范单元：
 
@@ -21,12 +21,18 @@
 - `docs/reviewer-refactor/runtime-contract-and-security.md`
 - `docs/reviewer-refactor/skill-context-and-evaluation.md`
 - `docs/reviewer-refactor/operations-and-execution.md`
+- `docs/reviewer-refactor/agent-entry.json`
+- `docs/reviewer-refactor/spec-manifest.json`
+- `docs/reviewer-refactor/readiness.json`
+- `docs/reviewer-refactor/execution-card.schema.json`
+- `docs/reviewer-refactor/execution-cards.json`
+- `docs/reviewer-refactor/verify_spec.py` 及 manifest 闭包内的 verifier modules/fixtures/tests
 
 配套文件只细化本规格；发现同版本冲突时整体为 `INDETERMINATE`，不得以文件顺序静默覆盖。文件名中的 `proposal` 仅为链接稳定性，不表示本文落库、合并或被引用即获得 authority。
 
 ## 0. 文档地位与授权边界
 
-本文把原架构 Proposal 和 2026-08-05 的补充评审意见合并为可执行的跨仓重构规格，规定目标架构、契约、工作包、测试、阶段门、切换、回滚和删除标准。
+本文把原架构 Proposal、2026-08-05 的补充评审意见和 2026-08-06 的 agent-handoff 审计合并为可执行的跨仓重构规格，规定目标架构、契约、工作包、测试、阶段门、切换、回滚和删除标准。
 
 - `contracts/agent-first/spec-decision-register.json` 仍是当前决策权威。冲突的生产实现必须先由 append-only 新决策逐项 supersede。
 - 当前 D41 仍禁止 D24 激活、部署、生产流量、真实 benchmark、canary、cutover 和 legacy 删除。
@@ -281,7 +287,7 @@ v1 refs 使用 closed ASCII form：`repo:<repo-id>:<percent-encoded-path>#<perce
 - Admin 仍编辑 `reviewerConcurrency`，并消费 `maxBundles/maxReviewerAssignments`。
 - 决策注册表为 `ready`：40 resolved、D2 inactive、无 active decision。
 - Slice-0 当前失败：当前 generated wrapper 为 8,762 行、SHA-256 `9404c18b39afdb0ee6bd9d15fdbb3b24d9b85f1972a597a5919a868afe480697`，与 D41 记录一致；Slice-0 baseline 仍固定 D39 的 8,062 行、SHA-256 `bd099dd825c2b2340061b67500bc02f1bb4fee0a1ce7ff44138b36b8821a59fd` 及旧 producer。Stage 0A 必须证明二者的完整 provenance，再决定是既有生成链机械漏同步还是需要 RR-GOV replacement；本文不预判结论。
-- `tests/test_agent_first_decision_register_gate.py` 当前 405 行且未入 Slice-0 baseline。它不能以“新增 grandfathered 超限文件”的方式直接纳入；若现有语义确实要求收录，先按单一职责拆分/缩减到不超过 400 行并证明测试语义不变，否则记录为 Stage 0B replacement obligation。
+- `tests/test_agent_first_decision_register_gate.py` 当前 406 行且未入 Slice-0 baseline。它不能以“新增 grandfathered 超限文件”的方式直接纳入；若现有语义确实要求收录，先按单一职责拆分/缩减到不超过 400 行并证明测试语义不变，否则记录为 Stage 0B replacement obligation。r3 中曾为 426 行的 `docs/reviewer-refactor/verify_spec.py` 已在 r4 拆成职责单一且均不超过 400 行的 manifest-bound modules，不再作为 Slice-0 超限项。
 - legacy contract baseline 为 `compatible`，14 组固定 probe 全部通过。
 - 默认 absence ratchet 为 `ratchet_clean=true`、`legacy_absent=false`。
 - 当前 `--require-absent` 既发现 live legacy，又因 `worker.004-frozen-contract-baseline` 自引用而 `indeterminate`；当前报告有 108 个 failure，failure 列表首项为 `server.001-agents`，唯一 indeterminate reason 为 `strict_catalog_self_reference`，不能证明 clean break。
@@ -882,7 +888,7 @@ bootstrap严格分两段：`RR-GOV-COLLECTOR-DRAFT/FREEZE` 是唯一无formal bo
 
 1. `S0A.0` 按第 0.2/0.3/0.5 节创建不可覆盖 bootstrap generation，记录四仓 HEAD/clean status、当前命令/环境/input digests；同一 generation 不执行或夹带任何 tracked 修复。所有原始 stdout/stderr/exit 直接保存，`result.json` 只写 provisional 状态；另获授权的 tracked action 完成并合并后必须用新 generation 复核。
 2. `S0A.1` 用当前 register/Slice-0 commands 复现 wrapper 8,762/8,062 和 digest 漂移，输出 `slice0-provenance.json`：D39/D41 record digest、producer version、Generate generation、expected/actual path/line/digest、首次出现 commit。只有既能证明是既有权威生成链/冻结语义内的机械同步遗漏，又有当前 resolution exact 授权目标 write set 时才可修复；截至本文快照不假定该授权存在。否则只产出 evidence packet，留给 RR-GOV。
-3. `S0A.2` 只读取证 405 行 decision-register gate test 未入 baseline。若现有 baseline 定义确已要求收录，也必须先取得 exact write-set 授权，才可 split/reduce 到每个新手写文件 ≤400 行、运行原有 focused/full tests 并机械同步；否则只记录 replacement obligation，不扩大 current baseline。
+3. `S0A.2` 只读取证 406 行 decision-register gate test 未入 baseline。若现有 baseline 定义确已要求收录，也必须先取得 exact write-set 授权，才可 split/reduce 到每个新手写文件 ≤400 行、运行原有 focused/full tests 并机械同步；否则只记录 replacement obligation，不扩大 current baseline。
 4. `S0A.3` 按 5.3.1 取证 `pyproject.toml` exact pin、`setup.py` unpinned requirement、release/CI build commands、当前安装 distribution 和可得 wheel metadata，输出 `packaging-pin-provenance.json`。在未证明所有 runnable producer 一致前分类为 `PACKAGING_PIN_DRIFT`，只写入 RR-GOV replacement obligation，不直接修改 packaging files。
 5. `S0A.4` 建含 Admin 的四仓 deletion inventory，记录 entrypoint/config/table/artifact/test/docs，明确它不是兼容承诺。
 6. `S0A.5` 保持默认 absence ratchet 语义不变，补齐当前 self-reference/legacy-present/108 failures/indeterminate 的可重复证据和 CI 状态。
@@ -1177,6 +1183,8 @@ python scripts/check_reviewer_refactor_evidence.py check --workspace-root .. --e
 
 | 切片 | 主仓 | 主要目录/职责 | 独立验收 |
 |---|---|---|---|
+| COL-0D | Worker | inert collector authority packet；只含 proposed bytes、fixtures、target mapping | closed manifest、零 runtime/CI consumer、零 script/test install |
+| COL-0F | Worker | frozen collector script 与 clean-room self-tests | installed bytes 等于 packet；no-clobber/path/drift/secret fixtures |
 | GOV-0A | Worker | current decision/slice0/absence evidence、四仓 inventory | 不改变语义的 drift classification/current check |
 | EVD-0 | Worker | minimal evidence/signature/stage-advance schema、writer/verifier、ledger skeleton | bootstrap import、tamper/missing/replay/role/expiry/exit-code fixtures |
 | GOV-0B | Worker | RR-GOV、replacement slice0/absence scripts、contracts、docs | 三态/self-reference/true-absence fixtures + signed stage PASS |
@@ -1195,14 +1203,20 @@ python scripts/check_reviewer_refactor_evidence.py check --workspace-root .. --e
 | WEB-1 | Web | normalizer/flow/detail/history | check + browser QA |
 | ADM-1 | Admin | plan/settings/worker copy | check + mobile |
 | CUT-1 | 四仓 | builder/routes/config/deletion/CI/docs | coordinated checklist |
+| REL-1 | Evidence/production control plane | stop/drain、exact clean-break activation、credential/generation fence | signed activation record、single current generation、old generation permanently rejected |
+| CAN-5 | Evidence/production control plane | 5% capacity window | ≥24 eligible hours、≥200 window-local accepted tasks、全部 frozen gates PASS |
+| CAN-25 | Evidence/production control plane | 25% capacity window | 独立窗口、≥72 eligible hours、≥1,000 window-local accepted tasks、全部 frozen gates PASS |
+| PROM-1 | Evidence/production control plane | full promotion 与最终 attestation | exact canaried build、DOD/readiness/deletion attestations 全部 PASS |
 
 两个切片不得同时修改同一超大 legacy 文件；需触及时先提取 narrow seam，并记录所有权/合并顺序。
 
 ### 15.1 依赖 DAG
 
 ```text
-GOV-0A bootstrap + inert RR-GOV bundle
-  └─ RR-GOV-DRAFT-A → RR-GOV-FREEZE-A
+COL-0D inert packet → RR-GOV-COLLECTOR-DRAFT-A
+  └─ RR-GOV-COLLECTOR-FREEZE-A → COL-0F exact collector install
+       └─ GOV-0A bootstrap + inert RR-GOV bundle
+            └─ RR-GOV-DRAFT-A → RR-GOV-FREEZE-A
        └─ GOV-0B: EVD-0 first → replacement gates → signed GOV-0B PASS
             └─ inert RR-* bundles → RR-*-DRAFT-A → signed A advance
                  └─ Stage A: CON-0 + BEN-0 + policies/fixtures + EVD-1
@@ -1214,8 +1228,9 @@ GOV-0A bootstrap + inert RR-GOV bundle
                                                      └─ signed B2 advance → BEN-1 → signed B2 PASS
                                                           └─ signed C advance → SRV-1/local E2E → signed C PASS
                                                                └─ exact-one Generate resolution + signed D advance
-                                                                    └─ CON-1 → SRV-2 + WEB-1 + ADM-1 + CUT-1 → signed D PASS
-                                                                         └─ signed E advance → E PASS → signed F advance → F
+                                                                    └─ CON-1 → SRV-2 → WEB-1 + ADM-1 → CUT-1 → signed D PASS
+                                                                         └─ signed E advance → REL-1 → CAN-5 → CAN-25 → E PASS
+                                                                              └─ signed F advance → PROM-1 → final attestation
 ```
 
 除第 0.3 节唯一 bootstrap 外，依赖只接受前置 work package 的 exact signed `PASS` manifest 和适用 stage-advance；工作树上“代码看起来已合并”不算依赖完成。可以并行的切片必须有互斥 write set 和共同 pinned input root；任一共享契约、decision、instruction、runtime 或 release generation 变化会使所有下游证据 stale。图中一条箭头不赋予额外权限，仍以 record 中 exact work-package/write-set 为准。
@@ -1224,7 +1239,7 @@ GOV-0A bootstrap + inert RR-GOV bundle
 
 EVD-0 在 GOV-0B 生成 `work-package-ledger/v1` skeleton；它列出所有已知 package，但未授权项初始为 `NOT_AUTHORIZED`。每个后续阶段创建不可覆盖的新 ledger generation，不原地修改旧状态。每项至少含 owner/reviewer、repository/write set、stage-advance digest、dependency evidence digest、decision/instruction/contract/runtime/release inputs、red command+failure、green command、focused/full/CI commands、output artifacts、line-count result、derived state 和 superseded-by。ledger manifest 不列自己的 hash；package result 由 aggregator 从直接 evidence 推导并反向引用 ledger manifest digest，避免自引用。手工编辑 state、只引用 PR/commit 或缺 direct command/CI bytes 不能产生 PASS。
 
-候选 machine index 位于 `docs/reviewer-refactor/execution-cards.json`，schema 为 `execution-card.schema.json`。generation 1 的 18 张 card 全部故意保持 `NOT_AUTHORIZED` 且 command arrays 为空：这准确表示 FREEZE/advance 尚未绑定真实 argv，而不是遗漏。不得把不存在的命令、`latest` 或 placeholder 填进去制造“可执行”外观；相应决策生效后必须发布新 generation，补齐 exact argv/timeout/evidence outputs 并由 ledger 推导状态。当前结构自检命令固定为：
+唯一 agent 起点为 `docs/reviewer-refactor/agent-entry.json`；它绑定 candidate manifest、readiness 和 machine index。machine index 位于 `docs/reviewer-refactor/execution-cards.json`，schema 为 `execution-card.schema.json`。generation 1 的 24 张 card 全部故意保持 `execution_state=blocked`、`NOT_AUTHORIZED` 且 command arrays 为空：这准确表示 FREEZE/advance 尚未绑定真实 argv，而不是遗漏。它已经列出 collector DRAFT/FREEZE、完整 A–D 实施面和 `REL-1/CAN-5/CAN-25/PROM-1`，所以 agent 不需要自行发明缺失阶段。不得把不存在的命令、`latest`、synthetic `release-change-set` 或 placeholder 填进去制造“可执行”外观；运行期才能确定的 output path 必须是 `path=null` 加 exact `path_binding_artifact`，不能伪装成真实目录。
 
 ```text
 python -I -B docs/reviewer-refactor/verify_spec.py --repo-root . --self-test
@@ -1232,6 +1247,8 @@ python -I -B docs/reviewer-refactor/verify_spec.py --repo-root . --self-test
 
 | Work package | Entry gate | PASS 必须直接证明 |
 |---|---|---|
+| COL-0D | current inert-doc authority + candidate manifest PASS | collector packet exact bytes/fixtures/targets/forbidden set；无 script、runtime、CI 或 evidence consumer |
+| COL-0F | RR-GOV-COLLECTOR-DRAFT-A + 独立 FREEZE-A | canonical script/tests byte-match packet、clean-room self-test PASS；仍不产生 stage PASS |
 | GOV-0A | current read-only/document authority；不扩大 D41 | provenance、四仓 inventory、现有 gate raw outputs、inert RR-GOV bundle；零语义变化；仅 provisional result |
 | EVD-0 | RR-GOV-FREEZE-A | bootstrap import、manifest/signature/stage-advance/ledger tamper、role/revocation/expiry、exit 0/1/2、deterministic self-check |
 | GOV-0B | EVD-0 + RR-GOV-FREEZE-A | replacement 三态、true absence/live present/history damage/self-reference fixtures、旧义务映射、signed PASS |
@@ -1247,10 +1264,32 @@ python -I -B docs/reviewer-refactor/verify_spec.py --repo-root . --self-test
 | SRV-1 | signed B2 PASS + signed C advance | 新 DDL constraints、四事务、SQLite concurrency/recovery、terminal CAS/local E2E；无生产入口 |
 | CON-1 | signed C PASS + exact-one Generate resolution + signed D advance | `generation-transaction` crash/concurrent-edit/disk-full recovery、canonical parity、四仓 exact pins |
 | SRV-2 | CON-1 + signed D advance | intake disabled integration、billing/projection/debug/v1 rejection |
-| WEB-1/ADM-1 | public generator transaction + SRV-2 | 只依赖 public v2、旧 fallback/config absent、check + 390px QA |
+| WEB-1 | public generator transaction + SRV-2 | 实际 API/data/scan/flow/issues consumers 只依赖 public v2、旧 fallback/config absent、check + 390px QA |
+| ADM-1 | public generator transaction + SRV-2 | 实际 plans/settings/API consumers 只依赖 public v2、旧 fallback/config absent、check + 390px QA |
 | CUT-1 | 所有适用上游 signed PASS + D advance | external exact release manifest、strict absence、完整 rehearsal、CI、signed runbook/attestation |
+| REL-1 | signed D PASS + D→E advance + production release authorization | stop/drain/fence、单一 generation activation、旧 credential/generation 永久拒绝 |
+| CAN-5 | REL-1 PASS + frozen canary policy | exact 5% capacity rounding、低流量规则、24h/200 tasks、telemetry/quality/security/cost gates |
+| CAN-25 | CAN-5 signed promotion | 独立 25% 窗口、72h/1,000 tasks、无跨窗口人口复用、全部 gates |
+| PROM-1 | signed E PASS + E→F advance | exact canaried build full promotion、最终 readiness/DOD/deletion attestation |
 
 每个新手写 production source/test/script 默认 ≤400 行；401–600 行必须在 ledger 中有 cohesion rationale 和 review；>600 不得进入新架构。当前超大 legacy 文件只允许删除或添加调用 narrow seam 所需的最小变更，不得承接新职责。
+
+### 15.3 Agent handoff 与 card generation 迁移
+
+Agent 必须从 `agent-entry.json` 开始，而不是从主文任意段落猜测“下一步”。入口只允许两个当前动作：运行 content-addressed spec self-test，以及重跑既有只读 gates；然后读取 `next_card_id=COL-0D` 的 blocking predicates。generation 1 是完整目录而不是执行计划：它可以告诉 agent 从哪里开始、每一步依赖什么、最终如何到达 Stage F，但不能授权任何 card。
+
+第一份可执行 successor 至少为 generation 2，并以一个不可拆分的 tracked transaction 同时更新：
+
+1. `execution-cards.json`：`generation=n+1`、`profile=stage_bound`、`from_generation=n`、前一份 spec manifest 的 exact SHA-256、append-only authority record refs，以及本次获准 card 的 `execution_state=bound`；
+2. 每张 bound card 的 red/green/focused/full/CI argv、cwd、timeout、expected exits 和 evidence outputs；尚未获准的 card 保持 blocked、空命令与 `NOT_AUTHORIZED`；
+3. `agent-entry.json` 的 generation/profile/authority/next-card CAS；
+4. `readiness.json` 的直接证据与状态，以及新的 `spec-manifest.json` sizes/digests。
+
+`from_generation/from_manifest_sha256/authority_record_refs` 是 CAS keys。任一旧 generation、manifest digest、authority bytes 或四文件 transaction 不匹配时 successor 无效，入口保持 `NOT_AUTHORIZED`。不得原地给 generation 1 填命令，也不得只改 card 而留下旧 entry/readiness/manifest。
+
+write set 中的 repository path 必须是已核对的 canonical actual file/tree；不能使用 `release-change-set` 等伪目录。若 release/evidence output 的最终路径依赖未来 `release_id/generation`，card 使用 `path=null` 与 `generation-path-bindings.json` 的 exact JSON Pointer；真正 bind 时由已冻结 collector/evidence contract生成并进入输入 digest。successor 必须再次通过 schema、DAG、artifact dependency、parallel-write overlap、source-line-limit、tamper 和 lifecycle self-tests，才可由入口暴露下一张 bound card。
+
+Agent 在缺 authority、失败/不确定 gate、路径未 bind、命令含 placeholder、输入 digest 漂移或生产 principal/signer/canary prerequisite 缺失时必须停止并报告 exact blocker。只有 `SPEC-READY-01..12` 全 PASS、当前 stage-bound generation 自检 PASS 且 `PROM-1` 对 exact canaried release PASS，才算从头到尾完成。
 
 ## 16. 回滚与 operator runbook
 
@@ -1390,14 +1429,16 @@ engineering_calendar =
 
 ## 19. 立即下一步
 
-1. 当前先完成 candidate spec self-check，并准备只授权 collector exact source/tests 的 inert RR-GOV bootstrap packet；`bootstrap-command.json` 目前明确记录 collector absent/FAIL。在适用 append-only resolution exact 授权该 script write set 前，不创建或执行 formal collector，也不手工伪造 GOV-0A manifest。collector exact bytes/self-test获授权并落库后，才确保四仓 clean，按第 0.5 节在仓外创建 no-clobber provisional generation，复现并分类 Slice-0/absence drift，生成 provenance、packaging pin取证、四仓 deletion inventory 和 gate-replacement RR-GOV packet。
-2. 将无法在现有语义内修复的项目写入 RR-GOV exact target/fixture/obligation mapping；当前至少包括 Slice-0 generated wrapper drift、405 行未登记 test、strict absence self-reference 和 `setup.py` unpinned requirement。不改 expected、不 Generate、不替换 gate，不把 provisional result 称为 signed PASS。
-3. 按第 0.6 节以 current register v1 entry + exact-bound packet 分别取得 `RR-GOV-DRAFT-A` 与 `RR-GOV-FREEZE-A` option-anchored resolution；然后 GOV-0B 先按 TDD 实现 EVD-0/back-validation，再实现 replacement gate。缺 FREEZE、packet digest 或 exact confirmation 任一项即停在 GOV-0A。
-4. 取得 GOV-0B signed PASS 后，准备 RR-SCOPE/TRUST/TRUTH/EVAL/CUT inert bundles；先取得 DRAFT-A records 与 Stage A advance，完成 non-consumed artifacts/tests，再逐项取得 FREEZE-A。RR-TRUTH 必须明确 supersede D5/D9 的 terminal authority。
-5. Stage A 冻结 canonical private/public contract、inventory population、instruction pagination/seal、Agent-output/result/coverage、registry/DDL、gateway/tool/receipt、scratch-only model FS、generation transaction、`semantic_review_started`、RR-EVAL power/statistics 和 EVD-1 ledger；四仓 instruction conflicts 必须为零。
-6. 仅在相应 FREEZE + signed B advance 后按 DAG/TDD 建 Skill 和无生产 authority candidate；SDK capability 不能证明就 `NO-GO`。
-7. exact-load/surface/env/gateway-receipt/full-vs-partial coverage/terminal rejection faults 未全绿，不签 B PASS、不开始真实 benchmark。
-8. power preflight 与 paired benchmark 未 signed PASS，不开始 Stage C–F；Stage D 另需 exact-one Generate resolution，任何部署、流量、canary 或删除仍需对应 advance/发布授权。
+1. 当前先从 `docs/reviewer-refactor/agent-entry.json` 运行 `verify-spec` 与 `inspect-current-gates`。下一张机器卡固定为 `COL-0D`，但 generation 1 仍是 blocked/`NOT_AUTHORIZED`；只有 current inert-doc authority 与独立 `RR-GOV-COLLECTOR-DRAFT-A` exact-bind packet write set 后，才准备 collector proposed bytes。不得越过 `COL-0D` 直接创建 script。
+2. `RR-GOV-COLLECTOR-FREEZE-A` exact-bind packet 后发布 successor card generation，才可执行 `COL-0F` 安装 canonical collector source/tests；安装 bytes、自检和 manifest 不匹配即停止。`bootstrap-command.json` 在此之前继续明确记录 collector absent/FAIL，不创建或执行 formal GOV-0A，也不手工伪造 evidence manifest。
+3. collector exact bytes/self-test 获授权并落库后，才确保四仓 clean，执行 `GOV-0A` 在仓外创建 no-clobber provisional generation，复现并分类 Slice-0/absence drift，生成 provenance、packaging pin取证、四仓 deletion inventory 和 gate-replacement RR-GOV packet。
+4. 将无法在现有语义内修复的项目写入 RR-GOV exact target/fixture/obligation mapping；当前至少包括 Slice-0 generated wrapper drift、406 行未登记 test、strict absence self-reference 和 `setup.py` unpinned requirement。不改 expected、不 Generate、不替换 gate，不把 provisional result 称为 signed PASS。
+5. 按第 0.6 节以 current register v1 entry + exact-bound packet 分别取得 `RR-GOV-DRAFT-A` 与 `RR-GOV-FREEZE-A` option-anchored resolution；然后 GOV-0B 先按 TDD 实现 EVD-0/back-validation，再实现 replacement gate。缺 FREEZE、packet digest 或 exact confirmation 任一项即停在 GOV-0A。
+6. 取得 GOV-0B signed PASS 后，准备 RR-SCOPE/TRUST/TRUTH/EVAL/CUT inert bundles；先取得 DRAFT-A records 与 Stage A advance，完成 non-consumed artifacts/tests，再逐项取得 FREEZE-A。RR-TRUTH 必须明确 supersede D5/D9 的 terminal authority。
+7. Stage A 冻结 canonical private/public contract、inventory population、instruction pagination/seal、Agent-output/result/coverage、registry/DDL、gateway/tool/receipt、scratch-only model FS、generation transaction、`semantic_review_started`、RR-EVAL power/statistics 和 EVD-1 ledger；四仓 instruction conflicts 必须为零。
+8. 仅在相应 FREEZE + signed B advance 后按 DAG/TDD 建 Skill 和无生产 authority candidate；SDK capability 不能证明就 `NO-GO`。
+9. exact-load/surface/env/gateway-receipt/full-vs-partial coverage/terminal rejection faults 未全绿，不签 B PASS、不开始真实 benchmark。
+10. power preflight 与 paired benchmark 未 signed PASS，不开始 Stage C–F；Stage D 另需 exact-one Generate resolution，任何部署、流量、canary 或删除仍需对应 advance/发布授权；Stage E/F 必须逐卡完成 `REL-1 → CAN-5 → CAN-25 → PROM-1`。
 
 最小正确原则：
 

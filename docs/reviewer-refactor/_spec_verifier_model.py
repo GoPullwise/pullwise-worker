@@ -64,6 +64,7 @@ GATE_IDS = tuple(
 )
 REQUIRED_FILES = (
     MAIN_REL.as_posix(),
+    "docs/reviewer-refactor/_spec_verifier_cards.py",
     "docs/reviewer-refactor/_spec_verifier_core.py",
     "docs/reviewer-refactor/_spec_verifier_json.py",
     "docs/reviewer-refactor/_spec_verifier_model.py",
