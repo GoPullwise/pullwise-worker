@@ -59,8 +59,9 @@
           "argv": [
             "python",
             "scripts/verify_agent_first_contract_baseline.py",
-            "--repo-root",
-            "."
+            "check",
+            "--workspace-root",
+            ".."
           ],
           "expected_exit": [
             0,
@@ -73,8 +74,23 @@
           "argv": [
             "python",
             "scripts/verify_agent_first_legacy_absence.py",
-            "--repo-root",
-            "."
+            "--workspace-root",
+            ".."
+          ],
+          "expected_exit": [
+            0,
+            1,
+            2
+          ]
+        },
+        {
+          "cwd_repo": "worker",
+          "argv": [
+            "python",
+            "scripts/verify_agent_first_legacy_absence.py",
+            "--workspace-root",
+            "..",
+            "--require-absent"
           ],
           "expected_exit": [
             0,
@@ -87,9 +103,9 @@
           "argv": [
             "python",
             "scripts/agent_first_slice0_baseline.py",
+            "check",
             "--repo-root",
-            ".",
-            "--check"
+            "."
           ],
           "expected_exit": [
             0,

@@ -13,6 +13,7 @@
 一个可被执行器接受的规范快照必须同时绑定：
 
 - 本规范标识与版本；
+- `docs/reviewer-refactor/agent-entry.json` 的唯一入口、current card generation/profile 和 allowed read-only actions；
 - `docs/reviewer-refactor/spec-manifest.json` 的 exact bytes SHA-256；
 - 主规格和全部配套文件的 exact path/size/SHA-256；
 - 当前 decision-register manifest/resolution digests；
@@ -34,6 +35,10 @@
 | `RELEASE_READY` | 仅按 exact release attestation/runbook 执行获授权阶段 | 任何 digest 漂移、mixed authority、越级 promotion |
 
 状态只可由适用 append-only resolution、直接证据和 signed stage advance 推导，不得手工填写。当前固定为 `PROPOSED_INERT`。
+
+当前 `agent-entry.json` 只允许 `verify-spec` 与 `inspect-current-gates`，并把 `next_card_id` 固定为 `COL-0D`。这不是 COL-0D 的执行授权：generation 1 的 24 张 card 全部是 `blocked/NOT_AUTHORIZED`。collector packet、collector install 和 formal GOV-0A 分别由 `COL-0D → COL-0F → GOV-0A` 表达，agent 不得省略任一步或把一般性“继续”当作 DRAFT/FREEZE。
+
+第一份 stage-bound successor 至少为 generation 2，并以 `from_generation/from_manifest_sha256/authority_record_refs` 做 CAS。cards、entry、readiness 与 manifest 必须在同一 tracked transaction 更新；只改其中一项、给 blocked card 填命令、让未授权 card 离开 `NOT_AUTHORIZED` 或引用 synthetic path，均不产生有效 readiness。
 
 ## 3. 当前权威与 supersession 规则
 
@@ -83,7 +88,7 @@ plan 每项必须含 current bytes/digest、冲突句稳定 id、目标 bytes/di
 |---|---|
 | `SPEC-READY-01-AUTHORITY` | collector 专用 DRAFT/FREEZE 只授权 collector/GOV-0A，随后普通 RR-GOV DRAFT/FREEZE exact-bind GOV-0A 与本规范 manifest，并创建 `reviewer-refactor-program` normative unit；无模糊确认或权限合并 |
 | `SPEC-READY-02-INSTRUCTIONS` | 四仓 conflict plan 完整；获授权 bytes 应用后 report `unresolved=0` |
-| `SPEC-READY-03-MANIFEST` | spec manifest、machine cards、schemas、fixtures 全部 digest/结构/self-test PASS |
+| `SPEC-READY-03-MANIFEST` | agent entry、spec manifest、24-card schema/index、fixtures、schema/lifecycle/tamper self-tests 和每个 verifier/test source ≤400 行全部 PASS |
 | `SPEC-READY-04-BOOTSTRAP` | GOV-0A collector 有 canonical path/bytes/digest/command、clean-room test 和 no-clobber evidence；在此之前不得声称 GOV-0A 可自动执行 |
 | `SPEC-READY-05-EVIDENCE` | evidence DAG、volatile-field policy、same-generation deterministic verifier 和跨-generation stable projection均有 fixtures |
 | `SPEC-READY-06-CONTRACT` | 一个 layered atomic root 闭合 private/public/shared schemas、registries、fixtures 和 wrapper generation |
@@ -92,7 +97,7 @@ plan 每项必须含 current bytes/digest、冲突句稳定 id、目标 bytes/di
 | `SPEC-READY-09-CONTEXT` | exact tokenizer/transcript budget preflight 可证明全部 mandatory bytes 与输出 reserve 可容纳；否则 NO-GO |
 | `SPEC-READY-10-CAPABILITY` | exact SDK/CLI/App Server path 的 early surface probe 有结论；不支持的机制没有进入冻结架构 |
 | `SPEC-READY-11-RELEASE` | 首发 stable baseline、canary capacity/telemetry/formulas、signer/key、rollback 与 retention policy 闭合 |
-| `SPEC-READY-12-EXECUTION` | 每个 package 有 machine card、互斥 write set、依赖、red/green/full/CI commands、产物和 owner/reviewer binding |
+| `SPEC-READY-12-EXECUTION` | 24 个 package 从 COL-0D 到 PROM-1 全覆盖；当前 generation 1 可保持 blocked，但真正获授权的 successor 必须为每张 bound card 提供真实 write set、artifact dependency、red/green/focused/full/CI commands、产物和 principal binding |
 
 任一门 `FAIL/INDETERMINATE/NOT_AUTHORIZED` 时，implementation readiness 为 false。不得用整体文档长度、人工评审通过或另一门 PASS 抵消。
 

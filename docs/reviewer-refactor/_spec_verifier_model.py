@@ -130,4 +130,58 @@ TRANSITION_TRANSACTION = (
     "advance-agent-entry-cas",
     "verify-successor-self-test",
 )
+ENTRY_ACTION_COMMANDS = {
+    "verify-spec": (
+        (
+            "worker",
+            (
+                "python", "-I", "-B",
+                "docs/reviewer-refactor/verify_spec.py", "--self-test",
+            ),
+            (0,),
+        ),
+    ),
+    "inspect-current-gates": (
+        (
+            "worker",
+            (
+                "python", "scripts/agent_first_decision_register.py", "check",
+                "--repo-root", ".", "--require-slice", "S8",
+            ),
+            (0, 2),
+        ),
+        (
+            "worker",
+            (
+                "python", "scripts/verify_agent_first_contract_baseline.py",
+                "check", "--workspace-root", "..",
+            ),
+            (0, 1, 2),
+        ),
+        (
+            "worker",
+            (
+                "python", "scripts/verify_agent_first_legacy_absence.py",
+                "--workspace-root", "..",
+            ),
+            (0, 1, 2),
+        ),
+        (
+            "worker",
+            (
+                "python", "scripts/verify_agent_first_legacy_absence.py",
+                "--workspace-root", "..", "--require-absent",
+            ),
+            (0, 1, 2),
+        ),
+        (
+            "worker",
+            (
+                "python", "scripts/agent_first_slice0_baseline.py", "check",
+                "--repo-root", ".",
+            ),
+            (0, 1, 2),
+        ),
+    ),
+}
 LINE_POLICY = {"default_max": 400, "review_max": 600, "hard_max": 600}

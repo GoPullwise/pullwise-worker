@@ -16,6 +16,7 @@ from reviewer_spec_json import (
 )
 from reviewer_spec_model import (
     CARD_IDS,
+    ENTRY_ACTION_COMMANDS,
     GATE_IDS,
     MAIN_REL,
     MANIFEST_REL,
@@ -115,6 +116,53 @@ def verify_readiness(root: Path) -> dict[str, Any]:
     return value
 
 
+def verify_bootstrap(root: Path, cards: dict[str, Any]) -> None:
+    value = load_json(root / SPEC_DIR / "bootstrap-command.json")
+    validate_profile(value)
+    exact_keys(
+        value,
+        {
+            "schema_id", "spec_id", "spec_version", "agent_entry_path",
+            "card_generation", "execution_profile", "draft_card_id",
+            "install_card_id", "formal_card_id", "minimum_successor_generation",
+            "collector_id", "collector_repo_id", "collector_path",
+            "collector_expected_state", "collector_sha256", "readiness_status",
+            "reason_code", "python_flags", "subcommand", "required_flags",
+            "forbidden_flags", "write_scope",
+            "expected_process_exit_before_back_validation",
+            "activation_requirement",
+        },
+        "bootstrap-command",
+    )
+    identity = (value["spec_id"], value["spec_version"])
+    if identity != (SPEC_ID, SPEC_VERSION):
+        fail("bootstrap.identity", repr(identity))
+    card_binding = (
+        value["card_generation"], value["execution_profile"],
+        value["draft_card_id"], value["install_card_id"], value["formal_card_id"],
+    )
+    if card_binding != (
+        cards["generation"], cards["profile"], "COL-0D", "COL-0F", "GOV-0A"
+    ):
+        fail("bootstrap.card_binding", repr(card_binding))
+    collector = root / value["collector_path"]
+    if value["collector_expected_state"] == "absent":
+        if collector.exists() or value["collector_sha256"] is not None:
+            fail("bootstrap.absent_truth", value["collector_path"])
+        if value["readiness_status"] != "FAIL":
+            fail("bootstrap.readiness_truth", str(value["readiness_status"]))
+    elif value["collector_expected_state"] == "installed":
+        if not collector.is_file():
+            fail("bootstrap.installed_truth", value["collector_path"])
+        digest = value["collector_sha256"] or ""
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            fail("bootstrap.collector_digest", repr(digest))
+        if sha256(collector.read_bytes()) != digest:
+            fail("bootstrap.collector_digest", value["collector_path"])
+    else:
+        fail("bootstrap.expected_state", str(value["collector_expected_state"]))
+
+
 def verify_entry(root: Path, cards: dict[str, Any]) -> None:
     entry = load_json(root / SPEC_DIR / "agent-entry.json")
     validate_profile(entry)
@@ -145,16 +193,28 @@ def verify_entry(root: Path, cards: dict[str, Any]) -> None:
     if entry["allowed_action_ids"] != ["verify-spec", "inspect-current-gates"]:
         fail("entry.allowed_actions", repr(entry["allowed_action_ids"]))
     action_ids: list[str] = []
+    action_commands: dict[str, tuple[tuple[str, tuple[str, ...], tuple[int, ...]], ...]] = {}
     for action in entry["actions"]:
         exact_keys(action, {"action_id", "mutates_worktree", "commands"}, "entry.action")
         action_ids.append(action["action_id"])
         if action["mutates_worktree"] or not action["commands"]:
             fail("entry.action_mutation", action["action_id"])
+        normalized: list[tuple[str, tuple[str, ...], tuple[int, ...]]] = []
         for command in action["commands"]:
             exact_keys(command, {"cwd_repo", "argv", "expected_exit"}, "entry.command")
             safe_argv(command["argv"], action["action_id"])
+            normalized.append(
+                (
+                    command["cwd_repo"],
+                    tuple(command["argv"]),
+                    tuple(command["expected_exit"]),
+                )
+            )
+        action_commands[action["action_id"]] = tuple(normalized)
     if action_ids != entry["allowed_action_ids"]:
         fail("entry.action_order", repr(action_ids))
+    if action_commands != ENTRY_ACTION_COMMANDS:
+        fail("entry.command_binding", repr(action_commands))
     contract = entry["generation_advance_contract"]
     exact_keys(
         contract,
@@ -249,6 +309,7 @@ def verify(root: Path) -> dict[str, Any]:
     main = verify_prose(root)
     readiness = verify_readiness(root)
     cards = verify_cards(root, main)
+    verify_bootstrap(root, cards)
     verify_entry(root, cards)
     verify_fixtures(root)
     verify_source_limits(root)

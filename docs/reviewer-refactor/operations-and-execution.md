@@ -126,29 +126,35 @@ Stage A必须发布 `reviewer-data-lifecycle-policy/v1`，对每个data class给
 
 ## 7. Machine execution cards
 
-`docs/reviewer-refactor/execution-cards.json` 是工作包的machine index，不是authority。每张card exact keys至少为：
+`docs/reviewer-refactor/agent-entry.json` 是唯一 agent 起点；`execution-cards.json` 是它绑定的工作包 machine index，不是 authority。每张 card exact keys 为：
 
 ```text
-schema_id/id/title/stage/authority_state
+schema_id/id/title/stage/execution_state/authority_state
 owner_role/reviewer_roles/repositories
 write_set/forbidden_set/dependencies
-decision_bindings/input_artifacts
+decision_bindings/input_artifacts/blocking_predicates
 red_commands/green_commands/focused_commands/full_commands/ci_commands
 outputs/rollback/pass_predicates/line_policy
 ```
 
-命令不是自由字符串；每项含`command_id/cwd_repo/argv/timeout_seconds/expected_exit/evidence_outputs`。`argv`保持顺序，禁止shell解释、placeholder和`latest`。尚未冻结的真实path/command不得伪造：card以closed blocking predicate标记`NOT_AUTHORIZED`，并把其定义artifact列为dependency；只有FREEZE/advance生成的新card generation可填exact bytes。
+root 另有 `generation/profile/transition`。`transition` exact-bind `from_generation/from_manifest_sha256/authority_record_refs/command_binding_state/required_transaction`。generation 1 固定为 `inert_catalog`，包含 24 张 blocked card：`COL-0D/COL-0F` 打破 collector 授权循环，A–D cards 绑定真实跨仓 surface，`REL-1/CAN-5/CAN-25/PROM-1` 闭合 Stage E/F。
+
+命令不是自由字符串；每项含`command_id/cwd_repo/argv/timeout_seconds/expected_exit/evidence_outputs`。`argv`保持顺序，禁止shell解释、placeholder和`latest`。尚未冻结的真实path/command不得伪造：card以closed blocking predicate标记`blocked/NOT_AUTHORIZED`，并把其定义artifact列为dependency；只有FREEZE/advance生成的 content-addressed successor generation可填exact bytes。
 
 规则：
 
 - card id与主规格work-package ledger一一对应；unknown/missing/duplicate/case-collision均FAIL；
 - dependency DAG必须acyclic，依赖只能引用同或更早stage的signed PASS；
+- 每个 input artifact 若由另一张 card 产出，producer 必须位于该 card 的 dependency ancestry；
 - 并行card的write set必须disjoint；glob/prefix重叠由verifier按canonical path计算；
+- write set 只接受 canonical actual file/tree，禁止 `release-change-set`、template、glob 或未来才可能存在的伪路径；
 - owner/reviewer role在实施前必须解析到principal registry，且满足职责分离；
 - `authority_state`由verifier从decision/advance/evidence推导，不能由implementer手改成PASS；
 - red必须先以预期closed reason失败，green不能靠改expected/fixture/exclusion；focused/full/CI各有直接bytes；
-- output artifact必须有schema/path/manifest identity与consumer state；non-consumed draft不可被build/runtime/release引用；
+- output artifact必须有schema/path/manifest identity与consumer state；exact path 使用 `path`，运行期才能确定的 release/evidence path 使用 `path=null` + `generation-path-bindings.json` exact JSON Pointer，两者必须且只能有一个；non-consumed draft不可被build/runtime/release引用；
 - rollback仅撤销card声明的未发布target，禁止reset/restore用户其他改动；已经current的数据/contract只按runbook state machine处理。
+
+successor generation transaction 必须同时更新 cards、agent entry、readiness 与 spec manifest。获准 card 变为 `bound` 并补齐五组 command arrays；未获准 card 继续 blocked。CAS keys 是前一 generation、前一 spec-manifest SHA-256 和 exact authority refs；任一不匹配都保持 `NOT_AUTHORIZED`。verifier 必须实际加载 `execution-card.schema.json`，并运行 schema mutation、lifecycle mutation、manifest tamper、DAG/artifact/write-set 和 source line-limit self-tests。
 
 ## 8. Runbook command contract
 

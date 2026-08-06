@@ -287,7 +287,7 @@ v1 refs 使用 closed ASCII form：`repo:<repo-id>:<percent-encoded-path>#<perce
 - Admin 仍编辑 `reviewerConcurrency`，并消费 `maxBundles/maxReviewerAssignments`。
 - 决策注册表为 `ready`：40 resolved、D2 inactive、无 active decision。
 - Slice-0 当前失败：当前 generated wrapper 为 8,762 行、SHA-256 `9404c18b39afdb0ee6bd9d15fdbb3b24d9b85f1972a597a5919a868afe480697`，与 D41 记录一致；Slice-0 baseline 仍固定 D39 的 8,062 行、SHA-256 `bd099dd825c2b2340061b67500bc02f1bb4fee0a1ce7ff44138b36b8821a59fd` 及旧 producer。Stage 0A 必须证明二者的完整 provenance，再决定是既有生成链机械漏同步还是需要 RR-GOV replacement；本文不预判结论。
-- `tests/test_agent_first_decision_register_gate.py` 当前 406 行且未入 Slice-0 baseline。它不能以“新增 grandfathered 超限文件”的方式直接纳入；若现有语义确实要求收录，先按单一职责拆分/缩减到不超过 400 行并证明测试语义不变，否则记录为 Stage 0B replacement obligation。r3 中曾为 426 行的 `docs/reviewer-refactor/verify_spec.py` 已在 r4 拆成职责单一且均不超过 400 行的 manifest-bound modules，不再作为 Slice-0 超限项。
+- `tests/test_agent_first_decision_register_gate.py` 当前 405 行且未入 Slice-0 baseline。它不能以“新增 grandfathered 超限文件”的方式直接纳入；若现有语义确实要求收录，先按单一职责拆分/缩减到不超过 400 行并证明测试语义不变，否则记录为 Stage 0B replacement obligation。r3 中曾为 426 行的 `docs/reviewer-refactor/verify_spec.py` 已在 r4 拆成职责单一且均不超过 400 行的 manifest-bound modules，不再作为 Slice-0 超限项。
 - legacy contract baseline 为 `compatible`，14 组固定 probe 全部通过。
 - 默认 absence ratchet 为 `ratchet_clean=true`、`legacy_absent=false`。
 - 当前 `--require-absent` 既发现 live legacy，又因 `worker.004-frozen-contract-baseline` 自引用而 `indeterminate`；当前报告有 108 个 failure，failure 列表首项为 `server.001-agents`，唯一 indeterminate reason 为 `strict_catalog_self_reference`，不能证明 clean break。
@@ -888,7 +888,7 @@ bootstrap严格分两段：`RR-GOV-COLLECTOR-DRAFT/FREEZE` 是唯一无formal bo
 
 1. `S0A.0` 按第 0.2/0.3/0.5 节创建不可覆盖 bootstrap generation，记录四仓 HEAD/clean status、当前命令/环境/input digests；同一 generation 不执行或夹带任何 tracked 修复。所有原始 stdout/stderr/exit 直接保存，`result.json` 只写 provisional 状态；另获授权的 tracked action 完成并合并后必须用新 generation 复核。
 2. `S0A.1` 用当前 register/Slice-0 commands 复现 wrapper 8,762/8,062 和 digest 漂移，输出 `slice0-provenance.json`：D39/D41 record digest、producer version、Generate generation、expected/actual path/line/digest、首次出现 commit。只有既能证明是既有权威生成链/冻结语义内的机械同步遗漏，又有当前 resolution exact 授权目标 write set 时才可修复；截至本文快照不假定该授权存在。否则只产出 evidence packet，留给 RR-GOV。
-3. `S0A.2` 只读取证 406 行 decision-register gate test 未入 baseline。若现有 baseline 定义确已要求收录，也必须先取得 exact write-set 授权，才可 split/reduce 到每个新手写文件 ≤400 行、运行原有 focused/full tests 并机械同步；否则只记录 replacement obligation，不扩大 current baseline。
+3. `S0A.2` 只读取证 405 行 decision-register gate test 未入 baseline。若现有 baseline 定义确已要求收录，也必须先取得 exact write-set 授权，才可 split/reduce 到每个新手写文件 ≤400 行、运行原有 focused/full tests 并机械同步；否则只记录 replacement obligation，不扩大 current baseline。
 4. `S0A.3` 按 5.3.1 取证 `pyproject.toml` exact pin、`setup.py` unpinned requirement、release/CI build commands、当前安装 distribution 和可得 wheel metadata，输出 `packaging-pin-provenance.json`。在未证明所有 runnable producer 一致前分类为 `PACKAGING_PIN_DRIFT`，只写入 RR-GOV replacement obligation，不直接修改 packaging files。
 5. `S0A.4` 建含 Admin 的四仓 deletion inventory，记录 entrypoint/config/table/artifact/test/docs，明确它不是兼容承诺。
 6. `S0A.5` 保持默认 absence ratchet 语义不变，补齐当前 self-reference/legacy-present/108 failures/indeterminate 的可重复证据和 CI 状态。
@@ -1432,7 +1432,7 @@ engineering_calendar =
 1. 当前先从 `docs/reviewer-refactor/agent-entry.json` 运行 `verify-spec` 与 `inspect-current-gates`。下一张机器卡固定为 `COL-0D`，但 generation 1 仍是 blocked/`NOT_AUTHORIZED`；只有 current inert-doc authority 与独立 `RR-GOV-COLLECTOR-DRAFT-A` exact-bind packet write set 后，才准备 collector proposed bytes。不得越过 `COL-0D` 直接创建 script。
 2. `RR-GOV-COLLECTOR-FREEZE-A` exact-bind packet 后发布 successor card generation，才可执行 `COL-0F` 安装 canonical collector source/tests；安装 bytes、自检和 manifest 不匹配即停止。`bootstrap-command.json` 在此之前继续明确记录 collector absent/FAIL，不创建或执行 formal GOV-0A，也不手工伪造 evidence manifest。
 3. collector exact bytes/self-test 获授权并落库后，才确保四仓 clean，执行 `GOV-0A` 在仓外创建 no-clobber provisional generation，复现并分类 Slice-0/absence drift，生成 provenance、packaging pin取证、四仓 deletion inventory 和 gate-replacement RR-GOV packet。
-4. 将无法在现有语义内修复的项目写入 RR-GOV exact target/fixture/obligation mapping；当前至少包括 Slice-0 generated wrapper drift、406 行未登记 test、strict absence self-reference 和 `setup.py` unpinned requirement。不改 expected、不 Generate、不替换 gate，不把 provisional result 称为 signed PASS。
+4. 将无法在现有语义内修复的项目写入 RR-GOV exact target/fixture/obligation mapping；当前至少包括 Slice-0 generated wrapper drift、405 行未登记 test、strict absence self-reference 和 `setup.py` unpinned requirement。不改 expected、不 Generate、不替换 gate，不把 provisional result 称为 signed PASS。
 5. 按第 0.6 节以 current register v1 entry + exact-bound packet 分别取得 `RR-GOV-DRAFT-A` 与 `RR-GOV-FREEZE-A` option-anchored resolution；然后 GOV-0B 先按 TDD 实现 EVD-0/back-validation，再实现 replacement gate。缺 FREEZE、packet digest 或 exact confirmation 任一项即停在 GOV-0A。
 6. 取得 GOV-0B signed PASS 后，准备 RR-SCOPE/TRUST/TRUTH/EVAL/CUT inert bundles；先取得 DRAFT-A records 与 Stage A advance，完成 non-consumed artifacts/tests，再逐项取得 FREEZE-A。RR-TRUTH 必须明确 supersede D5/D9 的 terminal authority。
 7. Stage A 冻结 canonical private/public contract、inventory population、instruction pagination/seal、Agent-output/result/coverage、registry/DDL、gateway/tool/receipt、scratch-only model FS、generation transaction、`semantic_review_started`、RR-EVAL power/statistics 和 EVD-1 ledger；四仓 instruction conflicts 必须为零。

@@ -29,6 +29,10 @@ pullwise-worker/scripts/reviewer_refactor_evidence.py
 
 `RR-GOV-COLLECTOR-DRAFT-A/FREEZE-A` packet 必须绑定 collector 的 proposed exact source bytes、source SHA-256、installed-script SHA-256、Python executable/version/digest、CLI descriptor digest、valid/invalid fixtures和唯一写根。DRAFT只授权 inert bytes，FREEZE只授权 canonical script/self-tests和一次formal GOV-0A；collector首次落库与启用属于该 exact write set。formal GOV-0A之后的普通RR-GOV packet才处理gate replacement；本文不让一个未来脚本追认自己的创建权限。
 
+machine handoff 将这三步固定为 `COL-0D → COL-0F → GOV-0A`。当前 generation 1 只描述 outputs/dependencies/blockers，三张 card 都没有可运行命令；`agent-entry.json` 只允许规格自检和现有只读 gate。DRAFT/FREEZE exact records 生效后必须发布新的 stage-bound card generation，不能原地改 generation 1，也不能用手写 shell 命令绕开 card transition。
+
+future `release_id/generation` 在当前尚无真实值，因此 evidence output 不写伪目录。card 使用 `path=null` 与 `generation-path-bindings.json#/cards/<card-id>/outputs/<artifact-id>`；该 binding artifact 由获冻结的 collector/evidence writer 根据已经验证的 identifiers 与 canonical evidence root 产生并进入 input/content root。bind 前不得创建目录，bind 后 path 必须落在 card 声明的 evidence write root 且 no-clobber。
+
 ## 2. Collector 安全与发布原子性
 
 collector 必须满足以下机械条件：
