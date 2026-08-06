@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pullwise.dev/schemas/reviewer-refactor-execution-cards-v1.json",
+  "$id": "https://pullwise.dev/schemas/reviewer-refactor-execution-cards-v2.json",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_id", "spec_id", "generation", "cards"],
