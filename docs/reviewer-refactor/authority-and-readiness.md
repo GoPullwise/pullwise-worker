@@ -103,7 +103,7 @@ plan 每项必须含 current bytes/digest、冲突句稳定 id、目标 bytes/di
 
 ## 6. 当前非规范性快照
 
-截至 2026-08-05 的只读快照：Worker HEAD `001fe2a40c2270b139e27d4331ccc243c80b21ab`，current decision-register check 报告 40 resolved、0 pending、`ready=true`。该 `ready` 只描述现有 register，不包含任何 RR decision；HEAD、register 或指令 bytes 变化即使本段过期。本段不得被 stage advance 引用，执行证据必须来自新的不可覆盖 generation。
+截至 2026-08-06 r4 审计开始的只读快照：Worker HEAD `6a45784`，current decision-register check 报告 40 resolved、0 pending、`ready=true`；contract baseline 为 `compatible`，default absence 为 `ratchet_clean=true/legacy_absent=false`，strict absence 因 108 个 live failure 与 `strict_catalog_self_reference` 为 `INDETERMINATE`。共享环境在文档修改期间自动推进了 Worker `main/origin/main`，因此这里不把后续 HEAD 当作冻结证据。该 `ready` 只描述现有 register，不包含任何 RR decision；HEAD、register、指令或 spec bytes 变化即使本段过期。本段不得被 stage advance 引用，执行证据必须来自新的不可覆盖 generation。
 
 ## 7. 激活后的必要接线
 

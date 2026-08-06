@@ -93,8 +93,46 @@ def self_test(root: Path, verify: Verify) -> dict[str, Any]:
         _refresh_manifest(target, relative)
 
     _expect_failure(root, verify, violate_lifecycle, "cards.bound_commands")
+
+    def violate_transition(target: Path) -> None:
+        relative = "docs/reviewer-refactor/execution-cards.json"
+        path = target / relative
+        value = load_json(path)
+        value["generation"] = 2
+        value["profile"] = "stage_bound"
+        value["transition"].update(
+            {
+                "from_generation": 1,
+                "from_manifest_sha256": None,
+                "authority_record_refs": ["RR-GOV-COLLECTOR-DRAFT-A"],
+                "command_binding_state": "partial",
+            }
+        )
+        card = value["cards"][0]
+        card["execution_state"] = "bound"
+        card["authority_state"] = "READY"
+        for index, field in enumerate(
+            ("red_commands", "green_commands", "focused_commands",
+             "full_commands", "ci_commands"),
+            start=1,
+        ):
+            card[field] = [
+                {
+                    "command_id": f"COL-0D.TEST-{index}",
+                    "cwd_repo": "worker",
+                    "argv": ["python", "-c", "pass"],
+                    "timeout_seconds": 30,
+                    "expected_exit": [0],
+                    "evidence_outputs": [f"command-{index}.json"],
+                }
+            ]
+        _write_json(path, value)
+        _refresh_manifest(target, relative)
+
+    _expect_failure(root, verify, violate_transition, "cards.transition_manifest")
     result["self_test"] = "PASS"
     result["tamper_detection"] = "PASS"
     result["schema_enforcement"] = "PASS"
     result["lifecycle_enforcement"] = "PASS"
+    result["transition_enforcement"] = "PASS"
     return result

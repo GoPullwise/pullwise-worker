@@ -17,7 +17,10 @@
   "actions": [
     {
       "action_id": "verify-spec",
-      "mutates_worktree": false,
+      "action_kind": "read_only",
+      "card_id": null,
+      "mutates_state": false,
+      "command_refs": [],
       "commands": [
         {
           "cwd_repo": "worker",
@@ -36,7 +39,10 @@
     },
     {
       "action_id": "inspect-current-gates",
-      "mutates_worktree": false,
+      "action_kind": "read_only",
+      "card_id": null,
+      "mutates_state": false,
+      "command_refs": [],
       "commands": [
         {
           "cwd_repo": "worker",
@@ -51,6 +57,7 @@
           ],
           "expected_exit": [
             0,
+            1,
             2
           ]
         },

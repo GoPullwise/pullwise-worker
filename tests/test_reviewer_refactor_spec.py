@@ -138,43 +138,58 @@ class ReviewerRefactorSpecTests(unittest.TestCase):
     def test_cards_bind_real_cross_repo_surfaces(self) -> None:
         required = {
             "RUN-1": {
-                "pullwise_worker/reviewer_runtime/__init__.py",
-                "pullwise_worker/reviewer_runtime/types.py",
-                "pullwise_worker/reviewer_runtime/validation_service.py",
-                "tests/test_reviewer_validation_service.py",
+                ("worker", "pullwise_worker/reviewer_runtime/__init__.py"),
+                ("worker", "pullwise_worker/reviewer_runtime/types.py"),
+                ("worker", "pullwise_worker/reviewer_runtime/validation_service.py"),
+                ("worker", "tests/test_reviewer_validation_service.py"),
             },
             "RUN-2": {
-                "scripts/run_reviewer_candidate.py",
-                "tests/test_reviewer_model_fs_policy.py",
-                "tests/test_reviewer_runtime_policy.py",
+                ("worker", "scripts/run_reviewer_candidate.py"),
+                ("worker", "tests/test_reviewer_model_fs_policy.py"),
+                ("worker", "tests/test_reviewer_runtime_policy.py"),
             },
             "WEB-1": {
-                "src/api/pullwise.js",
-                "src/lib/pullwise-data.js",
-                "src/screens/flow.jsx",
-                "src/screens/issues.jsx",
+                ("web", "src/api/pullwise.js"),
+                ("web", "src/lib/pullwise-data.js"),
+                ("web", "src/screens/flow.jsx"),
+                ("web", "src/screens/issues.jsx"),
             },
             "ADM-1": {
-                "src/api/pullwise.js",
-                "src/screens/plans.jsx",
-                "src/screens/settings.jsx",
+                ("admin", "src/api/pullwise.js"),
+                ("admin", "src/screens/plans.jsx"),
+                ("admin", "src/screens/settings.jsx"),
             },
             "SRV-2": {
-                "pullwise_server/db.py",
-                "pullwise_server/_app_part_04_scan_audit_bundle.py",
-                "pullwise_server/_app_part_05_worker_results.py",
-                "pullwise_server/_app_part_10_handler_main.py",
+                ("server", "pullwise_server/db.py"),
+                ("server", "pullwise_server/_app_part_04_scan_audit_bundle.py"),
+                ("server", "pullwise_server/_app_part_05_worker_results.py"),
+                ("server", "pullwise_server/_app_part_10_handler_main.py"),
             },
             "CUT-1": {
-                "pullwise_worker/main.py",
-                "pullwise_worker/review_worker_v1.py",
-                "tests/test_review_worker_protocol_v1.py",
-                "contract-package-pin.json",
+                ("worker", "pullwise_worker/main.py"),
+                ("worker", "pullwise_worker/review_worker_v1.py"),
+                ("server", "tests/test_review_worker_protocol_v1.py"),
+                ("web", "contract-package-pin.json"),
             },
         }
         for card_id, expected in required.items():
-            paths = {item["path"] for item in self.by_id[card_id]["write_set"]}
+            paths = {
+                (item["repo_id"], item["path"])
+                for item in self.by_id[card_id]["write_set"]
+            }
             self.assertTrue(expected <= paths, f"{card_id}: {sorted(expected - paths)}")
+        repo_roots = {
+            "worker": ROOT,
+            "server": ROOT.parent / "pullwise-server",
+            "web": ROOT.parent / "pullwise-web",
+            "admin": ROOT.parent / "pullwise-admin",
+        }
+        for card_id in ("WEB-1", "ADM-1", "SRV-2", "CUT-1"):
+            for repo_id, relative in required[card_id]:
+                self.assertTrue(
+                    (repo_roots[repo_id] / relative).exists(),
+                    f"{card_id}:{repo_id}:{relative}",
+                )
         all_paths = [
             item["path"]
             for card in self.cards["cards"]

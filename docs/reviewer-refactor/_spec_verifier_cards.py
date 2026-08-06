@@ -201,7 +201,10 @@ def verify_cards(root: Path, main_text: str) -> dict[str, Any]:
             if producer is not None and producer not in reach[card_id]:
                 fail("cards.artifact_dependency", f"{card_id}<-{producer}:{artifact}")
     for card_id, required in REQUIRED_CARD_PATHS.items():
-        actual = {item["path"] for item in by_id[card_id]["write_set"]}
+        actual = {
+            (item["repo_id"], item["path"])
+            for item in by_id[card_id]["write_set"]
+        }
         if not required <= actual:
             fail("cards.required_surface", f"{card_id}:{sorted(required-actual)}")
     for index, left_id in enumerate(CARD_IDS):

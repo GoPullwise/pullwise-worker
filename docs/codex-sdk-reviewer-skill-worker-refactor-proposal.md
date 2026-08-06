@@ -277,7 +277,7 @@ v1 refs 使用 closed ASCII form：`repo:<repo-id>:<percent-encoded-path>#<perce
 
 ## 2. 当前证据快照
 
-2026-08-05 当前四仓复核：
+2026-08-06 r4 只读复核（实施时必须由新 generation 重取）：
 
 - 默认 builder 仍返回 `ReviewWorkerV1`；Agent Kernel 只是可选 shadow projection。
 - `review_worker_v1.py` 仍注册 30 个生产 phase，SDK 调用仍在该路径。
@@ -291,7 +291,7 @@ v1 refs 使用 closed ASCII form：`repo:<repo-id>:<percent-encoded-path>#<perce
 - legacy contract baseline 为 `compatible`，14 组固定 probe 全部通过。
 - 默认 absence ratchet 为 `ratchet_clean=true`、`legacy_absent=false`。
 - 当前 `--require-absent` 既发现 live legacy，又因 `worker.004-frozen-contract-baseline` 自引用而 `indeterminate`；当前报告有 108 个 failure，failure 列表首项为 `server.001-agents`，唯一 indeterminate reason 为 `strict_catalog_self_reference`，不能证明 clean break。
-- 四仓取证时工作树均干净；远端 CI 未纳入本地证据，实施阶段必须复查。
+- r4 审计开始时四仓工作树均干净，Worker 为 `6a45784`。共享环境随后自动提交并推进 Worker `main/origin/main`；这些 auto commits 与当前 docs 工作树状态不是 Stage evidence，也不改变 readiness。Server/Web/Admin 在本轮只读 inventory 中未修改；正式 COL-0D/COL-0F/GOV-0A 必须重新绑定四仓 exact HEAD/status。
 
 因此必须从 Stage 0A 开始；未完成 Stage 0B 所需决策时，不能替换 gate、写 candidate 或删旧代码。
 
