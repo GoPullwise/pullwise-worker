@@ -1283,11 +1283,12 @@ Agent 必须从 `agent-entry.json` 开始，而不是从主文任意段落猜测
 1. `execution-cards.json`：`generation=n+1`、`profile=stage_bound`、`from_generation=n`、前一份 spec manifest 的 exact SHA-256、append-only authority record refs，以及本次获准 card 的 `execution_state=bound`；
 2. 每张 bound card 的 red/green/focused/full/CI argv、cwd、timeout、expected exits 和 evidence outputs；尚未获准的 card 保持 blocked、空命令与 `NOT_AUTHORIZED`；
 3. `agent-entry.json` 的 generation/profile/authority/next-card CAS；
-4. `readiness.json` 的直接证据与状态，以及新的 `spec-manifest.json` sizes/digests。
+4. `bootstrap-command.json` 的 card generation/profile 绑定，以及 `readiness.json` 的直接证据与状态；
+5. 新的 `spec-manifest.json` sizes/digests。
 
-`from_generation/from_manifest_sha256/authority_record_refs` 是 CAS keys。任一旧 generation、manifest digest、authority bytes 或四文件 transaction 不匹配时 successor 无效，入口保持 `NOT_AUTHORIZED`。不得原地给 generation 1 填命令，也不得只改 card 而留下旧 entry/readiness/manifest。
+`from_generation/from_manifest_sha256/authority_record_refs` 是 CAS keys。任一旧 generation、manifest digest、authority bytes 或五文件 transaction 不匹配时 successor 无效，入口保持 `NOT_AUTHORIZED`。不得原地给 generation 1 填命令，也不得只改 card 而留下旧 entry/bootstrap/readiness/manifest。
 
-write set 中的 repository path 必须是已核对的 canonical actual file/tree；不能使用 `release-change-set` 等伪目录。若 release/evidence output 的最终路径依赖未来 `release_id/generation`，card 使用 `path=null` 与 `generation-path-bindings.json` 的 exact JSON Pointer；真正 bind 时由已冻结 collector/evidence contract生成并进入输入 digest。successor 必须再次通过 schema、DAG、artifact dependency、parallel-write overlap、source-line-limit、tamper 和 lifecycle self-tests，才可由入口暴露下一张 bound card。
+write set 中的 repository path 必须是已核对的 canonical actual file/tree；不能使用 `release-change-set` 等伪目录。若 release/evidence output 的最终路径依赖未来 `release_id/generation`，card 使用 `path=null` 与 `generation-path-bindings.json` 的 exact JSON Pointer；真正 bind 时由已冻结 collector/evidence contract生成并进入输入 digest。successor 的 `agent-entry.json` 必须只为首张尚未 PASS 的 bound card 增加 `execute-next-card`，其 `command_refs` 按固定顺序引用该 card 的 red/green/focused/full/CI arrays，入口本身不得复制或改写 argv。successor 必须再次通过 schema、DAG、artifact dependency、parallel-write overlap、source-line-limit、tamper、lifecycle rejection 和合法 successor acceptance self-tests，才可由入口暴露下一张 bound card。
 
 Agent 在缺 authority、失败/不确定 gate、路径未 bind、命令含 placeholder、输入 digest 漂移或生产 principal/signer/canary prerequisite 缺失时必须停止并报告 exact blocker。只有 `SPEC-READY-01..12` 全 PASS、当前 stage-bound generation 自检 PASS 且 `PROM-1` 对 exact canaried release PASS，才算从头到尾完成。
 

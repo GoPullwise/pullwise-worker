@@ -57,16 +57,24 @@ class ReviewerRefactorSpecTests(unittest.TestCase):
         self.cards = load_json(SPEC_DIR / "execution-cards.json")
         self.by_id = {card["id"]: card for card in self.cards["cards"]}
 
-    def run_verifier(self, root: Path) -> subprocess.CompletedProcess[str]:
+    def run_verifier(
+        self,
+        root: Path,
+        *,
+        self_test: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [
+            sys.executable,
+            "-I",
+            "-B",
+            str(root / "docs/reviewer-refactor/verify_spec.py"),
+            "--repo-root",
+            str(root),
+        ]
+        if self_test:
+            argv.append("--self-test")
         return subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-B",
-                str(root / "docs/reviewer-refactor/verify_spec.py"),
-                "--repo-root",
-                str(root),
-            ],
+            argv,
             cwd=root,
             text=True,
             capture_output=True,
@@ -110,6 +118,10 @@ class ReviewerRefactorSpecTests(unittest.TestCase):
         self.assertEqual(
             ["verify-spec", "inspect-current-gates"],
             entry["allowed_action_ids"],
+        )
+        self.assertIn(
+            "bootstrap-command card_generation and execution_profile binding",
+            entry["generation_advance_contract"]["atomic_changes"],
         )
 
     def test_cards_cover_bootstrap_and_release_lifecycle(self) -> None:
@@ -233,6 +245,12 @@ class ReviewerRefactorSpecTests(unittest.TestCase):
         for path in set(sources):
             line_count = len(path.read_text(encoding="utf-8").splitlines())
             self.assertLessEqual(line_count, 400, f"{path.name}: {line_count}")
+
+    def test_self_test_accepts_valid_generation_two_successor(self) -> None:
+        result = self.run_verifier(ROOT, self_test=True)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual("PASS", payload["successor_acceptance"])
 
 
 if __name__ == "__main__":

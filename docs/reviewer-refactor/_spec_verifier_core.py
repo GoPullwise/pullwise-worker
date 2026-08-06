@@ -6,24 +6,13 @@ from typing import Any
 
 from reviewer_spec_cards import graph_has_cycle, safe_argv, verify_cards
 from reviewer_spec_json import (
-    SpecError,
-    canonical_rel,
-    exact_keys,
-    fail,
-    load_json,
-    sha256,
+    SpecError, canonical_rel, exact_keys, fail, load_json, sha256,
     validate_profile,
 )
 from reviewer_spec_model import (
-    CARD_IDS,
-    ENTRY_ACTION_COMMANDS,
-    GATE_IDS,
-    MAIN_REL,
-    MANIFEST_REL,
-    REQUIRED_FILES,
-    SPEC_DIR,
-    SPEC_ID,
-    SPEC_VERSION,
+    CARD_IDS, COMMAND_FIELDS, ENTRY_ACTION_COMMANDS, GATE_IDS,
+    GENERATION_ATOMIC_CHANGES, MAIN_REL, MANIFEST_REL, REQUIRED_FILES,
+    SPEC_DIR, SPEC_ID, SPEC_VERSION,
 )
 
 
@@ -74,7 +63,7 @@ def verify_manifest(root: Path) -> dict[str, Any]:
     return manifest
 
 
-def verify_readiness(root: Path) -> dict[str, Any]:
+def verify_readiness(root: Path, cards: dict[str, Any]) -> dict[str, Any]:
     value = load_json(root / SPEC_DIR / "readiness.json")
     validate_profile(value)
     exact_keys(
@@ -87,9 +76,17 @@ def verify_readiness(root: Path) -> dict[str, Any]:
     )
     if value["spec_id"] != SPEC_ID or value["spec_version"] != SPEC_VERSION:
         fail("readiness.identity", f"{value['spec_id']}:{value['spec_version']}")
-    if value["activation_state"] != "PROPOSED_INERT":
+    activation_states = {
+        "PROPOSED_INERT", "GOVERNANCE_DRAFTED", "GOVERNANCE_FROZEN",
+        "ARCHITECTURE_FROZEN", "IMPLEMENTATION_READY", "RELEASE_READY",
+    }
+    statuses = {
+        "NOT_AUTHORIZED", "READY", "IN_PROGRESS", "PASS", "FAIL",
+        "INDETERMINATE",
+    }
+    if value["activation_state"] not in activation_states:
         fail("readiness.activation_state", str(value["activation_state"]))
-    if value["overall_status"] != "NOT_AUTHORIZED":
+    if value["overall_status"] not in statuses:
         fail("readiness.current_state", str(value["overall_status"]))
     ids = tuple(gate.get("gate_id") for gate in value["gates"])
     if ids != GATE_IDS:
@@ -102,6 +99,8 @@ def verify_readiness(root: Path) -> dict[str, Any]:
             str(gate.get("gate_id")),
         )
         by_id[gate["gate_id"]] = gate
+        if gate["status"] not in statuses:
+            fail("readiness.gate_status", f"{gate['gate_id']}:{gate['status']}")
         for reference in gate["evidence_refs"]:
             rel = reference.split("#", 1)[0]
             canonical_rel(rel)
@@ -109,10 +108,15 @@ def verify_readiness(root: Path) -> dict[str, Any]:
                 fail("readiness.evidence_missing", reference)
     if by_id["SPEC-READY-03-MANIFEST"]["status"] != "PASS":
         fail("readiness.manifest_truth", "self-check must be PASS")
-    if by_id["SPEC-READY-04-BOOTSTRAP"]["status"] != "FAIL":
-        fail("readiness.bootstrap_truth", "collector remains absent")
-    if by_id["SPEC-READY-12-EXECUTION"]["status"] != "NOT_AUTHORIZED":
-        fail("readiness.execution_truth", "generation 1 is inert")
+    execution_status = by_id["SPEC-READY-12-EXECUTION"]["status"]
+    if cards["profile"] == "inert_catalog":
+        current = (value["activation_state"], value["overall_status"], execution_status)
+        if current != ("PROPOSED_INERT", "NOT_AUTHORIZED", "NOT_AUTHORIZED"):
+            fail("readiness.generation_one", repr(current))
+        if by_id["SPEC-READY-04-BOOTSTRAP"]["status"] != "FAIL":
+            fail("readiness.bootstrap_truth", "collector remains absent")
+    elif execution_status == "NOT_AUTHORIZED":
+        fail("readiness.successor_execution", execution_status)
     return value
 
 
@@ -163,7 +167,7 @@ def verify_bootstrap(root: Path, cards: dict[str, Any]) -> None:
         fail("bootstrap.expected_state", str(value["collector_expected_state"]))
 
 
-def verify_entry(root: Path, cards: dict[str, Any]) -> None:
+def verify_entry(root: Path, cards: dict[str, Any], readiness: dict[str, Any]) -> None:
     entry = load_json(root / SPEC_DIR / "agent-entry.json")
     validate_profile(entry)
     exact_keys(
@@ -180,37 +184,95 @@ def verify_entry(root: Path, cards: dict[str, Any]) -> None:
     identity = (entry["spec_id"], entry["spec_version"])
     if identity != (SPEC_ID, SPEC_VERSION):
         fail("entry.identity", repr(identity))
-    state = (entry["activation_state"], entry["authority_state"])
-    if state != ("PROPOSED_INERT", "NOT_AUTHORIZED"):
-        fail("entry.state", repr(state))
     if (entry["current_generation"], entry["execution_profile"]) != (
         cards["generation"],
         cards["profile"],
     ):
         fail("entry.card_generation", repr(entry["current_generation"]))
-    if entry["next_card_id"] != "COL-0D":
-        fail("entry.next_card", str(entry["next_card_id"]))
-    if entry["allowed_action_ids"] != ["verify-spec", "inspect-current-gates"]:
+    if entry["activation_state"] != readiness["activation_state"]:
+        fail("entry.readiness_state", str(entry["activation_state"]))
+    read_actions = ["verify-spec", "inspect-current-gates"]
+    if cards["profile"] == "inert_catalog":
+        state = (entry["activation_state"], entry["authority_state"])
+        if state != ("PROPOSED_INERT", "NOT_AUTHORIZED"):
+            fail("entry.state", repr(state))
+        if entry["next_card_id"] != "COL-0D":
+            fail("entry.next_card", str(entry["next_card_id"]))
+        expected_actions = read_actions
+    else:
+        if entry["activation_state"] == "PROPOSED_INERT":
+            fail("entry.successor_activation", entry["activation_state"])
+        pending = [
+            card for card in cards["cards"]
+            if card["execution_state"] == "bound"
+            and card["authority_state"] != "PASS"
+        ]
+        if pending:
+            next_card = pending[0]
+            if entry["next_card_id"] != next_card["id"]:
+                fail("entry.next_card", str(entry["next_card_id"]))
+            if entry["authority_state"] != next_card["authority_state"]:
+                fail("entry.card_authority", str(entry["authority_state"]))
+            expected_actions = read_actions + ["execute-next-card"]
+        else:
+            complete = all(
+                card["execution_state"] == "bound"
+                and card["authority_state"] == "PASS"
+                for card in cards["cards"]
+            )
+            if not complete or entry["next_card_id"] is not None:
+                fail("entry.completed_state", repr(entry["next_card_id"]))
+            if entry["authority_state"] != "PASS":
+                fail("entry.card_authority", str(entry["authority_state"]))
+            expected_actions = read_actions
+    if entry["allowed_action_ids"] != expected_actions:
         fail("entry.allowed_actions", repr(entry["allowed_action_ids"]))
     action_ids: list[str] = []
     action_commands: dict[str, tuple[tuple[str, tuple[str, ...], tuple[int, ...]], ...]] = {}
     for action in entry["actions"]:
-        exact_keys(action, {"action_id", "mutates_worktree", "commands"}, "entry.action")
+        exact_keys(
+            action,
+            {
+                "action_id", "action_kind", "card_id", "mutates_state",
+                "command_refs", "commands",
+            },
+            "entry.action",
+        )
         action_ids.append(action["action_id"])
-        if action["mutates_worktree"] or not action["commands"]:
-            fail("entry.action_mutation", action["action_id"])
         normalized: list[tuple[str, tuple[str, ...], tuple[int, ...]]] = []
-        for command in action["commands"]:
-            exact_keys(command, {"cwd_repo", "argv", "expected_exit"}, "entry.command")
-            safe_argv(command["argv"], action["action_id"])
-            normalized.append(
-                (
-                    command["cwd_repo"],
-                    tuple(command["argv"]),
-                    tuple(command["expected_exit"]),
+        if action["action_kind"] == "read_only":
+            if (
+                action["card_id"] is not None
+                or action["mutates_state"]
+                or action["command_refs"]
+                or not action["commands"]
+            ):
+                fail("entry.read_action", action["action_id"])
+            for command in action["commands"]:
+                exact_keys(command, {"cwd_repo", "argv", "expected_exit"}, "entry.command")
+                safe_argv(command["argv"], action["action_id"])
+                normalized.append(
+                    (
+                        command["cwd_repo"],
+                        tuple(command["argv"]),
+                        tuple(command["expected_exit"]),
+                    )
                 )
-            )
-        action_commands[action["action_id"]] = tuple(normalized)
+            action_commands[action["action_id"]] = tuple(normalized)
+        elif action["action_kind"] == "card":
+            expected_refs = [
+                f"{entry['next_card_id']}:{field}" for field in COMMAND_FIELDS
+            ]
+            if (
+                action["action_id"] != "execute-next-card"
+                or action["card_id"] != entry["next_card_id"]
+                or not action["mutates_state"]
+                or action["commands"]
+                or action["command_refs"] != expected_refs
+            ):
+                fail("entry.card_action", action["action_id"])
+        else:
+            fail("entry.action_kind", str(action["action_kind"]))
     if action_ids != entry["allowed_action_ids"]:
         fail("entry.action_order", repr(action_ids))
     if action_commands != ENTRY_ACTION_COMMANDS:
@@ -226,6 +288,8 @@ def verify_entry(root: Path, cards: dict[str, Any]) -> None:
     )
     if contract["minimum_successor_generation"] != 2:
         fail("entry.successor_generation", repr(contract["minimum_successor_generation"]))
+    if tuple(contract["atomic_changes"]) != GENERATION_ATOMIC_CHANGES:
+        fail("entry.atomic_changes", repr(contract["atomic_changes"]))
     if contract["cas_keys"] != [
         "from_generation", "from_manifest_sha256", "authority_record_refs"
     ]:
@@ -307,10 +371,10 @@ def verify(root: Path) -> dict[str, Any]:
     root = root.resolve()
     manifest = verify_manifest(root)
     main = verify_prose(root)
-    readiness = verify_readiness(root)
     cards = verify_cards(root, main)
+    readiness = verify_readiness(root, cards)
     verify_bootstrap(root, cards)
-    verify_entry(root, cards)
+    verify_entry(root, cards, readiness)
     verify_fixtures(root)
     verify_source_limits(root)
     return {

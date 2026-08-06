@@ -13,7 +13,7 @@
 一个可被执行器接受的规范快照必须同时绑定：
 
 - 本规范标识与版本；
-- `docs/reviewer-refactor/agent-entry.json` 的唯一入口、current card generation/profile 和 allowed read-only actions；
+- `docs/reviewer-refactor/agent-entry.json` 的唯一入口、current card generation/profile、allowed actions 和 exact command refs；
 - `docs/reviewer-refactor/spec-manifest.json` 的 exact bytes SHA-256；
 - 主规格和全部配套文件的 exact path/size/SHA-256；
 - 当前 decision-register manifest/resolution digests；
@@ -38,7 +38,7 @@
 
 当前 `agent-entry.json` 只允许 `verify-spec` 与 `inspect-current-gates`，并把 `next_card_id` 固定为 `COL-0D`。这不是 COL-0D 的执行授权：generation 1 的 24 张 card 全部是 `blocked/NOT_AUTHORIZED`。collector packet、collector install 和 formal GOV-0A 分别由 `COL-0D → COL-0F → GOV-0A` 表达，agent 不得省略任一步或把一般性“继续”当作 DRAFT/FREEZE。
 
-第一份 stage-bound successor 至少为 generation 2，并以 `from_generation/from_manifest_sha256/authority_record_refs` 做 CAS。cards、entry、readiness 与 manifest 必须在同一 tracked transaction 更新；只改其中一项、给 blocked card 填命令、让未授权 card 离开 `NOT_AUTHORIZED` 或引用 synthetic path，均不产生有效 readiness。
+第一份 stage-bound successor 至少为 generation 2，并以 `from_generation/from_manifest_sha256/authority_record_refs` 做 CAS。cards、entry、bootstrap、readiness 与 manifest 必须在同一 tracked transaction 更新；只改其中一项、给 blocked card 填命令、让未授权 card 离开 `NOT_AUTHORIZED` 或引用 synthetic path，均不产生有效 readiness。合法 successor 的 entry 只为首张尚未 PASS 的 bound card 暴露 `execute-next-card`，并用 ordered `command_refs` 指向该 card 的 red/green/focused/full/CI arrays；不得在入口复制 argv 或绕过 card lifecycle。
 
 ## 3. 当前权威与 supersession 规则
 

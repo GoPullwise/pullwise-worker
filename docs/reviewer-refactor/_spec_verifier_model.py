@@ -130,6 +130,13 @@ TRANSITION_TRANSACTION = (
     "advance-agent-entry-cas",
     "verify-successor-self-test",
 )
+GENERATION_ATOMIC_CHANGES = (
+    "execution-cards generation, profile, transition, card states, and commands",
+    "agent-entry current_generation, execution_profile, authority_state, and next_card_id",
+    "bootstrap-command card_generation and execution_profile binding",
+    "readiness evidence and status without weakening failed gates",
+    "spec-manifest file sizes and digests",
+)
 ENTRY_ACTION_COMMANDS = {
     "verify-spec": (
         (
