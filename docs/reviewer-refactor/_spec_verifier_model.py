@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+SPEC_VERSION = "2026-08-06-r4"
+SPEC_ID = "pullwise-reviewer-refactor/v1"
+SPEC_DIR = Path("docs/reviewer-refactor")
+MANIFEST_REL = SPEC_DIR / "spec-manifest.json"
+MAIN_REL = Path("docs/codex-sdk-reviewer-skill-worker-refactor-proposal.md")
+SAFE_INT_MAX = 9_007_199_254_740_991
+COMMAND_FIELDS = (
+    "red_commands",
+    "green_commands",
+    "focused_commands",
+    "full_commands",
+    "ci_commands",
+)
+CARD_IDS = (
+    "COL-0D",
+    "COL-0F",
+    "GOV-0A",
+    "EVD-0",
+    "GOV-0B",
+    "EVD-1",
+    "CON-0",
+    "BEN-0",
+    "SKILL-1",
+    "RUN-1",
+    "RUN-2",
+    "RES-1",
+    "PUB-1",
+    "BEN-1",
+    "SRV-1",
+    "CON-1",
+    "SRV-2",
+    "WEB-1",
+    "ADM-1",
+    "CUT-1",
+    "REL-1",
+    "CAN-5",
+    "CAN-25",
+    "PROM-1",
+)
+GATE_IDS = tuple(
+    f"SPEC-READY-{index:02d}-{name}"
+    for index, name in enumerate(
+        (
+            "AUTHORITY",
+            "INSTRUCTIONS",
+            "MANIFEST",
+            "BOOTSTRAP",
+            "EVIDENCE",
+            "CONTRACT",
+            "SECURITY",
+            "SKILL",
+            "CONTEXT",
+            "CAPABILITY",
+            "RELEASE",
+            "EXECUTION",
+        ),
+        start=1,
+    )
+)
+REQUIRED_FILES = (
+    MAIN_REL.as_posix(),
+    "docs/reviewer-refactor/_spec_verifier_core.py",
+    "docs/reviewer-refactor/_spec_verifier_json.py",
+    "docs/reviewer-refactor/_spec_verifier_model.py",
+    "docs/reviewer-refactor/_spec_verifier_selftest.py",
+    "docs/reviewer-refactor/agent-entry.json",
+    "docs/reviewer-refactor/authority-and-readiness.md",
+    "docs/reviewer-refactor/bootstrap-command.json",
+    "docs/reviewer-refactor/evidence-and-determinism.md",
+    "docs/reviewer-refactor/execution-card.schema.json",
+    "docs/reviewer-refactor/execution-cards.json",
+    "docs/reviewer-refactor/fixtures/spec-verifier/invalid/dependency-cycle.json",
+    "docs/reviewer-refactor/fixtures/spec-verifier/invalid/float-confidence.json",
+    "docs/reviewer-refactor/fixtures/spec-verifier/invalid/path-escape.json",
+    "docs/reviewer-refactor/fixtures/spec-verifier/manifest.json",
+    "docs/reviewer-refactor/fixtures/spec-verifier/valid/scalar-profile.json",
+    "docs/reviewer-refactor/operations-and-execution.md",
+    "docs/reviewer-refactor/readiness.json",
+    "docs/reviewer-refactor/runtime-contract-and-security.md",
+    "docs/reviewer-refactor/skill-context-and-evaluation.md",
+    "docs/reviewer-refactor/verify_spec.py",
+    "tests/test_reviewer_refactor_spec.py",
+)
+REQUIRED_CARD_PATHS = {
+    "RUN-1": {
+        "pullwise_worker/reviewer_runtime/__init__.py",
+        "pullwise_worker/reviewer_runtime/types.py",
+        "pullwise_worker/reviewer_runtime/validation_service.py",
+        "tests/test_reviewer_validation_service.py",
+    },
+    "RUN-2": {
+        "scripts/run_reviewer_candidate.py",
+        "tests/test_reviewer_model_fs_policy.py",
+        "tests/test_reviewer_runtime_policy.py",
+    },
+    "WEB-1": {
+        "src/api/pullwise.js",
+        "src/lib/pullwise-data.js",
+        "src/screens/flow.jsx",
+        "src/screens/issues.jsx",
+    },
+    "ADM-1": {
+        "src/api/pullwise.js",
+        "src/screens/plans.jsx",
+        "src/screens/settings.jsx",
+    },
+    "SRV-2": {
+        "pullwise_server/db.py",
+        "pullwise_server/_app_part_04_scan_audit_bundle.py",
+        "pullwise_server/_app_part_05_worker_results.py",
+        "pullwise_server/_app_part_10_handler_main.py",
+    },
+    "CUT-1": {
+        "pullwise_worker/main.py",
+        "pullwise_worker/review_worker_v1.py",
+        "tests/test_review_worker_protocol_v1.py",
+        "contract-package-pin.json",
+    },
+}
+TRANSITION_TRANSACTION = (
+    "publish-content-addressed-successor",
+    "bind-authorized-card-commands",
+    "bind-authority-record-digests",
+    "advance-agent-entry-cas",
+    "verify-successor-self-test",
+)
+LINE_POLICY = {"default_max": 400, "review_max": 600, "hard_max": 600}
