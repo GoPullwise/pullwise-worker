@@ -1,3 +1,25 @@
+<!-- PULLWISE_REVIEWER_CURRENT_AUTHORITY_START -->
+## Pullwise Reviewer — Current Implementation Authority
+
+For every new Pullwise Reviewer implementation task, the only entry point is
+[Pullwise Reviewer — Current Implementation Authority](https://app.notion.com/p/3b4e5c88f85f8128bd39dac3a7679c4a).
+Follow its [current implementation specification](https://app.notion.com/p/3b4e5c88f85f818e933ecf3864c97469),
+[live implementation cards](https://app.notion.com/p/b79ceacfedcd4d34a0d619c1790066c4), and
+[Code Authorization Registry](https://app.notion.com/p/760a1698a86b404083662eeb1b637f64).
+
+Before any card, read [00A](https://app.notion.com/p/3b5e5c88f85f81bc840ace8b8a65962e), [00B](https://app.notion.com/p/3b5e5c88f85f81aeaeaef4621d211126),
+[00C](https://app.notion.com/p/3b5e5c88f85f81d89deef714c8b23eeb), [00D](https://app.notion.com/p/3b8e5c88f85f814d8296c6c60541946d) whenever a named asset is required,
+and [Page 19](https://app.notion.com/p/3b4e5c88f85f8192a488f6db72fa116b). Only an exact live card authorization plus a PASS
+running gate permits tracked writes. Never self-authorize a card or treat
+documentation status as code authority.
+
+All later Reviewer protocol, runtime, phase, fanout, generated-package, and
+production-cutover guidance is retained only as current-state cleanup evidence;
+it must not govern new Reviewer implementation. Unrelated repository security,
+deployment, frontend, and testing rules remain binding unless they conflict with
+the current Reviewer authority.
+<!-- PULLWISE_REVIEWER_CURRENT_AUTHORITY_END -->
+
 # Pullwise Worker Agent Notes
 
 ## Problem Solving Discipline
