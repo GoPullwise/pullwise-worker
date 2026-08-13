@@ -383,6 +383,55 @@ inference never select an option or authorize production implementation.
   signing/attestation/release, canary, cutover, legacy deletion, fallback,
   dual/compatibility/downgrade paths, second authority/store/runner, and
   codegraph remain prohibited.
+- D42 (`b2710ca7cbfd19cd70721a54cf18e5674dd4eadb10f2625728eb79fec4a422c3`)
+  is bound to `bounded_python_facade_cache_one_generate_no_activation`. It
+  supersedes only D41's consumed Generate boundary to cache the decoded bundle
+  and internal schema/fixture lookup in the generated Python facade while
+  preserving detached, caller-mutation-safe public values. The exactly-one
+  Generate allowance is consumed at count `1`; package
+  `@pullwise/agent-task-contract@0.1.0`, content
+  `501ed1be77f96f5a00f1fb9cfd59da64ca46b317f117e8661af7d7948a9374e4`,
+  and root
+  `1a79eb16f24c0390b9916255db251e7f607f5c23cc3a1afec5de4a63fb155ed9`
+  remain unchanged. The Server and Worker generated Python wrappers are
+  byte-identical, LF-only, and SHA-256
+  `b80384b663667fb041819f5c94d83e7f018264f9732569d394e8289512b3299f`;
+  published bundle, root manifest, npm wrapper, and npm package bytes remain
+  unchanged. Do not Generate again, hand-edit generated outputs, redefine
+  contract schemas, activate D24, deploy, send production traffic, canary, cut
+  over, delete legacy paths, add fallback/dual/compatibility/downgrade paths,
+  or create a second authority/store/runner.
+- D43 (`703631e3aa2e1b05dfc2f4ba1d3f9e6607e1d53116f39969abe7f705f31a202c`)
+  is the append-only
+  `bounded_public_error_code_oneof_cache_one_generate_no_activation` repair.
+  `_public_error_code` must read `error_golden_current_registry` from the
+  module-owned parsed cache so expected failures of a valid `oneOf` never
+  decode or parse the embedded bundle again. D42's Generate remains consumed
+  at count `1`; D43's exactly-one Generate is also consumed at count `1`.
+  The Server and Worker generated Python wrappers are byte-identical, LF-only,
+  and SHA-256
+  `956e2db9ea8fb81bce50e549656b44e6a28793597133693c0073210b171f2a8d`.
+  Package `@pullwise/agent-task-contract@0.1.0`, content
+  `501ed1be77f96f5a00f1fb9cfd59da64ca46b317f117e8661af7d7948a9374e4`,
+  root `1a79eb16f24c0390b9916255db251e7f607f5c23cc3a1afec5de4a63fb155ed9`,
+  and the published bundle, root manifest, npm wrapper, and npm package bytes
+  remain unchanged. Do not Generate again or hand-edit either wrapper.
+- D44 (`ac083eb8c4ef4f7e98dc7590d197d9499544eaaf762a34fc0c2ff18495690d1d`)
+  is the append-only
+  `bounded_public_error_code_missing_registry_default_one_generate_no_activation`
+  repair. A rendered minimal bundle without
+  `error_golden_current_registry` must retain the public
+  `CONTRACT_DOCUMENT_INVALID` default without decoding or parsing the embedded
+  bundle again; catch only the missing internal registry lookup and preserve
+  all other validation failures. D42, D43, and D44 Generate counts are each
+  consumed at exactly `1`. The Server and Worker generated Python wrappers are
+  byte-identical, LF-only, and SHA-256
+  `5142895ac6d9b2a6933ad1b5e9abdaf8efcebc453d502adae87bd55aaf3f8329`.
+  Package `@pullwise/agent-task-contract@0.1.0`, content
+  `501ed1be77f96f5a00f1fb9cfd59da64ca46b317f117e8661af7d7948a9374e4`,
+  root `1a79eb16f24c0390b9916255db251e7f607f5c23cc3a1afec5de4a63fb155ed9`,
+  and the published bundle, root manifest, npm wrapper, and npm package bytes
+  remain unchanged. Do not Generate again or hand-edit either wrapper.
 - The preceding S7 `SPEC_GAP` text is historical pre-D39 guidance; D39 is the
   completed S7 closure, D40 is the bounded audit authority, and resolved D41
   controls only the raw-evidence contract closure and single Generate boundary.
