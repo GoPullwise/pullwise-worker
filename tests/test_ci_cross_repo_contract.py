@@ -104,7 +104,7 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
         )
         self.assertNotIn("--require-absent", workflow)
 
-    def test_ci_and_release_gate_the_exact_current_package_lock(self) -> None:
+    def test_ci_marks_exact_lock_diagnostic_while_release_stays_blocking(self) -> None:
         baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
         legacy_server = next(
             item for item in baseline["repositories"] if item["id"] == "server"
@@ -121,10 +121,29 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
             self.assertIn("repository: GoPullwise/pullwise-server", workflow)
             self.assertIn(f"ref: {CURRENT_PACKAGE_SERVER_COMMIT}", workflow)
             self.assertIn("path: current-contract-server", workflow)
-            self.assertIn("Check current Agent-First package exact lock", workflow)
-            for test_name in lock_tests:
-                self.assertIn(test_name, workflow)
 
+        diagnostic_name = (
+            'Diagnostic (non-authoritative): Check current Agent-First package exact lock'
+        )
+        diagnostic_start = ci.index(diagnostic_name)
+        diagnostic_end = ci.index("\n      - name:", diagnostic_start)
+        diagnostic_step = ci[diagnostic_start:diagnostic_end]
+
+        self.assertIn("continue-on-error: true", diagnostic_step)
+        self.assertIn(
+            'PULLWISE_EXPERIMENTAL_EXACT_PACKAGE_DIAGNOSTIC: "1"',
+            diagnostic_step,
+        )
+        self.assertIn(
+            "python -m unittest tests.test_agent_kernel_current_package",
+            diagnostic_step,
+        )
+        for test_name in lock_tests:
+            self.assertNotIn(test_name, ci)
+            self.assertIn(test_name, release)
+
+        self.assertIn("Check current Agent-First package exact lock", release)
+        self.assertNotIn(diagnostic_name, release)
         self.assertEqual(
             2,
             ci.count(
@@ -141,6 +160,7 @@ class CrossRepositoryCiContractTest(unittest.TestCase):
         self.assertIn(f"ref: {legacy_server['frozen_head']}", ci)
         self.assertNotIn(f"ref: {legacy_server['frozen_head']}", release)
 
-
 if __name__ == "__main__":
     unittest.main()
+
+

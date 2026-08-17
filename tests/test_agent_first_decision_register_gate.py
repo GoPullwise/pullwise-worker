@@ -72,9 +72,7 @@ def _resolve(
 
 def _resolved_d1(option_id: str = "pullwise_full_scan") -> dict[str, object]:
     changed = _resolve(_all_pending_register(), "D1", option_id)
-    changed["active_decision_id"] = (
-        "D2" if option_id == "generic_agent_worker" else "D3"
-    )
+    changed["active_decision_id"] = "D2" if option_id == "generic_agent_worker" else "D3"
     return validate_register(changed)
 
 
@@ -96,9 +94,7 @@ def _all_pending_register() -> dict[str, object]:
     return changed
 
 
-def _unit_body(
-    register: dict[str, object], unit_id: str
-) -> str | None:
+def _unit_body(register: dict[str, object], unit_id: str) -> str | None:
     decisions = {item["id"]: item for item in register["decisions"]}
     unit = next(
         item for item in register["normative_units"] if item["id"] == unit_id
@@ -137,9 +133,7 @@ def _write_normative_docs(
                 not include_ready and unit["id"] not in overrides
             ):
                 continue
-            lines.extend(
-                [unit["start_marker"], body, unit["end_marker"], ""]
-            )
+            lines.extend([unit["start_marker"], body, unit["end_marker"], ""])
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
@@ -403,3 +397,4 @@ class AgentFirstDecisionRegisterGateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

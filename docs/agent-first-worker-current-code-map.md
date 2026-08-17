@@ -98,5 +98,6 @@ The inventory covers every Git-tracked regular file above 400 physical lines tha
 
 | Path | Physical lines | Digest | Provenance | Reason | Considered split seam | Owner | Removal condition |
 |---|---:|---|---|---|---|---|---|
-| `pullwise_worker/_generated_agent_task_contract.py` | 8062 | `bd099dd825c2b2340061b67500bc02f1bb4fee0a1ce7ff44138b36b8821a59fd` | `pullwise-server@06ed22299e324a8a39f9030c653aef34044c3d3e:pullwise_server/agent_first_contract_bundle_python.py` | D28 requires immutable Server-generated Python wrapper and Worker cannot hand-edit it. | Server generator owns partitioning and Worker must preserve exact bytes. | Pullwise Server current-contract package owner | Remove when Worker no longer checks in this wrapper or it falls to <=400 physical lines. |
+| `pullwise_worker/_generated_agent_task_contract.py` | 8808 | `5142895ac6d9b2a6933ad1b5e9abdaf8efcebc453d502adae87bd55aaf3f8329` | `pullwise-server@06ed22299e324a8a39f9030c653aef34044c3d3e:pullwise_server/agent_first_contract_bundle_python.py` | D28 requires immutable Server-generated Python wrapper and Worker cannot hand-edit it. | Server generator owns partitioning and Worker must preserve exact bytes. | Pullwise Server current-contract package owner | Remove when Worker no longer checks in this wrapper or it falls to <=400 physical lines. |
 <!-- END GENERATED WORKER SLICE 0 BASELINE -->
+

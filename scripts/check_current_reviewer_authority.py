@@ -241,6 +241,48 @@ def validate_workspace(workspace_root: Path) -> dict[str, Any]:
     }
 
 
+def validate_repository(repository_root: Path, repo: str) -> dict[str, Any]:
+    reports: list[dict[str, Any]] = []
+    environment_errors: list[dict[str, str]] = []
+    block: str | None = None
+    try:
+        root = _resolve_workspace_root(repository_root)
+        text, byte_sha256 = _read_regular_utf8(
+            root / "AGENTS.md",
+            root=root,
+            repository_root=root,
+        )
+        errors, block = _routing_errors(text)
+        reports.append(
+            {
+                "repo": repo,
+                "path": "AGENTS.md",
+                "status": "PASS" if not errors else "FAIL",
+                "errors": errors,
+                "sha256": byte_sha256,
+            }
+        )
+    except WorkspaceInputError as exc:
+        environment_errors.append({"repo": repo, "code": str(exc)})
+    return {
+        "schema_id": REPORT_SCHEMA_ID,
+        "status": (
+            "INDETERMINATE"
+            if environment_errors
+            else "PASS"
+            if reports and reports[0]["status"] == "PASS"
+            else "FAIL"
+        ),
+        "repositories": reports,
+        "routing_parity_sha256": (
+            hashlib.sha256(block.encode("utf-8")).hexdigest()
+            if block is not None
+            else None
+        ),
+        "environment_errors": environment_errors,
+    }
+
+
 class JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise WorkspaceInputError(message)
@@ -249,9 +291,14 @@ class JsonArgumentParser(argparse.ArgumentParser):
 def main(argv: list[str] | None = None) -> int:
     parser = JsonArgumentParser()
     parser.add_argument("--workspace-root", type=Path, default=ROOT.parent)
+    parser.add_argument("--repo", choices=sorted(REPOSITORIES))
     try:
         args = parser.parse_args(argv)
-        report = validate_workspace(args.workspace_root)
+        report = (
+            validate_repository(ROOT, args.repo)
+            if args.repo
+            else validate_workspace(args.workspace_root)
+        )
     except WorkspaceInputError as exc:
         report = {
             "schema_id": REPORT_SCHEMA_ID,

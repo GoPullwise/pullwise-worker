@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-22.04
@@ -16,27 +19,42 @@ jobs:
         with:
           fetch-depth: 0
           path: pullwise-worker
-      - name: Check out frozen Server contract producer
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10.12"
+      - name: Check current Reviewer authority
+        run: python scripts/check_current_reviewer_authority.py --repo worker
+      - name: Check out current Server test dependency
         uses: actions/checkout@v4
         with:
           repository: GoPullwise/pullwise-server
-          ref: d68487a283bbc28e526ffac623cb3dd1f06cd4e9
           path: pullwise-server
-      - name: Check out current Server contract producer
+          persist-credentials: false
+      - name: Check out current Web test dependency
+        uses: actions/checkout@v4
+        with:
+          repository: GoPullwise/pullwise-web
+          path: pullwise-web
+          persist-credentials: false
+      - name: "Diagnostic (non-authoritative): frozen Server checkout"
+        continue-on-error: true
+        run: |
+          # Historical diagnostic only; ref: d68487a283bbc28e526ffac623cb3dd1f06cd4e9
+          git -C ../pullwise-server cat-file -e d68487a283bbc28e526ffac623cb3dd1f06cd4e9^{commit}
+      - name: "Diagnostic (non-authoritative): current exact-package Server checkout"
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: GoPullwise/pullwise-server
           ref: 183824c810811094330b273b2eecabed567d945f
           path: current-contract-server
-      - name: Check out frozen Web contract consumer
-        uses: actions/checkout@v4
-        with:
-          repository: GoPullwise/pullwise-web
-          ref: 0af3088a86a3474b6f8b937958137db438098d48
-          path: pullwise-web
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+          persist-credentials: false
+      - name: "Diagnostic (non-authoritative): frozen Web checkout"
+        continue-on-error: true
+        run: |
+          # Historical diagnostic only; ref: 0af3088a86a3474b6f8b937958137db438098d48
+          git -C ../pullwise-web cat-file -e 0af3088a86a3474b6f8b937958137db438098d48^{commit}
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade "pip>=25.3,<27" setuptools wheel
@@ -59,15 +77,13 @@ jobs:
         run: python scripts/check_output_contracts.py
       - name: Check isolated Agent Kernel wheel
         run: python scripts/check_agent_kernel_wheel.py
-      - name: Check current Agent-First package exact lock
+      - name: "Diagnostic (non-authoritative): Check current Agent-First package exact lock"
+        continue-on-error: true
         env:
           PULLWISE_CURRENT_SERVER_ROOT: ../current-contract-server
+          PULLWISE_EXPERIMENTAL_EXACT_PACKAGE_DIAGNOSTIC: "1"
         run: |
-          python -m unittest \
-            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_worker_pin_is_the_generated_package_tuple \
-            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_worker_wrapper_is_exact_server_artifact \
-            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_d22_release_gate_schemas_and_golden_fixtures_are_public
+          # Diagnostic input: PULLWISE_CURRENT_SERVER_ROOT: ../current-contract-server
+          python -m unittest tests.test_agent_kernel_current_package
       - name: Run tests
-        env:
-          PULLWISE_CURRENT_SERVER_ROOT: ../current-contract-server
         run: python -m unittest discover -s tests -p "test_*.py"

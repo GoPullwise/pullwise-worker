@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import socket
@@ -12,11 +13,16 @@ import unittest
 from unittest import mock
 import urllib.request
 
-from scripts import check_current_reviewer_authority as checker
-
-
 WORKER_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = WORKER_ROOT.parent
+CHECKER_PATH = WORKER_ROOT / "scripts" / "check_current_reviewer_authority.py"
+CHECKER_SPEC = importlib.util.spec_from_file_location(
+    "_pullwise_worker_current_reviewer_authority", CHECKER_PATH
+)
+if CHECKER_SPEC is None or CHECKER_SPEC.loader is None:
+    raise ImportError(f"unable to load Worker authority checker: {CHECKER_PATH}")
+checker = importlib.util.module_from_spec(CHECKER_SPEC)
+CHECKER_SPEC.loader.exec_module(checker)
 
 
 class CurrentReviewerAuthorityTest(unittest.TestCase):
@@ -243,6 +249,31 @@ class CurrentReviewerAuthorityTest(unittest.TestCase):
 
         self.assertEqual(1, process.returncode)
         self.assertEqual("FAIL", json.loads(process.stdout)["status"])
+        self.assertEqual("", process.stderr)
+
+    def test_repo_cli_validates_current_worker_checkout(self) -> None:
+        process = subprocess.run(
+            [
+                sys.executable,
+                str(CHECKER_PATH),
+                "--repo",
+                "worker",
+            ],
+            cwd=WORKER_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        report = json.loads(process.stdout)
+        repositories = report["repositories"]
+        self.assertEqual(0, process.returncode)
+        self.assertEqual("PASS", report["status"])
+        self.assertEqual(
+            ["worker"], [item["repo"] for item in repositories]
+        )
+        self.assertEqual([], report["environment_errors"])
         self.assertEqual("", process.stderr)
 
 

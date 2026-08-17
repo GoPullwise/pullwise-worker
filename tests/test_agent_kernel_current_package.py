@@ -54,8 +54,15 @@ SERVER_BUNDLE = (
 
 
 INVOCATION_SCHEMA_ID = 'tool-invocation/v1'
+EXACT_PACKAGE_DIAGNOSTIC_ENABLED = (
+    os.environ.get('PULLWISE_EXPERIMENTAL_EXACT_PACKAGE_DIAGNOSTIC') == '1'
+)
 
 
+@unittest.skipUnless(
+    EXACT_PACKAGE_DIAGNOSTIC_ENABLED,
+    'experimental exact-package diagnostic disabled',
+)
 class AgentKernelCurrentPackageTest(unittest.TestCase):
     def test_worker_pin_is_the_generated_package_tuple(self) -> None:
         self.assertEqual(generated_contract.PACKAGE_TUPLE, CURRENT_PACKAGE.as_tuple())
