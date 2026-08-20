@@ -1,2 +1,3 @@
 recursive-include deploy *
 recursive-include contracts/agent-task/v1 *.json
+include reviewer-contract-pin.json

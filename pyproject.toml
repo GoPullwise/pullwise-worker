@@ -26,3 +26,6 @@ include = ["pullwise_worker"]
 "share/pullwise-worker/contracts/agent-task/v1/fixtures" = [
     "contracts/agent-task/v1/fixtures/*.json",
 ]
+"share/pullwise-worker/contracts/pullwise-review/v1" = [
+    "reviewer-contract-pin.json",
+]

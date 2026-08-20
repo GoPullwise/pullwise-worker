@@ -1,0 +1,10 @@
+{
+  "schema_id": "pullwise-reviewer-contract-pin/v1",
+  "contract_version": "pullwise-review/v1",
+  "canonicalization": "pullwise-canonical-json/v1",
+  "manifest_digest": "sha256:71428f4dc199e7cbdbe99b64cbdeff03686cda59eb08e84f22224822f5a8167e",
+  "consumer_path": "pullwise_worker/_generated_reviewer_contract.py",
+  "consumer_sha256": "sha256:0a998deec3f72134bfedd6ca4d5246aeb5fbad9cd9efdf691bda7d925349613b",
+  "source_commit": "556c0dc759d91e159513c2cd8232299981c6f811",
+  "source_path": "generated/reviewer-contract-python/reviewer_contract.py"
+}
