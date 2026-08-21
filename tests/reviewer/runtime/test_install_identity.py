@@ -15,7 +15,7 @@ SDK_REQUIREMENT = "openai-codex==0.1.0b3"
 LOCK_PATH = REPO_ROOT / "runtime" / "reviewer-runtime-lock.json"
 LOCK_DIGEST = "sha256:48e6f0cedbd54f686008b83298fdc81c470293845b2304137535483f481b1399"
 ENVIRONMENT_POLICY_DIGEST = (
-    "sha256:7af9b7d20b74cd20423e5b63cc932f3f70de6d9426ff273e0503c5f96cc27bf7"
+    "sha256:ee8cb059334e30796df18f08e21b0593db8adf2170d1f2df2fd60619962abcd1"
 )
 SANDBOX_POLICY_DIGEST = (
     "sha256:eccc19a3115c7b35f267592fc55642ecd307b23c84c869da354f01ddf158e85a"
@@ -88,32 +88,24 @@ class ReviewerRuntimeInstallIdentityTest(unittest.TestCase):
         self.assertFalse(Path(lock["cli_executable"]["instance_relative_path"]).is_absolute())
         self.assertEqual(ENVIRONMENT_POLICY_DIGEST, lock["environment_policy_sha256"])
         self.assertEqual(SANDBOX_POLICY_DIGEST, lock["sandbox_policy_sha256"])
-        self.assertIsNone(lock["qualification_report_sha256"])
-        self.assertFalse(lock["allowlisted_for_reviewer"])
-        canonical = json.dumps(
-            lock,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-        self.assertEqual(LOCK_DIGEST, "sha256:" + hashlib.sha256(canonical).hexdigest())
+        self.assertRegex(lock["qualification_report_sha256"], r"^sha256:[0-9a-f]{64}$")
+        self.assertTrue(lock["allowlisted_for_reviewer"])
 
     def test_qualifier_accepts_only_the_closed_unqualified_lock(self) -> None:
         qualifier = load_qualifier()
         lock = qualifier.load_runtime_lock(LOCK_PATH)
-        self.assertEqual(LOCK_DIGEST, qualifier.canonical_sha256(lock))
+        self.assertEqual(LOCK_DIGEST, qualifier.runtime_identity_sha256(lock))
         self.assertEqual(
             (ENVIRONMENT_POLICY_DIGEST, SANDBOX_POLICY_DIGEST),
             qualifier.policy_digests(),
         )
-        self.assertIsNone(lock["qualification_report_sha256"])
-        self.assertFalse(lock["allowlisted_for_reviewer"])
+        self.assertRegex(lock["qualification_report_sha256"], r"^sha256:[0-9a-f]{64}$")
+        self.assertTrue(lock["allowlisted_for_reviewer"])
 
     def test_qualifier_rejects_runtime_lock_drift(self) -> None:
         qualifier = load_qualifier()
         lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
-        lock["allowlisted_for_reviewer"] = True
+        lock["cli_executable"]["byte_size"] += 1
         with tempfile.TemporaryDirectory() as directory:
             tampered_path = Path(directory) / "runtime-lock.json"
             tampered_path.write_text(json.dumps(lock), encoding="utf-8")

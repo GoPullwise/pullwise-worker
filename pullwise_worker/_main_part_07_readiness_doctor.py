@@ -147,6 +147,37 @@ def worker_provider_home_isolation_check(config: WorkerConfig) -> tuple[bool, st
     return True, service_home
 
 
+def reviewer_runtime_qualification_check(lock_path: Path, report_path: Path) -> tuple[bool, str]:
+    """Compose the R3Q status without taking qualification ownership."""
+    try:
+        from pullwise_worker.reviewer.qualification import (
+            FIXTURE_IDS,
+            canonical_sha256,
+            environment_policy,
+            qualification_report_sha256,
+        )
+
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        fixture_status = {
+            str(item.get("id")): item.get("status")
+            for item in report.get("fixtures", [])
+            if isinstance(item, dict)
+        }
+        report_digest = qualification_report_sha256(report)
+        ok = (
+            lock.get("allowlisted_for_reviewer") is True
+            and lock.get("qualification_report_sha256") == report_digest
+            and lock.get("environment_policy_sha256") == canonical_sha256(environment_policy())
+            and report.get("result") == "PASS"
+            and report.get("runtime_state") == "PASS"
+            and fixture_status == {fixture_id: "PASS" for fixture_id in FIXTURE_IDS}
+        )
+        return ok, report_digest if ok else "runtime qualification evidence mismatch"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def worker_readiness_state(config: WorkerConfig) -> tuple[list[tuple[str, bool, str]], bool, list[str]]:
     checks: list[tuple[str, bool, str]] = []
     checks.append(("server_url", server_url_allowed(config.server_url, allow_insecure=config.allow_insecure_server_url), config.server_url))
