@@ -1,6 +1,0 @@
-{
-  "schema_id": "pullwise-runtime-close-hang-fixture/v1",
-  "child_code": "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)",
-  "timeout_seconds": 0.25,
-  "expected": "PROCESS_GROUP_REAPED"
-}

@@ -24,9 +24,6 @@ ENVIRONMENT_POLICY = {
     "variables": {
         "CODEX_HOME": "instance_scoped",
         "HOME": "instance_scoped",
-        "HTTP_PROXY": "explicit_external_proxy",
-        "HTTPS_PROXY": "explicit_external_proxy",
-        "NO_PROXY": "fixed_local_callback_only",
         "PATH": "fixed_system_minimal",
         "TMPDIR": "attempt_scoped",
     },
@@ -39,7 +36,7 @@ SANDBOX_POLICY = {
     "process_boundary": "supervised_instance_local_cli",
     "shell_tool": False,
 }
-EXPECTED_ENVIRONMENT_POLICY_DIGEST = "sha256:ee8cb059334e30796df18f08e21b0593db8adf2170d1f2df2fd60619962abcd1"
+EXPECTED_ENVIRONMENT_POLICY_DIGEST = "sha256:7af9b7d20b74cd20423e5b63cc932f3f70de6d9426ff273e0503c5f96cc27bf7"
 EXPECTED_SANDBOX_POLICY_DIGEST = "sha256:eccc19a3115c7b35f267592fc55642ecd307b23c84c869da354f01ddf158e85a"
 EXPECTED_LOCK = {
     "schema_id": "pullwise-codex-runtime-lock/v1",
@@ -111,14 +108,6 @@ def policy_digests() -> tuple[str, str]:
     return canonical_sha256(ENVIRONMENT_POLICY), canonical_sha256(SANDBOX_POLICY)
 
 
-def runtime_identity_sha256(value: dict[str, Any]) -> str:
-    projection = json.loads(json.dumps(value))
-    projection["environment_policy_sha256"] = "sha256:7af9b7d20b74cd20423e5b63cc932f3f70de6d9426ff273e0503c5f96cc27bf7"
-    projection["qualification_report_sha256"] = None
-    projection["allowlisted_for_reviewer"] = False
-    return canonical_sha256(projection)
-
-
 def load_runtime_lock(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(
@@ -129,22 +118,10 @@ def load_runtime_lock(path: Path) -> dict[str, Any]:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeIdentityError(f"cannot read runtime lock: {error}") from error
-    if not isinstance(value, dict) or set(value) != set(EXPECTED_LOCK):
-        raise RuntimeIdentityError("runtime lock does not have the closed shape")
-    if runtime_identity_sha256(value) != EXPECTED_LOCK_DIGEST:
-        raise RuntimeIdentityError("runtime lock measured identity mismatch")
-    report_digest = value.get("qualification_report_sha256")
-    allowlisted = value.get("allowlisted_for_reviewer")
-    if allowlisted is False and report_digest is not None:
-        raise RuntimeIdentityError("unqualified lock cannot bind a report")
-    if allowlisted is True and (
-        not isinstance(report_digest, str)
-        or not report_digest.startswith("sha256:")
-        or len(report_digest) != 71
-    ):
-        raise RuntimeIdentityError("qualified lock must bind a report digest")
-    if not isinstance(allowlisted, bool):
-        raise RuntimeIdentityError("runtime allowlist flag must be boolean")
+    if value != EXPECTED_LOCK:
+        raise RuntimeIdentityError("runtime lock does not match the closed measured identity")
+    if canonical_sha256(value) != EXPECTED_LOCK_DIGEST:
+        raise RuntimeIdentityError("runtime lock canonical digest mismatch")
     environment_digest, sandbox_digest = policy_digests()
     if environment_digest != EXPECTED_ENVIRONMENT_POLICY_DIGEST:
         raise RuntimeIdentityError("environment policy canonical digest mismatch")
@@ -384,35 +361,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=repo_root / "runtime" / "reviewer-runtime-lock.json",
     )
-    parser.add_argument("--sdk-wheel", type=Path)
-    parser.add_argument("--cli-wheel", type=Path)
-    parser.add_argument("--python", type=Path)
-    parser.add_argument("--instance-root", type=Path)
+    parser.add_argument("--sdk-wheel", type=Path, required=True)
+    parser.add_argument("--cli-wheel", type=Path, required=True)
+    parser.add_argument("--python", type=Path, required=True)
+    parser.add_argument("--instance-root", type=Path, required=True)
     parser.add_argument("--report", type=Path)
-    parser.add_argument("--output", type=Path)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.output is not None:
-        try:
-            from pullwise_worker.reviewer.qualification import qualify_runtime
-
-            repo_root = Path(__file__).resolve().parents[1]
-            report = qualify_runtime(repo_root, args.lock, args.output)
-        except (RuntimeIdentityError, ValueError) as error:
-            print(f"mismatch: {error}", file=sys.stderr)
-            return EXIT_MISMATCH
-        except OSError as error:
-            print(f"error: {error}", file=sys.stderr)
-            return EXIT_OPERATIONAL
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return EXIT_OK if report.get("result") == "PASS" else EXIT_MISMATCH
-    required = (args.sdk_wheel, args.cli_wheel, args.python, args.instance_root)
-    if any(value is None for value in required):
-        print("error: install identity mode requires --sdk-wheel, --cli-wheel, --python, and --instance-root", file=sys.stderr)
-        return EXIT_OPERATIONAL
     try:
         report = verify_install_identity(
             args.lock,
