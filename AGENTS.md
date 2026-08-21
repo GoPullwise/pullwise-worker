@@ -19,6 +19,30 @@ it must not govern new Reviewer implementation. Unrelated repository security,
 deployment, frontend, and testing rules remain binding unless they conflict with
 the current Reviewer authority.
 <!-- PULLWISE_REVIEWER_CURRENT_AUTHORITY_END -->
+<!-- PULLWISE_REVIEWER_TARGET_START -->
+## Pullwise Reviewer Target — Node.js + Pi Coding Agent
+
+For all new Pullwise Reviewer implementation, the sole Worker target is
+Node.js/TypeScript on Node `>=22.19.0`, embedding
+`@earendil-works/pi-coding-agent`. One active attempt owns one Pi
+`AgentSession`.
+
+This is a clean break. Do not add or preserve a Codex SDK or CLI, `CODEX_HOME`,
+a Python Worker runtime, compatibility or shadow adapters, dual runtimes,
+provider routing, or automatic provider/model fallback. Pi is not a sandbox:
+the Worker supervisor must enforce operating-system containment, process-tree
+ownership, cancellation, cleanup, and late-publication fencing.
+
+Do not query or poll subscription/account quota windows, percentages, reset
+times, low/exhausted readiness, or refresh-window commands. Preserve immutable
+per-attempt input/output/cache-token usage, cost when reported, timing,
+provider/model identity, and provider-error facts. Product account/repository
+scan quotas are separate business controls and remain in force.
+
+Any later Reviewer-specific Python, Codex, quota-window, runtime, phase, or
+generated-consumer rule in this file is historical cleanup evidence only and
+must not govern target implementation.
+<!-- PULLWISE_REVIEWER_TARGET_END -->
 
 # Pullwise Worker Agent Notes
 
