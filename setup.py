@@ -41,7 +41,7 @@ setup(
     description="Pullwise pull-based scan worker",
     python_requires=">=3.10",
     packages=find_packages(include=["pullwise_worker"]),
-    install_requires=["openai-codex"],
+    install_requires=["openai-codex==0.1.0b3"],
     entry_points={"console_scripts": ["pullwise-worker=pullwise_worker.main:main"]},
     include_package_data=True,
     data_files=agent_kernel_contract_data_files(),

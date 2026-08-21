@@ -1,0 +1,25 @@
+{
+  "schema_id": "pullwise-codex-runtime-lock/v1",
+  "os": "ubuntu-22.04-x86_64",
+  "python_version": "3.10.12",
+  "sdk": {
+    "name": "openai-codex",
+    "version": "0.1.0b3",
+    "wheel_sha256": "sha256:8d1f9d346667aeecb435c6a45d0edb3f016187276ec452cf8094d813896276c4"
+  },
+  "cli_package": {
+    "name": "openai-codex-cli-bin",
+    "version": "0.137.0a4",
+    "artifact_sha256": "sha256:6454f838d44c56c1ed07a29b391fa412785e5dd2ffd06db0b62e62478c19bb64"
+  },
+  "cli_executable": {
+    "instance_relative_path": "runtime/bin/codex",
+    "byte_size": 227705152,
+    "sha256": "sha256:86d09b51543bccbf63bd1363e98b7f638e87dd55fe96b1cd22382a5d6bf384ad",
+    "version_output": "codex-cli 0.137.0-alpha.4"
+  },
+  "environment_policy_sha256": "sha256:7af9b7d20b74cd20423e5b63cc932f3f70de6d9426ff273e0503c5f96cc27bf7",
+  "sandbox_policy_sha256": "sha256:eccc19a3115c7b35f267592fc55642ecd307b23c84c869da354f01ddf158e85a",
+  "qualification_report_sha256": null,
+  "allowlisted_for_reviewer": false
+}
