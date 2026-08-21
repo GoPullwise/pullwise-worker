@@ -30,6 +30,15 @@ current code and available evidence, then fix that root cause. Add diagnostics
 only when they directly support root-cause isolation or make a verified fix
 safer to operate.
 
+## Cross-Repository CI Workspace
+
+The Worker full CI suite reads authority workflows and checkers from the Admin,
+Server, Web, and Worker repositories. Keep Worker CI checkouts at the exact
+sibling paths `pullwise-admin`, `pullwise-server`, and `pullwise-web` before
+`Run tests`, with credentials not persisted. Keep the workflow-contract test in
+`tests/test_current_reviewer_ci.py` so a local four-repository workspace cannot
+hide a missing CI checkout.
+
 ## Agent-First Clean-Break Refactor Policy
 
 The user has explicitly chosen a clean-break Agent-First refactor. For any

@@ -37,6 +37,12 @@ jobs:
           repository: GoPullwise/pullwise-web
           path: pullwise-web
           persist-credentials: false
+      - name: Check out current Admin test dependency
+        uses: actions/checkout@v4
+        with:
+          repository: GoPullwise/pullwise-admin
+          path: pullwise-admin
+          persist-credentials: false
       - name: "Diagnostic (non-authoritative): frozen Server checkout"
         continue-on-error: true
         run: |

@@ -142,6 +142,17 @@ class CurrentReviewerCiTest(unittest.TestCase):
                 for literal in forbidden:
                     self.assertNotIn(literal, text.lower())
 
+    def test_worker_checks_out_admin_before_full_cross_repository_tests(self) -> None:
+        text = workflow("worker")
+        admin_checkout = named_step(text, "Check out current Admin test dependency")
+        run_tests = named_step(text, "Run tests")
+
+        self.assertIn("uses: actions/checkout@v4", admin_checkout)
+        self.assertIn("repository: GoPullwise/pullwise-admin", admin_checkout)
+        self.assertIn("path: pullwise-admin", admin_checkout)
+        self.assertIn("persist-credentials: false", admin_checkout)
+        self.assertLess(text.index(admin_checkout), text.index(run_tests))
+
     def test_worker_frozen_and_exact_package_steps_are_diagnostic_only(self) -> None:
         text = workflow("worker")
         diagnostic_names = (
