@@ -10,7 +10,9 @@ from pathlib import Path, PurePosixPath
 import re
 import secrets
 import stat
+import threading
 import time
+import weakref
 
 
 class CurrentObjectError(RuntimeError):
@@ -60,7 +62,17 @@ class PublishedCurrentPayload:
         return self.payload.content_ref_bytes
 
 
+class _RootOperationLock:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+
+
 class CurrentObjectStore:
+    _root_locks: weakref.WeakValueDictionary[str, _RootOperationLock] = (
+        weakref.WeakValueDictionary()
+    )
+    _root_locks_guard = threading.Lock()
+
     def __init__(self, root: Path) -> None:
         if not isinstance(root, Path):
             raise CurrentObjectError("CURRENT_OBJECT_ROOT_INVALID")
@@ -69,12 +81,18 @@ class CurrentObjectStore:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(root, 0o700)
         self.root = root
+        self._operation_lock = self._root_operation_lock(root)
         self.objects = root / "objects"
         self.staging = root / "staging"
-        self._ensure_directory(self.objects)
-        self._ensure_directory(self.staging)
+        with self._operation_lock.lock:
+            self._ensure_directory(self.objects)
+            self._ensure_directory(self.staging)
 
     def publish(self, payload: bytes) -> PublishedCurrentObject:
+        with self._operation_lock.lock:
+            return self._publish(payload)
+
+    def _publish(self, payload: bytes) -> PublishedCurrentObject:
         if not isinstance(payload, bytes):
             raise CurrentObjectError("CURRENT_OBJECT_BYTES_INVALID")
         self._ensure_directory(self.objects)
@@ -122,9 +140,24 @@ class CurrentObjectStore:
                 pass
 
     def read_verified(self, published: PublishedCurrentObject) -> bytes:
-        return self._verify(published, return_bytes=True)
+        with self._operation_lock.lock:
+            return self._verify(published, return_bytes=True)
 
     def collect_orphans(
+        self,
+        reachable_sha256: set[str] | frozenset[str],
+        *,
+        min_age_seconds: int,
+        now: float | None = None,
+    ) -> tuple[str, ...]:
+        with self._operation_lock.lock:
+            return self._collect_orphans(
+                reachable_sha256,
+                min_age_seconds=min_age_seconds,
+                now=now,
+            )
+
+    def _collect_orphans(
         self,
         reachable_sha256: set[str] | frozenset[str],
         *,
@@ -266,6 +299,16 @@ class CurrentObjectStore:
         if not self._safe_directory(path):
             raise CurrentObjectError("CURRENT_OBJECT_ROOT_INVALID")
         os.chmod(path, 0o700)
+
+    @classmethod
+    def _root_operation_lock(cls, root: Path) -> _RootOperationLock:
+        key = os.path.normcase(os.path.abspath(os.fspath(root.resolve())))
+        with cls._root_locks_guard:
+            operation_lock = cls._root_locks.get(key)
+            if operation_lock is None:
+                operation_lock = _RootOperationLock()
+                cls._root_locks[key] = operation_lock
+            return operation_lock
 
     @classmethod
     def _safe_directory(cls, path: Path) -> bool:

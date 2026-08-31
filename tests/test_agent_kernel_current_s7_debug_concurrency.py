@@ -82,8 +82,12 @@ class CurrentWorkerDebugConcurrencyTest(unittest.TestCase):
 
     def test_concurrent_exact_replays_converge_to_one_row(self) -> None:
         root = self.root_with("same", "same")
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            captures = list(executor.map(lambda _index: self.capture(root, 1), range(4)))
+        captures = []
+        for _wave in range(3):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                captures.extend(
+                    executor.map(lambda _index: self.capture(root, 1), range(4))
+                )
         self.assertEqual(1, len({item.sha256 for item in captures}))
         self.assertEqual(1, self._fragment_count())
 
