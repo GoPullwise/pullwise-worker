@@ -96,6 +96,12 @@ must not govern target implementation.
   in the Node/Pi clean break. Do not restore them as adapters or fallback paths.
 - Run `npm test` and `npm run typecheck` for local verification. CI uses Node
   `22.23.1` and installs with lifecycle scripts disabled.
+- Contract-pin tests invoke npm through the current Node executable so nested
+  package checks stay cross-platform. Resolve npm from an existing regular
+  `npm-cli.js`: prefer the validated `npm_execpath`, then only the setup-node
+  `<node-prefix>/lib/node_modules/npm/bin/npm-cli.js` and Windows NVM
+  `<node-dir>/node_modules/npm/bin/npm-cli.js` layouts. Fail closed when none
+  match; setup-node does not install npm under `<node-bin>/node_modules`.
 
 # Pullwise Worker Agent Notes
 

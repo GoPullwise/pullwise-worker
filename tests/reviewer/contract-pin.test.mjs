@@ -9,11 +9,12 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
@@ -49,10 +50,37 @@ function sha256(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
+function isNpmCliFile(candidate) {
+  if (!candidate || basename(candidate) !== "npm-cli.js") return false;
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function resolveNpmCliPath(options = {}) {
+  const execPath = options.execPath ?? process.execPath;
+  const npmExecPath = Object.hasOwn(options, "npmExecPath")
+    ? options.npmExecPath
+    : process.env.npm_execpath;
+  const candidates = [
+    npmExecPath,
+    resolve(dirname(execPath), "../lib/node_modules/npm/bin/npm-cli.js"),
+    resolve(dirname(execPath), "node_modules/npm/bin/npm-cli.js"),
+  ];
+  for (const candidate of candidates) {
+    if (isNpmCliFile(candidate)) return resolve(candidate);
+  }
+  throw new Error(
+    "Unable to resolve an existing npm-cli.js from npm_execpath or Node's npm layouts",
+  );
+}
+
 function run(command, args, cwd = repoRoot) {
   const executable = command === "npm" ? process.execPath : command;
   const commandArgs = command === "npm"
-    ? [resolve(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"), ...args]
+    ? [resolveNpmCliPath(), ...args]
     : args;
   return spawnSync(executable, commandArgs, {
     cwd,
@@ -61,6 +89,77 @@ function run(command, args, cwd = repoRoot) {
     shell: false,
   });
 }
+
+test("the npm CLI resolver supports the setup-node POSIX layout", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "setup-node-npm-cli-"));
+  try {
+    const execPath = resolve(fixture, "x64/bin/node");
+    const npmCliPath = resolve(fixture, "x64/lib/node_modules/npm/bin/npm-cli.js");
+    mkdirSync(dirname(execPath), { recursive: true });
+    mkdirSync(dirname(npmCliPath), { recursive: true });
+    writeFileSync(execPath, "");
+    writeFileSync(npmCliPath, "");
+    assert.equal(resolveNpmCliPath({ execPath, npmExecPath: undefined }), npmCliPath);
+    assert.equal(resolveNpmCliPath({ execPath, npmExecPath: join(fixture, "stale/npm-cli.js") }), npmCliPath);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("the npm CLI resolver prefers a validated npm_execpath", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "npm-execpath-"));
+  try {
+    const execPath = resolve(fixture, "x64/bin/node");
+    const fallbackPath = resolve(fixture, "x64/lib/node_modules/npm/bin/npm-cli.js");
+    const npmExecPath = resolve(fixture, "npm/lib/npm-cli.js");
+    for (const path of [execPath, fallbackPath, npmExecPath]) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "");
+    }
+    assert.equal(resolveNpmCliPath({ execPath, npmExecPath }), npmExecPath);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("the npm CLI resolver supports the Windows NVM layout", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "windows-nvm-npm-cli-"));
+  try {
+    const execPath = resolve(fixture, "node.exe");
+    const npmCliPath = resolve(fixture, "node_modules/npm/bin/npm-cli.js");
+    writeFileSync(execPath, "");
+    mkdirSync(dirname(npmCliPath), { recursive: true });
+    writeFileSync(npmCliPath, "");
+    assert.equal(resolveNpmCliPath({ execPath, npmExecPath: undefined }), npmCliPath);
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
+
+test("the npm CLI resolver rejects invalid candidates", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "invalid-npm-cli-"));
+  try {
+    const execPath = resolve(fixture, "x64/bin/node");
+    const wrongBasename = resolve(fixture, "npm/lib/not-npm-cli.js");
+    const directoryCandidate = resolve(fixture, "npm/lib/npm-cli.js");
+    mkdirSync(dirname(execPath), { recursive: true });
+    mkdirSync(dirname(wrongBasename), { recursive: true });
+    mkdirSync(directoryCandidate, { recursive: true });
+    writeFileSync(execPath, "");
+    writeFileSync(wrongBasename, "");
+
+    assert.throws(
+      () => resolveNpmCliPath({ execPath, npmExecPath: wrongBasename }),
+      /Unable to resolve an existing npm-cli\.js/u,
+    );
+    assert.throws(
+      () => resolveNpmCliPath({ execPath, npmExecPath: directoryCandidate }),
+      /Unable to resolve an existing npm-cli\.js/u,
+    );
+  } finally {
+    rmSync(fixture, { force: true, recursive: true });
+  }
+});
 
 function copyFixture(destination, installed = "link") {
   mkdirSync(resolve(destination, "scripts"), { recursive: true });
