@@ -214,7 +214,7 @@ test("fails closed when AGENTS.md resolves outside its repository", () => {
   });
 });
 
-test("the real workspace carries the exact target block", () => {
-  const report = validateWorkspace(WORKSPACE_ROOT);
+test("the real Worker carries the exact target block", () => {
+  const report = validateRepository(WORKSPACE_ROOT, "worker");
   assert.equal(report.status, "PASS", JSON.stringify(report));
 });

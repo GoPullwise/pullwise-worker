@@ -1,10 +1,29 @@
 {
-  "schema_id": "pullwise-reviewer-contract-pin/v1",
+  "schema_id": "pullwise-reviewer-contract-npm-pin/v1",
   "contract_version": "pullwise-review/v1",
   "canonicalization": "pullwise-canonical-json/v1",
   "manifest_digest": "sha256:71428f4dc199e7cbdbe99b64cbdeff03686cda59eb08e84f22224822f5a8167e",
-  "consumer_path": "pullwise_worker/_generated_reviewer_contract.py",
-  "consumer_sha256": "sha256:0a998deec3f72134bfedd6ca4d5246aeb5fbad9cd9efdf691bda7d925349613b",
-  "source_commit": "556c0dc759d91e159513c2cd8232299981c6f811",
-  "source_path": "generated/reviewer-contract-python/reviewer_contract.py"
+  "source_card_id": "R1-PI-03",
+  "source_handoff_sha256": "sha256:6c478ec3934c300e1555fbbdf3ac840f9e7a2197593b1764056b0f99fabc3168",
+  "source_commit": "190111a81ef00f54fb9a514b821ad3d578e84914",
+  "source_tree": "a25c8751268e74a565c59148bfe326f115564f8e",
+  "source_path": "generated/reviewer-contract-npm",
+  "package_name": "pullwise-review-contract",
+  "package_version": "1.0.0",
+  "dependency_spec": "file:vendor/generated/reviewer-contract-npm",
+  "consumer_path": "vendor/generated/reviewer-contract-npm",
+  "files": {
+    "index.js": {
+      "size_bytes": 11227,
+      "sha256": "sha256:c3db5b6b4d10d9fb97c805c724585500d2352d293d3a8ed9b3964cca33809057"
+    },
+    "package.json": {
+      "size_bytes": 506,
+      "sha256": "sha256:b7998c233542c66db10d394ad116e1c5d329f16ba3f123010c978db57ea01bd7"
+    },
+    "schema.json": {
+      "size_bytes": 80741,
+      "sha256": "sha256:39dd603502669542b9e16b30d60522796794014307ae0335b2f892d551f0c6dd"
+    }
+  }
 }

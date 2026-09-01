@@ -1,15 +1,14 @@
 name: Release
 
-run-name: Release pullwise-worker ${{ github.event.inputs.version || github.ref_name }}
+run-name: Release pullwise-worker ${{ inputs.version || github.ref_name }}
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version to release, for example 0.1.0"
+        description: "Worker version, for example 0.10.25"
         required: true
         type: string
 
@@ -17,254 +16,47 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
+  package:
     runs-on: ubuntu-22.04
     steps:
-      - name: Validate manual release ref
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
-            echo "Manual releases must run from refs/heads/main. Current ref: ${{ github.ref }}"
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Check out current Server contract producer
-        uses: actions/checkout@v4
+          persist-credentials: false
+      - uses: actions/setup-node@v4
         with:
-          repository: GoPullwise/pullwise-server
-          ref: 183824c810811094330b273b2eecabed567d945f
-          path: current-contract-server
-
-      - name: Validate release tag ancestry
-        if: github.ref_type == 'tag'
-        run: |
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
-            echo "Release tags must point to commits reachable from origin/main."
-            exit 1
-          }
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
+          node-version: "22.23.1"
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm run typecheck
       - name: Resolve release version
         env:
-          INPUT_VERSION: ${{ github.event.inputs.version || '' }}
+          INPUT_VERSION: ${{ inputs.version || '' }}
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            tag="${GITHUB_REF_NAME}"
-            version="${tag#v}"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
           else
-            version="${INPUT_VERSION}"
-            version="${version#v}"
-            tag="v${version}"
+            version="${INPUT_VERSION#v}"
           fi
           case "$version" in
             ""|*[!0-9.]*|.*|*.|*..*) echo "Invalid version: $version"; exit 1 ;;
           esac
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
-
-      - name: Update package version
-        if: github.ref_type != 'tag'
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+      - name: Pack the Node Worker
         run: |
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ["RELEASE_VERSION"]
-          replacements = {
-              Path("pyproject.toml"): (r'^version = "[^"]+"', f'version = "{version}"'),
-              Path("pullwise_worker/__init__.py"): (r'^__version__ = "[^"]+"', f'__version__ = "{version}"'),
-              Path("deploy/worker.env.template"): (
-                  r'^PULLWISE_WORKER_PACKAGE=.*$',
-                  f'PULLWISE_WORKER_PACKAGE=https://github.com/GoPullwise/pullwise-worker/releases/download/v{version}/pullwise_worker-{version}-py3-none-any.whl',
-              ),
-          }
-          for path, (pattern, replacement) in replacements.items():
-              text = path.read_text(encoding="utf-8")
-              updated = re.sub(pattern, replacement, text, count=1, flags=re.M)
-              if updated == text and replacement not in text:
-                  raise SystemExit(f"unable to update version in {path}")
-              path.write_text(updated, encoding="utf-8", newline="\n")
-          PY
-
-      - name: Validate release version sources
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ["RELEASE_VERSION"]
-          expected_url = (
-              "https://github.com/GoPullwise/pullwise-worker/releases/download/"
-              f"v{version}/pullwise_worker-{version}-py3-none-any.whl"
-          )
-          checks = {
-              "pyproject.toml": re.search(
-                  r'^version = "([^"]+)"',
-                  Path("pyproject.toml").read_text(encoding="utf-8"),
-                  re.M,
-              ),
-              "pullwise_worker/__init__.py": re.search(
-                  r'^__version__ = "([^"]+)"',
-                  Path("pullwise_worker/__init__.py").read_text(encoding="utf-8"),
-                  re.M,
-              ),
-              "deploy/worker.env.template": re.search(
-                  r'^PULLWISE_WORKER_PACKAGE=(.+)$',
-                  Path("deploy/worker.env.template").read_text(encoding="utf-8"),
-                  re.M,
-              ),
-          }
-          actual = {}
-          for source_path, match in checks.items():
-              if not match:
-                  raise SystemExit(f"unable to read release version source: {source_path}")
-              actual[source_path] = match.group(1)
-          expected = {
-              "pyproject.toml": version,
-              "pullwise_worker/__init__.py": version,
-              "deploy/worker.env.template": expected_url,
-          }
-          mismatches = [
-              f"{source_path}: expected {expected[source_path]!r}, found {value!r}"
-              for source_path, value in actual.items()
-              if value != expected[source_path]
-          ]
-          if mismatches:
-              raise SystemExit("release version source mismatch:\n" + "\n".join(mismatches))
-          PY
-
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade "pip>=25.3,<27" setuptools wheel
-          python -m pip install -e .
-          python -m pip install "pip-audit>=2.10.1,<2.11"
-
-      - name: Audit Python dependencies
-        run: pip-audit .
-
-      - name: Check Python dependency constraints
-        run: python -m pip check
-
-      - name: Check shell scripts
-        run: |
-          bash -n ./deploy/update-worker.sh
-          bash -n ./deploy/restart-worker.sh
-          bash -n ./deploy/uninstall-worker.sh
-          bash -n ./deploy/cleanup-checkouts.sh
-
-      - name: Check semantic output contracts
-        run: python scripts/check_output_contracts.py
-
-      - name: Check current Agent-First package exact lock
-        env:
-          PULLWISE_CURRENT_SERVER_ROOT: current-contract-server
-        run: |
-          python -m unittest \
-            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_worker_pin_is_the_generated_package_tuple \
-            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_worker_wrapper_is_exact_server_artifact \
-            tests.test_agent_kernel_current_package.AgentKernelCurrentPackageTest.test_d22_release_gate_schemas_and_golden_fixtures_are_public
-
-      - name: Run tests
-        env:
-          PULLWISE_CURRENT_SERVER_ROOT: current-contract-server
-        run: python -m unittest discover -s tests -p "test_*.py"
-
-      - name: Build distributions
-        run: |
-          rm -rf build dist
-          python -m pip install --upgrade pip build
-          python -m build
-          python -m pip install --dry-run --no-deps dist/*.whl
-
-      - name: Validate built distribution version
-        run: |
-          python - <<'PY'
-          import os
-          import tarfile
-          import zipfile
-          from pathlib import Path
-
-          version = os.environ["RELEASE_VERSION"]
-          expected_wheel = f"pullwise_worker-{version}-py3-none-any.whl"
-          dist_files = sorted(path.name for path in Path("dist").iterdir())
-          if expected_wheel not in dist_files:
-              raise SystemExit(f"missing expected wheel {expected_wheel}; found {dist_files}")
-
-          with zipfile.ZipFile(Path("dist") / expected_wheel) as wheel:
-              metadata_names = [name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")]
-              if len(metadata_names) != 1:
-                  raise SystemExit(f"expected one wheel METADATA file, found {metadata_names}")
-              metadata = wheel.read(metadata_names[0]).decode("utf-8")
-          wheel_version = next((line.partition(":")[2].strip() for line in metadata.splitlines() if line.startswith("Version:")), "")
-          if wheel_version != version:
-              raise SystemExit(f"wheel metadata version {wheel_version!r} does not match {version}")
-
-          expected_sdist = f"pullwise_worker-{version}.tar.gz"
-          sdist_path = Path("dist") / expected_sdist
-          if not sdist_path.exists():
-              raise SystemExit(f"missing expected source archive {expected_sdist}; found {dist_files}")
-          with tarfile.open(sdist_path) as sdist:
-              pkg_info_names = [name for name in sdist.getnames() if name.endswith("/PKG-INFO")]
-              if not pkg_info_names:
-                  raise SystemExit("source archive is missing PKG-INFO")
-              pkg_info_file = sdist.extractfile(pkg_info_names[0])
-              if pkg_info_file is None:
-                  raise SystemExit("unable to read source archive PKG-INFO")
-              pkg_info = pkg_info_file.read().decode("utf-8")
-          sdist_version = next((line.partition(":")[2].strip() for line in pkg_info.splitlines() if line.startswith("Version:")), "")
-          if sdist_version != version:
-              raise SystemExit(f"source archive metadata version {sdist_version!r} does not match {version}")
-          PY
-
-      - name: Commit package version
-        if: github.ref_type != 'tag'
-        run: |
-          if git diff --quiet -- pyproject.toml pullwise_worker/__init__.py deploy/worker.env.template; then
-            echo "Package version already set to $RELEASE_VERSION"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml pullwise_worker/__init__.py deploy/worker.env.template
-          git commit -m "Release pullwise-worker v$RELEASE_VERSION"
-          git push origin "HEAD:$GITHUB_REF_NAME"
-
-      - name: Create release tag
-        if: github.ref_type != 'tag'
-        run: |
-          git fetch --tags origin
-          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null; then
-            existing_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
-            current_sha="$(git rev-parse HEAD)"
-            test "$existing_sha" = "$current_sha" || { echo "tag $RELEASE_TAG already points at $existing_sha, not $current_sha"; exit 1; }
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag "$RELEASE_TAG"
-            git push origin "$RELEASE_TAG"
-          fi
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+          npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+          npm pack --ignore-scripts
+      - uses: actions/upload-artifact@v4
         with:
-          name: pullwise-worker-dist
-          path: dist/*
-
+          name: pullwise-worker-node
+          path: pullwise-worker-*.tgz
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/* --clobber
+            gh release upload "$RELEASE_TAG" pullwise-worker-*.tgz --clobber
           else
-            gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes
+            gh release create "$RELEASE_TAG" pullwise-worker-*.tgz --target "$GITHUB_SHA" --generate-notes
           fi

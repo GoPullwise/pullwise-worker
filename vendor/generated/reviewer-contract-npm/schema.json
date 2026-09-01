@@ -1,0 +1,3041 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.pullwise.dev/pullwise-review/v1/shared/schemas/pullwise-review.schema.json",
+  "title": "Pullwise Reviewer contract v1",
+  "description": "Closed public, worker, and admin document contract. Registry arrays are generated from registry.json and must remain byte-for-byte equal.",
+  "$ref": "#/$defs/Document",
+  "$defs": {
+    "Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "CommitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "RepoPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)(?!.*[\\\\\\u0000-\\u001f]).+$",
+      "x-normalization": "NFC forward-slash repository-relative path"
+    },
+    "SafeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "ByteSpan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "start_byte",
+        "end_byte",
+        "content_digest"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/RepoPath"
+        },
+        "start_byte": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "end_byte": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483648
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "x-invariants": [
+        "end_byte > start_byte",
+        "the byte range is evaluated against the exact immutable file content_digest"
+      ]
+    },
+    "Usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "wall_time_ms",
+        "provider_cost_microunits"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        "cached_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        "reasoning_output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        "wall_time_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "provider_cost_microunits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "ArtifactDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "kind",
+        "visibility",
+        "digest",
+        "size_bytes",
+        "content_type",
+        "required"
+      ],
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "enum": [
+            "REPORT",
+            "COVERAGE",
+            "RESTRICTED_DEBUG",
+            "AUDIT"
+          ]
+        },
+        "visibility": {
+          "enum": [
+            "PUBLIC",
+            "ADMIN",
+            "RESTRICTED"
+          ]
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "content_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "CoverageEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "content_digest",
+        "state",
+        "reason_code"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/RepoPath"
+        },
+        "content_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "state": {
+          "enum": [
+            "REVIEWED",
+            "SKIPPED",
+            "UNAVAILABLE"
+          ]
+        },
+        "reason_code": {
+          "oneOf": [
+            {
+              "enum": [
+                "EXCLUDED_BY_POLICY",
+                "UNSUPPORTED_CONTENT",
+                "CONTEXT_BUDGET_EXCEEDED",
+                "VALIDATION_UNAVAILABLE",
+                "SOURCE_UNREADABLE",
+                "INSTRUCTION_CONFLICT",
+                "CANCELLED",
+                "RUNTIME_FAILURE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "reason_code is null iff state is REVIEWED",
+        "path is unique within a result candidate"
+      ]
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "finding_id",
+        "ordinal",
+        "fingerprint",
+        "title",
+        "category",
+        "severity",
+        "confidence_bps",
+        "evidence",
+        "evidence_text",
+        "explanation",
+        "impact",
+        "remediation",
+        "rule_id",
+        "validation_status"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-finding/v1"
+        },
+        "finding_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/Digest"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "category": {
+          "enum": [
+            "CORRECTNESS",
+            "SECURITY",
+            "RELIABILITY",
+            "PERFORMANCE",
+            "DATA_INTEGRITY",
+            "AUTHORIZATION",
+            "CONCURRENCY",
+            "API_CONTRACT",
+            "TEST_GAP"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "CRITICAL",
+            "HIGH",
+            "MEDIUM",
+            "LOW"
+          ]
+        },
+        "confidence_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "evidence": {
+          "$ref": "#/$defs/ByteSpan"
+        },
+        "evidence_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "impact": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "remediation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "rule_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_status": {
+          "enum": [
+            "VALIDATED",
+            "UNVALIDATED",
+            "COUNTEREXAMPLE_REJECTED"
+          ]
+        }
+      }
+    },
+    "CreateScanRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "request_id",
+        "source",
+        "instruction_policy_id",
+        "review_policy_id"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-create-scan/v1"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "ref"
+          ],
+          "properties": {
+            "kind": {
+              "const": "GITHUB_REPOSITORY_SNAPSHOT"
+            },
+            "ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        },
+        "instruction_policy_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "review_policy_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "output_language": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 35,
+          "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$"
+        },
+        "review_context": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      }
+    },
+    "PreflightResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "repository_id",
+        "commit_sha",
+        "source_size_bytes",
+        "feasible",
+        "rejection_code"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-scan-preflight/v1"
+        },
+        "repository_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "source_size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483648
+        },
+        "feasible": {
+          "type": "boolean"
+        },
+        "rejection_code": {
+          "oneOf": [
+            {
+              "enum": [
+                "SOURCE_REF_NOT_FOUND",
+                "SOURCE_TOO_LARGE",
+                "SOURCE_UNSAFE",
+                "BUDGET_UNAVAILABLE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "rejection_code is null iff feasible is true"
+      ]
+    },
+    "PublicScan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "scan_id",
+        "repository_id",
+        "commit_sha",
+        "state",
+        "progress_stage",
+        "lifecycle_version",
+        "attempt_count",
+        "terminal_outcome",
+        "summary",
+        "finding_count",
+        "coverage_total",
+        "coverage_reviewed",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-public-scan/v1"
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "repository_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "state": {
+          "enum": [
+            "QUEUED",
+            "RUNNING",
+            "FINALIZING",
+            "CANCEL_REQUESTED",
+            "COMPLETED",
+            "PARTIAL",
+            "FAILED",
+            "CANCELLED"
+          ]
+        },
+        "progress_stage": {
+          "enum": [
+            "QUEUED",
+            "PREPARING",
+            "REVIEWING",
+            "VALIDATING",
+            "FINALIZING"
+          ]
+        },
+        "lifecycle_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attempt_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminal_outcome": {
+          "oneOf": [
+            {
+              "enum": [
+                "COMPLETED",
+                "PARTIAL",
+                "FAILED",
+                "CANCELLED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finding_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "coverage_total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "coverage_reviewed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        }
+      },
+      "x-invariants": [
+        "coverage_reviewed <= coverage_total",
+        "terminal_outcome is non-null iff state is COMPLETED, PARTIAL, FAILED, or CANCELLED",
+        "terminal_outcome equals state for terminal states"
+      ]
+    },
+    "PublicIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "issue_id",
+        "repository_id",
+        "issue_key",
+        "status",
+        "issue_version",
+        "originating_scan_id",
+        "latest_finding",
+        "occurrence_count",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-public-issue/v1"
+        },
+        "issue_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "repository_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "issue_key": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "status": {
+          "enum": [
+            "OPEN",
+            "FIXED",
+            "SNOOZED"
+          ]
+        },
+        "issue_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "originating_scan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "latest_finding": {
+          "$ref": "#/$defs/Finding"
+        },
+        "occurrence_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        }
+      }
+    },
+    "UpdateIssueStatusItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "target_status",
+        "expected_issue_version"
+      ],
+      "properties": {
+        "issue_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "target_status": {
+          "enum": [
+            "OPEN",
+            "FIXED",
+            "SNOOZED"
+          ]
+        },
+        "expected_issue_version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "UpdateIssueStatusCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "updates"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-update-issue-status/v1"
+        },
+        "updates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/UpdateIssueStatusItem"
+          }
+        }
+      },
+      "x-invariants": [
+        "issue_id values are unique",
+        "all items derive to the authenticated tenant before any write",
+        "the batch is all-or-nothing"
+      ]
+    },
+    "LeaseGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lease_id",
+        "lease_version",
+        "expires_at"
+      ],
+      "properties": {
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        }
+      }
+    },
+    "ReviewBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token_budget",
+        "cost_budget_microunits",
+        "wall_clock_budget_ms",
+        "source_size_budget_bytes",
+        "output_budget_bytes"
+      ],
+      "properties": {
+        "token_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "cost_budget_microunits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "wall_clock_budget_ms": {
+          "type": "integer",
+          "minimum": 60000,
+          "maximum": 86400000
+        },
+        "source_size_budget_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483648
+        },
+        "output_budget_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 16777216
+        }
+      }
+    },
+    "ReviewAttemptGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "scan_id",
+        "repository_id",
+        "attempt_no",
+        "source",
+        "lease",
+        "contract_digest",
+        "instruction_bundle_id",
+        "instruction_digest",
+        "review_policy_id",
+        "model",
+        "reasoning_effort",
+        "runtime_lock_digest",
+        "skill_digest",
+        "budget",
+        "deadline_at"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-attempt-grant/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "repository_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "attempt_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "snapshot_id",
+            "commit_sha",
+            "content_root",
+            "grant_id",
+            "grant_expires_at"
+          ],
+          "properties": {
+            "kind": {
+              "const": "GITHUB_REPOSITORY_SNAPSHOT"
+            },
+            "snapshot_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            "commit_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "content_root": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "grant_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            "grant_expires_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+            }
+          }
+        },
+        "lease": {
+          "$ref": "#/$defs/LeaseGrant"
+        },
+        "contract_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "instruction_bundle_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "instruction_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "review_policy_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reasoning_effort": {
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "XHIGH"
+          ]
+        },
+        "runtime_lock_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "skill_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "budget": {
+          "$ref": "#/$defs/ReviewBudget"
+        },
+        "deadline_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        }
+      }
+    },
+    "EventAttemptStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "ATTEMPT_STARTED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {}
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventSourceReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "SOURCE_READY"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_content_root",
+            "file_count",
+            "total_bytes"
+          ],
+          "properties": {
+            "source_content_root": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "file_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "total_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483648
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventInstructionsReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "INSTRUCTIONS_READY"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instruction_digest",
+            "skill_digest",
+            "context_bytes"
+          ],
+          "properties": {
+            "instruction_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "skill_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "context_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777216
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventModelStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "MODEL_STARTED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "turn_id_digest"
+          ],
+          "properties": {
+            "turn_id_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventModelCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "MODEL_COMPLETED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "finish_reason",
+            "usage"
+          ],
+          "properties": {
+            "finish_reason": {
+              "enum": [
+                "STOP",
+                "LENGTH",
+                "INTERRUPTED",
+                "ERROR"
+              ]
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventValidationStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "VALIDATION_STARTED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {}
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventValidationCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "VALIDATION_COMPLETED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "validation_status",
+            "finding_count",
+            "coverage_total",
+            "coverage_reviewed"
+          ],
+          "properties": {
+            "validation_status": {
+              "enum": [
+                "VALIDATED",
+                "REJECTED"
+              ]
+            },
+            "finding_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "coverage_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "coverage_reviewed": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventPublicationStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "PUBLICATION_STARTED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "candidate_digest",
+            "artifact_count"
+          ],
+          "properties": {
+            "candidate_digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "artifact_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventHeartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "HEARTBEAT"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "progress_stage"
+          ],
+          "properties": {
+            "progress_stage": {
+              "enum": [
+                "QUEUED",
+                "PREPARING",
+                "REVIEWING",
+                "VALIDATING",
+                "FINALIZING"
+              ]
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventCancelObserved": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "CANCEL_OBSERVED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reason_code"
+          ],
+          "properties": {
+            "reason_code": {
+              "enum": [
+                "USER_REQUEST",
+                "DEADLINE_EXCEEDED",
+                "LEASE_LOST",
+                "WORKER_SHUTDOWN",
+                "POLICY_REVOKED"
+              ]
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "EventAttemptFailed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "sequence_no",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "occurred_at",
+        "monotonic_offset_ms",
+        "previous_receipt_digest",
+        "event_digest",
+        "event_type",
+        "payload"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-event/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "monotonic_offset_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "previous_receipt_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "event_type": {
+          "const": "ATTEMPT_FAILED"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "error_code",
+            "retry_class"
+          ],
+          "properties": {
+            "error_code": {
+              "enum": [
+                "REQUEST_INVALID",
+                "AUTH_REQUIRED",
+                "AUTH_DENIED",
+                "RESOURCE_NOT_FOUND",
+                "REPOSITORY_NOT_AUTHORIZED",
+                "SOURCE_REF_NOT_FOUND",
+                "SOURCE_TOO_LARGE",
+                "SOURCE_UNSAFE",
+                "BUDGET_UNAVAILABLE",
+                "IDEMPOTENCY_CONFLICT",
+                "STATE_CONFLICT",
+                "VERSION_CONFLICT",
+                "WORKER_NOT_ATTESTED",
+                "LEASE_STALE",
+                "LEASE_EXPIRED",
+                "EVENT_SEQUENCE_CONFLICT",
+                "EVENT_DIGEST_CONFLICT",
+                "CANDIDATE_CONFLICT",
+                "TERMINAL_ALREADY_COMMITTED",
+                "CANDIDATE_INVALID",
+                "MODEL_OUTPUT_INVALID",
+                "EVIDENCE_INVALID",
+                "COVERAGE_INVALID",
+                "ARTIFACT_INVALID",
+                "ARTIFACT_NOT_COMMITTED",
+                "PROVIDER_UNAVAILABLE",
+                "LOCK_UNAVAILABLE",
+                "INTERNAL_ERROR"
+              ]
+            },
+            "retry_class": {
+              "enum": [
+                "NEVER",
+                "POLICY",
+                "TRANSIENT"
+              ]
+            }
+          }
+        }
+      },
+      "x-digest-projection": "event_digest is SHA-256 of canonical JSON with event_digest omitted"
+    },
+    "ReviewEvent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EventAttemptStarted"
+        },
+        {
+          "$ref": "#/$defs/EventSourceReady"
+        },
+        {
+          "$ref": "#/$defs/EventInstructionsReady"
+        },
+        {
+          "$ref": "#/$defs/EventModelStarted"
+        },
+        {
+          "$ref": "#/$defs/EventModelCompleted"
+        },
+        {
+          "$ref": "#/$defs/EventValidationStarted"
+        },
+        {
+          "$ref": "#/$defs/EventValidationCompleted"
+        },
+        {
+          "$ref": "#/$defs/EventPublicationStarted"
+        },
+        {
+          "$ref": "#/$defs/EventHeartbeat"
+        },
+        {
+          "$ref": "#/$defs/EventCancelObserved"
+        },
+        {
+          "$ref": "#/$defs/EventAttemptFailed"
+        }
+      ]
+    },
+    "ResultCandidateSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "candidate_id",
+        "attempt_id",
+        "scan_id",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "candidate_digest",
+        "artifacts",
+        "usage",
+        "candidate_kind",
+        "proposed_outcome",
+        "summary",
+        "findings",
+        "coverage"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-result-candidate/v1"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "candidate_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/ArtifactDescriptor"
+          }
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "candidate_kind": {
+          "const": "RESULT"
+        },
+        "proposed_outcome": {
+          "enum": [
+            "COMPLETED",
+            "PARTIAL"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/Finding"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/CoverageEntry"
+          }
+        }
+      },
+      "x-invariants": [
+        "finding_id, fingerprint, and ordinal are unique; ordinal is dense from zero",
+        "coverage path is unique",
+        "COMPLETED requires every mandatory coverage entry REVIEWED",
+        "candidate_digest is SHA-256 of canonical JSON with candidate_digest omitted"
+      ]
+    },
+    "ResultCandidateFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "candidate_id",
+        "attempt_id",
+        "scan_id",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "candidate_digest",
+        "artifacts",
+        "usage",
+        "candidate_kind",
+        "proposed_outcome",
+        "failure"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-result-candidate/v1"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "candidate_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/ArtifactDescriptor"
+          }
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "candidate_kind": {
+          "const": "FAILURE_REPORT"
+        },
+        "proposed_outcome": {
+          "const": "FAILED"
+        },
+        "failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "error_code",
+            "retry_class",
+            "public_message"
+          ],
+          "properties": {
+            "error_code": {
+              "enum": [
+                "REQUEST_INVALID",
+                "AUTH_REQUIRED",
+                "AUTH_DENIED",
+                "RESOURCE_NOT_FOUND",
+                "REPOSITORY_NOT_AUTHORIZED",
+                "SOURCE_REF_NOT_FOUND",
+                "SOURCE_TOO_LARGE",
+                "SOURCE_UNSAFE",
+                "BUDGET_UNAVAILABLE",
+                "IDEMPOTENCY_CONFLICT",
+                "STATE_CONFLICT",
+                "VERSION_CONFLICT",
+                "WORKER_NOT_ATTESTED",
+                "LEASE_STALE",
+                "LEASE_EXPIRED",
+                "EVENT_SEQUENCE_CONFLICT",
+                "EVENT_DIGEST_CONFLICT",
+                "CANDIDATE_CONFLICT",
+                "TERMINAL_ALREADY_COMMITTED",
+                "CANDIDATE_INVALID",
+                "MODEL_OUTPUT_INVALID",
+                "EVIDENCE_INVALID",
+                "COVERAGE_INVALID",
+                "ARTIFACT_INVALID",
+                "ARTIFACT_NOT_COMMITTED",
+                "PROVIDER_UNAVAILABLE",
+                "LOCK_UNAVAILABLE",
+                "INTERNAL_ERROR"
+              ]
+            },
+            "retry_class": {
+              "enum": [
+                "NEVER",
+                "POLICY",
+                "TRANSIENT"
+              ]
+            },
+            "public_message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "candidate_digest is SHA-256 of canonical JSON with candidate_digest omitted"
+      ]
+    },
+    "ResultCandidateCancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "candidate_id",
+        "attempt_id",
+        "scan_id",
+        "lease_id",
+        "lease_version",
+        "idempotency_key",
+        "candidate_digest",
+        "artifacts",
+        "usage",
+        "candidate_kind",
+        "proposed_outcome",
+        "cancel"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-result-candidate/v1"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "candidate_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/ArtifactDescriptor"
+          }
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "candidate_kind": {
+          "const": "CANCEL_ACK"
+        },
+        "proposed_outcome": {
+          "const": "CANCELLED"
+        },
+        "cancel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reason_code"
+          ],
+          "properties": {
+            "reason_code": {
+              "enum": [
+                "USER_REQUEST",
+                "DEADLINE_EXCEEDED",
+                "LEASE_LOST",
+                "WORKER_SHUTDOWN",
+                "POLICY_REVOKED"
+              ]
+            }
+          }
+        }
+      },
+      "x-invariants": [
+        "candidate_digest is SHA-256 of canonical JSON with candidate_digest omitted"
+      ]
+    },
+    "ResultCandidate": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ResultCandidateSuccess"
+        },
+        {
+          "$ref": "#/$defs/ResultCandidateFailure"
+        },
+        {
+          "$ref": "#/$defs/ResultCandidateCancel"
+        }
+      ]
+    },
+    "FieldError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      }
+    },
+    "ApiError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "error"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-api-error/v1"
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "domain",
+            "message",
+            "retryable",
+            "request_id",
+            "field_errors"
+          ],
+          "properties": {
+            "code": {
+              "enum": [
+                "REQUEST_INVALID",
+                "AUTH_REQUIRED",
+                "AUTH_DENIED",
+                "RESOURCE_NOT_FOUND",
+                "REPOSITORY_NOT_AUTHORIZED",
+                "SOURCE_REF_NOT_FOUND",
+                "SOURCE_TOO_LARGE",
+                "SOURCE_UNSAFE",
+                "BUDGET_UNAVAILABLE",
+                "IDEMPOTENCY_CONFLICT",
+                "STATE_CONFLICT",
+                "VERSION_CONFLICT",
+                "WORKER_NOT_ATTESTED",
+                "LEASE_STALE",
+                "LEASE_EXPIRED",
+                "EVENT_SEQUENCE_CONFLICT",
+                "EVENT_DIGEST_CONFLICT",
+                "CANDIDATE_CONFLICT",
+                "TERMINAL_ALREADY_COMMITTED",
+                "CANDIDATE_INVALID",
+                "MODEL_OUTPUT_INVALID",
+                "EVIDENCE_INVALID",
+                "COVERAGE_INVALID",
+                "ARTIFACT_INVALID",
+                "ARTIFACT_NOT_COMMITTED",
+                "PROVIDER_UNAVAILABLE",
+                "LOCK_UNAVAILABLE",
+                "INTERNAL_ERROR"
+              ]
+            },
+            "domain": {
+              "enum": [
+                "REQUEST",
+                "AUTH",
+                "SOURCE",
+                "BUDGET",
+                "LIFECYCLE",
+                "LEASE",
+                "EVENT",
+                "CANDIDATE",
+                "VALIDATION",
+                "ARTIFACT",
+                "PROVIDER",
+                "STORAGE",
+                "INTERNAL"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "request_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            "field_errors": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "$ref": "#/$defs/FieldError"
+              }
+            }
+          }
+        }
+      }
+    },
+    "ReviewerPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "policy_id",
+        "version",
+        "model",
+        "reasoning_effort",
+        "token_budget",
+        "cost_budget_microunits",
+        "wall_clock_budget_ms",
+        "source_size_budget_bytes",
+        "output_budget_bytes",
+        "max_turns",
+        "enabled"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-reviewer-policy/v1"
+        },
+        "policy_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reasoning_effort": {
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "XHIGH"
+          ]
+        },
+        "token_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "cost_budget_microunits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "wall_clock_budget_ms": {
+          "type": "integer",
+          "minimum": 60000,
+          "maximum": 86400000
+        },
+        "source_size_budget_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483648
+        },
+        "output_budget_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 16777216
+        },
+        "max_turns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "RuntimeTuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "worker_build_digest",
+        "contract_digest",
+        "runtime_lock_digest",
+        "capability_report_digest",
+        "skill_digest",
+        "sandbox_digest",
+        "qualification_state",
+        "qualified_at"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-reviewer-runtime-tuple/v1"
+        },
+        "worker_build_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "contract_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "runtime_lock_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "capability_report_digest": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skill_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "sandbox_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "qualification_state": {
+          "enum": [
+            "UNQUALIFIED",
+            "PASS",
+            "FAIL",
+            "INDETERMINATE",
+            "QUARANTINED"
+          ]
+        },
+        "qualified_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "x-invariants": [
+        "qualified_at and capability_report_digest are non-null iff qualification_state is PASS"
+      ]
+    },
+    "AdminDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "scan_id",
+        "attempt_id",
+        "worker_id",
+        "runtime_tuple",
+        "lease_state",
+        "last_event_sequence",
+        "outbox_state",
+        "failure_code",
+        "updated_at"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-reviewer-admin-diagnostics/v1"
+        },
+        "scan_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "worker_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_tuple": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RuntimeTuple"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_state": {
+          "oneOf": [
+            {
+              "enum": [
+                "ACTIVE",
+                "EXPIRED",
+                "REVOKED",
+                "RELEASED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_event_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outbox_state": {
+          "oneOf": [
+            {
+              "enum": [
+                "PENDING",
+                "LEASED",
+                "DONE",
+                "DEAD"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure_code": {
+          "oneOf": [
+            {
+              "enum": [
+                "REQUEST_INVALID",
+                "AUTH_REQUIRED",
+                "AUTH_DENIED",
+                "RESOURCE_NOT_FOUND",
+                "REPOSITORY_NOT_AUTHORIZED",
+                "SOURCE_REF_NOT_FOUND",
+                "SOURCE_TOO_LARGE",
+                "SOURCE_UNSAFE",
+                "BUDGET_UNAVAILABLE",
+                "IDEMPOTENCY_CONFLICT",
+                "STATE_CONFLICT",
+                "VERSION_CONFLICT",
+                "WORKER_NOT_ATTESTED",
+                "LEASE_STALE",
+                "LEASE_EXPIRED",
+                "EVENT_SEQUENCE_CONFLICT",
+                "EVENT_DIGEST_CONFLICT",
+                "CANDIDATE_CONFLICT",
+                "TERMINAL_ALREADY_COMMITTED",
+                "CANDIDATE_INVALID",
+                "MODEL_OUTPUT_INVALID",
+                "EVIDENCE_INVALID",
+                "COVERAGE_INVALID",
+                "ARTIFACT_INVALID",
+                "ARTIFACT_NOT_COMMITTED",
+                "PROVIDER_UNAVAILABLE",
+                "LOCK_UNAVAILABLE",
+                "INTERNAL_ERROR"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        }
+      }
+    },
+    "LeaseHeartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "lease_id",
+        "lease_version",
+        "observed_at"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-lease-heartbeat/v1"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "observed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        }
+      }
+    },
+    "LeaseHeartbeatResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "lease_id",
+        "lease_version",
+        "expires_at",
+        "cancel_requested"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-lease-heartbeat-result/v1"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        }
+      }
+    },
+    "PrepareArtifactRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "lease_id",
+        "lease_version",
+        "descriptor"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-prepare-artifact/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "descriptor": {
+          "$ref": "#/$defs/ArtifactDescriptor"
+        }
+      }
+    },
+    "PrepareArtifactResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "artifact_id",
+        "upload_grant_id",
+        "upload_url",
+        "method",
+        "required_headers",
+        "expires_at"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-prepare-artifact-result/v1"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "upload_grant_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "expires_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+        },
+        "upload_url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "method": {
+          "const": "PUT"
+        },
+        "required_headers": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "content_type",
+            "content_digest",
+            "content_length"
+          ],
+          "properties": {
+            "content_type": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "content_digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "content_length": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            }
+          }
+        }
+      }
+    },
+    "CommitArtifactRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "attempt_id",
+        "lease_id",
+        "lease_version",
+        "descriptor",
+        "upload_receipt_digest"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-commit-artifact/v1"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "lease_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "descriptor": {
+          "$ref": "#/$defs/ArtifactDescriptor"
+        },
+        "upload_receipt_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "CandidateDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "candidate_id",
+        "disposition",
+        "result_id",
+        "terminal_outcome",
+        "lifecycle_version"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-candidate-disposition/v1"
+        },
+        "candidate_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "disposition": {
+          "enum": [
+            "RECEIVED",
+            "ACCEPTED",
+            "DUPLICATE",
+            "RETRY_SCHEDULED",
+            "REJECTED_STALE",
+            "REJECTED_INVALID",
+            "CONFLICT"
+          ]
+        },
+        "result_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_outcome": {
+          "oneOf": [
+            {
+              "enum": [
+                "COMPLETED",
+                "PARTIAL",
+                "FAILED",
+                "CANCELLED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lifecycle_version": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Document": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CreateScanRequest"
+        },
+        {
+          "$ref": "#/$defs/PreflightResult"
+        },
+        {
+          "$ref": "#/$defs/PublicScan"
+        },
+        {
+          "$ref": "#/$defs/Finding"
+        },
+        {
+          "$ref": "#/$defs/PublicIssue"
+        },
+        {
+          "$ref": "#/$defs/UpdateIssueStatusCommand"
+        },
+        {
+          "$ref": "#/$defs/ReviewAttemptGrant"
+        },
+        {
+          "$ref": "#/$defs/ReviewEvent"
+        },
+        {
+          "$ref": "#/$defs/ResultCandidate"
+        },
+        {
+          "$ref": "#/$defs/ApiError"
+        },
+        {
+          "$ref": "#/$defs/ReviewerPolicy"
+        },
+        {
+          "$ref": "#/$defs/RuntimeTuple"
+        },
+        {
+          "$ref": "#/$defs/AdminDiagnostics"
+        },
+        {
+          "$ref": "#/$defs/LeaseHeartbeat"
+        },
+        {
+          "$ref": "#/$defs/LeaseHeartbeatResult"
+        },
+        {
+          "$ref": "#/$defs/PrepareArtifactRequest"
+        },
+        {
+          "$ref": "#/$defs/PrepareArtifactResponse"
+        },
+        {
+          "$ref": "#/$defs/CommitArtifactRequest"
+        },
+        {
+          "$ref": "#/$defs/CandidateDisposition"
+        },
+        {
+          "$ref": "#/$defs/ReviewClaimRequest"
+        }
+      ]
+    },
+    "ReviewClaimRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_id",
+        "worker_id",
+        "runtime_tuple"
+      ],
+      "properties": {
+        "schema_id": {
+          "const": "pullwise-review-claim/v1"
+        },
+        "worker_id": {
+          "$ref": "#/$defs/SafeId"
+        },
+        "runtime_tuple": {
+          "$ref": "#/$defs/RuntimeTuple"
+        }
+      },
+      "x-invariants": [
+        "authenticated Worker identity equals worker_id",
+        "runtime_tuple digests equal the current attested Worker registration"
+      ]
+    }
+  }
+}

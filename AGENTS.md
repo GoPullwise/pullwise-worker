@@ -44,6 +44,59 @@ generated-consumer rule in this file is historical cleanup evidence only and
 must not govern target implementation.
 <!-- PULLWISE_REVIEWER_TARGET_END -->
 
+## Pi credential profiles and Server synchronization
+
+- Provider secrets stay on the Worker host. `profiles.json` contains metadata
+  only; every credential id owns a separate Pi agent directory under
+  `PULLWISE_PI_PROFILE_ROOT`.
+- Use `pullwise-worker profile add` to create metadata and the emitted
+  profile-scoped Pi auth command. Never add secret-bearing CLI flags or sync
+  API keys/tokens to Pullwise Server.
+- `pullwise-worker sync` builds the authenticated model catalog and sends it
+  through the existing v1 registration and heartbeat routes. The catalog
+  contains credential ids/labels, providers, auth types, and model metadata
+  only.
+- Server lease `runtime_selection` is authoritative. Match its credential id,
+  provider, and model exactly to one local profile; do not route or fall back.
+- `serve` claims and executes at most one lease at a time and never sends
+  heartbeats. It writes `pullwise-worker-state/v1` atomically; the paired
+  `watch` process is the sole registration/heartbeat bridge to Server.
+- V1 publication is mechanical: upload `report.human`, `report.agent`,
+  `coverage`, `qa`, and `token_budget`, then submit the matching terminal
+  envelope. Checkout credentials belong only in Git environment variables,
+  never argv, logs, prompts, state, or artifacts.
+- Watcher `cancel_run` commands create a run-scoped local cancellation marker;
+  the execution service converts it to the attempt AbortSignal. Cancelled or
+  failed attempts upload the required `worker_log`, `qa`, and
+  `error_report` artifacts before the matching terminal result.
+
+## Current Node/Pi Worker implementation
+
+- `src/main.ts` is the only production entry point. It reads one closed JSON
+  attempt from stdin, runs it, writes one JSON result, and exits.
+- `src/runtime/pi-session.ts` creates exactly one Pi `AgentSession` per attempt
+  with an exact provider/model pair. Model fallback, project extensions,
+  project prompt templates, and mutating/shell tools are disabled.
+- Do not expose Pi's built-in local filesystem tools directly: its read path can
+  accept absolute paths. Use only `repo_read`, `repo_grep`, and `repo_ls` from
+  `src/runtime/contained-tools.ts`; their lexical and real paths must remain
+  inside the attempt workspace.
+- Review judgment belongs under `reviewer/`: keep the workflow in the Skill,
+  heuristics in references, the task/output request in the prompt, and trust
+  rules in system/context text. Do not move semantic review phases into source.
+- Worker source may supervise invocation, cumulative usage/cost budgets,
+  cancellation/deadlines, strict input/result validation, safe filesystem
+  boundaries, and early/late publication fencing. Do not implement an agent
+  loop around Pi or add another provider runtime.
+- The external orchestrator owns checkout creation, the fence file, and result
+  publication. The Worker requires `PULLWISE_PI_AGENT_DIR` and
+  `PULLWISE_FENCE_ROOT`; the fence is checked before session creation and again
+  before a result is returned.
+- Python/Codex/Agent-Kernel/shadow/compatibility production trees were removed
+  in the Node/Pi clean break. Do not restore them as adapters or fallback paths.
+- Run `npm test` and `npm run typecheck` for local verification. CI uses Node
+  `22.23.1` and installs with lifecycle scripts disabled.
+
 # Pullwise Worker Agent Notes
 
 ## Problem Solving Discipline

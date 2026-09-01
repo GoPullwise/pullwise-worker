@@ -11,94 +11,20 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-22.04
-    defaults:
-      run:
-        working-directory: pullwise-worker
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          path: pullwise-worker
           persist-credentials: false
-      - name: Set up Node.js/Pi target runtime
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22.23.1"
-      - name: Check local current Reviewer authority and Node.js/Pi target
+          cache: npm
+      - name: Check the Node.js and Pi target
         run: node scripts/check-current-reviewer-target.mjs --repo worker
-      - name: Check out current Server test dependency
-        uses: actions/checkout@v4
-        with:
-          repository: GoPullwise/pullwise-server
-          path: pullwise-server
-          persist-credentials: false
-      - name: Check out current Web test dependency
-        uses: actions/checkout@v4
-        with:
-          repository: GoPullwise/pullwise-web
-          path: pullwise-web
-          persist-credentials: false
-      - name: Check out current Admin test dependency
-        uses: actions/checkout@v4
-        with:
-          repository: GoPullwise/pullwise-admin
-          path: pullwise-admin
-          persist-credentials: false
-      - name: Check four-repository current Reviewer authority and Node.js/Pi target
-        run: node scripts/check-current-reviewer-target.mjs --workspace-root ..
-      - name: Run Node.js/Pi target CI tests
-        run: node --test tests/current-reviewer-target.test.mjs tests/current-reviewer-ci.test.mjs
-      - name: "Diagnostic (non-authoritative): frozen Server checkout"
-        continue-on-error: true
-        run: |
-          # Historical diagnostic only; ref: d68487a283bbc28e526ffac623cb3dd1f06cd4e9
-          git -C ../pullwise-server cat-file -e d68487a283bbc28e526ffac623cb3dd1f06cd4e9^{commit}
-      - name: "Diagnostic (non-authoritative): current exact-package Server checkout"
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          repository: GoPullwise/pullwise-server
-          ref: 183824c810811094330b273b2eecabed567d945f
-          path: current-contract-server
-          persist-credentials: false
-      - name: "Diagnostic (non-authoritative): frozen Web checkout"
-        continue-on-error: true
-        run: |
-          # Historical diagnostic only; ref: 0af3088a86a3474b6f8b937958137db438098d48
-          git -C ../pullwise-web cat-file -e 0af3088a86a3474b6f8b937958137db438098d48^{commit}
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Set up Python 3.10.12"
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10.12"
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Install test dependencies"
-        run: |
-          python -m pip install --upgrade "pip>=25.3,<27" setuptools wheel
-          python -m pip install -e .
-          python -m pip install -e ../pullwise-server
-          python -m pip install "pip-audit>=2.10.1,<2.11"
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Audit Python dependencies"
-        run: pip-audit .
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Check Python dependency constraints"
-        run: python -m pip check
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Check shell scripts"
-        run: |
-          bash -n ./deploy/update-worker.sh
-          bash -n ./deploy/restart-worker.sh
-          bash -n ./deploy/uninstall-worker.sh
-          bash -n ./deploy/cleanup-checkouts.sh
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Check Agent-First legacy absence ratchet"
-        run: python scripts/verify_agent_first_legacy_absence.py --workspace-root ..
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Check semantic output contracts"
-        run: python scripts/check_output_contracts.py
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Check isolated Agent Kernel wheel"
-        run: python scripts/check_agent_kernel_wheel.py
-      - name: "Diagnostic (non-authoritative): Check current Agent-First package exact lock"
-        continue-on-error: true
-        env:
-          PULLWISE_CURRENT_SERVER_ROOT: ../current-contract-server
-          PULLWISE_EXPERIMENTAL_EXACT_PACKAGE_DIAGNOSTIC: "1"
-        run: |
-          # Diagnostic input: PULLWISE_CURRENT_SERVER_ROOT: ../current-contract-server
-          python -m unittest tests.test_agent_kernel_current_package
-      - name: "Historical cleanup regression (blocking until R1-PI-04): Run Python tests"
-        run: python -m unittest discover -s tests -p "test_*.py"
+      - name: Install the frozen runtime graph
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run tests
+        run: npm test
+      - name: Type-check Worker source
+        run: npm run typecheck

@@ -1,0 +1,38 @@
+{
+  "name": "pullwise-worker",
+  "version": "0.10.24",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pullwise-worker": "src/main.ts"
+  },
+  "files": [
+    "src",
+    "reviewer",
+    "vendor/generated/reviewer-contract-npm",
+    "scripts/check-reviewer-contract-pin.mjs",
+    "reviewer-contract-pin.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "npm@10.9.8",
+  "scripts": {
+    "check:reviewer-contract": "node scripts/check-reviewer-contract-pin.mjs",
+    "test:reviewer-contract": "node --test tests/reviewer/contract-pin.test.mjs",
+    "test:runtime": "node --test tests/runtime/*.test.ts",
+    "test:governance": "node --test tests/current-reviewer-target.test.mjs tests/current-reviewer-ci.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:reviewer-contract && npm run test:runtime && npm run test:governance",
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "pullwise-review-contract": "file:vendor/generated/reviewer-contract-npm"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "7.0.2"
+  }
+}

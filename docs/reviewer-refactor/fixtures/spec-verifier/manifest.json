@@ -1,9 +1,0 @@
-{
-  "schema_id": "reviewer-refactor-spec-verifier-fixtures/v1",
-  "fixtures": [
-    {"fixture_id": "valid-scalar-profile", "path": "valid/scalar-profile.json", "expected_status": "PASS", "expected_reason": "none"},
-    {"fixture_id": "invalid-float-confidence", "path": "invalid/float-confidence.json", "expected_status": "FAIL", "expected_reason": "json.float_forbidden"},
-    {"fixture_id": "invalid-dependency-cycle", "path": "invalid/dependency-cycle.json", "expected_status": "FAIL", "expected_reason": "cards.dependency_cycle"},
-    {"fixture_id": "invalid-path-escape", "path": "invalid/path-escape.json", "expected_status": "FAIL", "expected_reason": "path.noncanonical"}
-  ]
-}

@@ -1,21 +1,12 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
 .env
 .env.*
-.pytest_cache/
-.pytest-tmp/
-.mypy_cache/
-.coverage
-.coverage.*
-htmlcov/
+
+# Node.js
+node_modules/
 
 # Build
-build/
 dist/
-*.egg
+*.tgz
 
 # IDE
 .vscode/
@@ -34,5 +25,3 @@ Thumbs.db
 # Project
 .omx/
 .worktrees/
-.codereview/runs/
-.codereview/test-tmp/
