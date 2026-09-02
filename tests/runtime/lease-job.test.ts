@@ -36,6 +36,7 @@ test("leased job uses the exact profile once and publishes five v1 artifacts plu
           credential_id: "openai_team",
           provider: "openai",
           model: "gpt-5.1",
+          thinking_level: "medium",
         },
         repository: {
           clone_url: "https://github.com/acme/api.git",
@@ -79,6 +80,7 @@ test("leased job uses the exact profile once and publishes five v1 artifacts plu
     assert.equal(reviews[0].profile.credentialId, "openai_team");
     assert.equal(reviews[0].attempt.provider, "openai");
     assert.equal(reviews[0].attempt.model, "gpt-5.1");
+    assert.equal(reviews[0].attempt.thinkingLevel, "medium");
     assert.doesNotMatch(JSON.stringify(reviews[0].attempt.context), /clone-secret/u);
     assert.equal(uploads.length, 5);
     assert.equal(result.accepted, true);
@@ -102,7 +104,12 @@ test("lease selection must match one local credential profile exactly", async ()
         run_id: "run_1",
         lease_id: "lease_1",
         attempt: 1,
-        runtime_selection: { credential_id: "missing", provider: "openai", model: "gpt-5.1" },
+        runtime_selection: {
+          credential_id: "missing",
+          provider: "openai",
+          model: "gpt-5.1",
+          thinking_level: "medium",
+        },
       },
       materialize: async () => { throw new Error("must not materialize"); },
       review: async () => { throw new Error("must not review"); },
@@ -113,6 +120,46 @@ test("lease selection must match one local credential profile exactly", async ()
       writeState: async () => {},
     }),
     /does not match a local profile/u,
+  );
+});
+
+test("lease rejects an unsupported thinking level before materializing the repository", async () => {
+  await assert.rejects(
+    executeLeaseJob({
+      workerId: "wk_pi",
+      workerVersion: "0.10.24",
+      stateRoot: ".",
+      profiles: {
+        root: ".",
+        profiles: [{
+          credentialId: "openai_team",
+          label: "OpenAI team",
+          provider: "openai",
+          authType: "api_key",
+          agentDir: ".",
+        }],
+      },
+      job: {
+        job_id: "job_1",
+        run_id: "run_1",
+        lease_id: "lease_1",
+        attempt: 1,
+        runtime_selection: {
+          credential_id: "openai_team",
+          provider: "openai",
+          model: "gpt-5.1",
+          thinking_level: "xhigh",
+        },
+      },
+      materialize: async () => { throw new Error("must not materialize"); },
+      review: async () => { throw new Error("must not review"); },
+      client: {
+        uploadArtifact: async () => {},
+        submitResult: async () => ({}),
+      },
+      writeState: async () => {},
+    }),
+    /thinking_level must be low, medium, or high/u,
   );
 });
 
@@ -141,7 +188,12 @@ test("cancelled execution publishes the required terminal diagnostics", async ()
       run_id: "run_1",
       lease_id: "lease_1",
       attempt: 1,
-      runtime_selection: { credential_id: "openai_team", provider: "openai", model: "gpt-5.1" },
+      runtime_selection: {
+        credential_id: "openai_team",
+        provider: "openai",
+        model: "gpt-5.1",
+        thinking_level: "medium",
+      },
     },
     materialize: async () => ({ workspace: ".", cleanup: async () => {} }),
     review: async () => { throw new Error("cancelled"); },

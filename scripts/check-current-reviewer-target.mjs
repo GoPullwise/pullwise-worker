@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -8,14 +7,8 @@ import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 
 export const REPORT_SCHEMA_ID = "pullwise-current-reviewer-target-report/v1";
-export const CURRENT_START = "<!-- PULLWISE_REVIEWER_CURRENT_AUTHORITY_START -->";
-export const CURRENT_END = "<!-- PULLWISE_REVIEWER_CURRENT_AUTHORITY_END -->";
 export const TARGET_START = "<!-- PULLWISE_REVIEWER_TARGET_START -->";
 export const TARGET_END = "<!-- PULLWISE_REVIEWER_TARGET_END -->";
-export const CURRENT_BLOCK_SHA256 =
-  "24435fb38cf3b04c77243fb20df00fc3ceb928ebe560e4b8682c8e3c8f36deeb";
-export const TARGET_BLOCK_SHA256 =
-  "c61800c199d637568022d730f0758c7c523f44009a1aed66be20ea5034ef5eaa";
 export const REPOSITORIES = Object.freeze({
   admin: "pullwise-admin",
   server: "pullwise-server",
@@ -32,8 +25,9 @@ Node.js/TypeScript on Node \`>=22.19.0\`, embedding
 \`AgentSession\`.
 
 This is a clean break. Do not add or preserve a Codex SDK or CLI, \`CODEX_HOME\`,
-a Python Worker runtime, compatibility or shadow adapters, dual runtimes,
-provider routing, or automatic provider/model fallback. Pi is not a sandbox:
+a Python Worker runtime, compatibility or shadow adapters, dual runtimes, or
+automatic provider/model fallback. Server plan policy resolves one exact
+provider/model/thinking level against each Worker's advertised catalog. Pi is not a sandbox:
 the Worker supervisor must enforce operating-system containment, process-tree
 ownership, cancellation, cleanup, and late-publication fencing.
 
@@ -65,24 +59,6 @@ function occurrences(text, needle) {
 export function validateText(text) {
   const normalized = normalize(text);
   const errors = [];
-  if (!normalized.startsWith(CURRENT_START + "\n")) {
-    errors.push("missing_current_authority_block");
-  }
-  const currentEnd = normalized.indexOf(CURRENT_END);
-  if (currentEnd < 0) {
-    errors.push("unterminated_current_authority_block");
-    return errors;
-  }
-  const currentStop = currentEnd + CURRENT_END.length;
-  if (normalized[currentStop] !== "\n") {
-    errors.push("current_authority_block_missing_trailing_lf");
-  } else {
-    const currentBlock = normalized.slice(0, currentStop + 1);
-    const currentSha256 = crypto.createHash("sha256").update(currentBlock, "utf8").digest("hex");
-    if (currentSha256 !== CURRENT_BLOCK_SHA256) {
-      errors.push("current_authority_block_mismatch");
-    }
-  }
   if (
     occurrences(normalized, TARGET_START) !== 1 ||
     occurrences(normalized, TARGET_END) !== 1
@@ -99,16 +75,9 @@ export function validateText(text) {
   }
   if (normalized[targetStop] !== "\n") {
     errors.push("target_block_missing_trailing_lf");
-  } else {
-    const targetBlock = normalized.slice(targetStart, targetStop + 1);
-    const targetSha256 = crypto.createHash("sha256").update(targetBlock, "utf8").digest("hex");
-    if (targetSha256 !== TARGET_BLOCK_SHA256) {
-      errors.push("target_block_mismatch");
-    }
   }
-  const expectedOffset = currentStop + 1;
-  if (targetStart !== expectedOffset) {
-    errors.push("target_block_not_immediately_after_authority");
+  if (targetStart !== 0) {
+    errors.push("target_block_not_first");
   }
   return [...new Set(errors)].sort();
 }

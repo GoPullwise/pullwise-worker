@@ -85,6 +85,7 @@ function attempt(workspace: string, overrides: Partial<ReviewAttempt> = {}): Rev
     workspace,
     provider: "test-provider",
     model: "test-model",
+    thinkingLevel: "medium",
     context: { repository: "example/repo", revision: "abc123" },
     budget: {
       wallTimeMs: 1_000,

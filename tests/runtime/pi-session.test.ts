@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertExactPiRuntime,
   PiReviewSession,
   READ_ONLY_TOOLS,
   type PiSessionPort,
@@ -10,6 +11,7 @@ import {
 class FakePiSession implements PiSessionPort {
   readonly sessionId = "pi-session";
   readonly model = { provider: "provider", id: "model" };
+  readonly thinkingLevel = "medium";
   readonly messages: unknown[] = [];
   promptCalls: string[] = [];
   abortCalls = 0;
@@ -49,6 +51,28 @@ class FakePiSession implements PiSessionPort {
 
 test("Pi adapter exposes only the fixed read-only tool set", () => {
   assert.deepEqual(READ_ONLY_TOOLS, ["repo_read", "repo_grep", "repo_ls"]);
+});
+
+test("Pi adapter rejects provider, model, or thinking-level drift", () => {
+  const attempt = {
+    provider: "openai",
+    model: "gpt-5.1",
+    thinkingLevel: "high",
+  } as const;
+  assert.doesNotThrow(() =>
+    assertExactPiRuntime(attempt, {
+      model: { provider: "openai", id: "gpt-5.1" },
+      thinkingLevel: "high",
+    }),
+  );
+  assert.throws(
+    () =>
+      assertExactPiRuntime(attempt, {
+        model: { provider: "openai", id: "gpt-5.1" },
+        thinkingLevel: "medium",
+      }),
+    /thinking level/u,
+  );
 });
 
 test("Pi adapter maps cumulative SDK usage and delegates lifecycle once", async () => {

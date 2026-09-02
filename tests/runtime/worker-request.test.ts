@@ -9,6 +9,7 @@ const valid = JSON.stringify({
     workspace: "C:/attempt",
     provider: "provider",
     model: "model",
+    thinkingLevel: "medium",
     context: { repository: "example/repo" },
     budget: {
       wallTimeMs: 1_000,
@@ -24,6 +25,7 @@ const valid = JSON.stringify({
 test("parses the closed one-attempt Worker request", () => {
   const request = parseWorkerRequest(valid);
   assert.equal(request.attempt.provider, "provider");
+  assert.equal(request.attempt.thinkingLevel, "medium");
   assert.equal(request.fence.expected, "lease-1");
 });
 

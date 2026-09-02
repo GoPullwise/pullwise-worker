@@ -17,6 +17,7 @@ export interface LeaseJob {
     readonly credential_id?: string;
     readonly provider?: string;
     readonly model?: string;
+    readonly thinking_level?: string;
   };
   readonly review_request?: {
     readonly budget?: {
@@ -67,11 +68,20 @@ function requiredText(value: unknown, label: string): string {
   return text;
 }
 
+function requiredThinkingLevel(value: unknown): "low" | "medium" | "high" {
+  const level = requiredText(value, "runtime_selection.thinking_level");
+  if (level !== "low" && level !== "medium" && level !== "high") {
+    throw new Error("runtime_selection.thinking_level must be low, medium, or high");
+  }
+  return level;
+}
+
 function selectedProfile(job: LeaseJob, profiles: Profiles): Profile {
   const selection = job.runtime_selection ?? {};
   const credentialId = requiredText(selection.credential_id, "runtime_selection.credential_id");
   const provider = requiredText(selection.provider, "runtime_selection.provider");
   requiredText(selection.model, "runtime_selection.model");
+  requiredThinkingLevel(selection.thinking_level);
   const profile = profiles.profiles.find(
     (item) => item.credentialId === credentialId && item.provider === provider,
   );
@@ -105,6 +115,7 @@ function reviewAttempt(job: LeaseJob, workspace: string): ReviewAttempt {
     workspace,
     provider: requiredText(selection.provider, "runtime_selection.provider"),
     model: requiredText(selection.model, "runtime_selection.model"),
+    thinkingLevel: requiredThinkingLevel(selection.thinking_level),
     context: safeJob,
     budget: {
       wallTimeMs,

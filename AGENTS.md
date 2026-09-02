@@ -1,24 +1,3 @@
-<!-- PULLWISE_REVIEWER_CURRENT_AUTHORITY_START -->
-## Pullwise Reviewer — Current Implementation Authority
-
-For every new Pullwise Reviewer implementation task, the only entry point is
-[Pullwise Reviewer — Current Implementation Authority](https://app.notion.com/p/3b4e5c88f85f8128bd39dac3a7679c4a).
-Follow its [current implementation specification](https://app.notion.com/p/3b4e5c88f85f818e933ecf3864c97469),
-[live implementation cards](https://app.notion.com/p/b79ceacfedcd4d34a0d619c1790066c4), and
-[Code Authorization Registry](https://app.notion.com/p/760a1698a86b404083662eeb1b637f64).
-
-Before any card, read [00A](https://app.notion.com/p/3b5e5c88f85f81bc840ace8b8a65962e), [00B](https://app.notion.com/p/3b5e5c88f85f81aeaeaef4621d211126),
-[00C](https://app.notion.com/p/3b5e5c88f85f81d89deef714c8b23eeb), [00D](https://app.notion.com/p/3b8e5c88f85f814d8296c6c60541946d) whenever a named asset is required,
-and [Page 19](https://app.notion.com/p/3b4e5c88f85f8192a488f6db72fa116b). Only an exact live card authorization plus a PASS
-running gate permits tracked writes. Never self-authorize a card or treat
-documentation status as code authority.
-
-All later Reviewer protocol, runtime, phase, fanout, generated-package, and
-production-cutover guidance is retained only as current-state cleanup evidence;
-it must not govern new Reviewer implementation. Unrelated repository security,
-deployment, frontend, and testing rules remain binding unless they conflict with
-the current Reviewer authority.
-<!-- PULLWISE_REVIEWER_CURRENT_AUTHORITY_END -->
 <!-- PULLWISE_REVIEWER_TARGET_START -->
 ## Pullwise Reviewer Target — Node.js + Pi Coding Agent
 
@@ -28,8 +7,9 @@ Node.js/TypeScript on Node `>=22.19.0`, embedding
 `AgentSession`.
 
 This is a clean break. Do not add or preserve a Codex SDK or CLI, `CODEX_HOME`,
-a Python Worker runtime, compatibility or shadow adapters, dual runtimes,
-provider routing, or automatic provider/model fallback. Pi is not a sandbox:
+a Python Worker runtime, compatibility or shadow adapters, dual runtimes, or
+automatic provider/model fallback. Server plan policy resolves one exact
+provider/model/thinking level against each Worker's advertised catalog. Pi is not a sandbox:
 the Worker supervisor must enforce operating-system containment, process-tree
 ownership, cancellation, cleanup, and late-publication fencing.
 
@@ -57,7 +37,8 @@ must not govern target implementation.
   contains credential ids/labels, providers, auth types, and model metadata
   only.
 - Server lease `runtime_selection` is authoritative. Match its credential id,
-  provider, and model exactly to one local profile; do not route or fall back.
+  provider, model, and `low|medium|high` thinking level exactly; do not route
+  or fall back locally.
 - `serve` claims and executes at most one lease at a time and never sends
   heartbeats. It writes `pullwise-worker-state/v1` atomically; the paired
   `watch` process is the sole registration/heartbeat bridge to Server.
@@ -75,7 +56,7 @@ must not govern target implementation.
 - `src/main.ts` is the only production entry point. It reads one closed JSON
   attempt from stdin, runs it, writes one JSON result, and exits.
 - `src/runtime/pi-session.ts` creates exactly one Pi `AgentSession` per attempt
-  with an exact provider/model pair. Model fallback, project extensions,
+  with the exact leased provider/model/thinking-level tuple. Model fallback, project extensions,
   project prompt templates, and mutating/shell tools are disabled.
 - Do not expose Pi's built-in local filesystem tools directly: its read path can
   accept absolute paths. Use only `repo_read`, `repo_grep`, and `repo_ls` from

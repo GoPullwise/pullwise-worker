@@ -36,12 +36,28 @@ type PiPortEvent = { readonly type: string; readonly message?: { readonly role?:
 export interface PiSessionPort {
   readonly sessionId: string;
   readonly model: { readonly provider: string; readonly id: string };
+  readonly thinkingLevel: string;
   subscribe(listener: (event: PiPortEvent) => void): () => void;
   prompt(text: string): Promise<void>;
   abort(): Promise<void>;
   getLastAssistantText(): string | undefined;
   getSessionStats(): PiStats;
   dispose(): void;
+}
+
+export function assertExactPiRuntime(
+  attempt: Pick<ReviewAttempt, "provider" | "model" | "thinkingLevel">,
+  session: Pick<PiSessionPort, "model" | "thinkingLevel">,
+): void {
+  if (
+    session.model?.provider !== attempt.provider ||
+    session.model.id !== attempt.model
+  ) {
+    throw new Error("Pi did not preserve the exact configured provider/model identity");
+  }
+  if (session.thinkingLevel !== attempt.thinkingLevel) {
+    throw new Error("Pi did not preserve the exact configured thinking level");
+  }
 }
 
 function mapUsage(stats: PiStats): ReviewUsage {
@@ -159,7 +175,7 @@ export function createPiReviewSessionFactory(options: PiSessionFactoryOptions) {
       agentDir,
       modelRuntime,
       model,
-      thinkingLevel: "high",
+      thinkingLevel: attempt.thinkingLevel,
       tools: [...READ_ONLY_TOOLS],
       customTools,
       resourceLoader,
@@ -170,12 +186,14 @@ export function createPiReviewSessionFactory(options: PiSessionFactoryOptions) {
       created.session.dispose();
       throw new Error(`Pi model fallback is forbidden: ${created.modelFallbackMessage}`);
     }
-    if (
-      created.session.model?.provider !== attempt.provider ||
-      created.session.model.id !== attempt.model
-    ) {
+    try {
+      assertExactPiRuntime(
+        attempt,
+        created.session as unknown as Pick<PiSessionPort, "model" | "thinkingLevel">,
+      );
+    } catch (error) {
       created.session.dispose();
-      throw new Error("Pi did not preserve the exact configured provider/model identity");
+      throw error;
     }
     return new PiReviewSession(created.session as unknown as PiSessionPort);
   };

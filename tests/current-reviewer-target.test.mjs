@@ -6,8 +6,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  CURRENT_END,
-  CURRENT_START,
   REPOSITORIES,
   TARGET_BLOCK,
   validateRepository,
@@ -23,26 +21,13 @@ const WORKSPACE_ROOT = path.resolve(
   "..",
 );
 
-function markedBlock(text, startMarker, endMarker) {
-  const start = text.indexOf(startMarker);
-  const end = text.indexOf(endMarker, start);
-  assert.ok(start >= 0 && end >= 0, `missing ${startMarker}`);
-  return text.slice(start, end + endMarker.length);
-}
-
-const AUTHORITY_BLOCK = markedBlock(
-  fs.readFileSync(path.join(WORKER_ROOT, "AGENTS.md"), "utf8").replace(/\r\n?/g, "\n"),
-  CURRENT_START,
-  CURRENT_END,
-);
-
 function fixtureWorkspace() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pullwise-r0-pi-gov-"));
   for (const directory of Object.values(REPOSITORIES)) {
     fs.mkdirSync(path.join(root, directory), { recursive: true });
     fs.writeFileSync(
       path.join(root, directory, "AGENTS.md"),
-      AUTHORITY_BLOCK + "\n" + TARGET_BLOCK + "\n# Repository rules\n",
+      TARGET_BLOCK + "\n# Repository rules\n",
       "utf8",
     );
   }
@@ -89,18 +74,17 @@ test("accepts an exact single-repository Worker target", () => {
   });
 });
 
-test("rejects a tampered current-authority block", () => {
+test("rejects instructions placed before the local target block", () => {
   withWorkspace((root) => {
     overwriteWorker(
       root,
-      AUTHORITY_BLOCK.replace("the only entry point", "an entry point") +
-        "\n" + TARGET_BLOCK + "\n",
+      "# External authority\n" + TARGET_BLOCK + "\n",
     );
     const report = validateWorkspace(root);
     assert.equal(report.status, "FAIL");
     assert.ok(
       report.repositories.find((item) => item.repository === "worker")
-        .errors.includes("current_authority_block_mismatch"),
+        .errors.includes("target_block_not_first"),
     );
   });
 });
@@ -115,7 +99,7 @@ for (const [name, mutation] of [
     withWorkspace((root) => {
       overwriteWorker(
         root,
-        AUTHORITY_BLOCK + "\n" + mutation(TARGET_BLOCK) + "\n",
+        mutation(TARGET_BLOCK) + "\n",
       );
       const report = validateWorkspace(root);
       assert.equal(report.status, "FAIL");
@@ -131,8 +115,7 @@ test("preserves unrelated product scan-quota guidance", () => {
   withWorkspace((root) => {
     overwriteWorker(
       root,
-      AUTHORITY_BLOCK + "\n" + TARGET_BLOCK +
-        "\nAccount and repository scan quotas remain product controls.\n",
+      TARGET_BLOCK + "\nAccount and repository scan quotas remain product controls.\n",
     );
     assert.equal(validateWorkspace(root).status, "PASS");
   });
@@ -155,13 +138,21 @@ test("fails closed for non-UTF-8 instruction bytes", () => {
   });
 });
 
-test("fails closed for a symlinked instruction file", () => {
+test("fails closed for a symlinked instruction file", (context) => {
   withWorkspace((root) => {
     const target = path.join(root, "outside-agents.md");
-    fs.writeFileSync(target, AUTHORITY_BLOCK + "\n" + TARGET_BLOCK + "\n", "utf8");
+    fs.writeFileSync(target, TARGET_BLOCK + "\n", "utf8");
     const agents = path.join(root, REPOSITORIES.admin, "AGENTS.md");
     fs.rmSync(agents);
-    fs.symlinkSync(target, agents);
+    try {
+      fs.symlinkSync(target, agents);
+    } catch (error) {
+      if (error?.code === "EPERM") {
+        context.skip("file symlinks are unavailable in this Windows environment");
+        return;
+      }
+      throw error;
+    }
     assert.equal(validateWorkspace(root).status, "INDETERMINATE");
   });
 });

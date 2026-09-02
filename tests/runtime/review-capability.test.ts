@@ -25,6 +25,7 @@ test("prompt rendering only injects immutable attempt context into the text temp
     workspace: "C:/attempt",
     provider: "provider",
     model: "model",
+    thinkingLevel: "medium",
     context: { repository: "example/repo", revision: "abc123" },
     budget: {
       wallTimeMs: 1_000,

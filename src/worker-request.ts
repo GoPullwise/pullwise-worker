@@ -32,7 +32,7 @@ export function parseWorkerRequest(text: string): WorkerRequest {
   const rawAttempt = record(root.attempt, "attempt");
   exactKeys(
     rawAttempt,
-    ["attemptId", "workspace", "provider", "model", "context", "budget"],
+    ["attemptId", "workspace", "provider", "model", "thinkingLevel", "context", "budget"],
     "attempt",
   );
   const context = record(rawAttempt.context, "attempt.context");
@@ -44,12 +44,20 @@ export function parseWorkerRequest(text: string): WorkerRequest {
   );
   const rawFence = record(root.fence, "fence");
   exactKeys(rawFence, ["relativePath", "expected"], "fence");
+  const thinkingLevel = nonEmptyString(
+    rawAttempt.thinkingLevel,
+    "attempt.thinkingLevel",
+  );
+  if (!["low", "medium", "high"].includes(thinkingLevel)) {
+    throw new TypeError("attempt.thinkingLevel must be low, medium, or high");
+  }
   return Object.freeze({
     attempt: Object.freeze({
       attemptId: nonEmptyString(rawAttempt.attemptId, "attempt.attemptId"),
       workspace: nonEmptyString(rawAttempt.workspace, "attempt.workspace"),
       provider: nonEmptyString(rawAttempt.provider, "attempt.provider"),
       model: nonEmptyString(rawAttempt.model, "attempt.model"),
+      thinkingLevel: thinkingLevel as ReviewAttempt["thinkingLevel"],
       context,
       budget: {
         wallTimeMs: budget.wallTimeMs as number,

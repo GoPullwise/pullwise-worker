@@ -46,6 +46,7 @@ test("review runner composes text capability, one session, validation, and fence
       workspace,
       provider: "provider",
       model: "model",
+      thinkingLevel: "medium",
       context: { repository: "example/repo", revision: "abc123" },
       budget: {
         wallTimeMs: 1_000,

@@ -23,6 +23,7 @@ export interface ReviewAttempt {
   readonly workspace: string;
   readonly provider: string;
   readonly model: string;
+  readonly thinkingLevel: "low" | "medium" | "high";
   readonly context: Readonly<Record<string, unknown>>;
   readonly budget: ReviewBudget;
 }
@@ -102,6 +103,9 @@ function assertAttempt(attempt: ReviewAttempt): void {
     ["model", attempt.model],
   ] as const) {
     if (!value.trim()) throw new TypeError(`${label} must be a non-empty string`);
+  }
+  if (!["low", "medium", "high"].includes(attempt.thinkingLevel)) {
+    throw new TypeError("thinkingLevel must be low, medium, or high");
   }
   for (const [label, value] of Object.entries(attempt.budget)) {
     if (!isPositiveInteger(value)) {
