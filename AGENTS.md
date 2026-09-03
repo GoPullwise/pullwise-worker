@@ -24,21 +24,37 @@ generated-consumer rule in this file is historical cleanup evidence only and
 must not govern target implementation.
 <!-- PULLWISE_REVIEWER_TARGET_END -->
 
-## Pi credential profiles and Server synchronization
+## Centralized Model Gateway profiles
 
-- Provider secrets stay on the Worker host. `profiles.json` contains metadata
-  only; every credential id owns a separate Pi agent directory under
-  `PULLWISE_PI_PROFILE_ROOT`.
-- Use `pullwise-worker profile add` to create metadata and the emitted
-  profile-scoped Pi auth command. Never add secret-bearing CLI flags or sync
-  API keys/tokens to Pullwise Server.
-- `pullwise-worker sync` builds the authenticated model catalog and sends it
-  through the existing v1 registration and heartbeat routes. The catalog
-  contains credential ids/labels, providers, auth types, and model metadata
-  only.
-- Server lease `runtime_selection` is authoritative. Match its credential id,
-  provider, model, and `low|medium|high` thinking level exactly; do not route
-  or fall back locally.
+- Upstream provider secrets belong only to Pullwise Model Gateway. Never place
+  an OpenAI, DeepSeek, MiniMax, OAuth, or refresh credential in Worker state,
+  install commands, environment, catalog payloads, logs, or local Pi profiles.
+- `pullwise-worker profile ...` is retired. An unmanaged profile root fails
+  closed. `sync` and `watch` use the Worker control-plane token to fetch the
+  current Ed25519 manifest trust key and the Worker-bound model-profile package.
+- Managed Pi configuration is an immutable generation under
+  `PULLWISE_PI_PROFILE_ROOT/generations/<manifest-digest>.<gateway-token-jti>`.
+  Validate the closed manifest, digest, signature, Worker/Profile/revision URL,
+  and token expiry before writing; atomically replace `managed-current.json`
+  only after every private file is durable.
+- An existing generation is reusable only when every expected regular file is
+  byte-identical to the newly staged generation. Never replace or point at a
+  pre-existing file, symlink, partial directory, or corrupt state; restart loads
+  must validate typed ids, revisions, digests, token metadata, and pointer binding.
+- The sole Pi provider is `pullwise-gateway`. `auth.json` contains only that
+  Worker's short-lived Gateway token; `models.json` contains only the scoped
+  Gateway URL and enabled model aliases. Upstream secret rotation must not alter
+  Worker files.
+- Registration and heartbeat send de-secreted `profile_state`: Worker/Pool,
+  desired/applied revision, manifest/catalog digest, Gateway token id/expiry,
+  apply result, and applied time. Never send the access token.
+- Batch installs may start with `PULLWISE_WORKER_BOOTSTRAP_TOKEN`. Exchange it
+  once through `/v1/workers/bootstrap`, persist only the returned Worker
+  control-plane token in the instance env file, and never put either token in a
+  URL or process argv.
+- Server lease `runtime_selection` remains authoritative. Match its managed
+  credential id, `pullwise-gateway` provider, model alias, and thinking level
+  exactly; do not route or fall back locally.
 - `serve` claims and executes at most one lease at a time and never sends
   heartbeats. It writes `pullwise-worker-state/v1` atomically; the paired
   `watch` process is the sole registration/heartbeat bridge to Server.
@@ -50,6 +66,8 @@ must not govern target implementation.
   the execution service converts it to the attempt AbortSignal. Cancelled or
   failed attempts upload the required `worker_log`, `qa`, and
   `error_report` artifacts before the matching terminal result.
+- Run `npm test` and `npm run typecheck` after managed-profile, bootstrap,
+  control-plane, Pi runtime, or reconciliation changes.
 
 ## Current Node/Pi Worker implementation
 

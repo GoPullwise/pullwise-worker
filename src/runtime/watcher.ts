@@ -6,10 +6,20 @@ import {
   type RuntimeModel,
 } from "./profiles.ts";
 import { readWorkerState } from "./worker-state.ts";
+import type { GatewayProfileState } from "./gateway-profile.ts";
 
 export interface WatcherClient {
-  register(catalog: RuntimeCatalog, signal?: AbortSignal): Promise<unknown>;
-  heartbeat(catalog: RuntimeCatalog, state: HeartbeatState, signal?: AbortSignal): Promise<unknown>;
+  register(
+    catalog: RuntimeCatalog,
+    signal?: AbortSignal,
+    profileState?: GatewayProfileState,
+  ): Promise<unknown>;
+  heartbeat(
+    catalog: RuntimeCatalog,
+    state: HeartbeatState,
+    signal?: AbortSignal,
+    profileState?: GatewayProfileState,
+  ): Promise<unknown>;
 }
 
 export type WatcherCommand = Readonly<Record<string, unknown>>;
@@ -20,11 +30,15 @@ export interface WatcherSyncOptions {
   readonly client: WatcherClient;
   readonly register: boolean;
   readonly listModels?: (profile: Profile) => Promise<RuntimeModel[]>;
+  readonly reconcileProfile?: (signal?: AbortSignal) => Promise<GatewayProfileState>;
   readonly signal?: AbortSignal;
   readonly handleCommand?: (command: WatcherCommand) => void | Promise<void>;
 }
 
 export async function syncWatcherOnce(options: WatcherSyncOptions): Promise<void> {
+  const profileState = options.reconcileProfile
+    ? await options.reconcileProfile(options.signal)
+    : undefined;
   const profiles = await loadProfiles(options.profileRoot);
   const catalog = await buildRuntimeCatalog(profiles, options.listModels);
   let state: HeartbeatState;
@@ -47,8 +61,8 @@ export async function syncWatcherOnce(options: WatcherSyncOptions): Promise<void
       lastError: `worker_state_unavailable: ${detail}`,
     };
   }
-  if (options.register) await options.client.register(catalog, options.signal);
-  const response = await options.client.heartbeat(catalog, state, options.signal);
+  if (options.register) await options.client.register(catalog, options.signal, profileState);
+  const response = await options.client.heartbeat(catalog, state, options.signal, profileState);
   if (options.handleCommand && response && typeof response === "object") {
     const commands = (response as { commands?: unknown }).commands;
     if (Array.isArray(commands)) {

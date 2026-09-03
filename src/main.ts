@@ -5,12 +5,17 @@ import process from "node:process";
 import { hostname } from "node:os";
 import { pathToFileURL } from "node:url";
 
-import { runProfileCommand } from "./profile-cli.ts";
-import { ControlPlaneClient } from "./runtime/control-plane.ts";
+import { ControlPlaneClient, exchangeWorkerBootstrap } from "./runtime/control-plane.ts";
 import { requestCancellation } from "./runtime/cancellation.ts";
 import { createFileFenceValidator } from "./runtime/file-fence.ts";
 import { createReviewRunner } from "./runtime/review-runner.ts";
 import { runWatcher, syncWatcherOnce } from "./runtime/watcher.ts";
+import {
+  applyGatewayProfile,
+  loadGatewayProfileState,
+  parseGatewayManifestTrust,
+} from "./runtime/gateway-profile.ts";
+import { createGatewayProfileReconciler } from "./runtime/gateway-profile-reconciler.ts";
 import { createLeaseExecutor, runWorkerService } from "./runtime/worker-service.ts";
 import { writeWorkerState } from "./runtime/worker-state.ts";
 import { parseWorkerRequest } from "./worker-request.ts";
@@ -46,6 +51,22 @@ function controlPlaneClient(): ControlPlaneClient {
   });
 }
 
+async function modelProfileReconciler(client: ControlPlaneClient, profileRoot: string) {
+  return createGatewayProfileReconciler({
+    client,
+    loadState: () => loadGatewayProfileState(profileRoot),
+    applyProfile: async (payload, signal) => {
+      const trust = parseGatewayManifestTrust(await client.fetchModelProfileTrust(signal));
+      return applyGatewayProfile({
+        profileRoot,
+        expectedWorkerId: requiredEnvironment("PULLWISE_WORKER_ID"),
+        manifestPublicKeys: trust,
+        payload,
+      });
+    },
+  });
+}
+
 export async function main(): Promise<number> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -75,19 +96,27 @@ export async function main(): Promise<number> {
 }
 
 export async function cli(args = process.argv.slice(2)): Promise<number> {
-  if (args[0] === "profile") {
-    return runProfileCommand(args.slice(1), {
-      profileRoot: requiredEnvironment("PULLWISE_PI_PROFILE_ROOT"),
-      write: (text) => process.stdout.write(text),
+  if (args[0] === "bootstrap") {
+    const token = await exchangeWorkerBootstrap({
+      serverUrl: requiredEnvironment("PULLWISE_SERVER_URL"),
+      workerId: requiredEnvironment("PULLWISE_WORKER_ID"),
+      bootstrapToken: requiredEnvironment("PULLWISE_WORKER_BOOTSTRAP_TOKEN"),
     });
+    process.stdout.write(`${token}\n`);
+    return 0;
+  }
+  if (args[0] === "profile") {
+    throw new Error("profile commands are retired; profiles are centrally managed through Pullwise Model Gateway");
   }
   if (args[0] === "sync") {
     const client = controlPlaneClient();
+    const profileRoot = requiredEnvironment("PULLWISE_PI_PROFILE_ROOT");
     await syncWatcherOnce({
-      profileRoot: requiredEnvironment("PULLWISE_PI_PROFILE_ROOT"),
+      profileRoot,
       stateRoot: requiredEnvironment("PULLWISE_WORKER_STATE_ROOT"),
       client,
       register: true,
+      reconcileProfile: await modelProfileReconciler(client, profileRoot),
     });
     process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
     return 0;
@@ -98,10 +127,13 @@ export async function cli(args = process.argv.slice(2)): Promise<number> {
     process.once("SIGINT", cancel);
     process.once("SIGTERM", cancel);
     try {
+      const client = controlPlaneClient();
+      const profileRoot = requiredEnvironment("PULLWISE_PI_PROFILE_ROOT");
       await runWatcher({
-        profileRoot: requiredEnvironment("PULLWISE_PI_PROFILE_ROOT"),
+        profileRoot,
         stateRoot: requiredEnvironment("PULLWISE_WORKER_STATE_ROOT"),
-        client: controlPlaneClient(),
+        client,
+        reconcileProfile: await modelProfileReconciler(client, profileRoot),
         signal: controller.signal,
         onError: (error) => process.stderr.write(`${JSON.stringify({
           error: { name: error.name, message: error.message },

@@ -22,8 +22,8 @@ validation, filesystem safety, and early/late publication fencing.
 
 - Node.js `>=22.19.0` (CI uses `22.23.1`)
 - npm `10.9.8`
-- a Pi agent directory containing the selected provider credentials and optional
-  `models.json`
+- an assigned Pullwise Model Gateway Profile Set and a Worker control-plane
+  identity (or one short-lived bootstrap credential)
 
 Install and verify:
 
@@ -33,31 +33,32 @@ npm test
 npm run typecheck
 ```
 
-## Configure provider accounts
+## Reconcile the managed Gateway profile
 
-Credential material stays on the Worker host. Add one metadata profile per
-account or API key, then run the emitted Pi auth command. Each profile owns an
-isolated Pi agent directory.
+Upstream provider credentials never enter the Worker. An administrator creates
+write-only Provider Connections, publishes a Profile Set, and binds this Worker
+to a Worker Pool in Pullwise Admin. The installer exchanges a short-lived
+single-use bootstrap credential for the Worker control-plane token without
+putting either token in a URL or process argument.
 
 ```bash
-export PULLWISE_PI_PROFILE_ROOT=/var/lib/pullwise/pi-profiles
-pullwise-worker profile add --id anthropic_primary --label "Anthropic primary" --provider anthropic
-pullwise-worker profile add --id openai_team --label "OpenAI team" --provider openai
-pullwise-worker profile list
-pullwise-worker profile catalog
+export PULLWISE_SERVER_URL=https://api.pull-wise.com
+export PULLWISE_WORKER_ID=wk_example
+export PULLWISE_WORKER_TOKEN='the exchanged control-plane token'
+export PULLWISE_PI_PROFILE_ROOT=/var/lib/pullwise-worker/wk_example/workers/wk_example/pi-profiles
+export PULLWISE_WORKER_STATE_ROOT=/var/lib/pullwise-worker/wk_example/workers/wk_example/state
 pullwise-worker sync
 pullwise-worker watch
 pullwise-worker serve
 ```
 
-`profile add` never accepts a secret flag. Pi collects and stores the account or
-API key inside the emitted profile-specific `PI_CODING_AGENT_DIR`. The catalog
-contains only credential IDs/labels, provider IDs, auth type, and available
-model metadata; it is safe to send in Worker registration and heartbeat.
-`pullwise-worker sync` sends that catalog through the existing authenticated v1
-registration and heartbeat routes. It requires `PULLWISE_SERVER_URL`,
-`PULLWISE_WORKER_ID`, and `PULLWISE_WORKER_TOKEN` in addition to the profile
-root; its stdout never contains the Worker token or provider secrets.
+`profile add|list|catalog` is retired. `sync` and `watch` fetch the current
+Ed25519 manifest trust key plus the Worker-bound profile, validate it, write a
+private immutable generation, and atomically replace `managed-current.json`.
+The generated Pi `auth.json` contains only this Worker's short-lived Gateway
+token; `models.json` contains the Worker/Profile/revision-scoped Gateway URL and
+model aliases. Registration and heartbeat contain only de-secreted catalog and
+desired/applied profile state.
 
 The long-running Watcher reads `PULLWISE_WORKER_STATE_ROOT/worker-state.json`
 and is the only process that sends Worker status to Server. The execution
@@ -87,8 +88,8 @@ Request shape:
   "attempt": {
     "attemptId": "4f17b7fc-80d6-4a33-9d34-3ea3b8468141",
     "workspace": "/srv/pullwise/checkouts/attempt-1",
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-5",
+    "provider": "pullwise-gateway",
+    "model": "gpt-reviewer",
     "context": {
       "repository": "owner/repository",
       "revision": "0123456789abcdef"

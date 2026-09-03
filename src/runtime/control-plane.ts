@@ -1,3 +1,5 @@
+import type { GatewayProfileState } from "./gateway-profile.ts";
+
 export interface RuntimeCatalog {
   readonly schema_id: "pullwise-pi-runtime-catalog/v1";
   readonly credentials: readonly {
@@ -62,6 +64,76 @@ function providers(catalog: RuntimeCatalog): string[] {
   return [...new Set(catalog.credentials.map((credential) => credential.provider))];
 }
 
+function gatewayProfileState(state: GatewayProfileState) {
+  return {
+    schema_id: state.schemaId,
+    worker_id: state.workerId,
+    worker_pool_id: state.workerPoolId,
+    profile_set_id: state.profileSetId,
+    desired_revision: state.desiredRevision,
+    applied_revision: state.appliedRevision,
+    manifest_digest: state.manifestDigest,
+    catalog_digest: state.catalogDigest,
+    gateway_token_expires_at: state.gatewayTokenExpiresAt,
+    gateway_token_id: state.gatewayTokenId,
+    last_apply_result: state.lastApplyResult,
+    applied_at: state.appliedAt,
+  };
+}
+
+export interface BootstrapExchangeOptions {
+  readonly serverUrl: string;
+  readonly workerId: string;
+  readonly bootstrapToken: string;
+  readonly fetchImpl?: typeof fetch;
+  readonly signal?: AbortSignal;
+}
+
+export async function exchangeWorkerBootstrap(options: BootstrapExchangeOptions): Promise<string> {
+  const baseUrl = new URL(options.serverUrl);
+  if (!['http:', 'https:'].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password) {
+    throw new TypeError("serverUrl must be an HTTP(S) URL without credentials");
+  }
+  const workerId = safeIdentifier(options.workerId, "workerId");
+  const bootstrapToken = String(options.bootstrapToken ?? "").trim();
+  if (!bootstrapToken.startsWith("pwb_") || /[\r\n]/u.test(bootstrapToken)) {
+    throw new TypeError("bootstrapToken is invalid");
+  }
+  const init: RequestInit = {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${bootstrapToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      schema_id: "pullwise-worker-bootstrap-exchange/v1",
+      worker_id: workerId,
+    }),
+  };
+  if (options.signal) init.signal = options.signal;
+  const response = await (options.fetchImpl ?? fetch)(new URL("/v1/workers/bootstrap", baseUrl), init);
+  const text = await response.text();
+  let payload: unknown;
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`Pullwise Server returned invalid JSON (${response.status})`);
+  }
+  if (!response.ok) throw new Error("Worker bootstrap exchange failed");
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Worker bootstrap response is invalid");
+  }
+  const record = payload as Record<string, unknown>;
+  if (JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(["worker_id", "worker_token"])) {
+    throw new Error("Worker bootstrap response is invalid");
+  }
+  const workerToken = String(record.worker_token ?? "");
+  if (record.worker_id !== workerId || !workerToken.startsWith("pww_") || /[\r\n]/u.test(workerToken)) {
+    throw new Error("Worker bootstrap response is invalid");
+  }
+  return workerToken;
+}
+
 export class ControlPlaneClient {
   private readonly baseUrl: URL;
   private readonly workerId: string;
@@ -113,7 +185,11 @@ export class ControlPlaneClient {
     return payload;
   }
 
-  register(catalog: RuntimeCatalog, signal?: AbortSignal): Promise<unknown> {
+  register(
+    catalog: RuntimeCatalog,
+    signal?: AbortSignal,
+    profileState?: GatewayProfileState,
+  ): Promise<unknown> {
     return this.post("/v1/workers/register", {
       protocol_version: "review-worker-protocol/v1",
       worker: {
@@ -137,7 +213,22 @@ export class ControlPlaneClient {
           max_active_jobs: 1,
         },
         runtime_catalog: catalog,
+        ...(profileState ? { profile_state: gatewayProfileState(profileState) } : {}),
       },
+    }, signal);
+  }
+
+  fetchModelProfile(signal?: AbortSignal): Promise<unknown> {
+    return this.post(`/v1/workers/${encodeURIComponent(this.workerId)}/model-profile`, {
+      schema_id: "pullwise-worker-model-profile-request/v1",
+      worker_id: this.workerId,
+    }, signal);
+  }
+
+  fetchModelProfileTrust(signal?: AbortSignal): Promise<unknown> {
+    return this.post(`/v1/workers/${encodeURIComponent(this.workerId)}/model-profile-trust`, {
+      schema_id: "pullwise-model-gateway-manifest-trust-request/v1",
+      worker_id: this.workerId,
     }, signal);
   }
 
@@ -145,6 +236,7 @@ export class ControlPlaneClient {
     catalog: RuntimeCatalog,
     state: HeartbeatState = IDLE_STATE,
     signal?: AbortSignal,
+    profileState?: GatewayProfileState,
   ): Promise<unknown> {
     const readyProviders = providers(catalog);
     const active = ["busy", "cancelling", "finishing"].includes(state.status);
@@ -190,6 +282,7 @@ export class ControlPlaneClient {
       doctor_status: state.status === "degraded" || !readyProviders.length ? "not_ready" : "ok",
       last_error: state.lastError ?? null,
       runtime_catalog: catalog,
+      ...(profileState ? { profile_state: gatewayProfileState(profileState) } : {}),
       ...(progress ? { progress } : {}),
     }, signal);
   }

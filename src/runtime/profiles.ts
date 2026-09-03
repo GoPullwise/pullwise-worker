@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 
@@ -11,6 +11,7 @@ const CATALOG_SCHEMA_ID = "pullwise-pi-runtime-catalog/v1";
 const PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9._-]{0,59}$/u;
 const REPARSE_POINT = 0x400;
+const MANAGED_GENERATION = /^[0-9a-f]{64}\.[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 export interface ProfileInput {
   readonly credentialId: string;
@@ -60,6 +61,56 @@ async function safeRoot(root: string): Promise<string> {
   return resolved;
 }
 
+async function currentProfileRoot(root: string): Promise<string> {
+  const pointerPath = path.join(root, "managed-current.json");
+  let pointerText: string;
+  try {
+    const metadata = await lstat(pointerPath);
+    const resolvedPointer = await realpath(pointerPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || path.dirname(resolvedPointer) !== root) {
+      throw new Error("managed profile pointer must be a regular file inside the profile root");
+    }
+    pointerText = new TextDecoder("utf-8", { fatal: true }).decode(await readFile(resolvedPointer));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("managed profile pointer is required");
+    }
+    throw error;
+  }
+  const parsed = parseStrictJson(pointerText);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new TypeError("managed profile pointer must be an object");
+  }
+  const pointer = parsed as Record<string, unknown>;
+  if (JSON.stringify(Object.keys(pointer).sort()) !== JSON.stringify([
+    "generation",
+    "manifest_digest",
+    "schema_id",
+  ])) {
+    throw new TypeError("managed profile pointer must be a closed object");
+  }
+  const generation = String(pointer.generation ?? "");
+  if (
+    pointer.schema_id !== "pullwise-managed-profile-pointer/v1" ||
+    !MANAGED_GENERATION.test(generation) ||
+    String(pointer.manifest_digest ?? "") !== generation.slice(0, 64)
+  ) {
+    throw new TypeError("managed profile pointer is invalid");
+  }
+  const generationRoot = path.join(root, "generations", generation);
+  const metadata = await lstat(generationRoot);
+  const resolved = await realpath(generationRoot);
+  if (
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    path.dirname(resolved) !== path.join(root, "generations") ||
+    path.basename(resolved) !== generation
+  ) {
+    throw new Error("managed profile generation must be a real contained directory");
+  }
+  return resolved;
+}
+
 function normalizeInput(input: ProfileInput): ProfileInput {
   const credentialId = safeText(input.credentialId, "credentialId", 64);
   const provider = safeText(input.provider, "provider", 60).toLowerCase();
@@ -74,7 +125,8 @@ function normalizeInput(input: ProfileInput): ProfileInput {
 }
 
 export async function loadProfiles(root: string): Promise<Profiles> {
-  const resolvedRoot = await safeRoot(root);
+  const profileRoot = await safeRoot(root);
+  const resolvedRoot = await currentProfileRoot(profileRoot);
   const configPath = path.join(resolvedRoot, "profiles.json");
   let text: string;
   try {
@@ -141,36 +193,6 @@ export async function loadProfiles(root: string): Promise<Profiles> {
     profiles.push(Object.freeze({ ...normalized, authType: normalized.authType ?? "api_key", agentDir }));
   }
   return Object.freeze({ root: resolvedRoot, profiles: Object.freeze(profiles) });
-}
-
-async function persistProfiles(value: Profiles): Promise<void> {
-  const config = {
-    schema_id: PROFILE_SCHEMA_ID,
-    profiles: value.profiles.map((profile) => ({
-      credential_id: profile.credentialId,
-      label: profile.label,
-      provider: profile.provider,
-      auth_type: profile.authType,
-      agent_dir: `profiles/${profile.credentialId}`,
-    })),
-  };
-  const configPath = path.join(value.root, "profiles.json");
-  const temporaryPath = path.join(value.root, `.profiles-${process.pid}-${Date.now()}.tmp`);
-  await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  await rename(temporaryPath, configPath);
-}
-
-export async function addProfile(root: string, input: ProfileInput): Promise<Profile> {
-  const current = await loadProfiles(root);
-  const normalized = normalizeInput(input);
-  if (current.profiles.some((profile) => profile.credentialId === normalized.credentialId)) {
-    throw new Error(`profile already exists: ${normalized.credentialId}`);
-  }
-  const agentDir = path.join(current.root, "profiles", normalized.credentialId);
-  await mkdir(agentDir, { recursive: true, mode: 0o700 });
-  const added = Object.freeze({ ...normalized, authType: normalized.authType ?? "api_key", agentDir }) as Profile;
-  await persistProfiles({ root: current.root, profiles: [...current.profiles, added] });
-  return added;
 }
 
 async function listPiModels(profile: Profile): Promise<RuntimeModel[]> {

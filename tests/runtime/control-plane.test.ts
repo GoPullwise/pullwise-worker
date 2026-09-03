@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ControlPlaneClient } from "../../src/runtime/control-plane.ts";
+import { ControlPlaneClient, exchangeWorkerBootstrap } from "../../src/runtime/control-plane.ts";
 
 const catalog = {
   schema_id: "pullwise-pi-runtime-catalog/v1",
@@ -147,4 +147,143 @@ test("local degraded state maps to an idle slot with not-ready diagnostics", asy
   assert.equal(body.doctor_status, "not_ready");
   assert.equal(body.concurrency.active_jobs, 0);
   assert.equal(body.last_error, "worker_state_unavailable");
+});
+
+test("model profile pull uses only the Worker control-plane credential", async () => {
+  let call: { url: string; init: RequestInit; body: any } | undefined;
+  const responsePayload = {
+    schema_id: "pullwise-worker-model-profile/v1",
+    worker_id: "wk_pi",
+  };
+  const client = new ControlPlaneClient({
+    serverUrl: "https://api.example.com",
+    workerId: "wk_pi",
+    token: "worker-control-token",
+    workerVersion: "0.10.24",
+    hostname: "worker-host",
+    fetchImpl: async (url, init = {}) => {
+      call = { url: String(url), init, body: JSON.parse(String(init.body)) };
+      return new Response(JSON.stringify(responsePayload), { status: 200 });
+    },
+  });
+
+  const response = await client.fetchModelProfile();
+
+  assert.deepEqual(response, responsePayload);
+  assert.equal(call?.url, "https://api.example.com/v1/workers/wk_pi/model-profile");
+  assert.deepEqual(call?.body, {
+    schema_id: "pullwise-worker-model-profile-request/v1",
+    worker_id: "wk_pi",
+  });
+  assert.equal(
+    (call?.init.headers as Record<string, string>).Authorization,
+    "Bearer worker-control-token",
+  );
+  assert.doesNotMatch(JSON.stringify(call?.body), /worker-control-token/u);
+});
+
+test("manifest trust pull uses the authenticated Worker bootstrap channel", async () => {
+  let call: { url: string; init: RequestInit; body: any } | undefined;
+  const trust = {
+    schema_id: "pullwise-model-gateway-manifest-trust/v1",
+    alg: "Ed25519",
+    kid: "gateway-signing-2026-09",
+    public_key_pem: "-----BEGIN PUBLIC KEY-----\npublic\n-----END PUBLIC KEY-----\n",
+    fingerprint: "sha256:" + "a".repeat(64),
+  };
+  const client = new ControlPlaneClient({
+    serverUrl: "https://api.example.com",
+    workerId: "wk_pi",
+    token: "worker-control-token",
+    workerVersion: "0.10.24",
+    hostname: "worker-host",
+    fetchImpl: async (url, init = {}) => {
+      call = { url: String(url), init, body: JSON.parse(String(init.body)) };
+      return new Response(JSON.stringify(trust), { status: 200 });
+    },
+  });
+
+  assert.deepEqual(await client.fetchModelProfileTrust(), trust);
+  assert.equal(call?.url, "https://api.example.com/v1/workers/wk_pi/model-profile-trust");
+  assert.deepEqual(call?.body, {
+    schema_id: "pullwise-model-gateway-manifest-trust-request/v1",
+    worker_id: "wk_pi",
+  });
+  assert.equal((call?.init.headers as Record<string, string>).Authorization, "Bearer worker-control-token");
+});
+
+test("single-use bootstrap exchange keeps the credential out of URL and body", async () => {
+  let call: { url: string; init: RequestInit; body: any } | undefined;
+  const token = await exchangeWorkerBootstrap({
+    serverUrl: "https://api.example.com",
+    workerId: "wk_batch_1",
+    bootstrapToken: "pwb_single-use-secret",
+    fetchImpl: async (url, init = {}) => {
+      call = { url: String(url), init, body: JSON.parse(String(init.body)) };
+      return new Response(JSON.stringify({
+        worker_id: "wk_batch_1",
+        worker_token: "pww_control-token",
+      }), { status: 200 });
+    },
+  });
+
+  assert.equal(token, "pww_control-token");
+  assert.equal(call?.url, "https://api.example.com/v1/workers/bootstrap");
+  assert.deepEqual(call?.body, {
+    schema_id: "pullwise-worker-bootstrap-exchange/v1",
+    worker_id: "wk_batch_1",
+  });
+  assert.equal((call?.init.headers as Record<string, string>).Authorization, "Bearer pwb_single-use-secret");
+  assert.doesNotMatch(call?.url ?? "", /single-use-secret/u);
+  assert.doesNotMatch(JSON.stringify(call?.body), /single-use-secret/u);
+});
+
+test("registration and heartbeat report de-secreted desired and applied profile state", async () => {
+  const bodies: any[] = [];
+  const client = new ControlPlaneClient({
+    serverUrl: "https://api.example.com",
+    workerId: "wk_pi",
+    token: "worker-control-token",
+    workerVersion: "0.10.24",
+    hostname: "worker-host",
+    fetchImpl: async (_url, init = {}) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    },
+  });
+  const profileState = {
+    schemaId: "pullwise-worker-profile-state/v1" as const,
+    workerId: "wk_pi",
+    workerPoolId: "reviewers-primary",
+    profileSetId: "reviewer-production",
+    desiredRevision: 12,
+    appliedRevision: 12,
+    manifestDigest: "a".repeat(64),
+    catalogDigest: "b".repeat(64),
+    gatewayTokenExpiresAt: 1_788_259_500,
+    gatewayTokenId: "gtj_wk_pi",
+    lastApplyResult: "succeeded" as const,
+    appliedAt: 1_788_259_201,
+  };
+
+  await client.register(catalog, undefined, profileState);
+  await client.heartbeat(catalog, undefined, undefined, profileState);
+
+  const expected = {
+    schema_id: "pullwise-worker-profile-state/v1",
+    worker_id: "wk_pi",
+    worker_pool_id: "reviewers-primary",
+    profile_set_id: "reviewer-production",
+    desired_revision: 12,
+    applied_revision: 12,
+    manifest_digest: "a".repeat(64),
+    catalog_digest: "b".repeat(64),
+    gateway_token_expires_at: 1_788_259_500,
+    gateway_token_id: "gtj_wk_pi",
+    last_apply_result: "succeeded",
+    applied_at: 1_788_259_201,
+  };
+  assert.deepEqual(bodies[0]?.worker.profile_state, expected);
+  assert.deepEqual(bodies[1]?.profile_state, expected);
+  assert.doesNotMatch(JSON.stringify(bodies), /access_token|worker-control-token/u);
 });
